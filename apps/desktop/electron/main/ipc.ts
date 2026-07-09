@@ -59,6 +59,7 @@ import type {
   DesktopRoomLatestMessage,
   DesktopRoomMessage,
   DesktopRepoRoomSelection,
+  DesktopRepoWorktreeResult,
   DesktopSendRoomMessageResult,
   DesktopParticipantSummary,
   DesktopDroppedAttachmentContent,
@@ -146,6 +147,7 @@ import {
   leaveDesktopAccountRoom,
   listDesktopAccountRooms,
   openDesktopGitHubInstall,
+  createRepoRoomWorktree,
   openRepoRoomFromPath,
   pickRepoRoom,
   markDesktopRoomThreadRead,
@@ -763,6 +765,15 @@ export function registerDesktopIpcHandlers(
     "desktop:repos:open-room",
     async (_event, folderPath?: string | null): Promise<DesktopRepoRoomSelection> =>
       openRepoRoomFromPath(folderPath || ""),
+  );
+  targetIpcMain.handle(
+    "desktop:repos:create-worktree",
+    async (
+      _event,
+      repoRoot?: string | null,
+      branch?: string | null,
+    ): Promise<DesktopRepoWorktreeResult> =>
+      createRepoRoomWorktree(repoRoot || "", branch || ""),
   );
   targetIpcMain.handle(
     "desktop:workers:list",

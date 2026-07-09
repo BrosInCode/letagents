@@ -390,6 +390,17 @@
               </button>
 
               <button
+                v-else-if="preflight?.nextAction === 'choose_worktree' && canCreateWorktree && !matchingWorktrees.length"
+                type="button"
+                class="desktop-add-agent-primary"
+                data-testid="desktop-add-agent-create-worktree"
+                :disabled="creatingWorktree"
+                @click="createWorktree"
+              >
+                {{ createWorktreeButtonLabel }}
+              </button>
+
+              <button
                 v-else-if="preflight?.nextAction === 'choose_worktree'"
                 type="button"
                 class="desktop-add-agent-primary"
@@ -490,6 +501,7 @@ import {
   visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
+import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
 import {
   currentFocusableElement,
@@ -524,6 +536,7 @@ const loadingProviders = ref(false);
 const loadingPreflight = ref(false);
 const setupBusy = ref(false);
 const startingAgent = ref(false);
+const creatingWorktree = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const copyingAuthCommand = ref(false);
 const copyingExternalPrompt = ref(false);
@@ -648,6 +661,20 @@ const matchingWorktrees = computed(() =>
 
 const showWorktreePicker = computed(() =>
   preflight.value?.nextAction === "choose_worktree"
+);
+
+const canCreateWorktree = computed(() =>
+  Boolean(
+    props.repoRootPath?.trim()
+    && expectedWorktreeBranch.value?.trim()
+    && (!props.roomGitRoom || props.gitRoomMatchesActiveRepo),
+  )
+);
+
+const createWorktreeButtonLabel = computed(() =>
+  creatingWorktree.value
+    ? "Creating worktree..."
+    : `Create worktree on ${expectedWorktreeBranch.value}`
 );
 
 const expectedWorktreeBranch = computed(() =>
@@ -1454,6 +1481,30 @@ function chooseWorktree(rootPath: string): void {
   const trimmed = rootPath.trim();
   if (!trimmed) return;
   emit("choose-worktree", trimmed);
+}
+
+async function createWorktree(): Promise<void> {
+  const repoRoot = props.repoRootPath?.trim();
+  const branch = expectedWorktreeBranch.value?.trim();
+  if (!repoRoot || !branch || creatingWorktree.value) return;
+  creatingWorktree.value = true;
+  setupMessage.value = null;
+  try {
+    // On failure the modal stays open with the error visible and the button as
+    // the retry path; on success the regular choose-worktree flow takes over.
+    const errorMessage = await createManagedAgentWorktree({
+      repoRoot,
+      branch,
+      createWorktree: (root, branchName) =>
+        window.letagentsDesktop.repos.createWorktree(root, branchName),
+      chooseWorktree: (rootPath) => emit("choose-worktree", rootPath),
+    });
+    if (errorMessage) {
+      setupMessage.value = errorMessage;
+    }
+  } finally {
+    creatingWorktree.value = false;
+  }
 }
 
 function setupActionButtonText(action: DesktopAgentProviderSetupAction): string {

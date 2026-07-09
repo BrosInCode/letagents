@@ -2,6 +2,7 @@ import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus }
 import type {
   DesktopAppInfo,
   DesktopGitHubPullRequestStats,
+  DesktopRepoWorktreeResult,
   DiagnosticsSnapshot,
   RepoStatus,
   WorkerSnapshot,
@@ -245,6 +246,7 @@ export interface DesktopApi {
     onStatusChanged: (callback: (status: RepoStatus) => void) => () => void;
     openRoom: (rootPath: string) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
+    createWorktree: (repoRoot: string, branch: string) => Promise<DesktopRepoWorktreeResult>;
   };
   workers: {
     list: () => Promise<WorkerSnapshot[]>;

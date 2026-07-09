@@ -4,9 +4,11 @@ import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
   DesktopRepoRoomSelection,
+  DesktopRepoWorktreeResult,
   DesktopRoomInfo,
 } from "../../ipc-types.js";
 import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
+import { ensureRepoWorktree } from "./worktrees.js";
 import { apiFetch } from "../auth.js";
 import { openAllowedExternalUrl } from "../external-url.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
@@ -102,6 +104,30 @@ export async function openRepoRoomFromPath(
     error: null,
     warning: resolved.warning,
   };
+}
+
+export async function createRepoRoomWorktree(
+  repoRoot: string,
+  branch: string,
+): Promise<DesktopRepoWorktreeResult> {
+  const trimmedRoot = repoRoot.trim();
+  const trimmedBranch = branch.trim();
+  if (!trimmedRoot) {
+    return { worktreePath: null, branch: null, error: "Open a repository before creating a worktree." };
+  }
+  if (!trimmedBranch) {
+    return { worktreePath: null, branch: null, error: "Choose a branch for the worktree." };
+  }
+  try {
+    const ensured = await ensureRepoWorktree({ repoRoot: trimmedRoot, branch: trimmedBranch });
+    return { worktreePath: ensured.worktreePath, branch: trimmedBranch, error: null };
+  } catch (error) {
+    return {
+      worktreePath: null,
+      branch: trimmedBranch,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function renameDesktopRoom(

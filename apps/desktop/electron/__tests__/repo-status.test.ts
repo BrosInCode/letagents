@@ -10,12 +10,22 @@ import {
   buildLocalGitRoomIdentifier,
   buildLocalGitRoomInfo,
   buildRepoStatus,
+  normalizeGitRemoteToRoomIdentifier,
   parseGitStatusPorcelainV2,
   parseGitShortStat,
   parseGitWorktreePorcelain,
   resolveRoomIdentifierFromPath,
   resolveWorkspaceRoom,
 } from "../repo-status.js";
+
+function commitAll(cwd: string, message: string): void {
+  execFileSync("git", ["add", "-A"], { cwd, stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-c", "user.email=test@example.com", "-c", "user.name=Test User", "commit", "-m", message],
+    { cwd, stdio: "ignore" },
+  );
+}
 
 test("parseGitWorktreePorcelain marks the first worktree as the main checkout", () => {
   const worktrees = parseGitWorktreePorcelain([
@@ -350,7 +360,9 @@ test("resolveRoomIdentifierFromPath does not use fallback default branches for r
     const resolved = await resolveRoomIdentifierFromPath(tempDir);
 
     assert.equal(resolved.source, "git_remote");
-    assert.equal(resolved.roomIdentifier, "github.com/BrosInCode/letagents");
+    // Remote-derived github.com identifiers are lowercased so they cannot split
+    // from their (already lowercased) branch rooms across differently-cased clones.
+    assert.equal(resolved.roomIdentifier, "github.com/brosincode/letagents");
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -398,4 +410,62 @@ test("buildRepoStatus limits branch deltas to open worktree branches", async () 
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("linked worktrees of a local repo resolve to the same repository room key", async () => {
+  const tempParent = mkdtempSync(join(tmpdir(), "letagents-worktree-identity-"));
+  const mainRoot = join(tempParent, "repo");
+  const linkedRoot = join(tempParent, "repo-feature");
+  try {
+    mkdirSync(mainRoot, { recursive: true });
+    execFileSync("git", ["init", "-b", "main"], { cwd: mainRoot, stdio: "ignore" });
+    writeFileSync(join(mainRoot, "tracked.txt"), "hello\n");
+    commitAll(mainRoot, "Initial commit");
+    execFileSync("git", ["worktree", "add", "-b", "feature/worktree", linkedRoot], {
+      cwd: mainRoot,
+      stdio: "ignore",
+    });
+
+    const [mainResolved, linkedResolved] = await Promise.all([
+      resolveRoomIdentifierFromPath(mainRoot),
+      resolveRoomIdentifierFromPath(linkedRoot),
+    ]);
+
+    assert.equal(mainResolved.source, "local_git");
+    assert.equal(linkedResolved.source, "local_git");
+    // The room key hash must be identical (one repository, not one-room-per-worktree).
+    const keyOf = (identifier: string) =>
+      /^git-room:local:([a-f0-9]{16}):/.exec(identifier)?.[1] ?? null;
+    const mainKey = keyOf(mainResolved.roomIdentifier);
+    const linkedKey = keyOf(linkedResolved.roomIdentifier);
+    assert.ok(mainKey, "main checkout should produce a local room key");
+    assert.equal(linkedKey, mainKey);
+    // The returned repoRoot stays the actually-opened worktree root.
+    assert.equal(linkedResolved.repoRoot, realpathSync(linkedRoot));
+    // The gitRoom repository id is stable across worktrees too.
+    assert.equal(linkedResolved.gitRoom?.repository.id, mainResolved.gitRoom?.repository.id);
+  } finally {
+    rmSync(tempParent, { recursive: true, force: true });
+  }
+});
+
+test("normalizeGitRemoteToRoomIdentifier lowercases github.com identifiers (ssh + https)", () => {
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("git@github.com:BrosInCode/LetAgents.git"),
+    "github.com/brosincode/letagents",
+  );
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("https://github.com/BrosInCode/LetAgents.git"),
+    "github.com/brosincode/letagents",
+  );
+  // SSH and HTTPS forms of the same repo converge on one identifier.
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("git@github.com:BrosInCode/LetAgents.git"),
+    normalizeGitRemoteToRoomIdentifier("https://github.com/BrosInCode/LetAgents"),
+  );
+  // Hostnames are always lowercased; non-github hosts keep their path casing.
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("git@Example.COM:Owner/Repo.git"),
+    "example.com/Owner/Repo",
+  );
 });
