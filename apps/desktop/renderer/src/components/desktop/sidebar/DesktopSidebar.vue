@@ -5,6 +5,7 @@
         class="sidebar-collapse-button"
         type="button"
         :aria-label="sidebarMode === 'expanded' ? 'Collapse sidebar' : 'Hide sidebar'"
+        :title="sidebarMode === 'expanded' ? 'Collapse sidebar' : 'Hide sidebar'"
         data-testid="sidebar-cycle-button"
         @click="$emit('cycle-sidebar')"
       >
@@ -42,43 +43,55 @@
             class="project-group pinned-project-group"
             :data-testid="`pinned-room-group-${project.id}`"
           >
-            <button
-              class="pinned-room"
-              :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
-              :data-unread="project.parent.hasUnread"
-              type="button"
-              :data-testid="`pinned-room-${project.parent.id}`"
-              @click="selectOrToggleProject(project)"
-              @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
-            >
-              <span class="pin-mark" aria-hidden="true">
-                <Pin />
-              </span>
-              <span class="pinned-main">
-                <span class="room-title-line">
-                  <span class="pinned-title">{{ project.roomName }}</span>
-                  <span
-                    v-if="project.parent.hasUnread"
-                    class="room-unread-dot"
-                    aria-label="Unread messages"
-                    title="Unread messages"
-                  ></span>
+            <div class="sidebar-project-row-shell">
+              <button
+                class="pinned-room"
+                :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
+                :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
+                :data-unread="project.parent.hasUnread"
+                type="button"
+                :data-testid="`pinned-room-${project.parent.id}`"
+                @click="selectOrToggleProject(project)"
+                @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
+              >
+                <span class="pin-mark" aria-hidden="true">
+                  <Pin />
                 </span>
-                <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
-              </span>
-              <span
+                <span class="pinned-main">
+                  <span class="room-title-line">
+                    <span class="pinned-title">{{ project.roomName }}</span>
+                    <span
+                      v-if="project.parent.hasUnread"
+                      class="room-unread-dot"
+                      aria-label="Unread messages"
+                      title="Unread messages"
+                    ></span>
+                  </span>
+                  <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
+                </span>
+              </button>
+              <button
                 v-if="projectChildRooms(project).length"
-                class="project-open"
+                class="project-toggle"
                 :data-collapsed="collapsedProjects[project.id]"
+                type="button"
+                :aria-label="`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} ${project.roomName}`"
+                :aria-controls="projectChildListId(project.id)"
+                :aria-expanded="!collapsedProjects[project.id]"
                 :data-testid="`pinned-room-group-toggle-${project.id}`"
-                @click.stop="$emit('toggle-project', project.id)"
+                @click="$emit('toggle-project', project.id)"
+                @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
               >
                 <ChevronRight aria-hidden="true" />
-              </span>
-            </button>
+              </button>
+            </div>
 
             <Transition name="sidebar-reveal">
-              <div v-if="!collapsedProjects[project.id] && projectChildRooms(project).length" class="project-room-list">
+              <div
+                v-if="!collapsedProjects[project.id] && projectChildRooms(project).length"
+                :id="projectChildListId(project.id)"
+                class="project-room-list"
+              >
                 <button
                   v-for="childRoom in projectChildRooms(project)"
                   :key="childRoom.id"
@@ -86,6 +99,7 @@
                   :data-kind="childRoom.kind"
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
+                  :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
                   type="button"
                   :data-testid="`pinned-child-room-${childRoom.id}`"
                   @click="$emit('select-entry', childRoom)"
@@ -146,47 +160,59 @@
             class="project-group"
             :data-testid="`room-group-${project.id}`"
           >
-            <button
-              class="project-row"
-              :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
-              :data-unread="project.parent.hasUnread"
-              type="button"
-              :data-testid="`room-parent-${project.parent.id}`"
-              @click="selectOrToggleProject(project)"
-              @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
-            >
-              <div class="project-row-main">
-                <span class="project-icon" aria-hidden="true">
-                  <House />
-                </span>
-                <span class="project-copy">
-                  <span class="room-title-line">
-                    <span class="project-name">{{ project.roomName }}</span>
-                    <span
-                      v-if="project.parent.hasUnread"
-                      class="room-unread-dot"
-                      aria-label="Unread messages"
-                      title="Unread messages"
-                    ></span>
+            <div class="sidebar-project-row-shell">
+              <button
+                class="project-row"
+                :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
+                :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
+                :data-unread="project.parent.hasUnread"
+                type="button"
+                :data-testid="`room-parent-${project.parent.id}`"
+                @click="selectOrToggleProject(project)"
+                @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
+              >
+                <span class="project-row-main">
+                  <span class="project-icon" aria-hidden="true">
+                    <House />
                   </span>
-                  <small>
-                    {{ projectSubtitle(project) }}
-                  </small>
+                  <span class="project-copy">
+                    <span class="room-title-line">
+                      <span class="project-name">{{ project.roomName }}</span>
+                      <span
+                        v-if="project.parent.hasUnread"
+                        class="room-unread-dot"
+                        aria-label="Unread messages"
+                        title="Unread messages"
+                      ></span>
+                    </span>
+                    <small>
+                      {{ projectSubtitle(project) }}
+                    </small>
+                  </span>
                 </span>
-              </div>
-              <span
+              </button>
+              <button
                 v-if="projectChildRooms(project).length"
-                class="project-open"
+                class="project-toggle"
                 :data-collapsed="collapsedProjects[project.id]"
+                type="button"
+                :aria-label="`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} ${project.roomName}`"
+                :aria-controls="projectChildListId(project.id)"
+                :aria-expanded="!collapsedProjects[project.id]"
                 :data-testid="`room-group-toggle-${project.id}`"
-                @click.stop="$emit('toggle-project', project.id)"
+                @click="$emit('toggle-project', project.id)"
+                @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
               >
                 <ChevronRight aria-hidden="true" />
-              </span>
-            </button>
+              </button>
+            </div>
 
             <Transition name="sidebar-reveal">
-              <div v-if="!collapsedProjects[project.id] && projectChildRooms(project).length" class="project-room-list">
+              <div
+                v-if="!collapsedProjects[project.id] && projectChildRooms(project).length"
+                :id="projectChildListId(project.id)"
+                class="project-room-list"
+              >
                 <button
                   v-for="childRoom in projectChildRooms(project)"
                   :key="childRoom.id"
@@ -194,6 +220,7 @@
                   :data-kind="childRoom.kind"
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
+                  :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
                   type="button"
                   :data-testid="`child-room-${childRoom.id}`"
                   @click="$emit('select-entry', childRoom)"
@@ -229,6 +256,7 @@
       <button
         class="sidebar-row sidebar-settings-row"
         :data-active="activeEntry.id === settingsEntry.id || activeEntry.type === 'system'"
+        :aria-current="activeEntry.id === settingsEntry.id || activeEntry.type === 'system' ? 'page' : undefined"
         type="button"
         data-testid="sidebar-settings"
         @click="$emit('select-entry', settingsEntry)"
@@ -257,6 +285,7 @@
       <button
         class="sidebar-icon-button"
         :data-active="activeEntry.id === settingsEntry.id || activeEntry.type === 'system'"
+        :aria-current="activeEntry.id === settingsEntry.id || activeEntry.type === 'system' ? 'page' : undefined"
         type="button"
         data-testid="rail-settings"
         aria-label="Settings"
@@ -492,6 +521,10 @@ function projectSubtitle(project: ProjectGroup): string {
 function projectChildRooms(project: ProjectGroup | null | undefined): RoomEntry[] {
   if (!project) return [];
   return [...project.branchRooms, ...project.focusRooms];
+}
+
+function projectChildListId(projectId: string): string {
+  return `sidebar-project-children-${encodeURIComponent(projectId)}`;
 }
 
 function isSelectableRoom(entry: RoomEntry): boolean {
