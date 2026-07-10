@@ -283,7 +283,14 @@
   min-height: 42px;
   padding: 0 12px;
   font-weight: 600;
+  border-color: color-mix(in srgb, var(--border) 72%, transparent);
   background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-cta:focus-visible,
+.sidebar-icon-button[data-testid="rail-new-room"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, #60a5fa 62%, transparent);
+  outline-offset: 2px;
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .cta-plus,
