@@ -28,6 +28,8 @@ import {
   desktopEventPublicReplyText,
 } from "./codex-event-prompt.js";
 import {
+  canDeliverDesktopEventToManagedAgent,
+  isStopPhraseRoomStreamEvent,
   shouldDeliverRoomStreamEventToManagedAgent,
 } from "./codex-event-routing.js";
 import { buildClaudeCodeDesktopEventPrompt } from "./claude-code-event-prompt.js";
@@ -444,7 +446,11 @@ export function createDesktopClaudeCodeRuntime(
     }
 
     const sessions = listDesktopManagedClaudeCodeLiveSessions(event.roomIdentifier)
-      .filter((session) => shouldDeliverRoomStreamEventToClaudeCodeSession(session, event));
+      .filter((session) =>
+        shouldDeliverRoomStreamEventToManagedAgent(
+          toPublicClaudeCodeManagedAgentSession(session),
+          event,
+        ));
     for (const session of sessions) {
       enqueueDesktopEventTurn(session, event);
     }
@@ -491,7 +497,7 @@ export function createDesktopClaudeCodeRuntime(
     storage: DesktopRoomStorageState,
   ): Promise<void> {
     const session = getStoredClaudeCodeLiveSession(sessionId);
-    if (!session || !canDeliverDesktopEventToClaudeCodeSession(session)) {
+    if (!session || !canDeliverDesktopEventToManagedAgent(toPublicClaudeCodeManagedAgentSession(session))) {
       return;
     }
 
@@ -1071,28 +1077,6 @@ export function createDesktopClaudeCodeRuntime(
 
 function isManagedRoomStreamEvent(event: DesktopRoomStreamEvent): event is ManagedRoomEvent {
   return event.type === "message" || event.type === "task_update";
-}
-
-function canDeliverDesktopEventToClaudeCodeSession(session: DesktopClaudeCodeLiveSessionState): boolean {
-  const worker = toPublicClaudeCodeManagedAgentSession(session);
-  return (session.delivery_mode || "desktop_events") === "desktop_events" &&
-    Boolean(worker.agentSessionId) &&
-    session.status !== "interrupted" &&
-    session.status !== "failed";
-}
-
-function shouldDeliverRoomStreamEventToClaudeCodeSession(
-  session: DesktopClaudeCodeLiveSessionState,
-  event: ManagedRoomEvent,
-): boolean {
-  return shouldDeliverRoomStreamEventToManagedAgent(toPublicClaudeCodeManagedAgentSession(session), event);
-}
-
-function isStopPhraseRoomStreamEvent(
-  session: DesktopClaudeCodeLiveSessionState,
-  event: ManagedRoomEvent,
-): boolean {
-  return event.type === "message" && event.message.text === session.stop_phrase;
 }
 
 function activeWorkForEvent(

@@ -17,6 +17,8 @@ import { buildRepoStatus } from "../../repo-status.js";
 import { looksLikeInviteCode } from "./codex-start-prompt.js";
 import { desktopEventPublicReplyText } from "./codex-event-prompt.js";
 import {
+  canDeliverDesktopEventToManagedAgent,
+  isStopPhraseRoomStreamEvent,
   shouldDeliverRoomStreamEventToManagedAgent,
 } from "./codex-event-routing.js";
 import {
@@ -351,7 +353,11 @@ export function createDesktopCursorRuntime(
     }
 
     const sessions = listDesktopManagedCursorLiveSessions(event.roomIdentifier)
-      .filter((session) => shouldDeliverRoomStreamEventToCursorSession(session, event));
+      .filter((session) =>
+        shouldDeliverRoomStreamEventToManagedAgent(
+          toPublicCursorManagedAgentSession(session),
+          event,
+        ));
     for (const session of sessions) {
       enqueueDesktopEventTurn(session, event);
     }
@@ -398,7 +404,7 @@ export function createDesktopCursorRuntime(
     storage: DesktopRoomStorageState,
   ): Promise<void> {
     const session = getStoredCursorLiveSession(sessionId);
-    if (!session || !canDeliverDesktopEventToCursorSession(session)) {
+    if (!session || !canDeliverDesktopEventToManagedAgent(toPublicCursorManagedAgentSession(session))) {
       return;
     }
 
@@ -644,28 +650,6 @@ export function createDesktopCursorRuntime(
     dispatchRoomStreamEvent,
     waitForIdle,
   };
-}
-
-function canDeliverDesktopEventToCursorSession(session: DesktopCursorLiveSessionState): boolean {
-  const worker = toPublicCursorManagedAgentSession(session);
-  return Boolean(worker.agentSessionId) &&
-    (session.delivery_mode || "desktop_events") === "desktop_events" &&
-    session.status !== "interrupted" &&
-    session.status !== "failed";
-}
-
-function isStopPhraseRoomStreamEvent(
-  session: DesktopCursorLiveSessionState,
-  event: ManagedRoomEvent,
-): boolean {
-  return event.type === "message" && event.message.text === session.stop_phrase;
-}
-
-function shouldDeliverRoomStreamEventToCursorSession(
-  session: DesktopCursorLiveSessionState,
-  event: ManagedRoomEvent,
-): boolean {
-  return shouldDeliverRoomStreamEventToManagedAgent(toPublicCursorManagedAgentSession(session), event);
 }
 
 function activeWorkForEvent(
