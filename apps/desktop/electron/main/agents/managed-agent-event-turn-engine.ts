@@ -117,6 +117,12 @@ export interface ManagedAgentEventTurnEngineAdapter<
    */
   maxConsecutiveTurnErrors?: number;
   /**
+   * Preserve providers whose stop phrase historically ended the session even
+   * when the acknowledgement turn returned an error. Defaults to false so the
+   * existing Claude Code and Cursor behavior is unchanged.
+   */
+  stopAfterTurnOnError?: boolean;
+  /**
    * Optional post-turn status derivation for the error branch. When provided
    * and it returns a status, that status/last_error is persisted instead of the
    * engine's budget-based ladder. Codex uses this to preserve its richer status
@@ -355,7 +361,9 @@ export function createManagedAgentEventTurnEngine<
           updated_at: adapter.now(),
         }));
         adapter.emitSessionUpdate(updated);
-        if (exhausted) {
+        if (stopAfterTurn && adapter.stopAfterTurnOnError && updated) {
+          await stopAfterRoomStopPhrase(updated);
+        } else if (exhausted) {
           await endExhaustedSessionWorker(sessionId);
         }
         return;

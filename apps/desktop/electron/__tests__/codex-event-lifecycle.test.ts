@@ -58,6 +58,8 @@ type FakeCodexServerOptions = {
   turnReplies?: string[];
   /** When set, every `turn/start` rejects with this error message. */
   turnStartError?: string | null;
+  /** Terminal status reported for event turns. Defaults to `completed`. */
+  eventTurnStatus?: string;
   /**
    * Status sequence reported for the session's pre-existing turn (`turn_boot`)
    * on successive `thread/read` calls issued before an event turn starts. The
@@ -138,7 +140,7 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
               { id: "turn_boot", status: bootTurnStatus(), items: [] },
               ...[...eventTurns.entries()].map(([id, text]) => ({
                 id,
-                status: "completed",
+                status: options.eventTurnStatus ?? "completed",
                 items: [{ type: "agentMessage", phase: "final", text }],
               })),
             ],
@@ -564,6 +566,40 @@ test("codex stop-phrase message ends the session after the turn", async () => {
     assert.equal(session.status, "interrupted");
     assert.equal(server.turnStartCount(), 1);
     // The worker session is ended (killOwnedAppServer) after the stop phrase.
+    const worker = getStoredAgentSession(seeded.agent_session_id ?? null);
+    assert.ok(worker?.ended_at, "expected the worker agent-session to be marked ended");
+  } finally {
+    server.restore();
+  }
+});
+
+test("codex stop-phrase message still ends the session when its turn is interrupted", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_interrupted_stop_phrase";
+  const seeded = await seedDeliverableSession({
+    roomIdentifier,
+    sessionId: "codex_interrupted_stop_phrase",
+    workerSessionId: "agent_session_interrupted_stop_phrase",
+    stopPhrase: "/stop-codex-room",
+  });
+  const server = installFakeCodexServer({ eventTurnStatus: "interrupted" });
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+      id: "msg_interrupted_stop_phrase",
+      text: "/stop-codex-room",
+      threadRootId: "msg_interrupted_stop_phrase",
+    }));
+
+    const session = await waitFor(
+      () => {
+        const current = getStoredCodexLiveSession(seeded.session_id);
+        return current?.status === "interrupted" ? current : null;
+      },
+      "codex session interrupted after its stop-phrase turn was interrupted",
+    );
+
+    assert.equal(session.status, "interrupted");
+    assert.equal(server.turnStartCount(), 1);
     const worker = getStoredAgentSession(seeded.agent_session_id ?? null);
     assert.ok(worker?.ended_at, "expected the worker agent-session to be marked ended");
   } finally {

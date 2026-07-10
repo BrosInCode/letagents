@@ -1218,7 +1218,7 @@ async function disconnectCodexWorkerForStopPhrase(
  * idle preamble (both inside beforeTurnReadiness), and the context-request /
  * room-tool loop (inside runTurn).
  *
- * Four engine seams keep Codex's behavior byte-for-byte:
+ * Five engine seams keep Codex's behavior byte-for-byte:
  *   - maxConsecutiveTurnErrors: Infinity  -> no error budget, no parking; a
  *     failing turn stays "unknown" and keeps retrying (Phase 3.2 deferred).
  *   - resolveErrorTurnStatus                -> Codex's turn machinery persists a
@@ -1233,6 +1233,9 @@ async function disconnectCodexWorkerForStopPhrase(
  *   - resolveStorageAtEnqueue: true          -> the room's storage destination is
  *     snapshotted when the event arrives, so a storage-mode flip while the
  *     event waits behind an active turn cannot reroute the reply.
+ *   - stopAfterTurnOnError: true              -> an explicit stop phrase still
+ *     tears down the worker when its acknowledgement turn is interrupted or
+ *     times out.
  */
 const codexEventTurnEngine = createManagedAgentEventTurnEngine<
   DesktopCodexLiveSessionState,
@@ -1257,6 +1260,9 @@ const codexEventTurnEngine = createManagedAgentEventTurnEngine<
   replyChangeSessionKey: codexReplyChangeSessionKey,
   disconnectWorker: disconnectCodexWorkerForStopPhrase,
   maxConsecutiveTurnErrors: Number.POSITIVE_INFINITY,
+  // Codex historically honored the stop phrase after a non-throwing timeout
+  // or interrupted acknowledgement turn; preserve that explicit stop request.
+  stopAfterTurnOnError: true,
   resolveErrorTurnStatus: (session) => ({
     status: session.status,
     lastError: session.last_error ?? null,
