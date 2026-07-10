@@ -186,9 +186,15 @@ import type {
   DesktopPendingDeviceAuth,
   DesktopRoomAccess,
 } from "../../../../../electron/ipc-types";
-import { copyTextToClipboard } from "../../../domain/clipboard";
 import { friendlyRoomLabel } from "../../../domain/git-rooms";
 import { loginInitials } from "../../../domain/initials";
+import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import {
+  nextRetryStep,
+  resolveAuthCardState,
+  retryDeadlineAt,
+  retrySecondsLeft as computeRetrySecondsLeft,
+} from "./auth-onboarding";
 
 const props = defineProps<{
   access: DesktopRoomAccess;
@@ -215,25 +221,14 @@ const effectiveFeedback = computed(() => {
   return props.feedback || props.authStatus?.error || null;
 });
 
-type CardState = "loading" | "connect" | "code" | "connected" | "forbidden" | "missing" | "unavailable";
-
-const cardState = computed<CardState>(() => {
-  // A snapshot still in flight is not a verdict — never render it as one.
-  if (props.snapshotPending) return "loading";
-  switch (props.access.status) {
-    case "missing_room":
-      return "missing";
-    case "forbidden":
-      return "forbidden";
-    case "unavailable":
-      return "unavailable";
-    case "auth_required":
-      if (pendingAuth.value) return "code";
-      return props.authStatus?.authenticated ? "connected" : "connect";
-    default:
-      return "loading";
-  }
-});
+const cardState = computed(() =>
+  resolveAuthCardState({
+    snapshotPending: Boolean(props.snapshotPending),
+    status: props.access.status,
+    hasPendingAuth: Boolean(pendingAuth.value),
+    authenticated: Boolean(props.authStatus?.authenticated),
+  }),
+);
 
 const roomLabel = computed(() => {
   if (cardState.value === "missing") return "LetAgents";
@@ -265,10 +260,8 @@ const forbiddenTitle = computed(() => {
   return handle ? `@${handle} can't open this room` : "This account can't open this room";
 });
 
-// One shared ticker drives the expiry label, the approval poll, and the retry
-// countdown. Deadlines are absolute timestamps, never tick counts: throttled
-// or occluded windows batch timers, and a decrement-per-tick countdown
-// silently stalls when that happens.
+// Approval polling is owned by useDesktopAuthFlow, which reschedules itself off
+// the device-flow interval; the view only surfaces state and reads the clock.
 const now = ref(Date.now());
 let ticker: number | null = null;
 
@@ -280,54 +273,50 @@ const pendingExpiryLabel = computed(() => {
   return `in ${minutes} min`;
 });
 
-const POLL_MIN_INTERVAL_SECONDS = 5;
-let nextPollAt = 0;
-
-function armPollDeadline(pending: DesktopPendingDeviceAuth): void {
-  const seconds = Math.max(pending.intervalSeconds || 0, POLL_MIN_INTERVAL_SECONDS);
-  nextPollAt = Date.now() + seconds * 1000;
-}
-
-watch(
-  pendingAuth,
-  (pending) => {
-    if (pending) armPollDeadline(pending);
-    else nextPollAt = 0;
-  },
-  { immediate: true }
-);
-
-const RETRY_BACKOFF_SECONDS = [8, 15, 30];
+// A failed room load self-heals: auto-retry on a growing backoff, deadlines as
+// absolute timestamps so an occluded window's batched timers can't stall the
+// countdown.
 const retryStep = ref(0);
 const retryDeadline = ref(0);
 
-const retrySecondsLeft = computed(() => {
-  if (retryDeadline.value === 0) return null;
-  return Math.max(0, Math.ceil((retryDeadline.value - now.value) / 1000));
-});
+const retrySecondsLeft = computed(() => computeRetrySecondsLeft(now.value, retryDeadline.value));
+
+function armRetry(fromStep: number): void {
+  retryStep.value = fromStep;
+  retryDeadline.value = retryDeadlineAt(Date.now(), fromStep);
+}
+
+function clearRetry(): void {
+  retryStep.value = 0;
+  retryDeadline.value = 0;
+}
 
 watch(
   cardState,
   (state) => {
     if (state === "unavailable") {
-      if (retryDeadline.value === 0) {
-        retryDeadline.value = Date.now() + RETRY_BACKOFF_SECONDS[retryStep.value] * 1000;
-      }
+      if (retryDeadline.value === 0) armRetry(retryStep.value);
       return;
     }
     // Loading keeps the schedule: an in-flight auto-retry flips the card to
     // loading, and a failure lands back here to continue the backoff.
-    if (state !== "loading") {
-      retryStep.value = 0;
-      retryDeadline.value = 0;
-    }
+    if (state !== "loading") clearRetry();
   },
-  { immediate: true }
+  { immediate: true },
+);
+
+// A different room's failure gets its own fresh backoff — cardState stays
+// "unavailable" across the switch, so this reset can't ride on that watcher.
+watch(
+  [() => props.access.roomIdentifier, () => props.roomLabel],
+  () => {
+    if (cardState.value === "unavailable") armRetry(0);
+    else clearRetry();
+  },
 );
 
 function retryNow(): void {
-  retryStep.value = 0;
-  retryDeadline.value = Date.now() + RETRY_BACKOFF_SECONDS[0] * 1000;
+  armRetry(0);
   emit("refresh-room");
 }
 
@@ -335,31 +324,18 @@ function onTick(): void {
   now.value = Date.now();
   if (props.busy) return;
 
-  if (pendingAuth.value && nextPollAt !== 0 && now.value >= nextPollAt) {
-    armPollDeadline(pendingAuth.value);
-    emit("poll-auth");
-  }
-
   if (cardState.value === "unavailable" && retryDeadline.value !== 0 && now.value >= retryDeadline.value) {
-    retryStep.value = Math.min(retryStep.value + 1, RETRY_BACKOFF_SECONDS.length - 1);
-    retryDeadline.value = Date.now() + RETRY_BACKOFF_SECONDS[retryStep.value] * 1000;
+    armRetry(nextRetryStep(retryStep.value));
     emit("refresh-room");
   }
 }
 
-const codeCopied = ref(false);
-let copyResetTimer: number | null = null;
+const { copied: codeCopied, copy: copyToClipboard } = useCopyIndicator(1600);
 
 async function copyUserCode(): Promise<void> {
   const code = pendingAuth.value?.userCode;
   if (!code) return;
-  await copyTextToClipboard(code);
-  codeCopied.value = true;
-  if (copyResetTimer !== null) window.clearTimeout(copyResetTimer);
-  copyResetTimer = window.setTimeout(() => {
-    codeCopied.value = false;
-    copyResetTimer = null;
-  }, 1600);
+  await copyToClipboard(code);
 }
 
 onMounted(() => {
@@ -368,6 +344,5 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (ticker !== null) window.clearInterval(ticker);
-  if (copyResetTimer !== null) window.clearTimeout(copyResetTimer);
 });
 </script>
