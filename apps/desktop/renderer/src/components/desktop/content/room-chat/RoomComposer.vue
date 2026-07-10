@@ -107,13 +107,10 @@
       <button
         class="desktop-composer-send"
         type="submit"
-        :aria-label="sending ? 'Sending message' : 'Send message'"
-        :title="sending ? 'Sending message' : 'Send message'"
         :disabled="roomLoading || sending || !canSend"
         data-testid="desktop-composer-send"
       >
-        <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
-        <ArrowUp v-else :size="17" aria-hidden="true" />
+        {{ sending ? "Sending..." : "Send" }}
       </button>
     </div>
     <DesktopAttachmentDrafts
@@ -145,7 +142,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowUp, LoaderCircle, Plus } from "@lucide/vue";
+import { Plus } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
