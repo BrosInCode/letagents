@@ -141,7 +141,7 @@ export function desktopManagedAgentMessageActivationDecision(
 }
 
 export function isStopPhraseRoomStreamEvent(
-  session: DesktopCodexLiveSessionState,
+  session: { stop_phrase: string },
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): boolean {
   return event.type === "message" && event.message.text === session.stop_phrase;
