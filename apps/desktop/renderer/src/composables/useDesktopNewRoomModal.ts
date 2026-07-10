@@ -1,6 +1,38 @@
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "../../../electron/ipc-types";
+import { normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
+
+export type NewRoomStep =
+  | "chooser"
+  | "project"
+  | "standalone"
+  | "join"
+  | "working"
+  | "success"
+  | "error";
+
+export type NewRoomStorageChoice = "cloud" | "local";
+export type NewRoomActiveAction =
+  | "pick_project"
+  | "confirm_project"
+  | "create_standalone"
+  | "join"
+  | "open_success"
+  | "copy_code"
+  | null;
+
+export type NewRoomSuccessKind = "shared" | "local" | "project" | "joined";
+
+export interface NewRoomSuccessState {
+  kind: NewRoomSuccessKind;
+  roomName: string;
+  storageLabel: string;
+  inviteCode: string | null;
+  snapshot: DesktopRoomSnapshot;
+  openOptions: OpenRoomOptions;
+  repoStatus?: RepoStatus | null;
+}
 
 interface OpenRoomOptions {
   displayName?: string | null;
@@ -12,6 +44,7 @@ interface OpenRoomOptions {
 interface DesktopNewRoomModalOptions {
   openRoomSnapshot: (snapshot: DesktopRoomSnapshot, options?: OpenRoomOptions) => void;
   setRepoStatus: (status: RepoStatus | null) => void;
+  getDefaultStorageMode?: () => NewRoomStorageChoice;
 }
 
 export interface PendingProjectRoomSelection {
@@ -26,171 +59,416 @@ export interface PendingProjectRoomSelection {
   warning: string | null;
 }
 
+function generateDefaultRoomName(): string {
+  const stamp = new Date();
+  const hh = String(stamp.getHours()).padStart(2, "0");
+  const mm = String(stamp.getMinutes()).padStart(2, "0");
+  return `Room ${hh}:${mm}`;
+}
+
 export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomModalOpen = ref(false);
+  const newRoomStep = ref<NewRoomStep>("chooser");
+  const newRoomReturnStep = ref<Exclude<NewRoomStep, "working" | "success" | "error">>("chooser");
   const newRoomBusy = ref(false);
+  const newRoomActiveAction = ref<NewRoomActiveAction>(null);
   const newRoomFeedback = ref<string | null>(null);
   const newRoomFeedbackState = ref<"info" | "error" | "success">("info");
   const newRoomJoinCode = ref("");
+  const newRoomJoinError = ref<string | null>(null);
+  const newRoomName = ref("");
+  const newRoomStorage = ref<NewRoomStorageChoice>("cloud");
   const newRoomProjectSelection = ref<PendingProjectRoomSelection | null>(null);
+  const newRoomSuccess = ref<NewRoomSuccessState | null>(null);
+  const newRoomStatusMessage = ref<string | null>(null);
+
+  const canSubmitJoin = computed(() => Boolean(normalizeJoinRoomInput(newRoomJoinCode.value)));
+  const canSubmitStandalone = computed(() => !newRoomBusy.value);
+
+  function resetTransientState(): void {
+    newRoomBusy.value = false;
+    newRoomActiveAction.value = null;
+    newRoomFeedback.value = null;
+    newRoomFeedbackState.value = "info";
+    newRoomJoinError.value = null;
+    newRoomStatusMessage.value = null;
+  }
 
   function selectNewRoomEntry() {
     newRoomModalOpen.value = true;
-    newRoomFeedback.value = null;
-    newRoomFeedbackState.value = "info";
+    newRoomStep.value = "chooser";
+    newRoomReturnStep.value = "chooser";
+    newRoomJoinCode.value = "";
+    newRoomJoinError.value = null;
+    newRoomName.value = generateDefaultRoomName();
+    newRoomStorage.value = options.getDefaultStorageMode?.() === "local" ? "local" : "cloud";
+    newRoomProjectSelection.value = null;
+    newRoomSuccess.value = null;
+    resetTransientState();
   }
 
   function closeNewRoomModal(): void {
     if (newRoomBusy.value) return;
     newRoomModalOpen.value = false;
-    newRoomFeedback.value = null;
+    newRoomStep.value = "chooser";
     newRoomJoinCode.value = "";
+    newRoomJoinError.value = null;
+    newRoomName.value = "";
     newRoomProjectSelection.value = null;
+    newRoomSuccess.value = null;
+    resetTransientState();
+  }
+
+  function goToChooser(): void {
+    if (newRoomBusy.value) return;
+    newRoomStep.value = "chooser";
+    newRoomReturnStep.value = "chooser";
+    newRoomProjectSelection.value = null;
+    newRoomSuccess.value = null;
+    resetTransientState();
+  }
+
+  function chooseProjectIntent(): void {
+    if (newRoomBusy.value) return;
+    newRoomStep.value = "project";
+    newRoomReturnStep.value = "project";
+    newRoomSuccess.value = null;
+    resetTransientState();
+  }
+
+  function chooseStandaloneIntent(): void {
+    if (newRoomBusy.value) return;
+    newRoomStep.value = "standalone";
+    newRoomReturnStep.value = "standalone";
+    if (!newRoomName.value.trim()) {
+      newRoomName.value = generateDefaultRoomName();
+    }
+    newRoomStorage.value = options.getDefaultStorageMode?.() === "local" ? "local" : newRoomStorage.value;
+    newRoomSuccess.value = null;
+    resetTransientState();
+  }
+
+  function chooseJoinIntent(): void {
+    if (newRoomBusy.value) return;
+    newRoomStep.value = "join";
+    newRoomReturnStep.value = "join";
+    newRoomSuccess.value = null;
+    resetTransientState();
+  }
+
+  function backFromSubstep(): void {
+    if (newRoomBusy.value) return;
+    if (newRoomStep.value === "error") {
+      newRoomStep.value = newRoomReturnStep.value;
+      resetTransientState();
+      return;
+    }
+    goToChooser();
+  }
+
+  function retryLastAction(): void {
+    if (newRoomBusy.value) return;
+    const step = newRoomReturnStep.value;
+    newRoomStep.value = step;
+    resetTransientState();
+    if (step === "project" && newRoomProjectSelection.value) {
+      return;
+    }
+    if (step === "standalone") {
+      void createStandaloneRoom();
+      return;
+    }
+    if (step === "join") {
+      void joinRoomCodeFromModal();
+    }
   }
 
   async function createInviteRoom(): Promise<void> {
-    newRoomBusy.value = true;
-    newRoomFeedback.value = "Creating invite room...";
-    newRoomFeedbackState.value = "info";
-    try {
-      const result = await window.letagentsDesktop.room.createInviteRoom();
-      options.openRoomSnapshot(result.snapshot, {
-        kind: "room",
-        rootPath: null,
-        meta: "Temporary room",
-      });
-      newRoomFeedback.value = `Invite room created. Join code: ${result.code}.`;
-      newRoomFeedbackState.value = "success";
-      newRoomJoinCode.value = "";
-      newRoomProjectSelection.value = null;
-    } catch (error) {
-      newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not create an invite room.";
-      newRoomFeedbackState.value = "error";
-    } finally {
-      newRoomBusy.value = false;
-    }
+    newRoomStorage.value = "cloud";
+    await createStandaloneRoom();
   }
 
   async function createLocalRoomFromModal(): Promise<void> {
-    const bridge = window.letagentsDesktop.chatStorage;
-    if (!bridge?.createLocalRoom) {
-      newRoomFeedback.value = "Restart LetAgents Desktop to enable local rooms.";
-      newRoomFeedbackState.value = "error";
-      return;
-    }
+    newRoomStorage.value = "local";
+    await createStandaloneRoom();
+  }
+
+  async function createStandaloneRoom(): Promise<void> {
+    if (newRoomBusy.value) return;
+    const displayName = newRoomName.value.trim() || generateDefaultRoomName();
+    newRoomName.value = displayName;
     newRoomBusy.value = true;
-    newRoomFeedback.value = "Creating local room...";
+    newRoomActiveAction.value = "create_standalone";
+    newRoomReturnStep.value = "standalone";
+    newRoomStep.value = "working";
+    newRoomStatusMessage.value =
+      newRoomStorage.value === "local" ? "Creating local room..." : "Creating shared room...";
+    newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
+
     try {
-      const result = await bridge.createLocalRoom();
-      options.openRoomSnapshot(result.snapshot, {
-        kind: "room",
-        rootPath: null,
-        meta: "Local on this device",
-      });
-      newRoomFeedback.value = "Local room created.";
+      if (newRoomStorage.value === "local") {
+        const bridge = window.letagentsDesktop.chatStorage;
+        if (!bridge?.createLocalRoom) {
+          throw new Error("Restart LetAgents Desktop to enable local rooms.");
+        }
+        const result = await bridge.createLocalRoom({ displayName });
+        newRoomSuccess.value = {
+          kind: "local",
+          roomName: result.snapshot.room?.displayName || displayName,
+          storageLabel: "Local / private on this device",
+          inviteCode: null,
+          snapshot: result.snapshot,
+          openOptions: {
+            displayName,
+            kind: "room",
+            rootPath: null,
+            meta: "Local on this device",
+          },
+        };
+      } else {
+        const result = await window.letagentsDesktop.room.createInviteRoom();
+        const rename = window.letagentsDesktop.room.rename;
+        if (rename && displayName) {
+          try {
+            await rename(result.roomIdentifier, displayName);
+          } catch {
+            // Naming is best-effort; invite code success still matters.
+          }
+        }
+        const roomName =
+          result.snapshot.room?.displayName ||
+          displayName ||
+          result.snapshot.room?.name ||
+          result.code;
+        newRoomSuccess.value = {
+          kind: "shared",
+          roomName,
+          storageLabel: "Cloud / shared",
+          inviteCode: result.code,
+          snapshot: result.snapshot,
+          openOptions: {
+            displayName: roomName,
+            kind: "room",
+            rootPath: null,
+            meta: result.code || "Shared room",
+          },
+        };
+      }
+      newRoomStep.value = "success";
+      newRoomFeedback.value = null;
       newRoomFeedbackState.value = "success";
-      newRoomModalOpen.value = false;
       newRoomJoinCode.value = "";
       newRoomProjectSelection.value = null;
     } catch (error) {
       newRoomFeedback.value =
         error instanceof Error
           ? error.message
-          : "LetAgents could not create a local room.";
+          : newRoomStorage.value === "local"
+            ? "LetAgents could not create a local room."
+            : "LetAgents could not create a shared room.";
       newRoomFeedbackState.value = "error";
+      newRoomStep.value = "error";
     } finally {
       newRoomBusy.value = false;
+      newRoomActiveAction.value = null;
+      newRoomStatusMessage.value = null;
     }
   }
 
   async function openProjectRoomFromModal(): Promise<void> {
+    if (newRoomBusy.value) return;
     newRoomBusy.value = true;
-    newRoomFeedback.value = "Opening the project picker...";
+    newRoomActiveAction.value = "pick_project";
+    newRoomReturnStep.value = "project";
+    newRoomStep.value = "working";
+    newRoomStatusMessage.value = "Opening the project picker...";
+    newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
     try {
       const result = await window.letagentsDesktop.repos.pickRoom();
       if (result.canceled) {
-        newRoomFeedback.value = null;
+        newRoomStep.value = "project";
+        newRoomStatusMessage.value = null;
         return;
       }
       if (result.error || !result.snapshot) {
         newRoomFeedback.value = result.error || "LetAgents could not open a room from that folder.";
         newRoomFeedbackState.value = "error";
+        newRoomStep.value = "error";
         return;
       }
       newRoomProjectSelection.value = projectSelectionFromResult(result, result.snapshot);
       newRoomFeedback.value = result.warning || null;
       newRoomFeedbackState.value = result.warning ? "info" : "success";
+      newRoomStep.value = "project";
     } catch (error) {
       newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the project picker.";
       newRoomFeedbackState.value = "error";
+      newRoomStep.value = "error";
     } finally {
       newRoomBusy.value = false;
+      newRoomActiveAction.value = null;
+      newRoomStatusMessage.value = null;
     }
   }
 
   function confirmProjectRoomFromModal(): void {
     const selection = newRoomProjectSelection.value;
-    if (!selection) return;
-    options.setRepoStatus(selection.repoStatus);
-    options.openRoomSnapshot(selection.snapshot, {
-      displayName: selection.folderLabel,
+    if (!selection || newRoomBusy.value) return;
+    newRoomActiveAction.value = "confirm_project";
+    newRoomSuccess.value = {
       kind: "project",
-      rootPath: selection.repoPath,
-      meta: selection.repoStatus?.branch || rootPathLabel(selection.repoPath) || selection.source || null,
-    });
-    newRoomModalOpen.value = false;
-    newRoomFeedback.value = null;
-    newRoomJoinCode.value = "";
-    newRoomProjectSelection.value = null;
+      roomName: selection.roomName,
+      storageLabel: selection.sourceLabel,
+      inviteCode: null,
+      snapshot: selection.snapshot,
+      repoStatus: selection.repoStatus,
+      openOptions: {
+        displayName: selection.folderLabel,
+        kind: "project",
+        rootPath: selection.repoPath,
+        meta: selection.repoStatus?.branch || rootPathLabel(selection.repoPath) || selection.source || null,
+      },
+    };
+    openSuccessRoom();
   }
 
   async function joinRoomCodeFromModal(): Promise<void> {
-    const roomCode = newRoomJoinCode.value.trim();
-    if (!roomCode) return;
+    if (newRoomBusy.value) return;
+    const validation = validateJoinRoomInput(newRoomJoinCode.value);
+    if (!validation.normalized) {
+      newRoomJoinError.value = validation.error;
+      newRoomFeedback.value = validation.error;
+      newRoomFeedbackState.value = "error";
+      return;
+    }
+    newRoomJoinError.value = null;
+    newRoomJoinCode.value = validation.normalized;
     newRoomBusy.value = true;
-    newRoomFeedback.value = "Joining room...";
+    newRoomActiveAction.value = "join";
+    newRoomReturnStep.value = "join";
+    newRoomStep.value = "working";
+    newRoomStatusMessage.value = "Joining room...";
+    newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
     try {
-      const snapshot = await window.letagentsDesktop.room.getSnapshot(roomCode);
-      options.openRoomSnapshot(snapshot, {
-        kind: "room",
-        rootPath: null,
-        meta: snapshot.room?.code || "Joined room",
-      });
-      newRoomFeedback.value = snapshot.access.status === "ready"
-        ? "Room selected."
-        : snapshot.access.message;
-      newRoomFeedbackState.value = snapshot.access.status === "ready" ? "success" : "error";
-      if (snapshot.access.status === "ready") {
-        newRoomModalOpen.value = false;
-        newRoomJoinCode.value = "";
-        newRoomProjectSelection.value = null;
+      const snapshot = await window.letagentsDesktop.room.getSnapshot(validation.normalized);
+      if (snapshot.access.status !== "ready") {
+        newRoomFeedback.value = snapshot.access.message || "You do not have access to that room.";
+        newRoomFeedbackState.value = "error";
+        newRoomStep.value = "error";
+        return;
       }
+      const roomName =
+        snapshot.room?.displayName ||
+        snapshot.room?.name ||
+        snapshot.room?.code ||
+        validation.normalized;
+      newRoomSuccess.value = {
+        kind: "joined",
+        roomName,
+        storageLabel: snapshot.room?.code ? `Invite ${snapshot.room.code}` : "Joined room",
+        inviteCode: snapshot.room?.code || (looksLikeInviteCodeValue(validation.normalized) ? validation.normalized : null),
+        snapshot,
+        openOptions: {
+          kind: "room",
+          rootPath: null,
+          meta: snapshot.room?.code || "Joined room",
+        },
+      };
+      openSuccessRoom();
     } catch (error) {
       newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not join that room.";
       newRoomFeedbackState.value = "error";
+      newRoomStep.value = "error";
     } finally {
       newRoomBusy.value = false;
+      newRoomActiveAction.value = null;
+      newRoomStatusMessage.value = null;
+    }
+  }
+
+  function openSuccessRoom(): void {
+    const success = newRoomSuccess.value;
+    if (!success) return;
+    newRoomActiveAction.value = "open_success";
+    if (success.repoStatus) {
+      options.setRepoStatus(success.repoStatus);
+    }
+    options.openRoomSnapshot(success.snapshot, success.openOptions);
+    newRoomModalOpen.value = false;
+    newRoomStep.value = "chooser";
+    newRoomJoinCode.value = "";
+    newRoomProjectSelection.value = null;
+    newRoomSuccess.value = null;
+    resetTransientState();
+  }
+
+  function dismissSuccess(): void {
+    if (newRoomBusy.value) return;
+    newRoomModalOpen.value = false;
+    newRoomStep.value = "chooser";
+    newRoomSuccess.value = null;
+    resetTransientState();
+  }
+
+  async function copyInviteCode(): Promise<boolean> {
+    const code = newRoomSuccess.value?.inviteCode;
+    if (!code) return false;
+    newRoomActiveAction.value = "copy_code";
+    try {
+      await navigator.clipboard.writeText(code);
+      newRoomFeedback.value = "Invite code copied.";
+      newRoomFeedbackState.value = "success";
+      return true;
+    } catch {
+      newRoomFeedback.value = "Could not copy the invite code. Select it and copy manually.";
+      newRoomFeedbackState.value = "error";
+      return false;
+    } finally {
+      newRoomActiveAction.value = null;
     }
   }
 
   return {
+    backFromSubstep,
+    canSubmitJoin,
+    canSubmitStandalone,
+    chooseJoinIntent,
+    chooseProjectIntent,
+    chooseStandaloneIntent,
     closeNewRoomModal,
     confirmProjectRoomFromModal,
+    copyInviteCode,
     createInviteRoom,
     createLocalRoomFromModal,
+    createStandaloneRoom,
+    dismissSuccess,
+    goToChooser,
     joinRoomCodeFromModal,
+    newRoomActiveAction,
     newRoomBusy,
     newRoomFeedback,
     newRoomFeedbackState,
     newRoomJoinCode,
+    newRoomJoinError,
     newRoomModalOpen,
+    newRoomName,
     newRoomProjectSelection,
+    newRoomStatusMessage,
+    newRoomStep,
+    newRoomStorage,
+    newRoomSuccess,
     openProjectRoomFromModal,
+    openSuccessRoom,
+    retryLastAction,
     selectNewRoomEntry,
   };
+}
+
+function looksLikeInviteCodeValue(value: string): boolean {
+  return /^[A-Z0-9]{4}(?:-[A-Z0-9]{4})+$/.test(value.trim().toUpperCase());
 }
 
 function projectSelectionFromResult(

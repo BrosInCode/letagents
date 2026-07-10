@@ -231,20 +231,38 @@
       @run="runAppAgent"
     />
 
-    <DesktopNewRoomModal
-      v-if="newRoomModalOpen"
-      v-model:join-code="newRoomJoinCode"
-      :busy="newRoomBusy"
-      :feedback="newRoomFeedback"
-      :feedback-state="newRoomFeedbackState"
-      :project-selection="newRoomProjectSelection"
-      @close="closeNewRoomModal"
-      @confirm-project="confirmProjectRoomFromModal"
-      @create-invite="createInviteRoom"
-      @create-local="createLocalRoomFromModal"
-      @open-project="openProjectRoomFromModal"
-      @join="joinRoomCodeFromModal"
-    />
+    <Transition name="new-room-modal">
+      <DesktopNewRoomModal
+        v-if="newRoomModalOpen"
+        v-model:join-code="newRoomJoinCode"
+        v-model:room-name="newRoomName"
+        v-model:storage="newRoomStorage"
+        :step="newRoomStep"
+        :busy="newRoomBusy"
+        :active-action="newRoomActiveAction"
+        :feedback="newRoomFeedback"
+        :feedback-state="newRoomFeedbackState"
+        :project-selection="newRoomProjectSelection"
+        :success="newRoomSuccess"
+        :status-message="newRoomStatusMessage"
+        :join-error="newRoomJoinError"
+        :can-submit-join="canSubmitJoin"
+        :can-submit-standalone="canSubmitStandalone"
+        @back="backFromSubstep"
+        @choose-join="chooseJoinIntent"
+        @choose-project="chooseProjectIntent"
+        @choose-standalone="chooseStandaloneIntent"
+        @close="closeNewRoomModal"
+        @confirm-project="confirmProjectRoomFromModal"
+        @copy-code="copyInviteCode"
+        @create-standalone="createStandaloneRoom"
+        @dismiss-success="dismissSuccess"
+        @open-project="openProjectRoomFromModal"
+        @open-success="openSuccessRoom"
+        @join="joinRoomCodeFromModal"
+        @retry="retryLastAction"
+      />
+    </Transition>
   </main>
 </template>
 
@@ -862,24 +880,44 @@ const {
 });
 
 const {
+  backFromSubstep,
+  canSubmitJoin,
+  canSubmitStandalone,
+  chooseJoinIntent,
+  chooseProjectIntent,
+  chooseStandaloneIntent,
   closeNewRoomModal,
   confirmProjectRoomFromModal,
-  createInviteRoom,
-  createLocalRoomFromModal,
+  copyInviteCode,
+  createStandaloneRoom,
+  dismissSuccess,
   joinRoomCodeFromModal,
+  newRoomActiveAction,
   newRoomBusy,
   newRoomFeedback,
   newRoomFeedbackState,
   newRoomJoinCode,
+  newRoomJoinError,
   newRoomModalOpen,
+  newRoomName,
   newRoomProjectSelection,
+  newRoomStatusMessage,
+  newRoomStep,
+  newRoomStorage,
+  newRoomSuccess,
   openProjectRoomFromModal,
+  openSuccessRoom,
+  retryLastAction,
   selectNewRoomEntry,
 } = useDesktopNewRoomModal({
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
   setRepoStatus: (status) => {
     if (status) repoStatus.value = status;
   },
+  getDefaultStorageMode: () =>
+    chatStorageSettings.value?.defaultMode === "local" || chatStorageSettings.value?.mode === "local"
+      ? "local"
+      : "cloud",
 });
 const {
   archiveSidebarRoom,
