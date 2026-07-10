@@ -119,55 +119,27 @@
   min-height: 100vh;
   overflow: hidden;
   place-items: center;
-  padding: 32px;
   background: var(--setup-bg);
 }
 
-.desktop-launch-splash-inner {
-  display: grid;
-  justify-items: center;
-  gap: 10px;
-  color: var(--setup-text);
-  animation: launch-splash-settle 360ms var(--ease-out);
-}
-
-.desktop-launch-logo-shell {
+.desktop-launch-logo {
   display: inline-grid;
   place-items: center;
-  width: 64px;
-  height: 64px;
-  padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--setup-text) 10%, transparent);
-  border-radius: 17px;
-  background: color-mix(in srgb, var(--setup-text) 96%, var(--setup-bg));
-  color: var(--setup-bg);
-  box-shadow:
-    0 1px 0 color-mix(in srgb, var(--setup-bg) 18%, transparent) inset,
-    0 18px 44px color-mix(in srgb, #000 22%, transparent);
+  width: 44px;
+  height: 44px;
+  color: color-mix(in srgb, var(--setup-text) 68%, transparent);
   --letagents-logo-accent: var(--setup-accent);
+  animation: launch-splash-breathe 1.8s ease-in-out infinite;
 }
 
-.desktop-launch-splash-inner strong {
-  font-size: 1rem;
-  font-weight: 760;
-  letter-spacing: 0;
-}
-
-.desktop-launch-splash-inner small {
-  color: var(--setup-muted);
-  font-size: 0.78rem;
-  font-weight: 650;
-}
-
-@keyframes launch-splash-settle {
-  from {
-    opacity: 0;
-    transform: translateY(4px) scale(0.985);
+@keyframes launch-splash-breathe {
+  0%,
+  100% {
+    opacity: 0.48;
   }
 
-  to {
+  50% {
     opacity: 1;
-    transform: translateY(0) scale(1);
   }
 }
 
@@ -189,7 +161,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .desktop-launch-splash-inner {
+  .desktop-launch-logo {
     animation: none;
   }
 }
