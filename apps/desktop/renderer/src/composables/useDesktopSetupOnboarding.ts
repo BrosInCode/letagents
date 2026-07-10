@@ -14,6 +14,8 @@ import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mc
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index.js";
 
+const defaultInitialBootstrapTimeoutMs = 10_000;
+
 interface OpenRoomOptions {
   displayName?: string | null;
   kind?: RecentRootRoomKind | null;
@@ -37,10 +39,12 @@ interface DesktopSetupOnboardingOptions {
   repoStatus: Ref<RepoStatus | null>;
   selectedMcpTargetIds: Ref<DesktopMcpInstallTargetId[]>;
   setupLoadError: Ref<string | null>;
+  initialBootstrapTimeoutMs?: number;
 }
 
 export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions) {
   const firstRunRoomSelected = ref(false);
+  const initialBootstrapPending = ref(true);
 
   const showFirstRunGate = computed(() => {
     const installState = options.mcpInstallState.value;
@@ -48,7 +52,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
   });
 
   const showFirstRunSplash = computed(() => {
-    return options.mcpInstallState.value === null && !options.setupLoadError.value;
+    return initialBootstrapPending.value && !options.setupLoadError.value;
   });
 
   const visibleMcpInstallState = computed<DesktopMcpInstallState>(() => {
@@ -84,7 +88,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       options.firstRunStage.value = nextMcpInstallState.completed ? "github" : "welcome";
 
       if (nextMcpInstallState.completed) {
-        await options.refresh();
+        await waitForInitialRefresh(
+          options.refresh,
+          options.initialBootstrapTimeoutMs ?? defaultInitialBootstrapTimeoutMs,
+        );
       }
     } catch (error) {
       options.setupLoadError.value = error instanceof Error
@@ -96,6 +103,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       }
       options.firstRunStage.value = "welcome";
     } finally {
+      initialBootstrapPending.value = false;
       options.loading.value = false;
     }
   }
@@ -356,6 +364,23 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     startFirstRunSetup,
     visibleMcpInstallState,
   };
+}
+
+async function waitForInitialRefresh(
+  refresh: () => Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      refresh(),
+      new Promise<void>((resolve) => {
+        timeoutId = setTimeout(resolve, Math.max(0, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
 }
 
 function canSelectFirstRunRoom(status: DesktopRoomAccess["status"]): boolean {

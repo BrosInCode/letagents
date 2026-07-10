@@ -17,8 +17,27 @@
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
-  padding: 3px 4px 10px 0;
-  scroll-padding-block: 8px 12px;
+  padding: 3px 4px var(--scroll-fade-size-active) 0;
+  scroll-padding-block: 8px var(--scroll-fade-size-active);
+  --sidebar-scroll-mask-edge: var(--scroll-fade-size);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000,
+    #000 calc(100% - var(--sidebar-scroll-mask-edge)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000,
+    #000 calc(100% - var(--sidebar-scroll-mask-edge)),
+    transparent
+  );
+  transition: --sidebar-scroll-mask-edge var(--duration-normal) var(--ease-out);
+}
+
+.project-list:hover,
+.project-list:focus-within {
+  --sidebar-scroll-mask-edge: var(--scroll-fade-size-active);
 }
 
 .project-group {
@@ -28,20 +47,25 @@
 
 .sidebar-project-row-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 2px;
   min-width: 0;
 }
 
-.project-list > .project-group:has(> .project-room-list) > .sidebar-project-row-shell {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--sidebar-sticky-bg);
-  box-shadow:
-    0 -12px 0 var(--sidebar-sticky-bg),
-    0 6px 10px rgba(0, 0, 0, 0.34);
+.sidebar-project-row-shell > :is(.pinned-room, .project-row) {
+  grid-area: 1 / 1;
+  width: 100%;
+}
+
+.sidebar-project-row-shell:has(> .project-toggle) > :is(.pinned-room, .project-row) {
+  padding-right: 42px;
+}
+
+.sidebar-project-row-shell > .project-toggle {
+  z-index: 1;
+  grid-area: 1 / 1;
+  justify-self: end;
+  margin-right: 5px;
 }
 
 .project-row {
