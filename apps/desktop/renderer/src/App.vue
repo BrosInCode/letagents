@@ -134,6 +134,8 @@
         :auth-status="authStatus"
         :busy="authBusy || loading"
         :feedback="authFeedback"
+        :snapshot-pending="authSnapshotPending"
+        :room-label="selectedRoomInfo.displayName || selectedRoomInfo.name"
         @start-auth="startAuthFlow"
         @open-verification="openVerification"
         @poll-auth="pollAuthFlow"
@@ -322,6 +324,7 @@ import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue"
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
+import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboarding";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
@@ -915,6 +918,14 @@ const {
   settingsAccountRooms,
   workers,
 });
+
+const authSnapshotPending = computed(() =>
+  isAuthSnapshotPending({
+    rootLoading: loading.value,
+    selectedLoading: selectedSnapshotLoading.value,
+    hasSnapshot: Boolean(selectedSnapshot.value),
+  }),
+);
 
 const {
   authBusy,
