@@ -81,6 +81,13 @@
   backdrop-filter: blur(22px) saturate(1.22);
 }
 
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-cta {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
 .sidebar-collapse-button:hover {
   transform: translateY(-1px);
   background: rgba(255, 255, 255, 0.035);
@@ -100,6 +107,12 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.14),
     inset 0 -1px 0 rgba(255, 255, 255, 0.028),
     0 12px 28px rgba(0, 0, 0, 0.15);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-cta:hover {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.065);
+  box-shadow: none;
 }
 
 .sidebar-collapse-button:focus-visible {
@@ -204,10 +217,10 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 16px;
   width: 100%;
-  min-height: 24px;
-  padding: 0 10px;
+  min-height: 34px;
+  padding: 0 9px 0 10px;
   border: 1px solid transparent;
   border-radius: 999px;
   background: transparent;
@@ -234,24 +247,31 @@
   text-align: left;
 }
 
+.sidebar-section-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
 .section-count {
   display: inline-grid;
   place-items: center;
-  min-width: 22px;
-  height: 20px;
-  padding: 0 7px;
+  min-width: 24px;
+  height: 18px;
+  padding: 0 6px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.055);
+  background: rgba(255, 255, 255, 0.045);
   color: var(--text-secondary);
-  font-size: 0.72rem;
-  font-weight: 800;
+  font-size: 0.68rem;
+  font-weight: 750;
 }
 
 .sidebar-section-arrow {
   display: inline-grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   color: var(--text-tertiary);
   opacity: 0;
   transform: rotate(90deg);
@@ -279,17 +299,30 @@
 .sidebar-cta {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  padding: 0 12px;
-  font-weight: 600;
-  border-color: color-mix(in srgb, var(--border) 72%, transparent);
-  background: rgba(255, 255, 255, 0.04);
+  gap: 9px;
+  min-height: 38px;
+  padding: 0 10px;
+  border-color: transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.sidebar-cta:hover {
+  transform: none;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.sidebar-cta > span:last-child {
+  color: var(--text);
 }
 
 .sidebar-cta:focus-visible,
 .sidebar-icon-button[data-testid="rail-new-room"]:focus-visible {
-  outline: 2px solid color-mix(in srgb, #60a5fa 62%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--text) 48%, transparent);
   outline-offset: 2px;
 }
 
@@ -304,11 +337,17 @@
 .cta-plus {
   display: inline-grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  width: 18px;
+  height: 18px;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-secondary);
+}
+
+.cta-plus svg {
+  width: 17px;
+  height: 17px;
+  stroke-width: 2;
 }
 
 .sidebar-collapsed-actions {
