@@ -1,10 +1,9 @@
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import { resolve } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
 import type { RepoStatus } from "../ipc-types.js";
 import { buildRepoStatus } from "../repo-status.js";
+import { runGitStdout } from "./git-exec.js";
 import {
   repoStatusChanged,
   repoStatusWatchFingerprint,
@@ -15,7 +14,6 @@ import { emitToMainWindow, getMainWindow } from "./window.js";
 
 const repoStatusSlowRefreshMs = 5_000;
 const repoStatusChangeDebounceMs = 1_500;
-const execFileAsync = promisify(execFile);
 type RepoStatusWatchHooks = {
   buildRepoStatus: typeof buildRepoStatus;
   emitToMainWindow: typeof emitToMainWindow;
@@ -197,9 +195,7 @@ async function repoStatusWatchPaths(status: RepoStatus): Promise<string[]> {
 
 async function gitPath(repoRoot: string, relativeGitPath: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", relativeGitPath], {
-      cwd: repoRoot,
-    });
+    const stdout = await runGitStdout(repoRoot, ["rev-parse", "--git-path", relativeGitPath]);
     const path = stdout.trim();
     if (!path) return null;
     return resolve(repoRoot, path);

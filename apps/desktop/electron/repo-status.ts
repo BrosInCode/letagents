@@ -1,8 +1,6 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 
 import type {
   DesktopGitRoomInfo,
@@ -13,17 +11,14 @@ import type {
   RepoStatus,
   RepoWorktreeEntry,
 } from "./ipc-types.js";
-
-const execFileAsync = promisify(execFile);
+import { runGitStdout } from "./main/git-exec.js";
 
 async function runGit(workspaceRoot: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd: workspaceRoot });
-  return stdout;
+  return runGitStdout(workspaceRoot, args);
 }
 
 async function runGitInPath(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd });
-  return stdout;
+  return runGitStdout(cwd, args);
 }
 
 async function getRepoRoot(workspaceRoot: string): Promise<string | null> {

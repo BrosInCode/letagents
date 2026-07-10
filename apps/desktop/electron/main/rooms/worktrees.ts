@@ -1,30 +1,14 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
+
+import { getMainWorktreeRoot, runGit } from "../git-exec.js";
 
 // Behavioral mirror of `src/orchestrator/worktrees.ts`. The desktop app and the
 // orchestrator are compiled as separate packages with disjoint `rootDir`s, so
 // the canonical module cannot be imported here without breaking both builds.
 // Keep the prune-before-add, reuse-existing-checkout, sibling-naming,
 // collision-fallback and created-ownership behavior in sync with that module.
-
-const execFileAsync = promisify(execFile);
-
-async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const { stdout, stderr } = await execFileAsync("git", args, { cwd });
-    return { stdout, stderr, code: 0 };
-  } catch (error) {
-    const err = error as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: err.stdout ?? "",
-      stderr: err.stderr ?? (error instanceof Error ? error.message : String(error)),
-      code: typeof err.code === "number" ? err.code : 1,
-    };
-  }
-}
 
 function sanitizeBranchName(branch: string): string {
   return branch.replace(/[^a-zA-Z0-9._-]+/g, "-");
@@ -33,24 +17,6 @@ function sanitizeBranchName(branch: string): string {
 function worktreePathForBranch(repoRoot: string, branch: string): string {
   const normalizedRoot = resolve(repoRoot);
   return join(dirname(normalizedRoot), `${basename(normalizedRoot)}-${sanitizeBranchName(branch)}`);
-}
-
-async function getMainWorktreeRoot(repoRoot: string): Promise<string> {
-  try {
-    const { stdout, code } = await runGit(repoRoot, ["rev-parse", "--git-common-dir"]);
-    const commonDir = stdout.trim();
-    if (code === 0 && commonDir) {
-      const absoluteCommonDir = resolve(repoRoot, commonDir);
-      if (basename(absoluteCommonDir) === ".git") {
-        return dirname(absoluteCommonDir);
-      }
-    }
-  } catch {
-    // Fall back to the passed-in root. Keep in sync with
-    // `src/orchestrator/worktrees.ts` — unexpected git/spawn failures must not
-    // abort worktree provisioning.
-  }
-  return resolve(repoRoot);
 }
 
 async function findWorktreeForBranch(repoRoot: string, branch: string): Promise<string | null> {
