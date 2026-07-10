@@ -15,7 +15,6 @@ import type {
 } from "../../ipc-types.js";
 import { buildRepoStatus } from "../../repo-status.js";
 import { looksLikeInviteCode } from "./codex-start-prompt.js";
-import { desktopEventPublicReplyText } from "./codex-event-prompt.js";
 import {
   canDeliverDesktopEventToManagedAgent,
   isStopPhraseRoomStreamEvent,
@@ -43,45 +42,30 @@ import { normalizeManagedAgentModel } from "./managed-agent-models.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
 import {
-  desktopManagedAgentReplyTargetForMessage,
-  persistDesktopManagedAgentLocalReply,
-  type DesktopManagedAgentReplyTarget,
-} from "./managed-agent-local-replies.js";
-import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
-import {
-  createLocalDesktopManagedAgentWorkerSession,
-  shouldUseCloudDesktopManagedAgentWorkerSession,
-  resolveDesktopManagedAgentWorkerRegistration,
-} from "./managed-agent-local-worker-session.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import {
-  buildDesktopManagedAgentReplyChangeContext,
   clearDesktopManagedAgentReplyChangeState,
   desktopManagedAgentReplyChangeSignature,
-  localDesktopManagedAgentReplyChangeAttachments,
-  publishDesktopManagedAgentReplyChangeSummaryArtifact,
-  rememberDesktopManagedAgentReplyChangeAttachment,
-  stageDesktopManagedAgentReplyChangeAttachment,
 } from "./managed-agent-reply-changes.js";
 import {
+  disconnectDesktopManagedWorker,
+  publishDesktopManagedWorkerReply,
+  registerDesktopManagedWorker,
+  type ManagedAgentWorkerProvider,
+} from "./managed-agent-worker.js";
+import {
   getCurrentCursorLiveSession,
-  getOrCreateDesktopHostId,
-  getStoredAgentIdentityForRuntimeKey,
   getStoredAgentSession,
   getStoredCursorLiveSession,
   listCursorDisplayNamesForRoom,
   listDesktopManagedCursorLiveSessions,
-  markAgentSessionEnded,
-  saveAgentSession,
   saveCursorLiveSession,
-  saveStoredAgentIdentity,
   toPublicCursorManagedAgentSession,
   updateCursorLiveSession,
   type DesktopCursorJoinedVia,
   type DesktopCursorLiveSessionState,
-  type StoredAgentIdentityState,
   type StoredAgentSessionState,
 } from "./state.js";
 
@@ -94,40 +78,21 @@ function cursorReplyChangeSessionKey(sessionId: string): string {
   return `cursor:${sessionId}`;
 }
 
+const CURSOR_WORKER_PROVIDER: ManagedAgentWorkerProvider = {
+  ideLabel: "Cursor",
+  runtimePrefix: "cursor",
+  instancePrefix: "desktop-cursor",
+  livenessCapability: "desktop_supervised_cursor_readonly",
+  identityNameFallback: "desktop-cursor",
+  signInErrorMessage: "Sign into LetAgents Desktop before starting a supervised Cursor agent.",
+  unusableIdentityErrorMessage: "LetAgents did not return a usable agent identity for the desktop Cursor worker.",
+  missingActorKeyErrorMessage: "LetAgents desktop Cursor identity is missing an actor key.",
+  replyWarnLabel: "Cursor",
+};
+
 type ActiveCursorTurn = {
   abortController: AbortController;
   interruptReason: "preempt" | "stop" | null;
-};
-
-type AgentIdentityCreateResponse = {
-  name?: string;
-  display_name?: string;
-  owner_label?: string;
-  canonical_key?: string;
-};
-
-type AgentSessionCreateResponse = {
-  session_id?: string;
-  session_token?: string;
-  room_id?: string;
-  session_kind?: string;
-  runtime?: string;
-  host_id?: string | null;
-  host_kind?: string | null;
-  host_label?: string | null;
-  liveness_capability?: string | null;
-  tool_bridge_id?: string | null;
-  actor_label?: string | null;
-  agent_key?: string | null;
-  agent_instance_id?: string | null;
-  display_name?: string | null;
-  owner_label?: string | null;
-  ide_label?: string | null;
-  repo_branch?: string | null;
-  created_at?: string | null;
-  updated_at?: string | null;
-  last_seen_at?: string | null;
-  ended_at?: string | null;
 };
 
 interface RegisterCursorWorkerInput {
@@ -664,309 +629,41 @@ function activeWorkForEvent(
   };
 }
 
-function replyTargetForEvent(event: ManagedRoomEvent): DesktopManagedAgentReplyTarget {
-  if (event.type !== "message") {
-    return { replyTo: null, threadRootId: null };
-  }
-  return desktopManagedAgentReplyTargetForMessage(event.message);
-}
-
 async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput): Promise<void> {
-  const text = desktopEventPublicReplyText(input.session.token, input.text);
-  if (!text) {
-    return;
-  }
-
-  const workerSession = getStoredAgentSession(input.session.agent_session_id);
-  if (!workerSession?.session_id || !workerSession.session_token) {
-    updateCursorLiveSession(input.session.session_id, (current) => ({
-      ...current,
-      status: "unknown",
-      last_error: "Cursor produced a room reply before the desktop worker session was available.",
-      updated_at: new Date().toISOString(),
-    }));
-    return;
-  }
-
-  const roomIdentifier = input.session.room_identifier || input.session.room_id;
-  const sessionKey = cursorReplyChangeSessionKey(input.session.session_id);
-  const replyTarget = replyTargetForEvent(input.event);
-  const changeContext = await buildDesktopManagedAgentReplyChangeContext({
-    sessionKey,
-    session: toPublicCursorManagedAgentSession(input.session),
-    beforeSignature: input.beforeChangeSignature ?? null,
-  });
-  const localReply = await persistDesktopManagedAgentLocalReply({
-    roomIdentifier,
+  await publishDesktopManagedWorkerReply({
+    provider: CURSOR_WORKER_PROVIDER,
+    sessionToken: input.session.token,
+    agentSessionId: input.session.agent_session_id,
+    sessionKey: cursorReplyChangeSessionKey(input.session.session_id),
+    publicSession: () => toPublicCursorManagedAgentSession(input.session),
+    roomIdentifier: input.session.room_identifier || input.session.room_id,
     storage: input.storage,
-    workerSession,
-    replyTo: replyTarget.replyTo,
-    threadRootId: replyTarget.threadRootId,
-    text,
-    attachments: localDesktopManagedAgentReplyChangeAttachments(changeContext),
-  });
-  if (localReply) {
-    await publishDesktopManagedAgentReplyChangeSummaryArtifact({
-      sessionKey,
-      roomIdentifier,
-      storage: input.storage,
-      workerSession,
-      event: input.event,
-      context: changeContext,
-    });
-    rememberDesktopManagedAgentReplyChangeAttachment(sessionKey, changeContext.attachmentDraft);
-    const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
-    emitPersistedLocalRoomMessage(roomIdentifier, localReply);
-    return;
-  }
-
-  const { apiFetch } = await import("../auth.js");
-  const { cloudRoomIdentifierForStorage } = await import("../rooms/local-store.js");
-  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, roomIdentifier);
-  const attachments = await stageDesktopManagedAgentReplyChangeAttachment(
-    cloudRoomIdentifier,
-    changeContext.attachmentDraft,
-  );
-  if (changeContext.attachmentDraft && attachments.length === 0) {
-    console.warn("Could not attach Cursor managed-agent working tree summary to room reply.");
-  }
-  await apiFetch<Record<string, unknown>>(
-    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
-      },
-      body: JSON.stringify({
-        text,
-        reply_to: replyTarget.replyTo,
-        thread_root_id: replyTarget.threadRootId,
-        agent_session_id: workerSession.session_id,
-        agent_session_token: workerSession.session_token,
-        attachments,
-      }),
-    },
-  );
-  if (changeContext.attachmentDraft && attachments.length > 0) {
-    rememberDesktopManagedAgentReplyChangeAttachment(sessionKey, changeContext.attachmentDraft);
-  }
-  await publishDesktopManagedAgentReplyChangeSummaryArtifact({
-    sessionKey,
-    roomIdentifier,
-    storage: input.storage,
-    workerSession,
     event: input.event,
-    context: changeContext,
+    text: input.text,
+    beforeChangeSignature: input.beforeChangeSignature ?? null,
+    onMissingWorkerSession: () => {
+      updateCursorLiveSession(input.session.session_id, (current) => ({
+        ...current,
+        status: "unknown",
+        last_error: "Cursor produced a room reply before the desktop worker session was available.",
+        updated_at: new Date().toISOString(),
+      }));
+    },
   });
 }
 
 async function registerDesktopManagedCursorWorker(
   input: RegisterCursorWorkerInput,
 ): Promise<StoredAgentSessionState> {
-  const runtime = `cursor:${input.token}`;
-  const agentInstanceId = `desktop-cursor:${input.token}`;
-  const registrationLiveness = cursorSessionLivenessRegistration(runtime, input.token);
-  const registration = await resolveDesktopManagedAgentWorkerRegistration({
-    roomIdentifier: input.roomIdentifier,
-  });
-  const localSession = registration.storage.effectiveMode === "local"
-    ? await createLocalDesktopManagedAgentWorkerSession({
-      roomIdentifier: input.roomIdentifier,
-      runtime,
-      agentInstanceId,
-      displayName: input.displayName,
-      ideLabel: "Cursor",
-      repoBranch: input.repoBranch,
-      registrationLiveness,
-    }, registration.storage)
-    : null;
-  if (localSession) {
-    return localSession;
-  }
-
-  const identity = await ensureDesktopManagedCursorIdentity(input.displayName);
-  const actorKey = normalizeDisplayText(identity.canonical_key, "");
-  if (!actorKey) {
-    throw new Error("LetAgents desktop Cursor identity is missing an actor key.");
-  }
-
-  const { apiFetch } = await import("../auth.js");
-  const cloudRoomIdentifier = registration.cloudRoomIdentifier;
-  const created = await apiFetch<AgentSessionCreateResponse>(
-    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        actor_key: actorKey,
-        actor_label: identity.actor_label,
-        ide_label: "Cursor",
-        agent_instance_id: agentInstanceId,
-        display_name: input.displayName,
-        session_kind: "worker",
-        runtime,
-        repo_branch: input.repoBranch,
-        registration_liveness: registrationLiveness,
-      }),
-    },
-  );
-
-  return saveAgentSession(toStoredCursorAgentSession(created, {
-    roomIdentifier: cloudRoomIdentifier,
-    runtime,
-    identity,
-    agentInstanceId,
-    displayName: input.displayName,
-  }));
+  return registerDesktopManagedWorker(CURSOR_WORKER_PROVIDER, input);
 }
 
 async function disconnectDesktopManagedCursorWorker(
   session: StoredAgentSessionState | null,
 ): Promise<void> {
-  if (!session?.session_id || !session.session_token) {
-    return;
-  }
-
-  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) {
-    markAgentSessionEnded(session.session_id);
-    return;
-  }
-
-  try {
-    const { apiFetch } = await import("../auth.js");
-    await apiFetch<Record<string, unknown>>(
-      `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent_session_id: session.session_id,
-          agent_session_token: session.session_token,
-        }),
-      },
-    );
-  } catch {
-    // Local cleanup still matters; the next room snapshot will reconcile any server-side state.
-  } finally {
-    markAgentSessionEnded(session.session_id);
-  }
+  await disconnectDesktopManagedWorker(session);
 }
 
-async function ensureDesktopManagedCursorIdentity(displayName: string): Promise<StoredAgentIdentityState> {
-  const requestedName = normalizeAgentIdentityName(displayName, "desktop-cursor");
-  const requestedDisplayName = normalizeDisplayText(displayName, "Cursor");
-  const runtimeKey = `desktop-cursor:${requestedName}`;
-  const existingForName = getStoredAgentIdentityForRuntimeKey(runtimeKey);
-  if (isUsableAgentIdentity(existingForName)) {
-    return existingForName;
-  }
-
-  const { apiFetch, readStoredAuth } = await import("../auth.js");
-  const storedAuth = await readStoredAuth();
-  if (!storedAuth.token) {
-    throw new Error("Sign into LetAgents Desktop before starting a supervised Cursor agent.");
-  }
-
-  const ownerLabel = normalizeDisplayText(
-    storedAuth.account?.displayName || storedAuth.account?.login,
-    "Desktop",
-  );
-  const registered = await apiFetch<AgentIdentityCreateResponse>("/agents", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name: requestedName,
-      display_name: requestedDisplayName,
-      owner_label: ownerLabel,
-    }),
-  });
-  const canonicalKey = normalizeDisplayText(registered.canonical_key, "");
-  if (!canonicalKey) {
-    throw new Error("LetAgents did not return a usable agent identity for the desktop Cursor worker.");
-  }
-
-  const resolvedDisplayName = normalizeDisplayText(registered.display_name, requestedDisplayName);
-  const resolvedOwnerLabel = normalizeDisplayText(registered.owner_label, ownerLabel);
-  const now = new Date().toISOString();
-  return saveStoredAgentIdentity({
-    name: normalizeDisplayText(registered.name, requestedName),
-    display_name: resolvedDisplayName,
-    owner_label: resolvedOwnerLabel,
-    owner_attribution: formatOwnerAttribution(resolvedOwnerLabel),
-    ide_label: "Cursor",
-    actor_label: buildAgentActorLabel({
-      displayName: resolvedDisplayName,
-      ownerLabel: resolvedOwnerLabel,
-      ideLabel: "Cursor",
-    }),
-    canonical_key: canonicalKey,
-    runtime_key: runtimeKey,
-    source: "api",
-    resolved_at: now,
-  });
-}
-
-function toStoredCursorAgentSession(
-  created: AgentSessionCreateResponse,
-  input: {
-    roomIdentifier: string;
-    runtime: string;
-    identity: StoredAgentIdentityState;
-    agentInstanceId: string;
-    displayName: string;
-  },
-): StoredAgentSessionState {
-  const sessionId = normalizeDisplayText(created.session_id, "");
-  const sessionToken = normalizeDisplayText(created.session_token, "");
-  if (!sessionId || !sessionToken) {
-    throw new Error("Agent session registration response was missing session credentials.");
-  }
-
-  const createdAt = normalizeDisplayText(created.created_at, new Date().toISOString());
-  const updatedAt = normalizeDisplayText(created.updated_at, createdAt);
-  return {
-    session_id: sessionId,
-    session_token: sessionToken,
-    room_id: normalizeDisplayText(created.room_id, input.roomIdentifier),
-    session_kind: created.session_kind === "controller" ? "controller" : "worker",
-    runtime: normalizeDisplayText(created.runtime, input.runtime),
-    host_id: created.host_id ?? null,
-    host_kind: created.host_kind ?? null,
-    host_label: created.host_label ?? null,
-    liveness_capability: created.liveness_capability ?? null,
-    tool_bridge_id: created.tool_bridge_id ?? null,
-    actor_label: normalizeDisplayText(
-      created.actor_label,
-      buildAgentActorLabel({
-        displayName: input.displayName,
-        ownerLabel: input.identity.owner_label,
-        ideLabel: "Cursor",
-      }),
-    ),
-    agent_key: normalizeDisplayText(created.agent_key, input.identity.canonical_key ?? ""),
-    agent_instance_id: normalizeDisplayText(created.agent_instance_id, input.agentInstanceId),
-    display_name: normalizeDisplayText(created.display_name, input.displayName),
-    owner_label: normalizeDisplayText(created.owner_label, input.identity.owner_label),
-    ide_label: normalizeDisplayText(created.ide_label, "Cursor"),
-    repo_branch: normalizeDisplayText(created.repo_branch, "") || null,
-    created_at: createdAt,
-    updated_at: updatedAt,
-    last_seen_at: normalizeDisplayText(created.last_seen_at, updatedAt),
-    ended_at: created.ended_at ?? null,
-  };
-}
-
-function cursorSessionLivenessRegistration(runtime: string, token: string): Record<string, string | null> {
-  const hostId = getOrCreateDesktopHostId();
-  return {
-    host_id: hostId,
-    host_kind: process.platform === "darwin" ? "macos" : process.platform,
-    host_label: "LetAgents Desktop",
-    liveness_capability: "desktop_supervised_cursor_readonly",
-    tool_bridge_id: `${hostId}:${runtime}:desktop:${token}`,
-  };
-}
 
 function emitCursorManagedAgentSessionUpdate(
   session: DesktopCursorLiveSessionState | null | undefined,
@@ -1035,40 +732,4 @@ function formatDeadlineUtc(minutes: number): string | null {
 
 function makeCursorStopToken(): string {
   return `LOCAL_CURSOR_ROOM_${randomUUID()}`;
-}
-
-function normalizeAgentIdentityName(displayName: string, fallback: string): string {
-  const normalized = displayName
-    .trim()
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLowerCase();
-  return normalized || fallback;
-}
-
-function normalizeDisplayText(value: string | null | undefined, fallback: string): string {
-  const normalized = String(value ?? "").trim().replace(/\s+/g, " ");
-  return normalized || fallback;
-}
-
-function formatOwnerAttribution(ownerLabel: string): string {
-  const normalized = normalizeDisplayText(ownerLabel, "Owner");
-  return /s$/i.test(normalized) ? `${normalized}' agent` : `${normalized}'s agent`;
-}
-
-function buildAgentActorLabel(input: {
-  displayName: string;
-  ownerLabel: string;
-  ideLabel: string;
-}): string {
-  return [
-    normalizeDisplayText(input.displayName, "Agent"),
-    formatOwnerAttribution(input.ownerLabel),
-    normalizeDisplayText(input.ideLabel, "Agent"),
-  ].join(" | ");
-}
-
-function isUsableAgentIdentity(identity: StoredAgentIdentityState | null): identity is StoredAgentIdentityState {
-  return Boolean(identity?.canonical_key?.trim());
 }
