@@ -2,7 +2,6 @@
   --sidebar-hover: rgba(255, 255, 255, 0.046);
   --sidebar-selected: rgba(255, 255, 255, 0.074);
   --sidebar-selection: #0a84ff;
-  --sidebar-sticky-bg: var(--bg);
 
   display: grid;
   align-content: start;
@@ -30,8 +29,6 @@
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
-  /* Scrolling child labels must not remain legible beneath the sticky header. */
-  --sidebar-sticky-bg: #0b0b0c;
   border-right-color: rgba(255, 255, 255, 0.105);
   background: rgba(9, 9, 10, 0.96);
   box-shadow:
@@ -426,6 +423,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .project-list {
+    scroll-behavior: auto;
+  }
+
   .sidebar-collapse-button,
   .sidebar-cta,
   .pinned-room,
@@ -452,7 +453,6 @@
 @media (prefers-reduced-transparency: reduce) {
   .app-sidebar,
   .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
-    --sidebar-sticky-bg: var(--bg);
     background: #0b0b0c;
   }
 }
