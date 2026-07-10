@@ -1158,6 +1158,9 @@ onBeforeUnmount(() => {
   padding: 26px 32px 32px;
   color: var(--text);
   overscroll-behavior: contain;
+  /* Opaque so the translucent shell behind this tab page can't bleed through
+     the gaps the focus room panes leave (layout gutter, outer padding). */
+  background: var(--bg);
 }
 
 @keyframes focus-room-surface-in {
