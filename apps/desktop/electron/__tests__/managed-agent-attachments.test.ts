@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-managed-agent-attachments-"));
-process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
-process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
-process.env.LETAGENTS_AGENT_ATTACHMENTS_DIR = join(tempDir, "agent-attachments");
+import { createElectronTestEnv } from "./harness.js";
+
+const { tempDir, resetState } = createElectronTestEnv({
+  prefix: "letagents-managed-agent-attachments-",
+  paths: ["state", "localChatDb"],
+  extraEnvFiles: {
+    LETAGENTS_AGENT_ATTACHMENTS_DIR: "agent-attachments",
+  },
+});
 
 const {
   cleanupAgentSessionAttachments,
@@ -27,15 +31,8 @@ const { saveAgentSession } = await import("../main/agents/state.js");
 
 import type { DesktopRoomStorageState } from "../ipc-types.js";
 
-test.after(() => {
-  delete process.env.LETAGENTS_STATE_PATH;
-  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
-  delete process.env.LETAGENTS_AGENT_ATTACHMENTS_DIR;
-  rmSync(tempDir, { recursive: true, force: true });
-});
-
 function setupWorkerSession(): void {
-  writeFileSync(process.env.LETAGENTS_STATE_PATH ?? "", "{}\n", "utf-8");
+  resetState();
   saveAgentSession({
     session_id: "agent_session_attachments",
     session_token: "secret_session_token",
