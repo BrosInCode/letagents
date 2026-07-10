@@ -138,6 +138,50 @@ export function normalizeManagedAgentRoomIdentifier(value: string | null | undef
   return String(value || "").trim().toLowerCase();
 }
 
+/**
+ * Managed session lists are re-fetched on 4s polls from both the room shell
+ * and the Add Agent modal. Assigning a freshly-allocated but content-equal
+ * array into reactive state re-renders every dependent surface each tick,
+ * which reads as constant flicker. These helpers keep the CURRENT reference
+ * whenever the content did not change so idle polls trigger no reactivity.
+ */
+export function managedAgentSessionListsEqual(
+  a: DesktopManagedAgentSession[],
+  b: DesktopManagedAgentSession[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index] && JSON.stringify(a[index]) !== JSON.stringify(b[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function withRoomManagedAgentSessions(
+  current: DesktopManagedAgentSession[],
+  roomIdentifier: string,
+  incoming: DesktopManagedAgentSession[],
+): DesktopManagedAgentSession[] {
+  const next = [
+    ...current.filter((session) => !managedAgentSessionMatchesRoom(session, roomIdentifier)),
+    ...incoming,
+  ];
+  return managedAgentSessionListsEqual(current, next) ? current : next;
+}
+
+export function withUpsertedManagedAgentSession(
+  current: DesktopManagedAgentSession[],
+  session: DesktopManagedAgentSession,
+): DesktopManagedAgentSession[] {
+  const existing = current.find((entry) => entry.id === session.id);
+  if (existing && (existing === session || JSON.stringify(existing) === JSON.stringify(session))) {
+    return current;
+  }
+  return [session, ...current.filter((entry) => entry.id !== session.id)];
+}
+
 export function managedAgentSessionMatchesRoom(
   session: Pick<DesktopManagedAgentSession, "roomIdentifier">,
   roomIdentifier: string | null | undefined,
