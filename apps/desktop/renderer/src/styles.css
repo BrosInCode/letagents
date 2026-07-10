@@ -20,6 +20,7 @@
 @import "./styles/11-room-events.css";
 @import "./styles/12-room-inbox.css";
 @import "./styles/surfaces/shared-surfaces.css";
+@import "./styles/surfaces/focus-room.css";
 @import "./styles/surfaces/settings.css";
 @import "./styles/surfaces/auth-onboarding.css";
 @import "./styles/surfaces/mcp-onboarding.css";
