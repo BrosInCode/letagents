@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
@@ -12,7 +15,7 @@ import { createElectronTestEnv } from "./harness.js";
 // `WebSocket` (the CodexRpcClient socket) plus the global `fetch` used by the
 // app-server readiness probe, and by running rooms in local storage mode.
 
-const { resetState } = createElectronTestEnv({
+const { tempDir, resetState } = createElectronTestEnv({
   prefix: "letagents-codex-event-lifecycle-",
   paths: ["state", "chatStorage", "localChatDb"],
 });
@@ -61,11 +64,16 @@ type FakeCodexServerOptions = {
    * last entry sticks. Defaults to `["completed"]` (idle immediately).
    */
   bootTurnStatuses?: string[];
+  /** Fired when a `thread/read` reports the boot turn (1-based read count). */
+  onBootTurnRead?: (readCount: number) => void;
+  /** Fired when a `turn/start` arrives (1-based event-turn count). */
+  onTurnStart?: (turnCount: number) => void;
 };
 
 type FakeCodexServer = {
   sentMessages: SentMessage[];
   prompts: string[];
+  unexpectedFetches: string[];
   turnStartCount(): number;
   interruptCount(): number;
   restore(): void;
@@ -85,6 +93,7 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
   function bootTurnStatus(): string {
     const index = Math.min(bootReadCount, bootTurnStatuses.length - 1);
     bootReadCount += 1;
+    options.onBootTurnRead?.(bootReadCount);
     return bootTurnStatuses[index] ?? "completed";
   }
 
@@ -116,6 +125,7 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
           error = options.turnStartError;
         } else {
           const turnId = `turn_event_${++turnStartCount}`;
+          options.onTurnStart?.(turnStartCount);
           prompts.push(String(message.params?.input?.[0]?.text ?? ""));
           eventTurns.set(turnId, replies.shift() ?? "NO_ROOM_REPLY");
           result = { turn: { id: turnId } };
@@ -153,6 +163,7 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
     }
   }
 
+  const unexpectedFetches: string[] = [];
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
     FakeWebSocket as unknown as typeof WebSocket;
   (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo | URL) => {
@@ -166,12 +177,14 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
         headers: { "Content-Type": "application/json" },
       });
     }
+    unexpectedFetches.push(url);
     return new Response(JSON.stringify({ error: `Unexpected fetch: ${url}` }), { status: 599 });
   }) as typeof fetch;
 
   return {
     sentMessages,
     prompts,
+    unexpectedFetches,
     turnStartCount: () => sentMessages.filter((message) => message.method === "turn/start").length,
     interruptCount: () => sentMessages.filter((message) => message.method === "turn/interrupt").length,
     restore: () => {
@@ -290,12 +303,21 @@ async function seedDeliverableSession(input: {
   providerId?: "codex" | "open-model";
   ideLabel?: string;
   stopPhrase?: string;
+  cwd?: string;
+  repoBranch?: string | null;
+  /**
+   * Skip the local-room record so the room's storage mode is controlled purely
+   * by the override (a local room record forces effectiveMode "local" forever).
+   */
+  createRoom?: boolean;
 }): Promise<DesktopCodexLiveSessionState> {
   const sessionId = input.sessionId ?? "codex_session_1";
   const workerSessionId = input.workerSessionId ?? "agent_session_1";
   const displayName = input.displayName ?? "RiverField";
   const token = `LOCAL_CODEX_ROOM_${sessionId}`;
-  await createLocalRoom({ roomIdentifier: input.roomIdentifier, displayName: "Codex Room" });
+  if (input.createRoom !== false) {
+    await createLocalRoom({ roomIdentifier: input.roomIdentifier, displayName: "Codex Room" });
+  }
   await setLocalAwareRoomStorageMode(input.roomIdentifier, "local");
   saveAgentSession(workerSession({
     session_id: workerSessionId,
@@ -322,8 +344,25 @@ async function seedDeliverableSession(input: {
     thread_id: `thread_${sessionId}`,
     turn_id: "turn_boot",
     stop_phrase: input.stopPhrase ?? "/stop-codex-room",
+    cwd: input.cwd ?? "/tmp/repo",
+    repo_branch: input.repoBranch === undefined ? "codex/git-rooms" : input.repoBranch,
     status: "completed",
   }));
+}
+
+function git(cwd: string, args: string[]): void {
+  execFileSync("git", args, { cwd, stdio: "pipe" });
+}
+
+function initCommittedRepo(prefix: string): string {
+  const repo = mkdtempSync(join(tempDir, prefix));
+  git(repo, ["init", "-q"]);
+  git(repo, ["config", "user.email", "agent@example.com"]);
+  git(repo, ["config", "user.name", "Agent"]);
+  writeFileSync(join(repo, "tracked.txt"), "one\n");
+  git(repo, ["add", "tracked.txt"]);
+  git(repo, ["commit", "-qm", "init"]);
+  return repo;
 }
 
 // --- 1. happy path ---------------------------------------------------------
@@ -576,6 +615,147 @@ test("open-model sessions ride the codex runtime with codex:-prefixed markers", 
     );
     assert.equal(worker?.liveness_capability, "desktop_supervised_codex_app_server");
   } finally {
+    server.restore();
+  }
+});
+
+// --- 7. change-baseline timing ----------------------------------------------
+
+test("codex captures the change baseline after the previous turn goes idle, not at enqueue", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_change_baseline";
+  const repo = initCommittedRepo("codex-change-baseline-repo-");
+  const seeded = await seedDeliverableSession({
+    roomIdentifier,
+    sessionId: "codex_change_baseline",
+    workerSessionId: "agent_session_change_baseline",
+    cwd: repo,
+    repoBranch: "feature/baseline-timing",
+  });
+
+  // The previous (boot) turn is still running when the event is enqueued. While
+  // it runs it "writes a file" (moves the git-change signature); only then does
+  // the thread go idle and the event turn start. The second event's own turn
+  // also writes a file, this time AFTER the baseline was captured.
+  let activeWorkDuringPreviousTurn: unknown = "unread";
+  const server = installFakeCodexServer({
+    turnReplies: ["Reply after the previous turn.", "Reply after own-turn changes."],
+    bootTurnStatuses: ["inProgress", "completed"],
+    onBootTurnRead: (readCount) => {
+      if (readCount === 1) {
+        // The previous turn is still active: record that the session has NOT
+        // been marked active for the new event, then mutate the working tree
+        // as the previous turn's "work".
+        activeWorkDuringPreviousTurn =
+          getStoredCodexLiveSession(seeded.session_id)?.active_work ?? null;
+        writeFileSync(join(repo, "previous-turn.txt"), "written by the previous turn\n");
+      }
+    },
+    onTurnStart: (turnCount) => {
+      if (turnCount === 2) {
+        // The second event's own turn mutates the working tree after that
+        // event's baseline was captured.
+        writeFileSync(join(repo, "own-turn.txt"), "written by the event turn\n");
+      }
+    },
+  });
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+      id: "msg_baseline_1",
+      text: "please check this",
+      threadRootId: "msg_baseline_1",
+    }));
+
+    const firstReply = await waitFor(async () => {
+      const page = await getLocalChatMessages(roomIdentifier);
+      return page.messages.find((message) => message.text === "Reply after the previous turn.") ?? null;
+    }, "reply for the event enqueued behind a running turn");
+
+    // While the previous turn was still running, the new event had not marked
+    // the session active (no active_work attributed to it yet).
+    assert.equal(activeWorkDuringPreviousTurn, null);
+    // The baseline was captured AFTER the previous turn went idle, so the file
+    // the previous turn wrote is part of the baseline and is NOT attributed to
+    // this event's reply as a working-tree change attachment.
+    assert.deepEqual(firstReply.attachments ?? [], []);
+
+    // Positive control, same session: a change made during the event's OWN
+    // turn (after the baseline) IS attributed to that event's reply.
+    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+      id: "msg_baseline_2",
+      text: "please check this again",
+      threadRootId: "msg_baseline_2",
+    }));
+    const secondReply = await waitFor(async () => {
+      const page = await getLocalChatMessages(roomIdentifier);
+      return page.messages.find((message) => message.text === "Reply after own-turn changes.") ?? null;
+    }, "reply for the event whose own turn changed the working tree");
+    assert.equal(
+      (secondReply.attachments ?? []).length,
+      1,
+      "expected the own-turn change to attach a working-tree summary",
+    );
+    assert.match(JSON.stringify(secondReply.attachments), /managed-agent-change-summary/);
+  } finally {
+    server.restore();
+  }
+});
+
+// --- 8. storage-resolution timing --------------------------------------------
+
+test("codex publishes to the storage destination captured at enqueue time, not at delivery", async () => {
+  resetState();
+  // No local-room record and no "local_" prefix: the storage mode is controlled
+  // purely by the per-room override so it can actually flip local -> cloud.
+  const roomIdentifier = "codex-room-storage-flip";
+  await seedDeliverableSession({
+    roomIdentifier,
+    sessionId: "codex_storage_flip",
+    workerSessionId: "agent_session_storage_flip",
+    createRoom: false,
+  });
+
+  // Event A holds the queue on the wait-for-idle poll (~1s); event B is queued
+  // behind it. The room's storage mode flips to cloud while both are pending.
+  const server = installFakeCodexServer({
+    turnReplies: ["Reply A before the flip.", "Reply B enqueued before the flip."],
+    bootTurnStatuses: ["inProgress", "completed"],
+  });
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+      id: "msg_flip_a",
+      text: "please check this",
+      threadRootId: "msg_flip_a",
+    }));
+    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+      id: "msg_flip_b",
+      text: "please check this too",
+      threadRootId: "msg_flip_b",
+    }));
+
+    // Let the enqueue-time storage resolution settle, then flip the room to
+    // cloud while event A is still waiting for the previous turn to go idle
+    // and event B is still queued behind it.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const flipped = await setLocalAwareRoomStorageMode(roomIdentifier, "cloud");
+    assert.equal(flipped.effectiveMode, "cloud");
+
+    // Both replies land in the LOCAL store: the storage destination in effect
+    // at enqueue time wins, not the flipped one.
+    await waitFor(async () => {
+      const page = await getLocalChatMessages(roomIdentifier);
+      const hasA = page.messages.some((message) => message.text === "Reply A before the flip.");
+      const hasB = page.messages.some((message) => message.text === "Reply B enqueued before the flip.");
+      return hasA && hasB ? true : null;
+    }, "both replies published to the enqueue-time (local) storage");
+
+    // And nothing tried to publish the replies to the cloud messages API.
+    assert.deepEqual(
+      server.unexpectedFetches.filter((url) => url.includes("/messages")),
+      [],
+    );
+  } finally {
+    await setLocalAwareRoomStorageMode(roomIdentifier, "local");
     server.restore();
   }
 });
