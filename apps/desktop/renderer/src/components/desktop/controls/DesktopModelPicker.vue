@@ -2,6 +2,7 @@
   <div
     ref="rootElement"
     class="desktop-model-picker"
+    :data-open="open"
     :data-placement="placement"
     @focusout="handleFocusOut"
   >
@@ -14,6 +15,7 @@
         v-model="query"
         type="search"
         role="combobox"
+        aria-autocomplete="list"
         autocomplete="off"
         spellcheck="false"
         :disabled="disabled"
@@ -49,10 +51,10 @@
             <span>{{ option.label }}</span>
             <Check v-if="option.value === modelValue" :size="15" aria-hidden="true" />
           </li>
-          <li v-if="!filteredOptions.length" class="desktop-model-picker-empty" aria-disabled="true">
-            No matching models
-          </li>
         </ul>
+        <p v-if="!filteredOptions.length" class="desktop-model-picker-empty" role="status">
+          No matching models
+        </p>
       </div>
     </Transition>
   </div>
@@ -154,11 +156,21 @@ function openPicker(): void {
 
 async function positionPicker(): Promise<void> {
   await nextTick();
-  const rect = rootElement.value?.getBoundingClientRect();
-  if (!rect) return;
-  const availableBelow = window.innerHeight - rect.bottom - 16;
-  const availableAbove = rect.top - 16;
-  placement.value = availableBelow < 300 && availableAbove > availableBelow ? "above" : "below";
+  const root = rootElement.value;
+  const rect = root?.getBoundingClientRect();
+  if (!root || !rect) return;
+  const clippingAncestor = root.closest<HTMLElement>(".desktop-add-agent-status");
+  const clippingRect = clippingAncestor?.getBoundingClientRect();
+  const boundaryTop = Math.max(0, clippingRect?.top ?? 0);
+  const boundaryBottom = Math.min(window.innerHeight, clippingRect?.bottom ?? window.innerHeight);
+  const availableBelow = Math.max(0, boundaryBottom - rect.bottom - 12);
+  const availableAbove = Math.max(0, rect.top - boundaryTop - 12);
+  placement.value = availableBelow < 280 && availableAbove > availableBelow ? "above" : "below";
+  const available = placement.value === "above" ? availableAbove : availableBelow;
+  root.style.setProperty(
+    "--desktop-model-picker-list-max-height",
+    `${Math.max(48, Math.min(260, available - 16))}px`,
+  );
 }
 
 function closePicker(options: { restoreSelection?: boolean } = {}): void {
@@ -292,6 +304,9 @@ async function scrollActiveOptionIntoView(): Promise<void> {
 
 .desktop-model-picker:focus-within .desktop-model-picker-caret {
   color: var(--text-secondary);
+}
+
+.desktop-model-picker[data-open="true"] .desktop-model-picker-caret {
   transform: translateY(-50%) rotate(180deg);
 }
 
@@ -319,7 +334,7 @@ async function scrollActiveOptionIntoView(): Promise<void> {
 .desktop-model-picker-list {
   display: grid;
   gap: 2px;
-  max-height: 260px;
+  max-height: var(--desktop-model-picker-list-max-height, 260px);
   margin: 0;
   overflow-y: auto;
   padding: 6px;
@@ -353,10 +368,12 @@ async function scrollActiveOptionIntoView(): Promise<void> {
   white-space: nowrap;
 }
 
-.desktop-model-picker-list .desktop-model-picker-empty {
+.desktop-model-picker-empty {
   display: block;
+  margin: 0;
+  padding: 18px 12px;
   color: var(--text-tertiary);
-  cursor: default;
+  font-size: 0.8rem;
   text-align: center;
 }
 
@@ -378,12 +395,17 @@ async function scrollActiveOptionIntoView(): Promise<void> {
   transform: translateY(-4px) scale(0.99);
 }
 
+.desktop-model-picker[data-placement="above"] .desktop-model-picker-options-enter-from,
+.desktop-model-picker[data-placement="above"] .desktop-model-picker-options-leave-to {
+  transform: translateY(4px) scale(0.99);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .desktop-model-picker-caret {
     transition: color 120ms ease;
   }
 
-  .desktop-model-picker:focus-within .desktop-model-picker-caret {
+  .desktop-model-picker[data-open="true"] .desktop-model-picker-caret {
     transform: translateY(-50%);
   }
 
@@ -395,6 +417,13 @@ async function scrollActiveOptionIntoView(): Promise<void> {
   .desktop-model-picker-options-enter-from,
   .desktop-model-picker-options-leave-to {
     transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .desktop-model-picker-popover {
+    background: #141414;
+    backdrop-filter: none;
   }
 }
 </style>

@@ -1,6 +1,6 @@
 <template>
   <Teleport to="body">
-    <Transition name="desktop-add-agent-dialog">
+    <Transition name="desktop-add-agent-dialog" @after-leave="handleAfterLeave">
       <div
         v-if="open"
         class="desktop-add-agent-backdrop"
@@ -45,6 +45,7 @@
                 class="desktop-add-agent-provider"
                 type="button"
                 :data-selected="provider.id === selectedProviderId"
+                :aria-pressed="provider.id === selectedProviderId"
                 :data-testid="`desktop-add-agent-provider-${provider.id}`"
                 @click="selectProvider(provider.id)"
               >
@@ -894,12 +895,16 @@ watch(
     } else {
       resetTransientState();
       stopManagedSessionRefreshTimer();
-      restoreFocus(previousFocusElement);
-      previousFocusElement = null;
     }
   },
   { immediate: true },
 );
+
+function handleAfterLeave(): void {
+  if (props.open) return;
+  restoreFocus(previousFocusElement);
+  previousFocusElement = null;
+}
 
 watch(
   () => [
