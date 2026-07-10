@@ -82,9 +82,6 @@
       </div>
 
       <article v-else-if="!messages.length && !localAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
-        <span class="room-empty-icon" aria-hidden="true">
-          <MessageCircle :size="20" />
-        </span>
         <h3>{{ emptyStateTitle }}</h3>
         <p>{{ emptyStateDescription }}</p>
       </article>
@@ -124,7 +121,6 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import { MessageCircle } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
