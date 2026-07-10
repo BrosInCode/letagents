@@ -1,5 +1,6 @@
 import type {
   DesktopManagedAgentSession,
+  DesktopManagedAgentSessionStatus,
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
@@ -24,6 +25,8 @@ type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "tas
 // (terminal) instead of "unknown", which stays deliverable: a session that
 // errors on every turn (for example an unsupported model) would otherwise
 // keep consuming room events forever while being hidden from every UI list.
+// Providers may override this via `maxConsecutiveTurnErrors` — Codex passes
+// Infinity to preserve its historical no-budget infinite-retry behavior.
 const MAX_CONSECUTIVE_TURN_ERRORS = 3;
 
 type ActiveEventTurn = {
@@ -45,6 +48,15 @@ export interface ManagedAgentEventTurnEngineAdapter<
 > {
   now(): string;
   resolveStorage(roomIdentifier: string): Promise<DesktopRoomStorageState>;
+  /**
+   * When true, `resolveStorage` is invoked at enqueue time and the resulting
+   * storage snapshot is threaded to the delivery, so a room whose storage mode
+   * flips while the event sits queued behind an active turn still publishes to
+   * the destination that was in effect when the event arrived (Codex). Default
+   * false: storage resolves when the delivery reaches the front of the queue
+   * (claude/cursor behavior, unchanged).
+   */
+  resolveStorageAtEnqueue?: boolean;
   getStoredSession(sessionId: string): TSession | null;
   toPublicSession(session: TSession): DesktopManagedAgentSession;
   updateSession(
@@ -59,6 +71,23 @@ export interface ManagedAgentEventTurnEngineAdapter<
     text: string | null;
     beforeChangeSignature?: string | null;
   }): Promise<void>;
+  /**
+   * Optional readiness preflight, awaited after the deliverability guard but
+   * BEFORE the session is marked active for the event and before the change
+   * baseline (`beforeChangeSignature`) is captured. Codex moves its transport
+   * readiness probe and wait-for-current-turn-to-idle here so that a previous
+   * turn's working-tree changes land in the new event's baseline and the
+   * session is never shown active for an event it has not started.
+   *
+   * Return the refreshed session to run the turn against, or null to skip the
+   * delivery silently (for example the session went terminal while waiting).
+   * The engine re-checks deliverability on the returned session, mirroring the
+   * historical codex flow. Thrown errors route to the enqueue error handler.
+   */
+  beforeTurnReadiness?(input: {
+    session: TSession;
+    event: ManagedRoomEvent;
+  }): Promise<TSession | null>;
   /** Run one full provider turn (including any room-tool loop). */
   runTurn(input: {
     active: TSession;
@@ -81,6 +110,24 @@ export interface ManagedAgentEventTurnEngineAdapter<
   shouldPreemptOnEnqueue(session: TSession): boolean;
   replyChangeSessionKey(sessionId: string): string;
   disconnectWorker(session: StoredAgentSessionState | null): Promise<void>;
+  /**
+   * Consecutive turn errors tolerated before a session is parked as "failed".
+   * Defaults to 3 (claude/cursor). Codex passes Infinity so it never parks and
+   * keeps retrying against "unknown", matching its historical behavior.
+   */
+  maxConsecutiveTurnErrors?: number;
+  /**
+   * Optional post-turn status derivation for the error branch. When provided
+   * and it returns a status, that status/last_error is persisted instead of the
+   * engine's budget-based ladder. Codex uses this to preserve its richer status
+   * machine (for example a "failed" session whose owned app-server exited must
+   * stay terminal rather than becoming a "unknown" that retries forever). Not
+   * called on preempt/abort. Return null/undefined to fall back to the ladder.
+   */
+  resolveErrorTurnStatus?(
+    session: TSession,
+    result: TTurn,
+  ): { status: DesktopManagedAgentSessionStatus; lastError: string | null } | null | undefined;
   /** Extra per-provider cleanup when a session is parked as exhausted. */
   onSessionParked?(sessionId: string): void;
   /** Extra per-provider cleanup when a delivery finishes (success or not). */
@@ -104,15 +151,16 @@ export function createManagedAgentEventTurnEngine<
   const queues = new Map<string, Promise<void>>();
   const activeTurns = new Map<string, ActiveEventTurn>();
   const consecutiveTurnErrors = new Map<string, number>();
+  const maxConsecutiveTurnErrors = adapter.maxConsecutiveTurnErrors ?? MAX_CONSECUTIVE_TURN_ERRORS;
 
   function recordConsecutiveTurnError(sessionId: string): boolean {
     const errorCount = (consecutiveTurnErrors.get(sessionId) ?? 0) + 1;
     consecutiveTurnErrors.set(sessionId, errorCount);
-    return errorCount >= MAX_CONSECUTIVE_TURN_ERRORS;
+    return errorCount >= maxConsecutiveTurnErrors;
   }
 
   function exhaustedTurnError(errorText: string): string {
-    return `Stopped after ${MAX_CONSECUTIVE_TURN_ERRORS} consecutive turn errors. Last error: ${errorText}`;
+    return `Stopped after ${maxConsecutiveTurnErrors} consecutive turn errors. Last error: ${errorText}`;
   }
 
   /**
@@ -186,11 +234,22 @@ export function createManagedAgentEventTurnEngine<
     if (adapter.shouldPreemptOnEnqueue(session)) {
       preemptActiveTurn(session.session_id);
     }
+    // Codex snapshots the room's storage destination the moment the event
+    // arrives; a rejection is surfaced when the delivery awaits it, so silence
+    // the interim unhandled-rejection signal only.
+    const storageAtEnqueue = adapter.resolveStorageAtEnqueue
+      ? adapter.resolveStorage(event.roomIdentifier)
+      : null;
+    storageAtEnqueue?.catch(() => undefined);
     const previous = queues.get(session.session_id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(async () =>
-        deliverDesktopEventTurn(session.session_id, event, await adapter.resolveStorage(event.roomIdentifier)))
+        deliverDesktopEventTurn(
+          session.session_id,
+          event,
+          await (storageAtEnqueue ?? adapter.resolveStorage(event.roomIdentifier)),
+        ))
       .catch(async (error) => {
         const message = error instanceof Error ? error.message : String(error);
         const stored = adapter.getStoredSession(session.session_id);
@@ -227,8 +286,22 @@ export function createManagedAgentEventTurnEngine<
       return;
     }
 
-    const stopAfterTurn = isStopPhraseRoomStreamEvent(session, event);
-    const active = markSessionActiveForEvent(session, event);
+    // Provider readiness preflight (codex: readiness probe + wait for the
+    // current turn to go idle) runs before the session is marked active and
+    // before the change baseline is captured. Mirrors the historical codex
+    // flow: `if (!idleSession || !canDeliverDesktopEventToSession(idleSession))
+    // return;` — the wait may end with a session that is no longer deliverable.
+    let ready = session;
+    if (adapter.beforeTurnReadiness) {
+      const refreshed = await adapter.beforeTurnReadiness({ session, event });
+      if (!refreshed || !canDeliverDesktopEventToManagedAgent(adapter.toPublicSession(refreshed))) {
+        return;
+      }
+      ready = refreshed;
+    }
+
+    const stopAfterTurn = isStopPhraseRoomStreamEvent(ready, event);
+    const active = markSessionActiveForEvent(ready, event);
     const beforeChangeSignature = await desktopManagedAgentReplyChangeSignature(
       adapter.toPublicSession(active),
     );
@@ -253,21 +326,32 @@ export function createManagedAgentEventTurnEngine<
       if (result.status === "error") {
         const wasPreempted = abortController.signal.aborted && activeTurn.interruptReason === "preempt";
         const aborted = abortController.signal.aborted;
-        const exhausted = !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
+        // Let a provider that owns a richer status machine (Codex) finalize the
+        // status itself. The hook is skipped on preempt/abort — those outcomes
+        // are engine-owned regardless of provider.
+        const stored = !wasPreempted && !aborted ? adapter.getStoredSession(sessionId) : null;
+        const derived = stored
+          ? adapter.resolveErrorTurnStatus?.(stored, result) ?? null
+          : null;
+        const exhausted = !derived && !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
         const updated = clearSessionActiveWork(sessionId, (current) => ({
           ...adapter.applyTurnResult(current, result),
-          status: wasPreempted
-            ? "completed"
-            : aborted
-              ? "interrupted"
+          status: derived
+            ? derived.status
+            : wasPreempted
+              ? "completed"
+              : aborted
+                ? "interrupted"
+                : exhausted
+                  ? "failed"
+                  : "unknown",
+          last_error: derived
+            ? derived.lastError
+            : wasPreempted
+              ? null
               : exhausted
-                ? "failed"
-                : "unknown",
-          last_error: wasPreempted
-            ? null
-            : exhausted
-              ? exhaustedTurnError(String(result.error))
-              : result.error ?? null,
+                ? exhaustedTurnError(String(result.error))
+                : result.error ?? null,
           updated_at: adapter.now(),
         }));
         adapter.emitSessionUpdate(updated);
