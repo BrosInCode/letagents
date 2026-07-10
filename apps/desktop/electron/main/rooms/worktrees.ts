@@ -36,13 +36,19 @@ function worktreePathForBranch(repoRoot: string, branch: string): string {
 }
 
 async function getMainWorktreeRoot(repoRoot: string): Promise<string> {
-  const { stdout, code } = await runGit(repoRoot, ["rev-parse", "--git-common-dir"]);
-  const commonDir = stdout.trim();
-  if (code === 0 && commonDir) {
-    const absoluteCommonDir = resolve(repoRoot, commonDir);
-    if (basename(absoluteCommonDir) === ".git") {
-      return dirname(absoluteCommonDir);
+  try {
+    const { stdout, code } = await runGit(repoRoot, ["rev-parse", "--git-common-dir"]);
+    const commonDir = stdout.trim();
+    if (code === 0 && commonDir) {
+      const absoluteCommonDir = resolve(repoRoot, commonDir);
+      if (basename(absoluteCommonDir) === ".git") {
+        return dirname(absoluteCommonDir);
+      }
     }
+  } catch {
+    // Fall back to the passed-in root. Keep in sync with
+    // `src/orchestrator/worktrees.ts` — unexpected git/spawn failures must not
+    // abort worktree provisioning.
   }
   return resolve(repoRoot);
 }
