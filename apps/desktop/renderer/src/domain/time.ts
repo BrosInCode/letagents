@@ -18,3 +18,24 @@ export function formatRelativeTime(value: string | null | undefined): string {
   if (delta < 86_400_000) return `${Math.max(1, Math.round(delta / 3_600_000))}h ago`;
   return `${Math.max(1, Math.round(delta / 86_400_000))}d ago`;
 }
+
+export function formatShortDateTime(
+  value: string | null | undefined,
+  options?: { hourStyle?: "2-digit" | "numeric" },
+): string | null {
+  const parsed = new Date(String(value || ""));
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: options?.hourStyle ?? "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function formatFullTimestamp(value: string | null | undefined): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
+}

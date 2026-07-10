@@ -298,6 +298,7 @@ import type {
   RepoStatus,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
+import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
 import {
   isLocalGitRoom,
@@ -413,7 +414,7 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
-const roomLinkCopied = ref(false);
+const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
 const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
 const inboxLoading = ref(false);
@@ -1563,15 +1564,7 @@ function openAgentWorktree(rootPath: string): void {
 }
 
 async function copyRoomLink(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(roomUrl.value);
-    roomLinkCopied.value = true;
-    window.setTimeout(() => {
-      roomLinkCopied.value = false;
-    }, 1400);
-  } catch {
-    roomLinkCopied.value = false;
-  }
+  await copyRoomLinkToClipboard(roomUrl.value);
 }
 
 function exportChat(): void {

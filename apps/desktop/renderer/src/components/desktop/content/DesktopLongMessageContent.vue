@@ -70,6 +70,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 
+import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+
 const props = withDefaults(defineProps<{
   text: string;
   html: string;
@@ -87,7 +89,7 @@ const emit = defineEmits<{
 
 const expanded = ref(false);
 const readerOpen = ref(false);
-const copied = ref(false);
+const { copied, copy: copyToClipboard } = useCopyIndicator(1600);
 const readerDialog = ref<HTMLElement | null>(null);
 
 const lineCount = computed(() => props.text ? props.text.split(/\r\n|\r|\n/).length : 0);
@@ -128,14 +130,6 @@ function handleMessageReferenceClick(event: MouseEvent): void {
 }
 
 async function copyText(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(props.text);
-    copied.value = true;
-    window.setTimeout(() => {
-      copied.value = false;
-    }, 1600);
-  } catch {
-    copied.value = false;
-  }
+  await copyToClipboard(props.text);
 }
 </script>

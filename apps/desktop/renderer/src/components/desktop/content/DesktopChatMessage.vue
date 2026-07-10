@@ -184,6 +184,7 @@
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { Check, Copy, CornerUpLeft, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
+import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
 import {
@@ -223,11 +224,10 @@ const emit = defineEmits<{
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
-const copied = ref(false);
+const { copied, copy: copyToClipboard } = useCopyIndicator(1400);
 const selectionPopoverOpen = ref(false);
 const selectionPopoverPosition = ref({ x: 0, y: 0 });
 const selectedQuoteText = ref("");
-let copyResetTimeout: number | null = null;
 let selectionOutsideListenerActive = false;
 const identity = computed(() => parseSenderIdentity(props.message));
 const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
@@ -352,24 +352,7 @@ async function copyFromContext(): Promise<void> {
 async function copyMessage(): Promise<void> {
   const text = messageCopyText();
   if (!text) return;
-  const clipboard = navigator.clipboard;
-  if (!clipboard?.writeText) {
-    copied.value = false;
-    return;
-  }
-  try {
-    await clipboard.writeText(text);
-    copied.value = true;
-    if (copyResetTimeout !== null) {
-      window.clearTimeout(copyResetTimeout);
-    }
-    copyResetTimeout = window.setTimeout(() => {
-      copied.value = false;
-      copyResetTimeout = null;
-    }, 1400);
-  } catch {
-    copied.value = false;
-  }
+  await copyToClipboard(text);
 }
 
 function messageCopyText(): string {
@@ -474,8 +457,5 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleContextMenuKeydown);
   removeSelectionOutsidePointerListener();
   window.removeEventListener("keydown", handleSelectionKeydown);
-  if (copyResetTimeout !== null) {
-    window.clearTimeout(copyResetTimeout);
-  }
 });
 </script>

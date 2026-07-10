@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "../../../electron/ipc-types";
+import { copyTextToClipboard } from "../domain/clipboard";
 import { normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 
@@ -451,11 +452,12 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (!code) return false;
     newRoomActiveAction.value = "copy_code";
     try {
-      await navigator.clipboard.writeText(code);
-      newRoomFeedback.value = "Invite code copied.";
-      newRoomFeedbackState.value = "success";
-      return true;
-    } catch {
+      const copied = await copyTextToClipboard(code);
+      if (copied) {
+        newRoomFeedback.value = "Invite code copied.";
+        newRoomFeedbackState.value = "success";
+        return true;
+      }
       newRoomFeedback.value = "Could not copy the invite code. Select it and copy manually.";
       newRoomFeedbackState.value = "error";
       return false;

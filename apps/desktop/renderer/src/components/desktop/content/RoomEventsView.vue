@@ -276,6 +276,7 @@ import type {
   DesktopGitHubEventsPage,
   DesktopGitHubRoomEvent,
 } from "../../../../../electron/ipc-types";
+import { copyTextToClipboard } from "../../../domain/clipboard";
 import { renderDesktopMarkdown } from "./formatting/markdown";
 import RoomEventIcon from "./room-events/RoomEventIcon.vue";
 import {
@@ -396,11 +397,11 @@ function closeSelectedEvent(): void {
 
 async function copyEventUrl(event: DesktopGitHubEventPresentation): Promise<void> {
   if (!event.url) return;
-  await navigator.clipboard.writeText(event.url).catch(() => undefined);
+  await copyTextToClipboard(event.url);
 }
 
 async function copyEventId(event: DesktopGitHubEventPresentation): Promise<void> {
-  await navigator.clipboard.writeText(event.id).catch(() => undefined);
+  await copyTextToClipboard(event.id);
 }
 
 function relativeTime(value: string): string {

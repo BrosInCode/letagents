@@ -10,7 +10,7 @@
       <div class="auth-action-card" data-testid="auth-action-card">
         <div v-if="authStatus?.account" class="auth-account" data-testid="auth-account">
           <span class="auth-avatar" aria-hidden="true">
-            {{ authStatus.account.login.slice(0, 2).toUpperCase() }}
+            {{ loginInitials(authStatus.account.login) }}
           </span>
           <span>
             <strong>{{ authStatus.account.displayName || authStatus.account.login }}</strong>
@@ -107,6 +107,7 @@ import type {
   DesktopPendingDeviceAuth,
   DesktopRoomAccess,
 } from "../../../../../electron/ipc-types";
+import { loginInitials } from "../../../domain/initials";
 
 const props = defineProps<{
   access: DesktopRoomAccess;

@@ -750,7 +750,9 @@ import {
   Wrench,
 } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
+import { useCopyValueIndicator } from "../../../composables/useCopyIndicator";
 import { isLocalGitRoom } from "../../../domain/git-rooms";
+import { wordInitials } from "../../../domain/initials";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type {
   DesktopAccountRoomEntry,
@@ -831,8 +833,8 @@ const emit = defineEmits<{
 }>();
 
 const activePane = ref<SettingsPaneId>(props.initialPane);
-const copiedRoomUrl = ref<string | null>(null);
-const copiedText = ref<string | null>(null);
+const { copiedValue: copiedRoomUrl, copy: copyRoomUrlToClipboard } = useCopyValueIndicator(1400);
+const { copiedValue: copiedText, copy: copyTextValueToClipboard } = useCopyValueIndicator(1400);
 const roomFilter = ref<RoomFilter>("active");
 const roomSearch = ref("");
 const selectedRoomDetailIdentifier = ref<string | null>(null);
@@ -994,15 +996,7 @@ const accountPurposeLabel = computed(() => {
   return props.authStatus?.error || "Connect GitHub to show your identity in LetAgents rooms.";
 });
 
-const accountInitials = computed(() => {
-  const label = accountTitle.value;
-  return label
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("") || "LA";
-});
+const accountInitials = computed(() => wordInitials(accountTitle.value, "LA"));
 
 const providerLabel = computed(() => {
   const provider = props.authStatus?.account?.provider || "github";
@@ -1192,17 +1186,7 @@ function isBusy(room: DesktopAccountRoomEntry): boolean {
 
 async function copyText(value: string): Promise<void> {
   if (!value) return;
-  try {
-    await navigator.clipboard?.writeText(value);
-    copiedText.value = value;
-    window.setTimeout(() => {
-      if (copiedText.value === value) {
-        copiedText.value = null;
-      }
-    }, 1400);
-  } catch {
-    copiedText.value = null;
-  }
+  await copyTextValueToClipboard(value);
 }
 
 function roomUrl(room: DesktopAccountRoomEntry): string {
@@ -1216,17 +1200,7 @@ function showRoomDetail(room: DesktopAccountRoomEntry): void {
 async function copyRoomUrl(room: DesktopAccountRoomEntry): Promise<void> {
   const value = roomUrl(room);
   if (!value) return;
-  try {
-    await navigator.clipboard?.writeText(value);
-    copiedRoomUrl.value = value;
-    window.setTimeout(() => {
-      if (copiedRoomUrl.value === value) {
-        copiedRoomUrl.value = null;
-      }
-    }, 1400);
-  } catch {
-    copiedRoomUrl.value = null;
-  }
+  await copyRoomUrlToClipboard(value);
 }
 
 function lastOpenedLabel(room: DesktopAccountRoomEntry): string {

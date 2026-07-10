@@ -259,6 +259,7 @@ import {
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
+import { formatShortDateTime } from "../../../domain/time";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
 import {
@@ -728,14 +729,7 @@ function toggleExpandedChangeSummary(sessionId: string): void {
 }
 
 function formatTimestamp(value: string | null | undefined): string {
-  const parsed = new Date(String(value || ""));
-  if (Number.isNaN(parsed.getTime())) return "unknown";
-  return parsed.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatShortDateTime(value) ?? "unknown";
 }
 
 function sanitizeId(value: string): string {

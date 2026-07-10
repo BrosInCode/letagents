@@ -501,6 +501,7 @@ import {
   visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
+import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
 import { toIpcPayload } from "../../../domain/ipc-payload";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
@@ -1525,15 +1526,11 @@ async function copyAgentAuthCommand(): Promise<void> {
   copyingAuthCommand.value = true;
   setupMessage.value = null;
   try {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error("Clipboard is unavailable.");
-    }
-    await navigator.clipboard.writeText(command);
+    const copiedCommand = await copyTextToClipboard(command);
     if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = `Copied: ${command}`;
-  } catch {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = `Clipboard unavailable. Run: ${command}`;
+    setupMessage.value = copiedCommand
+      ? `Copied: ${command}`
+      : `Clipboard unavailable. Run: ${command}`;
   } finally {
     if (isCurrentModalState(requestVersion)) {
       copyingAuthCommand.value = false;
@@ -1549,15 +1546,11 @@ async function copyExternalJoinPrompt(): Promise<void> {
   copyingExternalPrompt.value = true;
   setupMessage.value = null;
   try {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error("Clipboard is unavailable.");
-    }
-    await navigator.clipboard.writeText(prompt);
+    const copiedPrompt = await copyTextToClipboard(prompt);
     if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = "Copied the agent join prompt.";
-  } catch {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = "Clipboard unavailable. Open Show full instructions, then copy the prompt manually.";
+    setupMessage.value = copiedPrompt
+      ? "Copied the agent join prompt."
+      : "Clipboard unavailable. Open Show full instructions, then copy the prompt manually.";
   } finally {
     if (isCurrentModalState(requestVersion)) {
       copyingExternalPrompt.value = false;

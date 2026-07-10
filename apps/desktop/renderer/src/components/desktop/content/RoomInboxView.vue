@@ -248,6 +248,7 @@ import {
   X,
 } from "@lucide/vue";
 import { computed, ref } from "vue";
+import { formatShortDateTime } from "../../../domain/time";
 import type { DesktopInboxFilter, DesktopInboxItem } from "./room-inbox/items";
 
 interface DetailRow {
@@ -424,13 +425,6 @@ function whyText(item: DesktopInboxItem): string {
 }
 
 function formatTimestamp(timestamp: string): string {
-  const date = new Date(timestamp);
-  if (!Number.isFinite(date.getTime())) return "";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
+  return formatShortDateTime(timestamp, { hourStyle: "numeric" }) ?? "";
 }
 </script>
