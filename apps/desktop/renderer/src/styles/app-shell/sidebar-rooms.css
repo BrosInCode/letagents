@@ -49,11 +49,11 @@
 
 .project-list > .project-group:has(> .project-room-list) > .sidebar-project-row-shell {
   position: sticky;
-  top: 4px;
+  top: 0;
   z-index: 2;
   background: var(--sidebar-sticky-bg);
   box-shadow:
-    0 -6px 0 var(--sidebar-sticky-bg),
+    0 -12px 0 var(--sidebar-sticky-bg),
     0 6px 10px rgba(0, 0, 0, 0.34);
   backdrop-filter: var(--sidebar-sticky-filter);
 }
