@@ -502,6 +502,7 @@ import {
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
+import { toIpcPayload } from "../../../domain/ipc-payload";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
 import {
   currentFocusableElement,
@@ -971,7 +972,7 @@ async function startManagedAgent(): Promise<void> {
   setupMessage.value = null;
   startManagedSessionRefreshTimer(1_000);
   try {
-    const result = await window.letagentsDesktop.workers.startManagedAgent({
+    const result = await window.letagentsDesktop.workers.startManagedAgent(toIpcPayload({
       providerId: selectedProviderId.value,
       roomIdentifier: props.roomIdentifier,
       roomGitRoom: props.roomGitRoom,
@@ -983,7 +984,7 @@ async function startManagedAgent(): Promise<void> {
       model: selectedModel.value,
       modelSource: selectedModelSource.value,
       effort: selectedEffort.value || null,
-    });
+    }));
     if (!isCurrentModalState(requestVersion)) return;
     setupMessage.value = result.message;
     upsertManagedSession(result.session);
@@ -1066,7 +1067,7 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
   try {
     const result = await listModels(
       requestProviderId,
-      {
+      toIpcPayload({
         roomIdentifier: props.roomIdentifier,
         roomGitRoom: props.roomGitRoom,
         repoRootPath: props.repoRootPath,
@@ -1075,7 +1076,7 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
         modelSource: selectedModelSource.value,
         effort: selectedEffort.value || null,
         refreshModels: options.refresh,
-      },
+      }),
     );
     if (
       isCurrentModalState(requestVersion) &&
@@ -1407,7 +1408,7 @@ async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<
   try {
     const result = await window.letagentsDesktop.workers.runAgentProviderPreflight(
       requestProviderId,
-      {
+      toIpcPayload({
         roomIdentifier: props.roomIdentifier,
         roomGitRoom: props.roomGitRoom,
         repoRootPath: props.repoRootPath,
@@ -1417,7 +1418,7 @@ async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<
         modelSource: selectedModelSource.value,
         effort: selectedEffort.value || null,
         refreshModels: options.refreshModels,
-      },
+      }),
     );
     if (
       isCurrentModalState(requestVersion) &&
