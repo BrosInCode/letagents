@@ -26,3 +26,8 @@ export interface SettingsNavGroup {
   label: string;
   items: SettingsNavItem[];
 }
+
+export type SettingsFeedback = {
+  message: string;
+  state: "error" | "info" | "success";
+};
