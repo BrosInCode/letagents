@@ -1,6 +1,8 @@
 @import "./styles/01-base.css";
 @import "./styles/app-shell/layout.css";
 @import "./styles/app-shell/shared-primitives.css";
+@import "./styles/app-shell/context-menu.css";
+@import "./styles/app-shell/action-toasts.css";
 @import "./styles/app-shell/sidebar.css";
 @import "./styles/app-shell/sidebar-rooms.css";
 @import "./styles/app-shell/main-content.css";

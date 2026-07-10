@@ -11,6 +11,10 @@ export type RoomEntry = {
   headline: string;
   description: string;
   gitRoom?: DesktopGitRoomInfo | null;
+  focusKey?: string | null;
+  parentRoomIdentifier?: string | null;
+  pinTargetRoomIdentifier?: string | null;
+  pinnedAccountRoomIdentifiers?: string[];
   suggestedAction?: string | null;
   currentWorkspace?: boolean;
   latestMessageId: string | null;

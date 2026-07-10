@@ -180,7 +180,9 @@ export function buildSidebarProjectGroups(input: {
     roomName: input.currentParentRoom.title,
     parent: input.currentParentRoom,
     branchRooms: gitRoomBranchChildFromCurrentEntry(input.currentParentRoom),
-    focusRooms: input.focusRooms.map(desktopFocusRoomToEntry),
+    focusRooms: input.focusRooms.map((focusRoom) =>
+      desktopFocusRoomToEntry(focusRoom, input.currentParentRoom.roomIdentifier)
+    ),
   });
 
   const groupedGitRooms = groupAccountGitRoomsByRepository(input.accountRooms);
@@ -231,7 +233,7 @@ function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
       : current;
     return {
       ...preferred,
-      pinned: current.pinned || incoming.pinned,
+      ...mergedPinState(current, incoming),
       hasUnread: current.hasUnread || incoming.hasUnread,
       latestMessageId: incoming.latestMessageId || current.latestMessageId,
       latestMessageAt: incoming.latestMessageAt || current.latestMessageAt,
@@ -245,14 +247,41 @@ function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
     headline: preferIncomingDisplay ? incoming.headline : current.headline,
     description: preferIncomingDisplay ? incoming.description : current.description,
     gitRoom: incoming.gitRoom ?? current.gitRoom ?? null,
+    focusKey: incoming.focusKey ?? current.focusKey ?? null,
+    parentRoomIdentifier: incoming.parentRoomIdentifier ?? current.parentRoomIdentifier ?? null,
     suggestedAction: incoming.suggestedAction ?? current.suggestedAction ?? null,
     currentWorkspace: sameRoom
       ? Boolean(current.currentWorkspace || incoming.currentWorkspace)
       : Boolean(incoming.currentWorkspace),
     latestMessageId: incoming.latestMessageId || current.latestMessageId,
     latestMessageAt: incoming.latestMessageAt || current.latestMessageAt,
-    pinned: current.pinned || incoming.pinned,
+    ...mergedPinState(current, incoming),
   };
+}
+
+function mergedPinState(
+  current: RoomEntry,
+  incoming: RoomEntry,
+): Pick<RoomEntry, "pinned" | "pinTargetRoomIdentifier" | "pinnedAccountRoomIdentifiers"> {
+  return {
+    pinned: current.pinned || incoming.pinned,
+    pinTargetRoomIdentifier: incoming.pinTargetRoomIdentifier ?? current.pinTargetRoomIdentifier ?? null,
+    pinnedAccountRoomIdentifiers: [...new Set([
+      ...(current.pinnedAccountRoomIdentifiers || []),
+      ...(incoming.pinnedAccountRoomIdentifiers || []),
+    ])],
+  };
+}
+
+export type RoomPinMutation = { pinned: boolean; roomIdentifiers: string[] };
+
+export function buildRoomPinMutation(entry: RoomEntry): RoomPinMutation | null {
+  if (entry.pinned) {
+    const roomIdentifiers = [...new Set(entry.pinnedAccountRoomIdentifiers || [])];
+    return roomIdentifiers.length ? { pinned: false, roomIdentifiers } : null;
+  }
+  const target = entry.pinTargetRoomIdentifier || null;
+  return target ? { pinned: true, roomIdentifiers: [target] } : null;
 }
 
 function roomEntryKey(entry: RoomEntry): string {
@@ -303,7 +332,10 @@ function gitRoomBranchChildFromCurrentEntry(entry: RoomEntry): RoomEntry[] {
   }];
 }
 
-function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][number]): RoomEntry {
+function desktopFocusRoomToEntry(
+  focusRoom: DesktopRoomSnapshot["focusRooms"][number],
+  parentRoomIdentifier: string | null,
+): RoomEntry {
   const gitMeta = gitRoomSidebarMeta(focusRoom.gitRoom);
   return {
     id: `room:focus:${focusRoom.roomId}`,
@@ -317,6 +349,7 @@ function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][nu
     description: gitMeta?.description
       || "A focus room gives one thread of work more space, without losing the connection back to the main room.",
     gitRoom: focusRoom.gitRoom,
+    ...focusRoomLineage(focusRoom, parentRoomIdentifier),
     suggestedAction: gitMeta ? "Open branch room" : null,
     latestMessageId: null,
     latestMessageAt: null,
@@ -333,7 +366,9 @@ function accountRoomToGroup(room: DesktopAccountRoomEntry): ProjectGroup {
     roomName: parent.title,
     parent,
     branchRooms: [],
-    focusRooms: room.focusRooms.map((focusRoom) => accountFocusRoomToEntry(focusRoom)),
+    focusRooms: room.focusRooms.map((focusRoom) =>
+      accountFocusRoomToEntry(focusRoom, null, room.roomIdentifier)
+    ),
   };
 }
 
@@ -348,6 +383,10 @@ function accountGitRoomToGroup(input: {
   const parent = {
     ...accountGitRoomToRepoParentEntry(parentRoom, input.currentRoomIdentifier),
     pinned: sortedRooms.some((room) => room.pinned),
+    pinTargetRoomIdentifier: parentRoom.roomIdentifier,
+    pinnedAccountRoomIdentifiers: sortedRooms
+      .filter((room) => room.pinned)
+      .map((room) => room.roomIdentifier),
   };
   if (!defaultRoom) {
     parent.id = `room:git-repo:${input.repositoryKey}`;
@@ -359,7 +398,9 @@ function accountGitRoomToGroup(input: {
     .filter((room) => !defaultRoom || room.roomIdentifier !== defaultRoom.roomIdentifier)
     .map((room) => accountGitRoomToBranchEntry(room, input.currentRoomIdentifier));
   const focusRooms = sortedRooms.flatMap((room) =>
-    room.focusRooms.map((focusRoom) => accountFocusRoomToEntry(focusRoom, input.currentRoomIdentifier))
+    room.focusRooms.map((focusRoom) =>
+      accountFocusRoomToEntry(focusRoom, input.currentRoomIdentifier, room.roomIdentifier)
+    )
   );
 
   return {
@@ -374,6 +415,7 @@ function accountGitRoomToGroup(input: {
 function accountFocusRoomToEntry(
   room: DesktopAccountRoomEntry["focusRooms"][number],
   currentRoomIdentifier: string | null = null,
+  parentRoomIdentifier: string | null = null,
 ): RoomEntry {
   const gitMeta = gitRoomSidebarMeta(room.gitRoom);
   const currentWorkspace = normalizeRoomIdentifier(room.roomIdentifier) === currentRoomIdentifier;
@@ -391,6 +433,7 @@ function accountFocusRoomToEntry(
     description: gitMeta?.description
       || "A focus room gives one thread of work more space, without losing the connection back to the main room.",
     gitRoom: room.gitRoom,
+    ...focusRoomLineage(room, parentRoomIdentifier),
     suggestedAction: currentWorkspace ? "Current workspace" : gitMeta ? "Open branch room" : null,
     currentWorkspace,
     latestMessageId: room.latestMessageId,
@@ -398,6 +441,16 @@ function accountFocusRoomToEntry(
     hasUnread: false,
     pinned: false,
     source: "account",
+  };
+}
+
+function focusRoomLineage(
+  room: { focusKey: string | null; sourceTaskId: string | null; parentRoomId: string | null },
+  parentRoomIdentifier: string | null,
+): Pick<RoomEntry, "focusKey" | "parentRoomIdentifier"> {
+  return {
+    focusKey: room.focusKey || room.sourceTaskId,
+    parentRoomIdentifier: room.parentRoomId || parentRoomIdentifier,
   };
 }
 
@@ -419,6 +472,8 @@ function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {
     latestMessageAt: room.latestMessageAt,
     hasUnread: false,
     pinned: room.pinned,
+    pinTargetRoomIdentifier: room.roomIdentifier,
+    pinnedAccountRoomIdentifiers: room.pinned ? [room.roomIdentifier] : [],
     source: "account",
   };
 }
