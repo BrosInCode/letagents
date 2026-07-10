@@ -299,7 +299,7 @@
 <script setup lang="ts">
 import { Archive, ChevronRight, Copy, House, Pin, Plus, Settings } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import { buildLetAgentsRoomLikeCopyValue } from "../../../domain/room-urls";
 import type { ProjectGroup, SidebarEntry, SidebarMode, SystemEntry, RoomEntry } from "../types";
 
 const props = defineProps<{
@@ -430,10 +430,17 @@ function selectOrToggleProject(project: ProjectGroup): void {
 }
 
 async function copyContextRoomUrl(): Promise<void> {
-  const identifier = roomContextMenu.value?.entry.roomIdentifier;
+  const entry = roomContextMenu.value?.entry;
+  const identifier = entry?.roomIdentifier;
   if (!identifier) return;
   try {
-    await navigator.clipboard?.writeText(buildLetAgentsRoomCopyValue(identifier));
+    await navigator.clipboard?.writeText(buildLetAgentsRoomLikeCopyValue({
+      roomIdentifier: identifier,
+      kind: entry.kind,
+      parentRoomId: entry.parentRoomId,
+      focusKey: entry.focusKey,
+      sourceTaskId: entry.sourceTaskId,
+    }));
   } finally {
     closeRoomContextMenu();
   }

@@ -310,6 +310,9 @@ function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][nu
     type: "room",
     kind: "focus",
     roomIdentifier: focusRoom.identifier,
+    parentRoomId: focusRoom.parentRoomId,
+    focusKey: focusRoom.focusKey,
+    sourceTaskId: focusRoom.sourceTaskId,
     title: focusRoom.displayName,
     meta: gitMeta?.meta || focusRoom.code || focusRoom.sourceTaskId || "Focus room",
     sectionLabel: gitMeta ? "Git Room" : "Focus room",
@@ -382,6 +385,9 @@ function accountFocusRoomToEntry(
     type: "room",
     kind: "focus",
     roomIdentifier: room.roomIdentifier,
+    parentRoomId: room.parentRoomId,
+    focusKey: room.focusKey,
+    sourceTaskId: room.sourceTaskId,
     title: room.displayName,
     meta: gitMeta?.meta || (room.focusStatus === "concluded"
       ? "Concluded"

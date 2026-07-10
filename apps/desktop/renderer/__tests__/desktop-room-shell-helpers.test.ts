@@ -16,6 +16,7 @@ import {
 import {
   buildLetAgentsFocusRoomUrl,
   buildLetAgentsRoomCopyValue,
+  buildLetAgentsRoomLikeCopyValue,
   buildLetAgentsRoomUrl,
 } from "../src/domain/room-urls";
 import {
@@ -103,6 +104,31 @@ describe("desktop room shell helpers", () => {
         focusKey: "task_42",
       }),
       "focus_local",
+    );
+    assert.equal(
+      buildLetAgentsRoomLikeCopyValue({
+        identifier: "focus_28",
+        kind: "focus",
+        parentRoomId: "github.com/brosincode/letagents",
+        focusKey: "task_99",
+      }),
+      "https://letagents.chat/in/github.com/brosincode/letagents/focus/task_99",
+    );
+    assert.equal(
+      buildLetAgentsRoomLikeCopyValue({
+        identifier: "focus_28",
+        kind: "focus",
+        parentRoomId: "github.com/brosincode/letagents",
+        sourceTaskId: "task_100",
+      }),
+      "https://letagents.chat/in/github.com/brosincode/letagents/focus/task_100",
+    );
+    assert.equal(
+      buildLetAgentsRoomLikeCopyValue({
+        identifier: "focus_28",
+        kind: "focus",
+      }),
+      "focus_28",
     );
   });
 

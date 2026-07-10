@@ -316,7 +316,7 @@ import {
   preferredManagedAgentRepoRootPath,
   type ManagedAgentPermissionApproval,
 } from "../../../domain/managed-agents";
-import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import { buildLetAgentsRoomLikeCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
@@ -455,7 +455,12 @@ let environmentRepoStatusRefreshRequestId = 0;
 let inboxReloadAfterCurrentLoad = false;
 let inboxThreadBaselinePending = false;
 const roomUrl = computed(() =>
-  buildLetAgentsRoomCopyValue(props.room.identifier, {
+  buildLetAgentsRoomLikeCopyValue({
+    identifier: props.room.identifier,
+    kind: props.room.kind,
+    parentRoomId: props.room.parentRoomId,
+    focusKey: props.room.focusKey,
+    sourceTaskId: props.room.sourceTaskId,
     localOnly: props.storage.localRoom?.publishStatus === "local_only",
   })
 );
