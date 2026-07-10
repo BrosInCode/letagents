@@ -43,11 +43,36 @@ export function validateJoinRoomInput(raw: string): {
   normalized: string | null;
   error: string | null;
 } {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) {
+    return { normalized: null, error: "Enter an invite code or room URL." };
+  }
+
+  const withoutSpaces = trimmed.replace(/\s+/g, "");
+  if (isAbsoluteHttpUrl(withoutSpaces)) {
+    const fromUrl = extractRoomIdentifierFromUrl(withoutSpaces, LETAGENTS_ROOM_ORIGIN);
+    if (!fromUrl) {
+      return {
+        normalized: null,
+        error: "Use an invite code or a LetAgents room URL.",
+      };
+    }
+  }
+
   const normalized = normalizeJoinRoomInput(raw);
   if (!normalized) {
     return { normalized: null, error: "Enter an invite code or room URL." };
   }
   return { normalized, error: null };
+}
+
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function extractRoomIdentifierFromUrl(value: string, origin: string): string | null {

@@ -37,6 +37,16 @@ test("validateJoinRoomInput rejects empty input", () => {
   });
 });
 
+test("validateJoinRoomInput rejects foreign absolute URLs", () => {
+  assert.deepEqual(validateJoinRoomInput("https://example.com/x"), {
+    normalized: null,
+    error: "Use an invite code or a LetAgents room URL.",
+  });
+  assert.equal(validateJoinRoomInput("https://letagents.chat/in/ABCD-1234").normalized, "ABCD-1234");
+  assert.equal(validateJoinRoomInput("ABCD-1234").normalized, "ABCD-1234");
+  assert.equal(validateJoinRoomInput("/in/focus_31").normalized, "focus_31");
+});
+
 test("new room modal starts on chooser and navigates intents", () => {
   const modal = useDesktopNewRoomModal({
     openRoomSnapshot: () => undefined,
@@ -60,24 +70,29 @@ test("new room modal starts on chooser and navigates intents", () => {
   assert.equal(modal.newRoomStep.value, "join");
 });
 
-test("create shared standalone room lands on success with invite code", async () => {
-  const opened: unknown[] = [];
-  const renamed: Array<[string, string]> = [];
-  const snapshot = snapshotFixture("room_1", "Team sync", "ABCD-9999");
+test("shared create patches stale snapshot name after successful rename", async () => {
+  const opened: Array<{
+    snapshot: DesktopRoomSnapshot;
+    options?: { displayName?: string | null };
+  }> = [];
+  const creationSnapshot = snapshotFixture("room_1", "Generated Room", "ABCD-9999");
 
   stubDesktopBridge({
     createInviteRoom: async () => ({
       roomIdentifier: "room_1",
       code: "ABCD-9999",
-      snapshot,
+      snapshot: creationSnapshot,
     }),
-    rename: async (roomIdentifier: string, displayName: string) => {
-      renamed.push([roomIdentifier, displayName]);
-    },
+    rename: async (_roomIdentifier: string, displayName: string) => ({
+      identifier: "room_1",
+      code: "ABCD-9999",
+      name: displayName,
+      displayName,
+    }),
   });
 
   const modal = useDesktopNewRoomModal({
-    openRoomSnapshot: (next) => opened.push(next),
+    openRoomSnapshot: (snapshot, options) => opened.push({ snapshot, options }),
     setRepoStatus: () => undefined,
   });
 
@@ -85,19 +100,54 @@ test("create shared standalone room lands on success with invite code", async ()
   modal.chooseStandaloneIntent();
   modal.newRoomName.value = "Team sync";
   modal.newRoomStorage.value = "cloud";
-
   await modal.createStandaloneRoom();
 
   assert.equal(modal.newRoomStep.value, "success");
-  assert.equal(modal.newRoomSuccess.value?.kind, "shared");
-  assert.equal(modal.newRoomSuccess.value?.inviteCode, "ABCD-9999");
-  assert.equal(modal.newRoomBusy.value, false);
-  assert.deepEqual(renamed, [["room_1", "Team sync"]]);
-  assert.equal(opened.length, 0);
+  assert.equal(modal.newRoomSuccess.value?.roomName, "Team sync");
+  assert.equal(modal.newRoomSuccess.value?.snapshot.room?.displayName, "Team sync");
+  assert.notEqual(modal.newRoomSuccess.value?.snapshot.room?.displayName, "Generated Room");
+  assert.equal(modal.newRoomSuccess.value?.openOptions.displayName, "Team sync");
 
   modal.openSuccessRoom();
   assert.equal(opened.length, 1);
-  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.equal(opened[0]?.options?.displayName, "Team sync");
+  assert.equal(opened[0]?.snapshot.room?.displayName, "Team sync");
+});
+
+test("shared create keeps invite code when rename fails and surfaces warning", async () => {
+  stubDesktopBridge({
+    createInviteRoom: async () => ({
+      roomIdentifier: "room_2",
+      code: "WXYZ-1111",
+      snapshot: snapshotFixture("room_2", "Generated Room", "WXYZ-1111"),
+    }),
+    rename: async () => {
+      throw new Error("rename unavailable");
+    },
+  });
+
+  const modal = useDesktopNewRoomModal({
+    openRoomSnapshot: () => undefined,
+    setRepoStatus: () => undefined,
+  });
+
+  modal.selectNewRoomEntry();
+  modal.chooseStandaloneIntent();
+  modal.newRoomName.value = "Team sync";
+  modal.newRoomStorage.value = "cloud";
+  await modal.createStandaloneRoom();
+
+  assert.equal(modal.newRoomStep.value, "success");
+  assert.equal(modal.newRoomSuccess.value?.inviteCode, "WXYZ-1111");
+  assert.equal(modal.newRoomSuccess.value?.roomName, "Generated Room");
+  assert.match(modal.newRoomFeedback.value || "", /renaming failed/i);
+  assert.equal(modal.newRoomFeedbackState.value, "info");
+  assert.equal(modal.newRoomBusy.value, false);
+
+  // Success with naming warning is not an error-step retry trap; Back returns to chooser.
+  modal.backFromSubstep();
+  assert.equal(modal.newRoomStep.value, "chooser");
+  assert.equal(modal.newRoomSuccess.value, null);
 });
 
 test("create local standalone room lands on success without invite code", async () => {
@@ -181,6 +231,30 @@ test("join access failure keeps form values and shows error step", async () => {
   assert.match(modal.newRoomFeedback.value || "", /access/i);
   assert.equal(modal.newRoomJoinCode.value, "ABCD-1234");
   assert.equal(modal.newRoomModalOpen.value, true);
+});
+
+test("join rejects foreign absolute URLs before snapshot lookup", async () => {
+  let snapshotCalls = 0;
+  stubDesktopBridge({
+    getSnapshot: async () => {
+      snapshotCalls += 1;
+      return snapshotFixture("should-not-run", "Nope");
+    },
+  });
+
+  const modal = useDesktopNewRoomModal({
+    openRoomSnapshot: () => undefined,
+    setRepoStatus: () => undefined,
+  });
+
+  modal.selectNewRoomEntry();
+  modal.chooseJoinIntent();
+  modal.newRoomJoinCode.value = "https://example.com/x";
+  assert.equal(modal.canSubmitJoin.value, false);
+  await modal.joinRoomCodeFromModal();
+  assert.equal(snapshotCalls, 0);
+  assert.equal(modal.newRoomJoinError.value, "Use an invite code or a LetAgents room URL.");
+  assert.equal(modal.newRoomStep.value, "join");
 });
 
 test("busy state blocks close and duplicate submit", async () => {

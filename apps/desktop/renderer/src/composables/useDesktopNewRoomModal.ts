@@ -82,7 +82,10 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomSuccess = ref<NewRoomSuccessState | null>(null);
   const newRoomStatusMessage = ref<string | null>(null);
 
-  const canSubmitJoin = computed(() => Boolean(normalizeJoinRoomInput(newRoomJoinCode.value)));
+  const canSubmitJoin = computed(() => {
+    const validation = validateJoinRoomInput(newRoomJoinCode.value);
+    return Boolean(validation.normalized) && !validation.error;
+  });
   const canSubmitStandalone = computed(() => !newRoomBusy.value);
 
   function resetTransientState(): void {
@@ -228,25 +231,46 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
         };
       } else {
         const result = await window.letagentsDesktop.room.createInviteRoom();
+        let snapshot = result.snapshot;
+        let roomName =
+          snapshot.room?.displayName ||
+          snapshot.room?.name ||
+          result.code;
+        let namingWarning: string | null = null;
         const rename = window.letagentsDesktop.room.rename;
         if (rename && displayName) {
           try {
-            await rename(result.roomIdentifier, displayName);
-          } catch {
-            // Naming is best-effort; invite code success still matters.
+            const renamed = await rename(result.roomIdentifier, displayName);
+            roomName = renamed.displayName || renamed.name || displayName;
+            snapshot = {
+              ...snapshot,
+              room: snapshot.room
+                ? {
+                    ...snapshot.room,
+                    displayName: roomName,
+                    name: renamed.name || roomName,
+                  }
+                : snapshot.room,
+            };
+          } catch (error) {
+            namingWarning =
+              error instanceof Error
+                ? `Room created, but renaming failed: ${error.message}`
+                : "Room created, but the requested name could not be applied.";
+            roomName =
+              snapshot.room?.displayName ||
+              snapshot.room?.name ||
+              result.code;
           }
+        } else if (displayName) {
+          roomName = displayName;
         }
-        const roomName =
-          result.snapshot.room?.displayName ||
-          displayName ||
-          result.snapshot.room?.name ||
-          result.code;
         newRoomSuccess.value = {
           kind: "shared",
           roomName,
           storageLabel: "Cloud / shared",
           inviteCode: result.code,
-          snapshot: result.snapshot,
+          snapshot,
           openOptions: {
             displayName: roomName,
             kind: "room",
@@ -254,10 +278,19 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
             meta: result.code || "Shared room",
           },
         };
+        if (namingWarning) {
+          newRoomFeedback.value = namingWarning;
+          newRoomFeedbackState.value = "info";
+        } else {
+          newRoomFeedback.value = null;
+          newRoomFeedbackState.value = "success";
+        }
       }
       newRoomStep.value = "success";
-      newRoomFeedback.value = null;
-      newRoomFeedbackState.value = "success";
+      if (newRoomStorage.value === "local") {
+        newRoomFeedback.value = null;
+        newRoomFeedbackState.value = "success";
+      }
       newRoomJoinCode.value = "";
       newRoomProjectSelection.value = null;
     } catch (error) {
