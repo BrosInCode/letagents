@@ -330,7 +330,10 @@
   display: grid;
   grid-template-columns: minmax(360px, 1fr) minmax(340px, 440px);
   gap: 16px;
-  min-height: 0;
+  /* min-height must stay auto: with min-height 0, this stretched item's auto
+     row in the scrolling manager grid collapses to 0, the panes overflow it,
+     and the RepoStatusView sibling gets laid out underneath them — visible
+     through the gutter between the panes. */
 }
 
 .focus-room-list-pane,
