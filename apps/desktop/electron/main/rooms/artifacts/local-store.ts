@@ -1,25 +1,15 @@
-import { createRequire } from "node:module";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-
 import type {
   DesktopRoomSharedArtifactKind,
   DesktopRoomSharedArtifactProvider,
   DesktopRoomSharedArtifactSource,
 } from "../../../ipc-types.js";
-import { localChatDatabasePath } from "../../chat-storage/settings.js";
 import type { RoomArtifactsResponse } from "../snapshot/payloads.js";
-
-type SqliteStatement = {
-  all: (...params: unknown[]) => Record<string, unknown>[];
-  get: (...params: unknown[]) => Record<string, unknown> | undefined;
-  run: (...params: unknown[]) => unknown;
-};
-
-type SqliteDatabase = {
-  exec: (sql: string) => void;
-  prepare: (sql: string) => SqliteStatement;
-};
+import {
+  beginImmediate,
+  getLocalChatDatabase,
+  rollback,
+  type SqliteDatabase,
+} from "../local-db.js";
 
 type LocalRoomArtifactInput = {
   provider: DesktopRoomSharedArtifactProvider;
@@ -52,10 +42,6 @@ type LocalRoomArtifactRow = {
   updated_at: string;
 };
 
-const require = createRequire(import.meta.url);
-let db: SqliteDatabase | null = null;
-let initialized = false;
-
 const localArtifactProviders = new Set<DesktopRoomSharedArtifactProvider>([
   "git",
   "github",
@@ -76,19 +62,12 @@ const localArtifactKinds = new Set<DesktopRoomSharedArtifactKind>([
   "check_run",
   "merge",
 ]);
+let schemaInitialized = false;
 
 async function getDb(): Promise<SqliteDatabase> {
-  if (db) return db;
-  await mkdir(dirname(localChatDatabasePath), { recursive: true });
-  const { DatabaseSync } = require("node:sqlite") as {
-    DatabaseSync: new (path: string) => SqliteDatabase;
-  };
-  db = new DatabaseSync(localChatDatabasePath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 5000");
-  if (!initialized) {
-    db.exec(`
+  const database = await getLocalChatDatabase();
+  if (!schemaInitialized) {
+    database.exec(`
       CREATE TABLE IF NOT EXISTS local_room_artifacts (
         room_id TEXT NOT NULL,
         identity_key TEXT NOT NULL,
@@ -121,21 +100,9 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE INDEX IF NOT EXISTS local_room_artifact_tasks_task_idx
         ON local_room_artifact_tasks (room_id, task_id);
     `);
-    initialized = true;
+    schemaInitialized = true;
   }
-  return db;
-}
-
-function beginImmediate(database: SqliteDatabase): void {
-  database.exec("BEGIN IMMEDIATE");
-}
-
-function rollback(database: SqliteDatabase): void {
-  try {
-    database.exec("ROLLBACK");
-  } catch {
-    // SQLite may already have closed the transaction after an error.
-  }
+  return database;
 }
 
 function stringValue(value: unknown): string | null {
