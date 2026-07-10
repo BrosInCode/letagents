@@ -131,9 +131,11 @@
         @click="$emit('toggle-rooms-collapsed')"
       >
         <span class="sidebar-heading">Rooms</span>
-        <span class="section-count">{{ totalRoomCount }}</span>
-        <span class="sidebar-section-arrow" :data-collapsed="roomsCollapsed" aria-hidden="true">
-          <ChevronRight />
+        <span class="sidebar-section-meta">
+          <span class="section-count">{{ totalRoomCount }}</span>
+          <span class="sidebar-section-arrow" :data-collapsed="roomsCollapsed" aria-hidden="true">
+            <ChevronRight />
+          </span>
         </span>
       </button>
       <Transition name="sidebar-reveal">
