@@ -18,20 +18,7 @@
   overflow-anchor: none;
   overscroll-behavior: contain;
   padding: 3px 4px 10px 0;
-  scroll-padding-block: 8px var(--scroll-fade-size-active);
-  --scroll-mask-edge: var(--scroll-fade-size-active);
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000,
-    #000 calc(100% - var(--scroll-mask-edge)),
-    transparent
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    #000,
-    #000 calc(100% - var(--scroll-mask-edge)),
-    transparent
-  );
+  scroll-padding-block: 8px 12px;
 }
 
 .project-group {
@@ -55,7 +42,6 @@
   box-shadow:
     0 -12px 0 var(--sidebar-sticky-bg),
     0 6px 10px rgba(0, 0, 0, 0.34);
-  backdrop-filter: var(--sidebar-sticky-filter);
 }
 
 .project-row {
