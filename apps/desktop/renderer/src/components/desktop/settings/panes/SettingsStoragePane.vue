@@ -175,6 +175,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import { useCopyValueIndicator } from "../../../../composables/useCopyIndicator";
 import { isLocalGitRoom } from "../../../../domain/git-rooms";
+import SettingsRow from "../SettingsRow.vue";
 import type { SettingsFeedback, SettingsPaneId } from "../types";
 
 const props = defineProps<{
