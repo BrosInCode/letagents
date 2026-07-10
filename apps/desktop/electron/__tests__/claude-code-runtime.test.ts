@@ -532,16 +532,18 @@ test("Claude Code runtime delivers room events into the SDK runner and persists 
   runtime.dispatchRoomStreamEvent(messageEvent());
   await runtime.waitForIdle();
 
-  assert.equal(prompts.length, 1);
+  // Starting with an explicit model runs a verification probe turn first.
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0]?.prompt ?? "", /model verification probe/i);
   assert.equal(started.session.model, "sonnet");
   assert.equal(started.session.effort, "high");
   assert.equal(getStoredClaudeCodeLiveSession(started.session.id)?.effort, "high");
-  assert.equal(prompts[0]?.model, "sonnet");
-  assert.equal(prompts[0]?.effort, "high");
-  assert.match(prompts[0]?.prompt ?? "", /Desktop-delivered LetAgents room event/);
-  assert.match(prompts[0]?.prompt ?? "", /Do not call raw LetAgents MCP room tools/);
-  assert.match(prompts[0]?.prompt ?? "", /LETAGENTS_ROOM_TOOL_REQUEST/);
-  assert.equal(prompts[0]?.claudeSessionId, null);
+  assert.equal(prompts[1]?.model, "sonnet");
+  assert.equal(prompts[1]?.effort, "high");
+  assert.match(prompts[1]?.prompt ?? "", /Desktop-delivered LetAgents room event/);
+  assert.match(prompts[1]?.prompt ?? "", /Do not call raw LetAgents MCP room tools/);
+  assert.match(prompts[1]?.prompt ?? "", /LETAGENTS_ROOM_TOOL_REQUEST/);
+  assert.equal(prompts[1]?.claudeSessionId, null);
   assert.deepEqual(published, [{ text: "I will check this.", eventId: "msg_1" }]);
   const stored = getStoredClaudeCodeLiveSession(started.session.id);
   assert.equal(stored?.model, "sonnet");
@@ -1157,4 +1159,100 @@ test("delivery pipeline failures exhaust the budget and end the worker", async (
   }));
   await runtime.waitForIdle();
   assert.equal(turns, 3, "failed sessions must not receive further room events");
+});
+
+test("an unsupported model fails the start before a worker is registered", async () => {
+  resetState();
+  let registered = 0;
+  const runtime = createDesktopClaudeCodeRuntime({
+    runner: {
+      async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+        assert.match(input.prompt, /model verification probe/i);
+        assert.equal(input.model, "fable");
+        return {
+          sessionId: null,
+          text: null,
+          status: "error",
+          error: "There's an issue with the selected model (fable). It may not exist or you may not have access to it.",
+          recentItems: [],
+        };
+      },
+    },
+    preflight: async () => readyPreflight(),
+    registerWorker: async (input) => {
+      registered += 1;
+      return fakeRegisterWorker(input);
+    },
+    resolveStorage: async (roomIdentifier) => storageState(roomIdentifier),
+    emitSessionUpdate: () => undefined,
+    now: () => "2026-06-30T00:00:00.000Z",
+  });
+
+  await assert.rejects(
+    () => runtime.start({
+      providerId: "claude-code",
+      roomIdentifier: "room_1",
+      repoRootPath: tempDir,
+      deliveryMode: "desktop_events",
+      model: "fable",
+      modelSource: "known",
+    }),
+    /issue with the selected model \(fable\)/,
+  );
+  assert.equal(registered, 0, "a failed probe must not register a worker");
+  assert.equal(runtime.listSessions("room_1").length, 0);
+});
+
+test("a verified model is probed once per app session", async () => {
+  resetState();
+  let probes = 0;
+  let eventTurns = 0;
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+      if (/model verification probe/i.test(input.prompt)) {
+        probes += 1;
+        return {
+          sessionId: null,
+          text: "ok",
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      eventTurns += 1;
+      return {
+        sessionId: "claude_session_probe",
+        text: "On it.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "On it." }],
+      };
+    },
+  });
+
+  const first = await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    model: "claude-fable-5",
+    modelSource: "known",
+  });
+  assert.equal(probes, 1);
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+  assert.equal(eventTurns, 1);
+  assert.deepEqual(published, [{ text: "On it.", eventId: "msg_1" }]);
+
+  await runtime.stop({ sessionId: first.session.id });
+  await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    model: "claude-fable-5",
+    modelSource: "known",
+  });
+  assert.equal(probes, 1, "a previously verified model must not probe again");
 });
