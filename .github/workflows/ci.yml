@@ -55,6 +55,9 @@ jobs:
       - name: Type check desktop
         run: npm --prefix apps/desktop run typecheck
 
+      - name: Lint desktop Vue components
+        run: npm --prefix apps/desktop run lint:vue-components
+
       - name: Test desktop
         run: npm --prefix apps/desktop test
 
