@@ -25,8 +25,6 @@ import {
   looksLikeInviteCode,
 } from "./codex-start-prompt.js";
 import {
-  canDeliverDesktopEventToManagedAgent,
-  isStopPhraseRoomStreamEvent,
   shouldDeliverRoomStreamEventToManagedAgent,
 } from "./codex-event-routing.js";
 import { buildClaudeCodeDesktopEventPrompt } from "./claude-code-event-prompt.js";
@@ -77,6 +75,7 @@ import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
+import { createManagedAgentEventTurnEngine } from "./managed-agent-event-turn-engine.js";
 import {
   disconnectDesktopManagedWorker,
   normalizeDisplayText,
@@ -86,15 +85,9 @@ import {
 } from "./managed-agent-worker.js";
 import {
   clearDesktopManagedAgentReplyChangeState,
-  desktopManagedAgentReplyChangeSignature,
 } from "./managed-agent-reply-changes.js";
 
 const DEFAULT_CLAUDE_CODE_STOP_PHRASE = "/stop-claude-code-room";
-// After this many consecutive failed turns the session is parked as "failed"
-// (terminal) instead of "unknown", which stays deliverable: a session that
-// errors on every turn (for example an unsupported model) would otherwise
-// keep consuming room events forever while being hidden from every UI list.
-const MAX_CONSECUTIVE_TURN_ERRORS = 3;
 
 type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
 
@@ -112,11 +105,6 @@ const CLAUDE_CODE_WORKER_PROVIDER: ManagedAgentWorkerProvider = {
   unusableIdentityErrorMessage: "LetAgents did not return a usable agent identity for the desktop Claude Code worker.",
   missingActorKeyErrorMessage: "LetAgents desktop Claude Code identity is missing an actor key.",
   replyWarnLabel: "Claude Code",
-};
-
-type ActiveClaudeCodeTurn = {
-  abortController: AbortController;
-  interruptReason: "preempt" | "stop" | null;
 };
 
 interface RegisterClaudeCodeWorkerInput {
@@ -199,9 +187,43 @@ export function createDesktopClaudeCodeRuntime(
   const permissionTimeoutMs =
     dependencies.permissionTimeoutMs ?? DEFAULT_MANAGED_AGENT_PERMISSION_TIMEOUT_MS;
   const now = dependencies.now ?? (() => new Date().toISOString());
-  const queues = new Map<string, Promise<void>>();
-  const activeTurns = new Map<string, ActiveClaudeCodeTurn>();
-  const consecutiveTurnErrors = new Map<string, number>();
+  const engine = createManagedAgentEventTurnEngine<DesktopClaudeCodeLiveSessionState, ClaudeCodeTurnResult>({
+    now,
+    resolveStorage: (roomIdentifier) => resolveStorage(roomIdentifier),
+    getStoredSession: getStoredClaudeCodeLiveSession,
+    toPublicSession: toPublicClaudeCodeManagedAgentSession,
+    updateSession: updateClaudeCodeLiveSession,
+    emitSessionUpdate: (session) => emitSessionUpdate(session),
+    publishReply: (input) => publishReply(input),
+    runTurn: (input) =>
+      runClaudeCodeDesktopEventTurnWithRoomTools({
+        active: input.active,
+        event: input.event,
+        storage: input.storage,
+        abortController: input.abortController,
+        canUseTool: buildClaudeCodePermissionHandler({
+          sessionId: input.active.session_id,
+          event: input.event,
+          storage: input.storage,
+          abortSignal: input.abortController.signal,
+        }),
+      }),
+    applyTurnResult: (current, result) => ({
+      ...current,
+      claude_session_id: result.sessionId ?? current.claude_session_id ?? null,
+      recent_items: result.recentItems,
+    }),
+    // Claude Code turns are always safe to preempt for a newer room event.
+    shouldPreemptOnEnqueue: () => true,
+    replyChangeSessionKey: claudeCodeReplyChangeSessionKey,
+    disconnectWorker: (session) => disconnectWorker(session),
+    onSessionParked: (sessionId) =>
+      clearPendingPermissionRequestsForSession(
+        sessionId,
+        "Permission request was cancelled because the managed agent session failed.",
+      ),
+    onDeliverFinally: (sessionId) => clearPendingPermissionRequestsForSession(sessionId),
+  });
   const verifiedStartModels = new Set<string>();
   const pendingPermissionResolvers = new Map<string, (decision: ManagedAgentPermissionDecision) => void>();
 
@@ -231,33 +253,6 @@ export function createDesktopClaudeCodeRuntime(
       throw new Error(probe.error || `Claude Code could not start with model "${model}".`);
     }
     verifiedStartModels.add(model);
-  }
-
-  function recordConsecutiveTurnError(sessionId: string): boolean {
-    const errorCount = (consecutiveTurnErrors.get(sessionId) ?? 0) + 1;
-    consecutiveTurnErrors.set(sessionId, errorCount);
-    return errorCount >= MAX_CONSECUTIVE_TURN_ERRORS;
-  }
-
-  function exhaustedTurnError(errorText: string): string {
-    return `Stopped after ${MAX_CONSECUTIVE_TURN_ERRORS} consecutive turn errors. Last error: ${errorText}`;
-  }
-
-  /**
-   * Parked sessions are hidden and cannot be stopped from the UI, so ending
-   * the worker registration here is what releases presence and server-side
-   * session state.
-   */
-  async function endExhaustedSessionWorker(sessionId: string): Promise<void> {
-    clearPendingPermissionRequestsForSession(
-      sessionId,
-      "Permission request was cancelled because the managed agent session failed.",
-    );
-    clearDesktopManagedAgentReplyChangeState(claudeCodeReplyChangeSessionKey(sessionId));
-    cleanupAgentSessionAttachments(sessionId);
-    consecutiveTurnErrors.delete(sessionId);
-    const liveSession = getStoredClaudeCodeLiveSession(sessionId);
-    await disconnectWorker(getStoredAgentSession(liveSession?.agent_session_id ?? null));
   }
 
   function listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
@@ -380,18 +375,14 @@ export function createDesktopClaudeCodeRuntime(
       return null;
     }
 
-    const activeTurn = activeTurns.get(session.session_id);
-    if (activeTurn) {
-      activeTurn.interruptReason = "stop";
-      activeTurn.abortController.abort();
-    }
+    engine.interruptActiveTurnForStop(session.session_id);
     clearPendingPermissionRequestsForSession(
       session.session_id,
       "Permission request was cancelled because the managed agent session stopped.",
     );
     clearDesktopManagedAgentReplyChangeState(claudeCodeReplyChangeSessionKey(session.session_id));
     cleanupAgentSessionAttachments(session.session_id);
-    consecutiveTurnErrors.delete(session.session_id);
+    engine.resetTurnErrorBudget(session.session_id);
     const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -419,148 +410,10 @@ export function createDesktopClaudeCodeRuntime(
           event,
         ));
     for (const session of sessions) {
-      enqueueDesktopEventTurn(session, event);
+      engine.enqueueDesktopEventTurn(session, event);
     }
   }
 
-  function enqueueDesktopEventTurn(
-    session: DesktopClaudeCodeLiveSessionState,
-    event: ManagedRoomEvent,
-  ): void {
-    preemptActiveTurn(session.session_id);
-    const previous = queues.get(session.session_id) ?? Promise.resolve();
-    const next = previous
-      .catch(() => undefined)
-      .then(async () => deliverDesktopEventTurn(session.session_id, event, await resolveStorage(event.roomIdentifier)))
-      .catch(async (error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        const stored = getStoredClaudeCodeLiveSession(session.session_id);
-        if (stored && (stored.status === "interrupted" || stored.status === "failed")) {
-          return;
-        }
-        const exhausted = recordConsecutiveTurnError(session.session_id);
-        const updated = clearSessionActiveWork(session.session_id, (current) => ({
-          ...current,
-          status: exhausted ? "failed" : "unknown",
-          last_error: exhausted ? exhaustedTurnError(message) : message,
-          updated_at: now(),
-        }));
-        emitSessionUpdate(updated);
-        if (exhausted) {
-          await endExhaustedSessionWorker(session.session_id);
-        }
-      });
-    queues.set(session.session_id, next);
-    void next.finally(() => {
-      if (queues.get(session.session_id) === next) {
-        queues.delete(session.session_id);
-      }
-    });
-  }
-
-  async function deliverDesktopEventTurn(
-    sessionId: string,
-    event: ManagedRoomEvent,
-    storage: DesktopRoomStorageState,
-  ): Promise<void> {
-    const session = getStoredClaudeCodeLiveSession(sessionId);
-    if (!session || !canDeliverDesktopEventToManagedAgent(toPublicClaudeCodeManagedAgentSession(session))) {
-      return;
-    }
-
-    const stopAfterTurn = isStopPhraseRoomStreamEvent(session, event);
-    const active = markSessionActiveForEvent(session, event);
-    const beforeChangeSignature = await desktopManagedAgentReplyChangeSignature(
-      toPublicClaudeCodeManagedAgentSession(active),
-    );
-    const abortController = new AbortController();
-    const activeTurn: ActiveClaudeCodeTurn = {
-      abortController,
-      interruptReason: null,
-    };
-    activeTurns.set(session.session_id, activeTurn);
-    try {
-      const result = await runClaudeCodeDesktopEventTurnWithRoomTools({
-        active,
-        event,
-        storage,
-        abortController,
-        canUseTool: buildClaudeCodePermissionHandler({
-          sessionId,
-          event,
-          storage,
-          abortSignal: abortController.signal,
-        }),
-      });
-
-      const latest = getStoredClaudeCodeLiveSession(sessionId) ?? active;
-      if (
-        latest.status === "interrupted" &&
-        abortController.signal.aborted &&
-        activeTurn.interruptReason !== "preempt"
-      ) {
-        return;
-      }
-
-      if (result.status === "error") {
-        const wasPreempted = abortController.signal.aborted && activeTurn.interruptReason === "preempt";
-        const aborted = abortController.signal.aborted;
-        const exhausted = !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
-        const updated = clearSessionActiveWork(sessionId, (current) => ({
-          ...current,
-          claude_session_id: result.sessionId ?? current.claude_session_id ?? null,
-          status: wasPreempted
-            ? "completed"
-            : aborted
-              ? "interrupted"
-              : exhausted
-                ? "failed"
-                : "unknown",
-          last_error: wasPreempted
-            ? null
-            : exhausted
-              ? exhaustedTurnError(String(result.error))
-              : result.error,
-          recent_items: result.recentItems,
-          updated_at: now(),
-        }));
-        emitSessionUpdate(updated);
-        if (exhausted) {
-          await endExhaustedSessionWorker(sessionId);
-        }
-        return;
-      }
-
-      const completed = clearSessionActiveWork(sessionId, (current) => ({
-        ...current,
-        claude_session_id: result.sessionId ?? current.claude_session_id ?? null,
-        status: "completed",
-        last_error: null,
-        recent_items: result.recentItems,
-        updated_at: now(),
-      })) ?? latest;
-      emitSessionUpdate(completed);
-      await publishReply({
-        session: completed,
-        event,
-        storage,
-        text: result.text,
-        beforeChangeSignature,
-      });
-      // The error budget resets only after the WHOLE delivery (turn + reply
-      // publication) succeeded, so persistent publish/storage failures still
-      // exhaust the budget via the outer catch below.
-      consecutiveTurnErrors.delete(sessionId);
-      if (stopAfterTurn) {
-        await stopAfterRoomStopPhrase(completed);
-      }
-    } finally {
-      clearPendingPermissionRequestsForSession(session.session_id);
-      if (activeTurns.get(session.session_id) === activeTurn) {
-        activeTurns.delete(session.session_id);
-      }
-    }
-  }
 
   async function runClaudeCodeDesktopEventTurnWithRoomTools(input: {
     active: DesktopClaudeCodeLiveSessionState;
@@ -628,64 +481,6 @@ export function createDesktopClaudeCodeRuntime(
     return { ...loop.turn, sessionId: loop.continuationId };
   }
 
-  function preemptActiveTurn(sessionId: string): void {
-    const activeTurn = activeTurns.get(sessionId);
-    if (!activeTurn || activeTurn.abortController.signal.aborted) {
-      return;
-    }
-    activeTurn.interruptReason = "preempt";
-    activeTurn.abortController.abort();
-  }
-
-  function markSessionActiveForEvent(
-    session: DesktopClaudeCodeLiveSessionState,
-    event: ManagedRoomEvent,
-  ): DesktopClaudeCodeLiveSessionState {
-    const activeWork = activeWorkForEvent(event, now());
-    const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
-      ...current,
-      status: "running",
-      active_work: activeWork,
-      last_error: null,
-      updated_at: activeWork.started_at,
-    })) ?? {
-      ...session,
-      status: "running",
-      active_work: activeWork,
-      last_error: null,
-      updated_at: activeWork.started_at,
-    };
-    emitSessionUpdate(updated);
-    return updated;
-  }
-
-  function clearSessionActiveWork(
-    sessionId: string,
-    updater: (session: DesktopClaudeCodeLiveSessionState) => DesktopClaudeCodeLiveSessionState,
-  ): DesktopClaudeCodeLiveSessionState | null {
-    return updateClaudeCodeLiveSession(sessionId, (current) => ({
-      ...updater(current),
-      active_work: null,
-    }));
-  }
-
-  async function stopAfterRoomStopPhrase(session: DesktopClaudeCodeLiveSessionState): Promise<void> {
-    const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
-      ...current,
-      status: "interrupted",
-      active_work: null,
-      last_error: null,
-      updated_at: now(),
-    })) ?? session;
-    emitSessionUpdate(updated);
-    await disconnectWorker(getStoredAgentSession(updated.agent_session_id));
-  }
-
-  async function waitForIdle(): Promise<void> {
-    while (queues.size > 0) {
-      await Promise.allSettled([...queues.values()]);
-    }
-  }
 
   async function resolvePermissionRequest(
     input: DesktopManagedAgentPermissionDecisionInput,
@@ -738,7 +533,7 @@ export function createDesktopClaudeCodeRuntime(
     inspect,
     stop,
     dispatchRoomStreamEvent,
-    waitForIdle,
+    waitForIdle: engine.waitForIdle,
     resolvePermissionRequest,
   };
 
@@ -1046,17 +841,6 @@ function isManagedRoomStreamEvent(event: DesktopRoomStreamEvent): event is Manag
   return event.type === "message" || event.type === "task_update";
 }
 
-function activeWorkForEvent(
-  event: ManagedRoomEvent,
-  startedAt: string,
-): NonNullable<DesktopClaudeCodeLiveSessionState["active_work"]> {
-  return {
-    kind: event.type,
-    event_id: event.type === "message" ? event.message.id : event.task.id,
-    started_at: startedAt,
-    summary: event.type === "message" ? "Reading the room message." : "Reading the task update.",
-  };
-}
 
 async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeReplyInput): Promise<void> {
   await publishDesktopManagedWorkerReply({
