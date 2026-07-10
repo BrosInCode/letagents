@@ -1,7 +1,8 @@
 import { ref, type Ref } from "vue";
-import type { DesktopAccountRoomEntry, DesktopRoomSnapshot } from "../../../electron/ipc-types";
+import type { DesktopAccountRoomEntry, DesktopRoomInfo, DesktopRoomSnapshot } from "../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import {
+  buildRoomPinMutation,
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
   type RecentRootRoom,
@@ -29,11 +30,20 @@ interface DesktopAccountRoomSettingsOptions {
   refresh: () => Promise<void>;
   refreshAccountRooms: () => Promise<void>;
   onRoomArchived?: (roomIdentifier: string, displayName?: string | null) => Promise<void>;
+  onRoomRenamed?: (room: DesktopRoomInfo) => void;
+  notify?: (message: string, state: "error" | "info" | "success") => void;
 }
 
 export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSettingsOptions) {
   const settingsFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
   const settingsRoomActionBusyKey = ref<string | null>(null);
+
+  // Sidebar-triggered actions report here: the Settings pane may not be
+  // visible, so the outcome also goes to the app-level notifier.
+  function reportSidebarRoomAction(message: string, state: "error" | "info" | "success"): void {
+    settingsFeedback.value = { message, state };
+    options.notify?.(message, state);
+  }
 
   async function refreshSettings(): Promise<void> {
     settingsFeedback.value = { message: "Refreshing account rooms...", state: "info" };
@@ -132,6 +142,90 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     }
   }
 
+  async function renameSidebarRoom(entry: RoomEntry): Promise<void> {
+    if (!entry.roomIdentifier) return;
+    const displayName = window.prompt(`Rename ${entry.title}:`, entry.title)?.trim();
+    if (!displayName || displayName === entry.title.trim()) return;
+    settingsRoomActionBusyKey.value = `rename:${entry.roomIdentifier}`;
+    try {
+      const room = await window.letagentsDesktop.room.rename(entry.roomIdentifier, displayName);
+      options.onRoomRenamed?.(room);
+      await options.refreshAccountRooms();
+      reportSidebarRoomAction(`Renamed to ${room.displayName || displayName}.`, "success");
+    } catch (error) {
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not rename ${entry.title}.`,
+        "error",
+      );
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
+  async function archiveSidebarFocusRoom(entry: RoomEntry): Promise<void> {
+    if (!entry.focusKey || !entry.parentRoomIdentifier) return;
+    const displayName = entry.title || entry.roomIdentifier || "this focus room";
+    const confirmed = window.confirm(
+      `Hide ${displayName}? It will be removed from the focus room manager, but the room history is preserved.`,
+    );
+    if (!confirmed) return;
+    settingsRoomActionBusyKey.value = `archive-focus:${entry.roomIdentifier || entry.focusKey}`;
+    try {
+      await window.letagentsDesktop.room.archiveFocusRoom(entry.parentRoomIdentifier, entry.focusKey);
+      await options.refresh();
+      reportSidebarRoomAction(`${displayName} hidden.`, "success");
+    } catch (error) {
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not hide ${displayName}.`,
+        "error",
+      );
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
+  async function togglePinSidebarRoom(entry: RoomEntry): Promise<void> {
+    const mutation = buildRoomPinMutation(entry);
+    if (!mutation) return;
+    const displayName = entry.title || entry.roomIdentifier || "Room";
+    settingsRoomActionBusyKey.value = `pin:${entry.roomIdentifier || mutation.roomIdentifiers[0]}`;
+    try {
+      // Unpinning clears every pinned account room in the group, not just the
+      // projected parent, so the aggregated pin state cannot stick. Wait for
+      // every request even when one fails: some may still have succeeded, and
+      // the sidebar must be refreshed to whatever state the server now holds.
+      const results = await Promise.allSettled(mutation.roomIdentifiers.map((roomIdentifier) =>
+        window.letagentsDesktop.room.updateAccountRoom(roomIdentifier, { pinned: mutation.pinned })
+      ));
+      await options.refreshAccountRooms();
+      const failures = results.filter(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (!failures.length) {
+        reportSidebarRoomAction(
+          mutation.pinned ? `${displayName} pinned.` : `${displayName} unpinned.`,
+          "success",
+        );
+        return;
+      }
+      const reason = failures[0].reason;
+      const detail = reason instanceof Error ? reason.message : `Could not update ${displayName}.`;
+      reportSidebarRoomAction(
+        failures.length === results.length
+          ? detail
+          : `Only ${results.length - failures.length} of ${results.length} rooms in ${displayName} were updated: ${detail}`,
+        "error",
+      );
+    } catch (error) {
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not update ${displayName}.`,
+        "error",
+      );
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
   async function archiveSidebarRoom(entry: RoomEntry): Promise<void> {
     if (entry.kind !== "parent" || !entry.roomIdentifier) return;
     const roomIdentifier = entry.roomIdentifier;
@@ -150,15 +244,15 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       forgetRecentRootRoom(roomIdentifier, displayName);
       await options.refreshAccountRooms();
       await options.onRoomArchived?.(roomIdentifier, displayName);
-      settingsFeedback.value = {
-        message: isAccountRoom ? `${displayName} hidden from your rooms.` : `${displayName} hidden from recent rooms.`,
-        state: "success",
-      };
+      reportSidebarRoomAction(
+        isAccountRoom ? `${displayName} hidden from your rooms.` : `${displayName} hidden from recent rooms.`,
+        "success",
+      );
     } catch (error) {
-      settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not hide ${displayName}.`,
-        state: "error",
-      };
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not hide ${displayName}.`,
+        "error",
+      );
     } finally {
       settingsRoomActionBusyKey.value = null;
     }
@@ -228,14 +322,17 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   }
 
   return {
+    archiveSidebarFocusRoom,
     archiveSidebarRoom,
     deleteAccountRoom,
     leaveAccountRoom,
+    renameSidebarRoom,
     openAccountRoomFromSettings,
     refreshSettings,
     restoreAccountRoom,
     settingsFeedback,
     settingsRoomActionBusyKey,
     toggleAccountRoomPin,
+    togglePinSidebarRoom,
   };
 }

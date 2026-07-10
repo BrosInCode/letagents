@@ -16,7 +16,11 @@
       </button>
     </div>
 
-    <div v-if="sidebarMode === 'expanded'" class="sidebar-actions">
+    <div
+      v-if="sidebarMode === 'expanded'"
+      class="sidebar-actions"
+      @contextmenu.prevent="openBackgroundContextMenu"
+    >
       <button
         class="sidebar-cta"
         type="button"
@@ -112,7 +116,12 @@
       </section>
     </div>
 
-    <section v-if="sidebarMode === 'expanded'" class="sidebar-section" data-testid="sidebar-section-rooms">
+    <section
+      v-if="sidebarMode === 'expanded'"
+      class="sidebar-section"
+      data-testid="sidebar-section-rooms"
+      @contextmenu.prevent="openBackgroundContextMenu"
+    >
       <button
         class="sidebar-section-header"
         type="button"
@@ -256,50 +265,51 @@
       </button>
     </div>
 
-    <div
+    <DesktopContextMenu
       v-if="roomContextMenu"
-      class="sidebar-context-menu"
-      role="menu"
-      :style="{ left: `${roomContextMenu.x}px`, top: `${roomContextMenu.y}px` }"
-      data-testid="sidebar-room-context-menu"
-      @click.stop
-      @contextmenu.prevent
-    >
-      <p class="sidebar-context-title">{{ roomContextMenu.entry.title }}</p>
-      <button v-if="isSelectableRoom(roomContextMenu.entry)" type="button" role="menuitem" @click="selectContextRoom">
-        <House aria-hidden="true" />
-        <span>Open room</span>
-      </button>
-      <button type="button" role="menuitem" :disabled="!roomContextMenu.entry.roomIdentifier" @click="copyContextRoomUrl">
-        <Copy aria-hidden="true" />
-        <span>Copy URL</span>
-      </button>
-      <button
-        v-if="contextProject"
-        type="button"
-        role="menuitem"
-        @click="toggleContextProject"
-      >
-        <ChevronRight aria-hidden="true" />
-        <span>{{ collapsedProjects[contextProject.id] ? "Expand rooms" : "Collapse rooms" }}</span>
-      </button>
-      <button
-        v-if="canArchiveContextRoom"
-        type="button"
-        role="menuitem"
-        @click="archiveContextRoom"
-      >
-        <Archive aria-hidden="true" />
-        <span>{{ archiveContextLabel }}</span>
-      </button>
-    </div>
+      :item-groups="roomContextMenuItemGroups"
+      :position="roomContextMenu"
+      :title="roomContextMenu.entry.title"
+      testid="sidebar-room-context-menu"
+      @select="handleRoomContextMenuSelect"
+      @close="closeRoomContextMenu"
+    />
+    <DesktopContextMenu
+      v-if="backgroundContextMenu"
+      :item-groups="backgroundContextMenuItemGroups"
+      :position="backgroundContextMenu"
+      testid="sidebar-background-context-menu"
+      @select="handleBackgroundContextMenuSelect"
+      @close="closeBackgroundContextMenu"
+    />
   </aside>
 </template>
 
 <script setup lang="ts">
-import { Archive, ChevronRight, Copy, House, Pin, Plus, Settings } from "@lucide/vue";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  Archive,
+  Check,
+  ChevronRight,
+  Copy,
+  ExternalLink,
+  GitBranch,
+  House,
+  Pencil,
+  Pin,
+  PinOff,
+  Plus,
+  Settings,
+} from "@lucide/vue";
+import { computed, ref, watch, type Component } from "vue";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import {
+  buildGitRoomWebUrl,
+  buildSidebarBackgroundMenuItems,
+  buildSidebarRoomContextMenuItems,
+  type SidebarBackgroundMenuActionId,
+  type SidebarRoomMenuActionId,
+} from "../../../domain/sidebar-context-menu";
+import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
 import type { ProjectGroup, SidebarEntry, SidebarMode, SystemEntry, RoomEntry } from "../types";
 
 const props = defineProps<{
@@ -313,10 +323,16 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "context-menu-open": [open: boolean];
   "cycle-sidebar": [];
   "new-room": [];
   "archive-room": [entry: RoomEntry];
+  "archive-focus-room": [entry: RoomEntry];
+  "mark-room-read": [entry: RoomEntry];
+  "pin-room": [entry: RoomEntry];
+  "rename-room": [entry: RoomEntry];
   "select-entry": [entry: SidebarEntry];
+  "set-projects-collapsed": [collapsed: boolean];
   "toggle-project": [projectId: string];
   "toggle-rooms-collapsed": [];
 }>();
@@ -329,6 +345,14 @@ type RoomContextMenu = {
 };
 
 const roomContextMenu = ref<RoomContextMenu | null>(null);
+const backgroundContextMenu = ref<{ x: number; y: number } | null>(null);
+
+// The sidebar peek panel closes on pointerleave; it needs to know a menu is
+// active (teleported outside the panel) so it can stay open underneath it.
+watch(
+  () => Boolean(roomContextMenu.value || backgroundContextMenu.value),
+  (open) => emit("context-menu-open", open),
+);
 
 const pinnedProjectEntries = computed(() => props.projectEntries.filter((project) => project.parent.pinned));
 const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
@@ -337,63 +361,114 @@ const totalRoomCount = computed(() =>
   roomProjectEntries.value.reduce((total, project) => total + 1 + projectChildRooms(project).length, 0)
 );
 
-const contextProject = computed(() => {
-  const projectId = roomContextMenu.value?.projectId;
-  if (!projectId) return null;
-  return props.projectEntries.find((project) => project.id === projectId && projectChildRooms(project).length) || null;
+const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
+  "open-room": House,
+  "mark-room-read": Check,
+  "pin-room": Pin,
+  "rename-room": Pencil,
+  "copy-room-url": Copy,
+  "copy-branch-name": GitBranch,
+  "open-on-github": ExternalLink,
+  "toggle-project": ChevronRight,
+  "archive-focus-room": Archive,
+  "archive-room": Archive,
+};
+
+function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopContextMenuItem[][] {
+  const project = projectId
+    ? props.projectEntries.find((candidate) => candidate.id === projectId && projectChildRooms(candidate).length)
+    : null;
+  return buildSidebarRoomContextMenuItems({
+    entry,
+    isPrimaryRoom: entry.id === props.primaryRoom.id,
+    hasProjectChildren: Boolean(project),
+    projectCollapsed: Boolean(project && props.collapsedProjects[project.id]),
+  }).map((group) => group.map((item) => ({
+    ...item,
+    icon: item.id === "pin-room" && entry.pinned ? PinOff : roomMenuIcons[item.id],
+  })));
+}
+
+const roomContextMenuItemGroups = computed<DesktopContextMenuItem[][]>(() => {
+  const menu = roomContextMenu.value;
+  return menu ? roomMenuGroupsFor(menu.entry, menu.projectId) : [];
 });
 
-const canArchiveContextRoom = computed(() => {
-  const entry = roomContextMenu.value?.entry;
-  if (!entry || entry.kind !== "parent" || !entry.roomIdentifier) return false;
-  return entry.id !== props.primaryRoom.id;
-});
+const backgroundMenuIcons: Record<SidebarBackgroundMenuActionId, Component> = {
+  "new-room": Plus,
+  "set-projects-collapsed": ChevronRight,
+};
 
-const archiveContextLabel = computed(() =>
-  roomContextMenu.value?.entry.source === "recent"
-    ? "Remove from my rooms"
-    : "Hide room",
+const allProjectsCollapsed = computed(() =>
+  props.projectEntries.every((project) =>
+    !projectChildRooms(project).length || props.collapsedProjects[project.id]
+  )
+);
+
+const backgroundContextMenuItemGroups = computed<DesktopContextMenuItem[][]>(() =>
+  buildSidebarBackgroundMenuItems({
+    hasProjects: props.projectEntries.some((project) => projectChildRooms(project).length > 0),
+    allProjectsCollapsed: allProjectsCollapsed.value,
+  }).map((group) => group.map((item) => ({ ...item, icon: backgroundMenuIcons[item.id] })))
 );
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
-  const menuWidth = 228;
-  const hasProjectToggle = Boolean(projectId && projectChildRooms(props.projectEntries.find((project) => project.id === projectId)).length);
-  const menuHeight = hasProjectToggle ? 196 : entry.kind === "parent" ? 156 : 116;
-  const sidebarRect = (event.currentTarget as HTMLElement | null)
-    ?.closest(".app-sidebar")
-    ?.getBoundingClientRect();
-  const minX = sidebarRect ? sidebarRect.left + 10 : 10;
-  const maxX = Math.max(minX, (sidebarRect?.right || window.innerWidth) - menuWidth - 10);
-  roomContextMenu.value = {
-    entry,
-    projectId,
-    x: Math.max(minX, Math.min(event.clientX, maxX)),
-    y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10)),
-  };
+  backgroundContextMenu.value = null;
+  roomContextMenu.value = roomMenuGroupsFor(entry, projectId).length
+    ? { entry, projectId, x: event.clientX, y: event.clientY }
+    : null;
 }
 
 function closeRoomContextMenu(): void {
   roomContextMenu.value = null;
 }
 
-function selectContextRoom(): void {
-  const entry = roomContextMenu.value?.entry;
-  if (!entry || !isSelectableRoom(entry)) return;
-  emit("select-entry", entry);
-  closeRoomContextMenu();
+function openBackgroundContextMenu(event: MouseEvent): void {
+  roomContextMenu.value = null;
+  backgroundContextMenu.value = { x: event.clientX, y: event.clientY };
 }
 
-function toggleContextProject(): void {
-  const projectId = roomContextMenu.value?.projectId;
-  if (!projectId) return;
-  emit("toggle-project", projectId);
-  closeRoomContextMenu();
+function closeBackgroundContextMenu(): void {
+  backgroundContextMenu.value = null;
 }
 
-function archiveContextRoom(): void {
-  if (!roomContextMenu.value || !canArchiveContextRoom.value) return;
-  emit("archive-room", roomContextMenu.value.entry);
-  closeRoomContextMenu();
+function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
+  const menu = roomContextMenu.value;
+  if (!menu) return;
+  const actions: Record<SidebarRoomMenuActionId, () => void> = {
+    "open-room": () => emit("select-entry", menu.entry),
+    "mark-room-read": () => emit("mark-room-read", menu.entry),
+    "pin-room": () => emit("pin-room", menu.entry),
+    "rename-room": () => emit("rename-room", menu.entry),
+    "copy-room-url": () =>
+      void copyText(menu.entry.roomIdentifier ? buildLetAgentsRoomCopyValue(menu.entry.roomIdentifier) : null),
+    "copy-branch-name": () => void copyText(menu.entry.gitRoom?.ref.name ?? null),
+    "open-on-github": () => {
+      const url = buildGitRoomWebUrl(menu.entry.gitRoom ?? null);
+      if (url) void window.letagentsDesktop.app.openGitHubUrl(url);
+    },
+    "toggle-project": () => {
+      if (menu.projectId) emit("toggle-project", menu.projectId);
+    },
+    "archive-focus-room": () => emit("archive-focus-room", menu.entry),
+    "archive-room": () => emit("archive-room", menu.entry),
+  };
+  actions[item.id as SidebarRoomMenuActionId]?.();
+}
+
+function handleBackgroundContextMenuSelect(item: DesktopContextMenuItem): void {
+  if (item.id === "new-room") {
+    emit("new-room");
+    return;
+  }
+  if (item.id === "set-projects-collapsed") {
+    emit("set-projects-collapsed", !allProjectsCollapsed.value);
+  }
+}
+
+async function copyText(value: string | null): Promise<void> {
+  if (!value) return;
+  await navigator.clipboard?.writeText(value);
 }
 
 function projectSubtitle(project: ProjectGroup): string {
@@ -429,27 +504,4 @@ function selectOrToggleProject(project: ProjectGroup): void {
   }
 }
 
-async function copyContextRoomUrl(): Promise<void> {
-  const identifier = roomContextMenu.value?.entry.roomIdentifier;
-  if (!identifier) return;
-  try {
-    await navigator.clipboard?.writeText(buildLetAgentsRoomCopyValue(identifier));
-  } finally {
-    closeRoomContextMenu();
-  }
-}
-
-function handleGlobalKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRoomContextMenu();
-}
-
-onMounted(() => {
-  window.addEventListener("click", closeRoomContextMenu);
-  window.addEventListener("keydown", handleGlobalKeydown);
-});
-
-onBeforeUnmount(() => {
-  window.removeEventListener("click", closeRoomContextMenu);
-  window.removeEventListener("keydown", handleGlobalKeydown);
-});
 </script>

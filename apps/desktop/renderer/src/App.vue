@@ -57,7 +57,12 @@
       @cycle-sidebar="cycleSidebar"
       @new-room="selectNewRoomEntry"
       @archive-room="archiveSidebarRoom"
+      @archive-focus-room="archiveSidebarFocusRoom"
+      @mark-room-read="markRoomEntryRead"
+      @pin-room="togglePinSidebarRoom"
+      @rename-room="renameSidebarRoom"
       @select-entry="handleSidebarEntrySelected"
+      @set-projects-collapsed="setAllProjectsCollapsed"
       @toggle-project="toggleProject"
       @toggle-rooms-collapsed="toggleRoomsCollapsed"
     />
@@ -96,10 +101,16 @@
           :settings-entry="settingsEntry"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
+          @context-menu-open="handleSidebarPeekMenuOpen"
           @cycle-sidebar="closeSidebarPeek"
           @new-room="selectNewRoomEntry"
           @archive-room="archiveSidebarRoom"
+          @archive-focus-room="archiveSidebarFocusRoom"
+          @mark-room-read="markRoomEntryRead"
+          @pin-room="togglePinSidebarRoom"
+          @rename-room="renameSidebarRoom"
           @select-entry="handleSidebarEntrySelected"
+          @set-projects-collapsed="setAllProjectsCollapsed"
           @toggle-project="toggleProject"
           @toggle-rooms-collapsed="toggleRoomsCollapsed"
         />
@@ -263,6 +274,24 @@
         @retry="retryLastAction"
       />
     </Transition>
+
+    <div
+      class="desktop-action-toasts"
+      role="status"
+      :aria-live="actionToasts.some((toast) => toast.state === 'error') ? 'assertive' : 'polite'"
+      data-testid="desktop-action-toasts"
+    >
+      <button
+        v-for="toast in actionToasts"
+        :key="toast.id"
+        type="button"
+        class="desktop-action-toast"
+        :data-state="toast.state"
+        @click="dismissActionToast(toast.id)"
+      >
+        {{ toast.message }}
+      </button>
+    </div>
   </main>
 </template>
 
@@ -300,6 +329,7 @@ import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
+import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
@@ -416,8 +446,12 @@ let repoStatusRefreshTimer: number | null = null;
 let repoStatusWatchRootPath: string | null = null;
 let repoStatusWatchRequestId = 0;
 
+const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
+
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const sidebarPeekOpen = ref(false);
+const sidebarPeekMenuOpen = ref(false);
+const sidebarPeekCloseSuppressed = ref(false);
 const showSidebarPeek = computed(() => !isSettingsSurface.value && sidebarMode.value === "hidden");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
 const desktopShellStyle = computed(() => ({
@@ -493,11 +527,27 @@ function openSettingsSurface(): void {
 
 function openSidebarPeek(): void {
   if (!showSidebarPeek.value) return;
+  sidebarPeekMenuOpen.value = false;
+  sidebarPeekCloseSuppressed.value = false;
   sidebarPeekOpen.value = true;
 }
 
 function closeSidebarPeek(): void {
+  // A context menu teleports outside the peek panel; leaving the panel to use
+  // it must not unmount the menu. Defer the close until the menu settles.
+  if (sidebarPeekMenuOpen.value) {
+    sidebarPeekCloseSuppressed.value = true;
+    return;
+  }
   sidebarPeekOpen.value = false;
+}
+
+function handleSidebarPeekMenuOpen(open: boolean): void {
+  sidebarPeekMenuOpen.value = open;
+  if (!open && sidebarPeekCloseSuppressed.value) {
+    sidebarPeekCloseSuppressed.value = false;
+    sidebarPeekOpen.value = false;
+  }
 }
 
 function readStoredSidebarWidth(): number {
@@ -804,6 +854,12 @@ function markRoomEntryRead(entry: RoomEntry): void {
   rememberRoomMessageIds();
 }
 
+function setAllProjectsCollapsed(collapsed: boolean): void {
+  collapsedProjects.value = Object.fromEntries(
+    projectEntries.value.map((project) => [project.id, collapsed]),
+  );
+}
+
 function rememberRoomMessageIds(): void {
   try {
     window.localStorage.setItem(readRoomMessagesStorageKey, JSON.stringify(readRoomMessageIds.value));
@@ -920,15 +976,18 @@ const {
       : "cloud",
 });
 const {
+  archiveSidebarFocusRoom,
   archiveSidebarRoom,
   deleteAccountRoom,
   leaveAccountRoom,
   openAccountRoomFromSettings,
   refreshSettings,
+  renameSidebarRoom,
   restoreAccountRoom,
   settingsFeedback,
   settingsRoomActionBusyKey,
   toggleAccountRoomPin,
+  togglePinSidebarRoom,
 } = useDesktopAccountRoomSettings({
   accountRooms,
   activeEntry,
@@ -946,6 +1005,12 @@ const {
   onRoomArchived: async (roomIdentifier, displayName) => {
     await leaveArchivedRoomIfActive(roomIdentifier, displayName);
   },
+  onRoomRenamed: (room) => {
+    if (normalizeRoomIdentifier(room.identifier) === normalizeRoomIdentifier(selectedRoomIdentifier.value)) {
+      handleRoomRenamed(room);
+    }
+  },
+  notify: (message, state) => pushActionToast(message, state),
 });
 
 const {
