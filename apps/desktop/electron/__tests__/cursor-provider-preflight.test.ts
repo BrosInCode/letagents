@@ -2,23 +2,27 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import type { DesktopAgentProvider, DesktopAgentProviderPreflightInput } from "../ipc-types.js";
+import { createElectronTestEnv } from "./harness.js";
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-cursor-provider-preflight-"));
-const statePath = join(tempDir, "mcp-state.json");
+const { tempDir } = createElectronTestEnv({
+  prefix: "letagents-cursor-provider-preflight-",
+  paths: ["state"],
+  extraCleanupEnvKeys: [
+    "LETAGENTS_CURSOR_SOURCE_HOME",
+    "LETAGENTS_CURSOR_MANAGED_HOME",
+    "LETAGENTS_CURSOR_AGENT_BIN",
+  ],
+});
 const cursorSourceHome = join(tempDir, "cursor-source-home");
 const cursorManagedHome = join(tempDir, "cursor-managed-home");
 const fakeCursorBin = join(tempDir, "cursor-agent-fake.js");
-process.env.LETAGENTS_STATE_PATH = statePath;
 process.env.LETAGENTS_CURSOR_SOURCE_HOME = cursorSourceHome;
 process.env.LETAGENTS_CURSOR_MANAGED_HOME = cursorManagedHome;
 process.env.LETAGENTS_CURSOR_AGENT_BIN = fakeCursorBin;
@@ -77,14 +81,6 @@ function runPreflight(input: DesktopAgentProviderPreflightInput) {
     commandTimeoutMs: 0,
   });
 }
-
-test.after(() => {
-  delete process.env.LETAGENTS_STATE_PATH;
-  delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
-  delete process.env.LETAGENTS_CURSOR_MANAGED_HOME;
-  delete process.env.LETAGENTS_CURSOR_AGENT_BIN;
-  rmSync(tempDir, { recursive: true, force: true });
-});
 
 test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
   const workspace = workspaceFixture("default-filter");

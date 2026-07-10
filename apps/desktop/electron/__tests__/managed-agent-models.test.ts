@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-managed-agent-models-"));
+import { createElectronTestEnv } from "./harness.js";
+
+const { tempDir } = createElectronTestEnv({
+  prefix: "letagents-managed-agent-models-",
+  paths: [],
+  extraCleanupEnvKeys: [
+    "LETAGENTS_CODEX_BIN",
+    "LETAGENTS_CURSOR_AGENT_BIN",
+    "LETAGENTS_CURSOR_MANAGED_HOME",
+    "LETAGENTS_CURSOR_SOURCE_HOME",
+    "LETAGENTS_STATE_PATH",
+  ],
+});
 
 const {
   listDesktopAgentProviderModels,
@@ -15,15 +26,6 @@ const {
   parseCursorModelsOutput,
   validateDesktopManagedAgentModel,
 } = await import("../main/agents/managed-agent-models.js");
-
-test.after(() => {
-  delete process.env.LETAGENTS_CODEX_BIN;
-  delete process.env.LETAGENTS_CURSOR_AGENT_BIN;
-  delete process.env.LETAGENTS_CURSOR_MANAGED_HOME;
-  delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
-  delete process.env.LETAGENTS_STATE_PATH;
-  rmSync(tempDir, { recursive: true, force: true });
-});
 
 test("managed agent model normalization trims blanks to null", () => {
   assert.equal(normalizeManagedAgentModel("  sonnet  "), "sonnet");

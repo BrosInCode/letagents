@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-managed-agent-room-tools-"));
-process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
-process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
+import { createElectronTestEnv } from "./harness.js";
+
+const { tempDir, resetState: writeEmptyState } = createElectronTestEnv({
+  prefix: "letagents-managed-agent-room-tools-",
+  paths: ["state", "localChatDb"],
+});
 
 const { DesktopApiError } = await import("../main/auth.js");
 const {
@@ -29,14 +29,8 @@ import type { ManagedAgentRoomToolLoopTurn } from "../main/agents/managed-agent-
 import type { ManagedAgentRoomToolCache } from "../main/agents/managed-agent-room-tools.js";
 import type { ManagedAgentRoomToolRequest } from "../main/agents/managed-agent-room-tools-protocol.js";
 
-test.after(() => {
-  delete process.env.LETAGENTS_STATE_PATH;
-  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
-  rmSync(tempDir, { recursive: true, force: true });
-});
-
 function resetState(): void {
-  writeFileSync(process.env.LETAGENTS_STATE_PATH ?? "", "{}\n", "utf-8");
+  writeEmptyState();
   saveAgentSession({
     session_id: "agent_session_1",
     session_token: "secret_session_token",

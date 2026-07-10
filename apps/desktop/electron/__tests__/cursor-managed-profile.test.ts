@@ -2,30 +2,28 @@ import assert from "node:assert/strict";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-const tempDir = mkdirTemp("letagents-cursor-managed-profile-");
-process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
+import { createElectronTestEnv } from "./harness.js";
+
+const { tempDir } = createElectronTestEnv({
+  prefix: "letagents-cursor-managed-profile-",
+  paths: ["state"],
+  extraCleanupEnvKeys: [
+    "LETAGENTS_CURSOR_MANAGED_HOME",
+    "LETAGENTS_CURSOR_SOURCE_HOME",
+  ],
+});
 
 const {
   filterLetAgentsCursorMcpConfig,
   normalizeCursorMcpPolicy,
   prepareCursorManagedProfile,
 } = await import("../main/agents/cursor-managed-profile.js");
-
-test.after(() => {
-  delete process.env.LETAGENTS_STATE_PATH;
-  delete process.env.LETAGENTS_CURSOR_MANAGED_HOME;
-  delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
-  rmSync(tempDir, { recursive: true, force: true });
-});
 
 test("Cursor managed profile defaults to filtering LetAgents while preserving other MCP servers", () => {
   const sourceHome = join(tempDir, "source-home-filter");
@@ -187,7 +185,3 @@ test("Cursor MCP policy normalization defaults to filter_letagents", () => {
   assert.equal(normalizeCursorMcpPolicy("normal"), "normal");
   assert.equal(normalizeCursorMcpPolicy("none"), "none");
 });
-
-function mkdirTemp(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
-}

@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-"));
-process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
-process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
-process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
-process.env.LETAGENTS_LOCAL_PROFILE_PATH = join(tempDir, "local-profile.json");
+import { createElectronTestEnv } from "./harness.js";
+
+const { tempDir, resetState } = createElectronTestEnv({
+  prefix: "letagents-cursor-runtime-",
+  paths: ["state", "chatStorage", "localChatDb", "localProfile"],
+  extraCleanupEnvKeys: ["LETAGENTS_CURSOR_SOURCE_HOME"],
+});
 const cursorSourceHome = join(tempDir, "cursor-source-home");
 mkdirSync(join(cursorSourceHome, ".cursor"), { recursive: true });
 writeFileSync(join(cursorSourceHome, ".cursor", "mcp.json"), '{"mcpServers":{"filesystem":{"command":"npx"}}}\n');
@@ -36,19 +37,6 @@ import type {
   CursorTurnResult,
 } from "../main/agents/cursor-runner.js";
 import type { StoredAgentSessionState } from "../main/agents/state.js";
-
-test.after(() => {
-  delete process.env.LETAGENTS_STATE_PATH;
-  delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
-  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
-  delete process.env.LETAGENTS_LOCAL_PROFILE_PATH;
-  delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
-  rmSync(tempDir, { recursive: true, force: true });
-});
-
-function resetState(state: Record<string, unknown> = {}): void {
-  writeFileSync(process.env.LETAGENTS_STATE_PATH ?? "", `${JSON.stringify(state, null, 2)}\n`, "utf-8");
-}
 
 function readyPreflight(): DesktopAgentProviderPreflight {
   return {

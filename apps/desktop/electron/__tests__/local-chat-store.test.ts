@@ -1,23 +1,22 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import type { DesktopGitRoomInfo, DesktopTaskSummary } from "../ipc-types.js";
+import { createElectronTestEnv } from "./harness.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const nodeRequire = createRequire(import.meta.url);
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-desktop-local-chat-"));
-process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
-process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
-process.env.LETAGENTS_LOCAL_PROFILE_PATH = join(tempDir, "local-profile.json");
+const { tempDir } = createElectronTestEnv({
+  prefix: "letagents-desktop-local-chat-",
+  paths: ["chatStorage", "localChatDb", "localProfile"],
+});
 
 const {
   addLocalChatMessage,
@@ -69,13 +68,6 @@ const {
 const {
   executeManagedAgentContextRequest,
 } = await import("../main/agents/managed-agent-context.js");
-
-test.after(() => {
-  delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
-  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
-  delete process.env.LETAGENTS_LOCAL_PROFILE_PATH;
-  rmSync(tempDir, { recursive: true, force: true });
-});
 
 test("desktop local chat store persists messages, replies, and sync metadata", async () => {
   const first = await addLocalChatMessage("room_1", {
