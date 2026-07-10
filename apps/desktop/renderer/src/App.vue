@@ -134,6 +134,8 @@
         :auth-status="authStatus"
         :busy="authBusy || loading"
         :feedback="authFeedback"
+        :snapshot-pending="selectedSnapshotLoading && !selectedSnapshot"
+        :room-label="selectedRoomInfo.displayName || selectedRoomInfo.name"
         @start-auth="startAuthFlow"
         @open-verification="openVerification"
         @poll-auth="pollAuthFlow"
