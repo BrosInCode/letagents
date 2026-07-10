@@ -67,6 +67,21 @@ test("Cursor model parser handles labels, defaults, duplicates, and empty lines"
   ]);
 });
 
+test("Cursor model parser accepts bullet and plain model listings", () => {
+  const models = parseCursorModelsOutput([
+    "\u001b[1mAvailable models\u001b[0m",
+    "- auto",
+    "  composer-2.5 - Composer 2.5",
+    "gpt-5.2 (default)",
+  ].join("\n"));
+
+  assert.deepEqual(models, [
+    { id: "auto", label: "auto", isDefault: false, source: "provider" },
+    { id: "composer-2.5", label: "Composer 2.5", isDefault: false, source: "provider" },
+    { id: "gpt-5.2", label: "gpt-5.2 (default)", isDefault: true, source: "provider" },
+  ]);
+});
+
 test("Codex model parser handles refreshed catalog JSON", () => {
   const models = parseCodexModelsOutput(JSON.stringify({
     models: [

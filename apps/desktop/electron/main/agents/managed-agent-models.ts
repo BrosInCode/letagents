@@ -349,12 +349,13 @@ async function listOpenModelModels(
 export function parseCursorModelsOutput(output: string): DesktopAgentProviderModelOption[] {
   const models: DesktopAgentProviderModelOption[] = [];
   const seen = new Set<string>();
-  for (const line of output.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    const match = /^(\S+)\s+-\s+(.+)$/.exec(trimmed);
+  for (const rawLine of output.split(/\r?\n/)) {
+    const trimmed = rawLine.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "").trim();
+    if (!trimmed || /^(available\s+)?models?:?$/i.test(trimmed)) continue;
+    const match = /^(?:[-*•]\s*)?(\S+)(?:\s+-\s+(.+)|\s+(\([^)]*\)))?$/.exec(trimmed);
     if (!match) continue;
     const id = match[1]?.trim();
-    const label = match[2]?.trim();
+    const label = match[2]?.trim() || (match[3] ? `${id} ${match[3].trim()}` : id);
     if (!id || !label || seen.has(id)) continue;
     seen.add(id);
     models.push({

@@ -1,101 +1,112 @@
 <template>
   <Teleport to="body">
-    <div
-      v-if="open"
-      class="desktop-add-agent-backdrop"
-      data-testid="desktop-add-agent-modal"
-      @click.self="emit('close')"
-    >
-      <section
-        ref="dialogElement"
-        class="desktop-add-agent-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="desktop-add-agent-title"
-        tabindex="-1"
-        @keydown.esc.prevent="emit('close')"
-        @keydown.tab="handleDialogTab"
+    <Transition name="desktop-add-agent-dialog">
+      <div
+        v-if="open"
+        class="desktop-add-agent-backdrop"
+        data-testid="desktop-add-agent-modal"
+        @click.self="emit('close')"
       >
-        <header class="desktop-add-agent-header">
-          <div>
-            <span>Add agent</span>
-            <h3 id="desktop-add-agent-title">Bring an agent into this room</h3>
-            <p>
-              Choose a provider, then complete any setup needed before it can join
-              <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
-            </p>
-          </div>
-          <button
-            class="desktop-modal-close"
-            type="button"
-            aria-label="Close add agent dialog"
-            @click="emit('close')"
-          >
-            <X aria-hidden="true" />
-          </button>
-        </header>
-
-        <div class="desktop-add-agent-body">
-          <section class="desktop-add-agent-providers" aria-label="Agent providers">
-            <button
-              v-for="provider in providers"
-              :key="provider.id"
-              class="desktop-add-agent-provider"
-              type="button"
-              :data-selected="provider.id === selectedProviderId"
-              :data-testid="`desktop-add-agent-provider-${provider.id}`"
-              @click="selectProvider(provider.id)"
-            >
-              <span class="desktop-add-agent-provider-icon" aria-hidden="true">
-                <McpHarnessIcon :target-id="provider.mcpTargetId" />
-              </span>
-              <span>
-                <strong>{{ provider.name }}</strong>
-                <small>{{ provider.description }}</small>
-              </span>
-            </button>
-          </section>
-
-          <section class="desktop-add-agent-status" :data-state="preflight?.status || 'loading'">
-            <div class="desktop-add-agent-status-header">
-              <div>
-                <span>{{ selectedProvider?.name || "Provider" }}</span>
-                <h4>{{ statusTitle }}</h4>
-              </div>
-              <button
-                type="button"
-                :disabled="loadingPreflight || !selectedProviderId"
-                @click="refreshSelectedProvider({ forceModels: true })"
-              >
-                {{ loadingPreflight ? "Checking..." : "Check again" }}
-              </button>
+        <section
+          ref="dialogElement"
+          class="desktop-add-agent-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="desktop-add-agent-title"
+          tabindex="-1"
+          @keydown.esc.prevent="emit('close')"
+          @keydown.tab="handleDialogTab"
+        >
+          <header class="desktop-add-agent-header">
+            <div>
+              <span>Add agent</span>
+              <h3 id="desktop-add-agent-title">Bring an agent into this room</h3>
+              <p>
+                Choose a provider, confirm its setup, then start it in
+                <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
+              </p>
             </div>
-
-            <p v-if="preflight?.detail">{{ preflight.detail }}</p>
-            <p v-else-if="loadError">{{ loadError }}</p>
-            <p v-else>Checking provider readiness...</p>
-
-            <dl class="desktop-add-agent-checks">
-              <div>
-                <dt>Agent app</dt>
-                <dd>{{ runtimeLabel }}</dd>
-              </div>
-              <div>
-                <dt>LetAgents connection</dt>
-                <dd>{{ bridgeLabel }}</dd>
-              </div>
-              <div>
-                <dt>Project folder</dt>
-                <dd>{{ repoLabel }}</dd>
-              </div>
-            </dl>
-
-            <section
-              v-if="showWorktreePicker"
-              class="desktop-add-agent-worktrees"
-              data-testid="desktop-add-agent-worktree-picker"
-              aria-label="Matching worktrees"
+            <button
+              class="desktop-modal-close"
+              type="button"
+              aria-label="Close add agent dialog"
+              @click="emit('close')"
             >
+              <X aria-hidden="true" />
+            </button>
+          </header>
+
+          <div class="desktop-add-agent-body">
+            <section class="desktop-add-agent-providers" aria-label="Agent providers">
+              <span class="desktop-add-agent-providers-label">Provider</span>
+              <button
+                v-for="provider in providers"
+                :key="provider.id"
+                class="desktop-add-agent-provider"
+                type="button"
+                :data-selected="provider.id === selectedProviderId"
+                :data-testid="`desktop-add-agent-provider-${provider.id}`"
+                @click="selectProvider(provider.id)"
+              >
+                <span class="desktop-add-agent-provider-icon" aria-hidden="true">
+                  <McpHarnessIcon :target-id="provider.mcpTargetId" />
+                </span>
+                <span>
+                  <strong>{{ provider.name }}</strong>
+                  <small>{{ provider.description }}</small>
+                </span>
+              </button>
+            </section>
+
+            <section class="desktop-add-agent-status" :data-state="preflight?.status || 'loading'">
+              <div class="desktop-add-agent-status-header">
+                <div>
+                  <span>{{ selectedProvider?.name || "Provider" }}</span>
+                  <h4>{{ statusTitle }}</h4>
+                </div>
+                <div class="desktop-add-agent-status-actions">
+                  <span
+                    class="desktop-add-agent-status-pill"
+                    :data-state="preflight?.status || 'loading'"
+                    aria-live="polite"
+                  >
+                    {{ preflightStatusLabel }}
+                  </span>
+                  <button
+                    type="button"
+                    :disabled="loadingPreflight || !selectedProviderId"
+                    @click="refreshSelectedProvider({ forceModels: true })"
+                  >
+                    {{ loadingPreflight ? "Checking..." : "Check again" }}
+                  </button>
+                </div>
+              </div>
+
+              <p v-if="preflight?.detail">{{ preflight.detail }}</p>
+              <p v-else-if="loadError">{{ loadError }}</p>
+              <p v-else>Checking provider readiness...</p>
+
+              <dl class="desktop-add-agent-checks">
+                <div>
+                  <dt>Agent app</dt>
+                  <dd>{{ runtimeLabel }}</dd>
+                </div>
+                <div>
+                  <dt>LetAgents connection</dt>
+                  <dd>{{ bridgeLabel }}</dd>
+                </div>
+                <div>
+                  <dt>Project folder</dt>
+                  <dd>{{ repoLabel }}</dd>
+                </div>
+              </dl>
+
+              <section
+                v-if="showWorktreePicker"
+                class="desktop-add-agent-worktrees"
+                data-testid="desktop-add-agent-worktree-picker"
+                aria-label="Matching worktrees"
+              >
               <div class="desktop-add-agent-worktrees-header">
                 <span>Existing worktrees</span>
                 <p>{{ worktreePickerDescription }}</p>
@@ -191,37 +202,56 @@
               class="desktop-add-agent-delivery desktop-add-agent-model"
               aria-label="Agent model"
             >
-              <DesktopSelectField
-                :model-value="selectedModelChoice"
-                :options="modelSelectOptions"
-                label="Model"
-                id="desktop-add-agent-model-select"
-                described-by="desktop-add-agent-model-description"
-                test-id="desktop-add-agent-model-select"
-                @update:model-value="handleModelChoiceValue"
-              />
-              <label v-if="selectedModelMode === 'custom'" class="desktop-add-agent-model-custom-input">
-                <small>Model id</small>
-                <input
-                  v-model="customModelId"
-                  type="text"
-                  placeholder="provider/model-or-alias"
-                  data-testid="desktop-add-agent-model-custom-input"
-                />
-              </label>
-              <p id="desktop-add-agent-model-description">{{ modelSelectorDescription }}</p>
-              <DesktopSelectField
-                v-if="showEffortSelector"
-                :model-value="selectedEffort"
-                :options="effortSelectOptions"
-                label="Effort"
-                id="desktop-add-agent-effort-select"
-                described-by="desktop-add-agent-effort-description"
-                test-id="desktop-add-agent-effort-select"
-                @update:model-value="handleEffortValue"
-              />
-              <p v-if="showEffortSelector" id="desktop-add-agent-effort-description">
-                {{ effortSelectorDescription }}
+              <div class="desktop-add-agent-section-heading">
+                <span>Model &amp; reasoning</span>
+                <button
+                  type="button"
+                  :disabled="loadingProviderModels"
+                  data-testid="desktop-add-agent-model-refresh"
+                  @click="refreshProviderModels"
+                >
+                  {{ loadingProviderModels ? "Loading..." : "Refresh models" }}
+                </button>
+              </div>
+              <div class="desktop-add-agent-model-grid" :data-single="!showEffortSelector">
+                <div class="desktop-add-agent-setting">
+                  <DesktopModelPicker
+                    :model-value="selectedModelChoice"
+                    :options="modelSelectOptions"
+                    label="Model"
+                    id="desktop-add-agent-model-select"
+                    described-by="desktop-add-agent-model-description"
+                    test-id="desktop-add-agent-model-select"
+                    @update:model-value="handleModelChoiceValue"
+                  />
+                  <label v-if="selectedModelMode === 'custom'" class="desktop-add-agent-model-custom-input">
+                    <small>Model id</small>
+                    <input
+                      v-model="customModelId"
+                      type="text"
+                      placeholder="provider/model-or-alias"
+                      data-testid="desktop-add-agent-model-custom-input"
+                    />
+                  </label>
+                  <p id="desktop-add-agent-model-description">{{ modelSelectorDescription }}</p>
+                </div>
+                <div v-if="showEffortSelector" class="desktop-add-agent-setting">
+                  <DesktopSelectField
+                    :model-value="selectedEffort"
+                    :options="effortSelectOptions"
+                    label="Effort"
+                    id="desktop-add-agent-effort-select"
+                    described-by="desktop-add-agent-effort-description"
+                    test-id="desktop-add-agent-effort-select"
+                    @update:model-value="handleEffortValue"
+                  />
+                  <p id="desktop-add-agent-effort-description">
+                    {{ effortSelectorDescription }}
+                  </p>
+                </div>
+              </div>
+              <p class="desktop-add-agent-model-catalog" aria-live="polite">
+                {{ providerModelCatalogLabel }}
               </p>
             </section>
 
@@ -231,7 +261,7 @@
               aria-label="Agent delivery mode"
             >
               <span>Delivery</span>
-              <div>
+              <div class="desktop-add-agent-segmented">
                 <button
                   type="button"
                   :data-selected="deliveryMode === 'mcp_polling'"
@@ -282,7 +312,7 @@
               aria-label="Cursor MCP tools"
             >
               <span>MCP tools</span>
-              <div>
+              <div class="desktop-add-agent-segmented">
                 <button
                   v-for="option in cursorMcpPolicyOptions"
                   :key="option.id"
@@ -440,10 +470,11 @@
             </div>
 
             <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
-          </section>
-        </div>
-      </section>
-    </div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -511,6 +542,7 @@ import {
 } from "./modal-focus";
 import DesktopSelectField, { type DesktopSelectOption } from "../controls/DesktopSelectField.vue";
 import { desktopIpc } from "../../../ipc/index.js";
+import DesktopModelPicker from "../controls/DesktopModelPicker.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -628,6 +660,14 @@ const statusTitle = computed(() => {
   return preflight.value.message;
 });
 
+const preflightStatusLabel = computed(() => {
+  if (loadingProviders.value || loadingPreflight.value) return "Checking";
+  if (loadError.value || preflight.value?.status === "error") return "Needs attention";
+  if (preflight.value?.status === "ready") return "Ready";
+  if (!preflight.value) return "Not checked";
+  return "Setup needed";
+});
+
 const runtimeLabel = computed(() => {
   if (preflight.value?.version) return preflight.value.version;
   if (preflight.value?.status === "missing_runtime") return "Missing";
@@ -719,6 +759,14 @@ const showEffortSelector = computed(() =>
 );
 
 const providerModelOptions = computed(() => providerModels.value?.models ?? []);
+
+const providerModelCatalogLabel = computed(() => {
+  if (loadingProviderModels.value) return "Loading the provider model catalog...";
+  if (providerModels.value?.error) return providerModels.value.error;
+  const count = providerModelOptions.value.length;
+  if (count) return `${count} provider model${count === 1 ? "" : "s"} available.`;
+  return "Provider default and custom model ids are available.";
+});
 
 const modelSelectOptions = computed<DesktopSelectOption[]>(() => [
   { value: "default", label: "Use provider default" },
@@ -1106,6 +1154,11 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
       loadingProviderModels.value = false;
     }
   }
+}
+
+function refreshProviderModels(): void {
+  if (loadingProviderModels.value) return;
+  void loadProviderModels({ refresh: true });
 }
 
 function requestPreflight(options: { debounce?: boolean } = {}): void {
