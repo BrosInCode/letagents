@@ -15,7 +15,7 @@ function wrapArgs(args: unknown[]): unknown[] {
 
 type AnyFn = (...args: never[]) => unknown;
 
-function wrapMethod<T extends AnyFn>(method: T | undefined, methodPath: string): T {
+function wrapMethod<T extends AnyFn>(method: T, methodPath: string): T {
   const wrapped = ((...args: never[]) => {
     if (typeof method !== "function") {
       throw new Error(`${desktopBridgeUpgradeMessage()} (missing ${methodPath})`);
@@ -27,21 +27,15 @@ function wrapMethod<T extends AnyFn>(method: T | undefined, methodPath: string):
 
 function wrapNamespace<T extends object>(
   namespaceName: string,
-  namespace: T | undefined,
+  namespace: T,
 ): T {
-  if (!namespace || typeof namespace !== "object") {
-    return new Proxy({} as T, {
-      get(_target, prop) {
-        if (typeof prop !== "string") return undefined;
-        return wrapMethod(undefined, `letagentsDesktop.${namespaceName}.${prop}`);
-      },
-    });
-  }
-
   return new Proxy(namespace, {
     get(target, prop, receiver) {
       if (typeof prop !== "string") {
         return Reflect.get(target, prop, receiver);
+      }
+      if (!(prop in target)) {
+        return undefined;
       }
       const value = Reflect.get(target, prop, receiver);
       if (typeof value === "function") {
@@ -52,6 +46,9 @@ function wrapNamespace<T extends object>(
       }
       return value;
     },
+    has(target, prop) {
+      return Reflect.has(target, prop);
+    },
   });
 }
 
@@ -60,8 +57,18 @@ function createDesktopIpcClient(): DesktopApi {
     get(_target, prop) {
       if (typeof prop !== "string") return undefined;
       const api = getDesktopApi();
-      const namespace = api?.[prop as keyof DesktopApi];
-      return wrapNamespace(prop, namespace as object | undefined);
+      if (!api || !(prop in api)) {
+        return undefined;
+      }
+      const namespace = api[prop as keyof DesktopApi];
+      if (!namespace || typeof namespace !== "object") {
+        return namespace;
+      }
+      return wrapNamespace(prop, namespace as object);
+    },
+    has(_target, prop) {
+      const api = getDesktopApi();
+      return Boolean(api && typeof prop === "string" && prop in api);
     },
   });
 }
