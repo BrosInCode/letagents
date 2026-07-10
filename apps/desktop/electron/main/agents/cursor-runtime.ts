@@ -16,8 +16,6 @@ import type {
 import { buildRepoStatus } from "../../repo-status.js";
 import { looksLikeInviteCode } from "./codex-start-prompt.js";
 import {
-  canDeliverDesktopEventToManagedAgent,
-  isStopPhraseRoomStreamEvent,
   shouldDeliverRoomStreamEventToManagedAgent,
 } from "./codex-event-routing.js";
 import {
@@ -45,9 +43,9 @@ import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
+import { createManagedAgentEventTurnEngine } from "./managed-agent-event-turn-engine.js";
 import {
   clearDesktopManagedAgentReplyChangeState,
-  desktopManagedAgentReplyChangeSignature,
 } from "./managed-agent-reply-changes.js";
 import {
   disconnectDesktopManagedWorker,
@@ -70,9 +68,6 @@ import {
 } from "./state.js";
 
 const DEFAULT_CURSOR_STOP_PHRASE = "/stop-cursor-room";
-// See claude-code-runtime: park always-erroring sessions as terminal instead
-// of leaving them deliverable-but-invisible in status "unknown".
-const MAX_CONSECUTIVE_TURN_ERRORS = 3;
 
 function cursorReplyChangeSessionKey(sessionId: string): string {
   return `cursor:${sessionId}`;
@@ -88,11 +83,6 @@ const CURSOR_WORKER_PROVIDER: ManagedAgentWorkerProvider = {
   unusableIdentityErrorMessage: "LetAgents did not return a usable agent identity for the desktop Cursor worker.",
   missingActorKeyErrorMessage: "LetAgents desktop Cursor identity is missing an actor key.",
   replyWarnLabel: "Cursor",
-};
-
-type ActiveCursorTurn = {
-  abortController: AbortController;
-  interruptReason: "preempt" | "stop" | null;
 };
 
 interface RegisterCursorWorkerInput {
@@ -153,28 +143,33 @@ export function createDesktopCursorRuntime(
   const resolveStorage = dependencies.resolveStorage ?? resolveRoomStorageMode;
   const emitSessionUpdate = dependencies.emitSessionUpdate ?? emitCursorManagedAgentSessionUpdate;
   const now = dependencies.now ?? (() => new Date().toISOString());
-  const queues = new Map<string, Promise<void>>();
-  const activeTurns = new Map<string, ActiveCursorTurn>();
-  const consecutiveTurnErrors = new Map<string, number>();
-
-  function recordConsecutiveTurnError(sessionId: string): boolean {
-    const errorCount = (consecutiveTurnErrors.get(sessionId) ?? 0) + 1;
-    consecutiveTurnErrors.set(sessionId, errorCount);
-    return errorCount >= MAX_CONSECUTIVE_TURN_ERRORS;
-  }
-
-  function exhaustedTurnError(errorText: string): string {
-    return `Stopped after ${MAX_CONSECUTIVE_TURN_ERRORS} consecutive turn errors. Last error: ${errorText}`;
-  }
-
-  /** See claude-code-runtime: release worker registration when parking. */
-  async function endExhaustedSessionWorker(sessionId: string): Promise<void> {
-    clearDesktopManagedAgentReplyChangeState(cursorReplyChangeSessionKey(sessionId));
-    cleanupAgentSessionAttachments(sessionId);
-    consecutiveTurnErrors.delete(sessionId);
-    const liveSession = getStoredCursorLiveSession(sessionId);
-    await disconnectWorker(getStoredAgentSession(liveSession?.agent_session_id ?? null));
-  }
+  const engine = createManagedAgentEventTurnEngine<DesktopCursorLiveSessionState, CursorTurnResult>({
+    now,
+    resolveStorage: (roomIdentifier) => resolveStorage(roomIdentifier),
+    getStoredSession: getStoredCursorLiveSession,
+    toPublicSession: toPublicCursorManagedAgentSession,
+    updateSession: updateCursorLiveSession,
+    emitSessionUpdate: (session) => emitSessionUpdate(session),
+    publishReply: (input) => publishReply(input),
+    runTurn: (input) =>
+      runCursorDesktopEventTurnWithRoomTools({
+        active: input.active,
+        event: input.event,
+        storage: input.storage,
+        abortController: input.abortController,
+      }),
+    applyTurnResult: (current, result) => ({
+      ...current,
+      cursor_session_id: result.sessionId ?? current.cursor_session_id ?? null,
+      recent_items: result.recentItems,
+    }),
+    // Force-mode turns write to the working tree; never interrupt them for a
+    // newer room event.
+    shouldPreemptOnEnqueue: (session) =>
+      !cursorLaunchOptionsForPermissionProfile(session.permission_profile_id).force,
+    replyChangeSessionKey: cursorReplyChangeSessionKey,
+    disconnectWorker: (session) => disconnectWorker(session),
+  });
 
   function listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
     return listDesktopManagedCursorLiveSessions(roomIdentifier)
@@ -292,14 +287,10 @@ export function createDesktopCursorRuntime(
       return null;
     }
 
-    const activeTurn = activeTurns.get(session.session_id);
-    if (activeTurn) {
-      activeTurn.interruptReason = "stop";
-      activeTurn.abortController.abort();
-    }
+    engine.interruptActiveTurnForStop(session.session_id);
     clearDesktopManagedAgentReplyChangeState(cursorReplyChangeSessionKey(session.session_id));
     cleanupAgentSessionAttachments(session.session_id);
-    consecutiveTurnErrors.delete(session.session_id);
+    engine.resetTurnErrorBudget(session.session_id);
     const updated = updateCursorLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -324,139 +315,10 @@ export function createDesktopCursorRuntime(
           event,
         ));
     for (const session of sessions) {
-      enqueueDesktopEventTurn(session, event);
+      engine.enqueueDesktopEventTurn(session, event);
     }
   }
 
-  function enqueueDesktopEventTurn(
-    session: DesktopCursorLiveSessionState,
-    event: ManagedRoomEvent,
-  ): void {
-    preemptActiveTurnIfSafe(session);
-    const previous = queues.get(session.session_id) ?? Promise.resolve();
-    const next = previous
-      .catch(() => undefined)
-      .then(async () => deliverDesktopEventTurn(session.session_id, event, await resolveStorage(event.roomIdentifier)))
-      .catch(async (error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        const stored = getStoredCursorLiveSession(session.session_id);
-        if (stored && (stored.status === "interrupted" || stored.status === "failed")) {
-          return;
-        }
-        const exhausted = recordConsecutiveTurnError(session.session_id);
-        const updated = clearSessionActiveWork(session.session_id, (current) => ({
-          ...current,
-          status: exhausted ? "failed" : "unknown",
-          last_error: exhausted ? exhaustedTurnError(message) : message,
-          updated_at: now(),
-        }));
-        emitSessionUpdate(updated);
-        if (exhausted) {
-          await endExhaustedSessionWorker(session.session_id);
-        }
-      });
-    queues.set(session.session_id, next);
-    void next.finally(() => {
-      if (queues.get(session.session_id) === next) {
-        queues.delete(session.session_id);
-      }
-    });
-  }
-
-  async function deliverDesktopEventTurn(
-    sessionId: string,
-    event: ManagedRoomEvent,
-    storage: DesktopRoomStorageState,
-  ): Promise<void> {
-    const session = getStoredCursorLiveSession(sessionId);
-    if (!session || !canDeliverDesktopEventToManagedAgent(toPublicCursorManagedAgentSession(session))) {
-      return;
-    }
-
-    const stopAfterTurn = isStopPhraseRoomStreamEvent(session, event);
-    const active = markSessionActiveForEvent(session, event);
-    const beforeChangeSignature = await desktopManagedAgentReplyChangeSignature(
-      toPublicCursorManagedAgentSession(active),
-    );
-    const abortController = new AbortController();
-    const activeTurn: ActiveCursorTurn = {
-      abortController,
-      interruptReason: null,
-    };
-    activeTurns.set(session.session_id, activeTurn);
-    try {
-      const result = await runCursorDesktopEventTurnWithRoomTools({
-        active,
-        event,
-        storage,
-        abortController,
-      });
-
-      const latest = getStoredCursorLiveSession(sessionId) ?? active;
-      if (
-        latest.status === "interrupted" &&
-        abortController.signal.aborted &&
-        activeTurn.interruptReason !== "preempt"
-      ) {
-        return;
-      }
-
-      if (result.status === "error") {
-        const wasPreempted = abortController.signal.aborted && activeTurn.interruptReason === "preempt";
-        const aborted = abortController.signal.aborted;
-        const exhausted = !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
-        const updated = clearSessionActiveWork(sessionId, (current) => ({
-          ...current,
-          cursor_session_id: result.sessionId ?? current.cursor_session_id ?? null,
-          status: wasPreempted
-            ? "completed"
-            : aborted
-              ? "interrupted"
-              : exhausted
-                ? "failed"
-                : "unknown",
-          last_error: wasPreempted
-            ? null
-            : exhausted
-              ? exhaustedTurnError(String(result.error))
-              : result.error,
-          recent_items: result.recentItems,
-          updated_at: now(),
-        }));
-        emitSessionUpdate(updated);
-        if (exhausted) {
-          await endExhaustedSessionWorker(sessionId);
-        }
-        return;
-      }
-
-      const completed = clearSessionActiveWork(sessionId, (current) => ({
-        ...current,
-        cursor_session_id: result.sessionId ?? current.cursor_session_id ?? null,
-        status: "completed",
-        last_error: null,
-        recent_items: result.recentItems,
-        updated_at: now(),
-      })) ?? latest;
-      emitSessionUpdate(completed);
-      await publishReply({
-        session: completed,
-        event,
-        storage,
-        text: result.text,
-        beforeChangeSignature,
-      });
-      // Reset only after full delivery succeeds; see claude-code-runtime.
-      consecutiveTurnErrors.delete(sessionId);
-      if (stopAfterTurn) {
-        await stopAfterRoomStopPhrase(completed);
-      }
-    } finally {
-      if (activeTurns.get(session.session_id) === activeTurn) {
-        activeTurns.delete(session.session_id);
-      }
-    }
-  }
 
   async function runCursorDesktopEventTurnWithRoomTools(input: {
     active: DesktopCursorLiveSessionState;
@@ -539,72 +401,6 @@ export function createDesktopCursorRuntime(
     });
   }
 
-  function preemptActiveTurnIfSafe(session: DesktopCursorLiveSessionState): void {
-    const launchOptions = cursorLaunchOptionsForPermissionProfile(session.permission_profile_id);
-    if (launchOptions.force) {
-      return;
-    }
-    preemptActiveTurn(session.session_id);
-  }
-
-  function preemptActiveTurn(sessionId: string): void {
-    const activeTurn = activeTurns.get(sessionId);
-    if (!activeTurn || activeTurn.abortController.signal.aborted) {
-      return;
-    }
-    activeTurn.interruptReason = "preempt";
-    activeTurn.abortController.abort();
-  }
-
-  function markSessionActiveForEvent(
-    session: DesktopCursorLiveSessionState,
-    event: ManagedRoomEvent,
-  ): DesktopCursorLiveSessionState {
-    const activeWork = activeWorkForEvent(event, now());
-    const updated = updateCursorLiveSession(session.session_id, (current) => ({
-      ...current,
-      status: "running",
-      active_work: activeWork,
-      last_error: null,
-      updated_at: activeWork.started_at,
-    })) ?? {
-      ...session,
-      status: "running",
-      active_work: activeWork,
-      last_error: null,
-      updated_at: activeWork.started_at,
-    };
-    emitSessionUpdate(updated);
-    return updated;
-  }
-
-  function clearSessionActiveWork(
-    sessionId: string,
-    updater: (session: DesktopCursorLiveSessionState) => DesktopCursorLiveSessionState,
-  ): DesktopCursorLiveSessionState | null {
-    return updateCursorLiveSession(sessionId, (current) => ({
-      ...updater(current),
-      active_work: null,
-    }));
-  }
-
-  async function stopAfterRoomStopPhrase(session: DesktopCursorLiveSessionState): Promise<void> {
-    const updated = updateCursorLiveSession(session.session_id, (current) => ({
-      ...current,
-      status: "interrupted",
-      active_work: null,
-      last_error: null,
-      updated_at: now(),
-    })) ?? session;
-    emitSessionUpdate(updated);
-    await disconnectWorker(getStoredAgentSession(updated.agent_session_id));
-  }
-
-  async function waitForIdle(): Promise<void> {
-    while (queues.size > 0) {
-      await Promise.allSettled([...queues.values()]);
-    }
-  }
 
   return {
     providerId: "cursor",
@@ -613,21 +409,10 @@ export function createDesktopCursorRuntime(
     inspect,
     stop,
     dispatchRoomStreamEvent,
-    waitForIdle,
+    waitForIdle: engine.waitForIdle,
   };
 }
 
-function activeWorkForEvent(
-  event: ManagedRoomEvent,
-  startedAt: string,
-): NonNullable<DesktopCursorLiveSessionState["active_work"]> {
-  return {
-    kind: event.type,
-    event_id: event.type === "message" ? event.message.id : event.task.id,
-    started_at: startedAt,
-    summary: event.type === "message" ? "Reading the room message." : "Reading the task update.",
-  };
-}
 
 async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput): Promise<void> {
   await publishDesktopManagedWorkerReply({
