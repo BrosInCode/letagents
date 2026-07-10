@@ -151,6 +151,7 @@ import SettingsProfilePane from "../settings/panes/SettingsProfilePane.vue";
 import SettingsRoomsPane from "../settings/panes/SettingsRoomsPane.vue";
 import SettingsRuntimePane from "../settings/panes/SettingsRuntimePane.vue";
 import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
+import SettingsStoragePane from "../settings/panes/SettingsStoragePane.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
 import type { SettingsFeedback, SettingsNavGroup, SettingsPaneId } from "../settings/types";
 import type { DesktopMcpWizardStep } from "../setup/types";
