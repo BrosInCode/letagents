@@ -29,25 +29,29 @@ function wrapNamespace<T extends object>(
   namespaceName: string,
   namespace: T,
 ): T {
-  return new Proxy(namespace, {
-    get(target, prop, receiver) {
+  // The proxy target must be an empty object, not the bridge namespace:
+  // contextBridge-exposed properties are read-only and non-configurable, and
+  // the Proxy `get` invariant then requires returning the target's exact
+  // value — returning a wrapper function throws at the first call site.
+  return new Proxy({} as T, {
+    get(_target, prop) {
       if (typeof prop !== "string") {
-        return Reflect.get(target, prop, receiver);
+        return Reflect.get(namespace, prop);
       }
-      if (!(prop in target)) {
+      if (!(prop in namespace)) {
         return undefined;
       }
-      const value = Reflect.get(target, prop, receiver);
+      const value = Reflect.get(namespace, prop) as unknown;
       if (typeof value === "function") {
         return wrapMethod(
-          value.bind(target) as AnyFn,
+          (value as AnyFn).bind(namespace) as AnyFn,
           `letagentsDesktop.${namespaceName}.${prop}`,
         );
       }
       return value;
     },
-    has(target, prop) {
-      return Reflect.has(target, prop);
+    has(_target, prop) {
+      return Reflect.has(namespace, prop);
     },
   });
 }
