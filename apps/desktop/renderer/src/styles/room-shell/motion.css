@@ -1,18 +1,11 @@
 .room-panel-enter-active,
 .room-panel-leave-active {
-  transition:
-    opacity var(--duration-fast) var(--ease-out),
-    transform var(--duration-fast) var(--ease-out);
+  transition: opacity 120ms ease;
 }
 
-.room-panel-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
+.room-panel-enter-from,
 .room-panel-leave-to {
   opacity: 0;
-  transform: translateY(-4px);
 }
 
 .desktop-room-tool-rail-enter-active,

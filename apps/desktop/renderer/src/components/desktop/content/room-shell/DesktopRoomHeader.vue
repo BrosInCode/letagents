@@ -1,97 +1,106 @@
 <template>
   <header class="desktop-room-header" data-testid="desktop-room-header">
-    <div class="desktop-room-header-main">
-      <button
-        v-if="sidebarMode === 'hidden'"
-        class="ghost-button sidebar-reveal-button desktop-room-sidebar-reveal"
-        type="button"
-        aria-label="Show sidebar"
-        data-testid="room-sidebar-reveal-button"
-        @click="emit('cycleSidebar')"
-      >
-        <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
-          <path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" />
-          <path d="M12.5 3.5v13" />
-          <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
-        </svg>
-      </button>
-      <div class="desktop-room-heading">
-        <h3 class="desktop-room-title" :title="room.displayName">
-          <span class="desktop-room-title-text">{{ headerDisplayName }}</span>
-        </h3>
-        <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
-          <span
-            v-if="storage.effectiveMode === 'local'"
-            class="desktop-room-badge"
-            data-testid="desktop-room-local-badge"
+    <div class="desktop-room-header-bar">
+      <div class="desktop-room-header-main">
+        <button
+          v-if="sidebarMode === 'hidden'"
+          class="ghost-button sidebar-reveal-button desktop-room-sidebar-reveal"
+          type="button"
+          aria-label="Show sidebar"
+          data-testid="room-sidebar-reveal-button"
+          @click="emit('cycleSidebar')"
+        >
+          <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" />
+            <path d="M12.5 3.5v13" />
+            <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
+          </svg>
+        </button>
+        <div class="desktop-room-heading">
+          <div class="desktop-room-context">
+            <span class="desktop-room-presence-dot" aria-hidden="true"></span>
+            <span>{{ roomContextLabel }}</span>
+          </div>
+          <div class="desktop-room-title-line">
+            <h3 class="desktop-room-title" :title="room.displayName">
+              <span class="desktop-room-title-text">{{ headerDisplayName }}</span>
+            </h3>
+            <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
+              <span
+                v-if="storage.effectiveMode === 'local'"
+                class="desktop-room-badge"
+                data-testid="desktop-room-local-badge"
+              >
+                Local
+              </span>
+              <span v-if="room.code" class="desktop-room-badge" data-testid="desktop-room-code">{{ room.code }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="desktop-room-header-actions">
+        <div
+          ref="overflowMenuRoot"
+          class="desktop-room-overflow"
+          data-testid="desktop-room-tools"
+          @pointerdown.stop
+          @keydown.escape.stop="closeOverflowMenu"
+        >
+          <button
+            class="desktop-room-overflow-button"
+            type="button"
+            aria-label="Room actions"
+            aria-haspopup="menu"
+            :aria-expanded="overflowMenuOpen"
+            :data-active="overflowMenuOpen || searchOpen || actionPanelOpen"
+            data-testid="desktop-room-overflow-toggle"
+            @click.stop="toggleOverflowMenu"
           >
-            Local
-          </span>
-          <span v-if="room.code" class="desktop-room-badge" data-testid="desktop-room-code">{{ room.code }}</span>
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M4 8h.01M8 8h.01M12 8h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <Transition name="desktop-room-overflow-pop">
+            <div
+              v-if="overflowMenuOpen"
+              class="desktop-room-overflow-menu"
+              role="menu"
+              data-testid="desktop-room-overflow-menu"
+            >
+              <button
+                class="desktop-room-menu-item"
+                type="button"
+                role="menuitem"
+                :data-active="searchOpen"
+                data-testid="desktop-room-search-toggle"
+                @click.stop="selectOverflowAction('find')"
+              >
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                </svg>
+                <span>Find</span>
+              </button>
+              <button
+                class="desktop-room-menu-item"
+                type="button"
+                role="menuitem"
+                :data-active="actionPanelOpen"
+                data-testid="desktop-room-actions-toggle"
+                @click.stop="selectOverflowAction('settings')"
+              >
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M3 5h10M3 11h10M6 3v4M10 9v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                </svg>
+                <span>Settings</span>
+              </button>
+            </div>
+          </Transition>
         </div>
       </div>
     </div>
 
-    <div class="desktop-room-header-actions">
-      <div
-        ref="overflowMenuRoot"
-        class="desktop-room-overflow"
-        data-testid="desktop-room-tools"
-        @pointerdown.stop
-        @keydown.escape.stop="closeOverflowMenu"
-      >
-        <button
-          class="desktop-room-overflow-button"
-          type="button"
-          aria-label="Room actions"
-          aria-haspopup="menu"
-          :aria-expanded="overflowMenuOpen"
-          :data-active="overflowMenuOpen || searchOpen || actionPanelOpen"
-          data-testid="desktop-room-overflow-toggle"
-          @click.stop="toggleOverflowMenu"
-        >
-          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M4 8h.01M8 8h.01M12 8h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <Transition name="desktop-room-overflow-pop" @after-leave="handleOverflowMenuAfterLeave">
-          <div
-            v-if="overflowMenuOpen"
-            class="desktop-room-overflow-menu"
-            role="menu"
-            data-testid="desktop-room-overflow-menu"
-          >
-            <button
-              class="desktop-room-menu-item"
-              type="button"
-              role="menuitem"
-              :data-active="searchOpen"
-              data-testid="desktop-room-search-toggle"
-              @click.stop="selectOverflowAction('find')"
-            >
-              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-              </svg>
-              <span>Find</span>
-            </button>
-            <button
-              class="desktop-room-menu-item"
-              type="button"
-              role="menuitem"
-              :data-active="actionPanelOpen"
-              data-testid="desktop-room-actions-toggle"
-              @click.stop="selectOverflowAction('settings')"
-            >
-              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M3 5h10M3 11h10M6 3v4M10 9v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-              </svg>
-              <span>Settings</span>
-            </button>
-          </div>
-        </Transition>
-      </div>
-
-      <nav class="desktop-room-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
+    <nav class="desktop-room-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
         <button
           v-for="tab in tabs"
           :key="tab.id"
@@ -172,9 +181,7 @@
             :mode="tab.indicator.mode ?? 'dot'"
           />
         </button>
-      </nav>
-
-    </div>
+    </nav>
   </header>
 </template>
 
@@ -204,11 +211,16 @@ const emit = defineEmits<{
 
 const overflowMenuOpen = ref(false);
 const overflowMenuRoot = ref<HTMLElement | null>(null);
-const pendingOverflowAction = ref<"find" | "settings" | null>(null);
 
 const headerDisplayName = computed(() =>
   compactRoomDisplayName(props.room.displayName)
 );
+
+const roomContextLabel = computed(() => {
+  if (props.room.gitRoom?.repository.fullName) return props.room.gitRoom.repository.fullName;
+  if (props.room.kind === "focus") return props.room.focusStatus === "concluded" ? "Concluded focus" : "Active focus";
+  return props.storage.effectiveMode === "local" ? "Private room" : "Shared room";
+});
 
 onMounted(() => {
   document.addEventListener("pointerdown", handleDocumentPointerDown);
@@ -219,7 +231,6 @@ onBeforeUnmount(() => {
 });
 
 function toggleOverflowMenu(): void {
-  pendingOverflowAction.value = null;
   overflowMenuOpen.value = !overflowMenuOpen.value;
 }
 
@@ -228,15 +239,8 @@ function closeOverflowMenu(): void {
 }
 
 function selectOverflowAction(action: "find" | "settings"): void {
-  pendingOverflowAction.value = action;
-  closeOverflowMenu();
-}
-
-function handleOverflowMenuAfterLeave(): void {
-  const action = pendingOverflowAction.value;
-  pendingOverflowAction.value = null;
-  if (action === null) return;
   runOverflowAction(action);
+  closeOverflowMenu();
 }
 
 function runOverflowAction(action: "find" | "settings"): void {
