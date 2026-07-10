@@ -734,3 +734,47 @@ test("Cursor runtime stop interrupts the worker session and disconnects the room
   assert.equal(stored?.active_work, null);
   assert.ok(getStoredAgentSession("agent_session_cursor")?.ended_at);
 });
+
+test("consecutive turn errors park the Cursor session as failed and end the worker", async () => {
+  resetState();
+  let turns = 0;
+  const { runtime } = createRuntimeHarness({
+    async runTurn(): Promise<CursorTurnResult> {
+      turns += 1;
+      return {
+        sessionId: null,
+        text: null,
+        status: "error",
+        error: "cursor-agent exploded",
+        recentItems: [],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  for (const id of ["msg_e1", "msg_e2", "msg_e3"]) {
+    runtime.dispatchRoomStreamEvent(messageEvent({
+      message: { ...messageEvent().message, id, threadRootId: id },
+    }));
+    await runtime.waitForIdle();
+  }
+
+  const parked = getStoredCursorLiveSession(started.session.id);
+  assert.equal(parked?.status, "failed");
+  assert.match(parked?.last_error ?? "", /Stopped after 3 consecutive turn errors/);
+  assert.ok(
+    getStoredAgentSession("agent_session_cursor")?.ended_at,
+    "parking must end the worker registration",
+  );
+
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: { ...messageEvent().message, id: "msg_e4", threadRootId: "msg_e4" },
+  }));
+  await runtime.waitForIdle();
+  assert.equal(turns, 3, "failed sessions must not receive further room events");
+});

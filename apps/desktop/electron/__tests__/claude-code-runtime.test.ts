@@ -1000,3 +1000,161 @@ test("Claude Code runtime stop interrupts the worker session and disconnects the
   assert.equal(stored?.active_work, null);
   assert.ok(getStoredAgentSession("agent_session_claude")?.ended_at);
 });
+
+test("consecutive turn errors park the session as failed and stop event delivery", async () => {
+  resetState();
+  let turns = 0;
+  const { runtime } = createRuntimeHarness({
+    async runTurn(): Promise<ClaudeCodeTurnResult> {
+      turns += 1;
+      return {
+        sessionId: null,
+        text: null,
+        status: "error",
+        error: "There's an issue with the selected model (fable).",
+        recentItems: [],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+  assert.equal(getStoredClaudeCodeLiveSession(started.session.id)?.status, "unknown");
+  assert.equal(turns, 1);
+
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: { ...messageEvent().message, id: "msg_2", threadRootId: "msg_2" },
+  }));
+  await runtime.waitForIdle();
+  assert.equal(getStoredClaudeCodeLiveSession(started.session.id)?.status, "unknown");
+  assert.equal(turns, 2);
+
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: { ...messageEvent().message, id: "msg_3", threadRootId: "msg_3" },
+  }));
+  await runtime.waitForIdle();
+  const parked = getStoredClaudeCodeLiveSession(started.session.id);
+  assert.equal(parked?.status, "failed");
+  assert.match(parked?.last_error ?? "", /Stopped after 3 consecutive turn errors/);
+  assert.match(parked?.last_error ?? "", /issue with the selected model/);
+  assert.ok(
+    getStoredAgentSession("agent_session_claude")?.ended_at,
+    "parking must end the worker registration so presence is released",
+  );
+
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: { ...messageEvent().message, id: "msg_4", threadRootId: "msg_4" },
+  }));
+  await runtime.waitForIdle();
+  assert.equal(turns, 3, "failed sessions must not receive further room events");
+});
+
+test("a successful turn resets the consecutive error budget", async () => {
+  resetState();
+  let turns = 0;
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(): Promise<ClaudeCodeTurnResult> {
+      turns += 1;
+      if (turns === 3) {
+        return {
+          sessionId: "claude_session_reset",
+          text: "Recovered.",
+          status: "success",
+          error: null,
+          recentItems: [{ type: "result", text: "Recovered." }],
+        };
+      }
+      return {
+        sessionId: null,
+        text: null,
+        status: "error",
+        error: "transient failure",
+        recentItems: [],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  for (const id of ["msg_a", "msg_b", "msg_c", "msg_d", "msg_e"]) {
+    runtime.dispatchRoomStreamEvent(messageEvent({
+      message: { ...messageEvent().message, id, threadRootId: id },
+    }));
+    await runtime.waitForIdle();
+  }
+
+  const session = getStoredClaudeCodeLiveSession(started.session.id);
+  assert.equal(turns, 5, "recovered sessions keep receiving events");
+  assert.notEqual(session?.status, "failed");
+  assert.deepEqual(published, [{ text: "Recovered.", eventId: "msg_c" }]);
+});
+
+test("delivery pipeline failures exhaust the budget and end the worker", async () => {
+  resetState();
+  let turns = 0;
+  const disconnected: string[] = [];
+  const runtime = createDesktopClaudeCodeRuntime({
+    runner: {
+      async runTurn(): Promise<ClaudeCodeTurnResult> {
+        turns += 1;
+        return {
+          sessionId: "claude_session_pipeline",
+          text: "Looks good.",
+          status: "success",
+          error: null,
+          recentItems: [{ type: "result", text: "Looks good." }],
+        };
+      },
+    },
+    preflight: async () => readyPreflight(),
+    registerWorker: async (input) => fakeRegisterWorker(input),
+    disconnectWorker: async (session) => {
+      if (session) {
+        disconnected.push(session.session_id);
+        const { markAgentSessionEnded } = await import("../main/agents/state.js");
+        markAgentSessionEnded(session.session_id);
+      }
+    },
+    publishReply: async () => {
+      throw new Error("cloud reply endpoint unavailable");
+    },
+    resolveStorage: async (roomIdentifier) => storageState(roomIdentifier),
+    emitSessionUpdate: () => undefined,
+    now: () => "2026-06-30T00:00:00.000Z",
+  });
+  const started = await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  for (const id of ["msg_p1", "msg_p2", "msg_p3"]) {
+    runtime.dispatchRoomStreamEvent(messageEvent({
+      message: { ...messageEvent().message, id, threadRootId: id },
+    }));
+    await runtime.waitForIdle();
+  }
+
+  const parked = getStoredClaudeCodeLiveSession(started.session.id);
+  assert.equal(parked?.status, "failed", "publish failures must count toward the budget");
+  assert.match(parked?.last_error ?? "", /Stopped after 3 consecutive turn errors/);
+  assert.match(parked?.last_error ?? "", /cloud reply endpoint unavailable/);
+  assert.deepEqual(disconnected, ["agent_session_claude"]);
+
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: { ...messageEvent().message, id: "msg_p4", threadRootId: "msg_p4" },
+  }));
+  await runtime.waitForIdle();
+  assert.equal(turns, 3, "failed sessions must not receive further room events");
+});
