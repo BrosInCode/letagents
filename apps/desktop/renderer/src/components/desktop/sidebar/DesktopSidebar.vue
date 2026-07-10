@@ -301,6 +301,7 @@ import {
   Settings,
 } from "@lucide/vue";
 import { computed, ref, watch, type Component } from "vue";
+import { copyTextToClipboard } from "../../../domain/clipboard";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import {
   buildGitRoomWebUrl,
@@ -468,7 +469,7 @@ function handleBackgroundContextMenuSelect(item: DesktopContextMenuItem): void {
 
 async function copyText(value: string | null): Promise<void> {
   if (!value) return;
-  await navigator.clipboard?.writeText(value);
+  await copyTextToClipboard(value);
 }
 
 function projectSubtitle(project: ProjectGroup): string {

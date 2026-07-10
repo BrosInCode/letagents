@@ -469,8 +469,10 @@
 <script setup lang="ts">
 import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { copyTextToClipboard } from "../../../domain/clipboard";
 import { shouldShowRepoEnvironmentForRoom } from "../../../domain/repo-environment";
 import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
+import { formatShortDateTime } from "../../../domain/time";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
 import RepoStatusView from "./RepoStatusView.vue";
@@ -863,13 +865,10 @@ function focusRoomUrl(focusRoom: DesktopFocusRoomInfo): string {
 }
 
 async function copyFocusRoomUrl(focusRoom: DesktopFocusRoomInfo): Promise<void> {
-  try {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error("Clipboard is unavailable.");
-    }
-    await navigator.clipboard.writeText(focusRoomUrl(focusRoom));
+  const copied = await copyTextToClipboard(focusRoomUrl(focusRoom));
+  if (copied) {
     setFeedback("Room URL copied.", "success");
-  } catch {
+  } else {
     setFeedback("Room URL could not be copied.", "error");
   }
 }
@@ -1094,14 +1093,7 @@ function githubRoutingLabel(value: DesktopFocusGitHubEventRouting): string {
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return "Unknown";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
+  return formatShortDateTime(value, { hourStyle: "numeric" }) ?? value;
 }
 
 function taskInitial(title: string): string {

@@ -94,7 +94,7 @@ import type {
   DesktopReasoningUpdate,
 } from "../../../../../electron/ipc-types";
 import { displayNameFromActor } from "../../../domain/agents";
-import { timestampValue } from "../../../domain/time";
+import { formatShortDateTime, timestampValue } from "../../../domain/time";
 
 interface ReasoningField {
   label: string;
@@ -418,13 +418,6 @@ function labelFromStatus(value: string | null): string {
 }
 
 function formatTimestamp(value: string | null | undefined): string {
-  const parsed = new Date(String(value || ""));
-  if (Number.isNaN(parsed.getTime())) return "unknown";
-  return parsed.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatShortDateTime(value) ?? "unknown";
 }
 </script>

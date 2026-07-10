@@ -5,6 +5,7 @@ import type {
   DesktopRentalPatchGateStatus,
   DesktopRentalSessionStatus,
 } from "../../../../../../electron/ipc-types";
+import { formatFullTimestamp } from "../../../../domain/time";
 
 type PillState = "active" | "connected" | "failed" | "offline" | "starting";
 
@@ -52,9 +53,7 @@ export function patchCheckState(status: DesktopRentalPatch["checkResults"][numbe
 }
 
 export function formatTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatFullTimestamp(value);
 }
 
 export function humanizeToken(value: string): string {

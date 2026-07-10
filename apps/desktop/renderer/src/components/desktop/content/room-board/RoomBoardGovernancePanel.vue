@@ -9,6 +9,7 @@ import type {
   DesktopBoardGovernanceSnapshot,
   DesktopBoardManagerMode,
 } from "../../../../../../electron/ipc-types";
+import { formatFullTimestamp } from "../../../../domain/time";
 import DesktopSegmentedControl from "../../controls/DesktopSegmentedControl.vue";
 import {
   readableIntentAction,
@@ -113,10 +114,7 @@ const activeManagerLabel = computed(() =>
 );
 
 function formatTimestamp(value: string | null | undefined): string {
-  if (!value) return "—";
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) return value;
-  return new Date(parsed).toLocaleString();
+  return formatFullTimestamp(value);
 }
 
 type LiveManagerCandidate = {

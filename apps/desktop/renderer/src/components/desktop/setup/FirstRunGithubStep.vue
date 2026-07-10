@@ -28,7 +28,7 @@
           <span class="github-access-eyebrow">Connected account</span>
           <div class="auth-account" data-testid="first-run-auth-account">
             <span class="auth-avatar" aria-hidden="true">
-              {{ authStatus.account.login.slice(0, 2).toUpperCase() }}
+              {{ loginInitials(authStatus.account.login) }}
             </span>
             <span>
               <strong>{{ authStatus.account.displayName || authStatus.account.login }}</strong>
@@ -110,6 +110,7 @@ import type {
   DesktopAuthStatus,
   DesktopPendingDeviceAuth,
 } from "../../../../../electron/ipc-types";
+import { loginInitials } from "../../../domain/initials";
 
 const props = defineProps<{
   authStatus: DesktopAuthStatus | null;
