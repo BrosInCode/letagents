@@ -316,6 +316,9 @@ import {
   pendingManagedAgentPermissionApprovals,
   preferredManagedAgentRepoRootPath,
   type ManagedAgentPermissionApproval,
+  managedAgentSessionListsEqual,
+  withRoomManagedAgentSessions,
+  withUpsertedManagedAgentSession,
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
@@ -1452,28 +1455,36 @@ async function refreshManagedAgentSessions(): Promise<void> {
   try {
     const sessions = await desktopIpc.workers.listManagedAgentSessions(roomIdentifier);
     if (props.room.identifier !== roomIdentifier) return;
-    managedAgentSessions.value = sessions;
+    if (!managedAgentSessionListsEqual(managedAgentSessions.value, sessions)) {
+      managedAgentSessions.value = sessions;
+    }
   } catch {
     if (props.room.identifier === roomIdentifier) {
-      managedAgentSessions.value = managedAgentSessions.value.filter((session) =>
+      const scoped = managedAgentSessions.value.filter((session) =>
         managedAgentSessionMatchesRoom(session, roomIdentifier)
       );
+      // Identity-stable like the success path: repeated poll errors must not
+      // re-render the shell every tick.
+      if (scoped.length !== managedAgentSessions.value.length) {
+        managedAgentSessions.value = scoped;
+      }
     }
   }
 }
 
 function replaceManagedAgentSessions(sessions: DesktopManagedAgentSession[]): void {
-  const otherRoomSessions = managedAgentSessions.value.filter((session) =>
-    !managedAgentSessionMatchesRoom(session, props.room.identifier)
+  managedAgentSessions.value = withRoomManagedAgentSessions(
+    managedAgentSessions.value,
+    props.room.identifier,
+    sessions,
   );
-  managedAgentSessions.value = [...otherRoomSessions, ...sessions];
 }
 
 function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
-  managedAgentSessions.value = [
+  managedAgentSessions.value = withUpsertedManagedAgentSession(
+    managedAgentSessions.value,
     session,
-    ...managedAgentSessions.value.filter((entry) => entry.id !== session.id),
-  ];
+  );
 }
 
 async function resolveComposerPermission(
