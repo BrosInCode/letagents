@@ -119,10 +119,13 @@ import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.j
 import {
   clearAllDesktopManagedAgentReplyChangeState,
   clearDesktopManagedAgentReplyChangeState,
-  desktopManagedAgentReplyChangeSignature,
 } from "./managed-agent-reply-changes.js";
 import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
 import { createDesktopCursorRuntime } from "./cursor-runtime.js";
+import {
+  createManagedAgentEventTurnEngine,
+  type ManagedAgentEventTurnResult,
+} from "./managed-agent-event-turn-engine.js";
 import {
   assertManagedAgentPermissionProfileAvailable,
 } from "./managed-agent-permission-profiles.js";
@@ -157,7 +160,6 @@ const CODEX_RUNTIME_REASONING_REPEAT_MS = 30_000;
 
 const spawnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
-const desktopEventQueues = new Map<string, Promise<void>>();
 const codexRuntimeReasoningLastPost = new Map<string, { signature: string; postedAt: number }>();
 const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
 const desktopManagedAgentRuntimes = new DesktopManagedAgentRuntimeRegistry();
@@ -1181,7 +1183,7 @@ function dispatchRoomStreamEventToCodexManagedAgents(event: DesktopRoomStreamEve
   const sessions = listDeliverableCodexSessionsForRoomStreamEvent(event);
 
   for (const session of sessions) {
-    enqueueDesktopEventTurn(session, event);
+    codexEventTurnEngine.enqueueDesktopEventTurn(session, event);
   }
 }
 
@@ -1189,44 +1191,83 @@ export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamE
   desktopManagedAgentRuntimes.dispatchRoomStreamEvent(event);
 }
 
-function enqueueDesktopEventTurn(
-  session: DesktopCodexLiveSessionState,
-  event: ManagedRoomEvent,
-): void {
-  const previous = desktopEventQueues.get(session.session_id) ?? Promise.resolve();
-  const storage = resolveLocalAwareRoomStorageMode(event.roomIdentifier);
-  const next = previous
-    .catch(() => undefined)
-    .then(async () => deliverDesktopEventTurn(session.session_id, event, await storage))
-    .catch((error) => {
-      clearSessionActiveWork(session.session_id, (current) => ({
-        ...current,
-        status: "unknown",
-        last_error: error instanceof Error ? error.message : String(error),
-        updated_at: new Date().toISOString(),
-      }));
-    });
-  desktopEventQueues.set(session.session_id, next);
-  void next.finally(() => {
-    if (desktopEventQueues.get(session.session_id) === next) {
-      desktopEventQueues.delete(session.session_id);
-    }
-  });
+/**
+ * Tear a Codex-engine session down after a room stop phrase. The shared event
+ * engine drives this through its `disconnectWorker` adapter hook; Codex's
+ * teardown is process-oriented (kill the owned app-server, clear the monitor)
+ * rather than a cloud disconnect, matching the historical stop-phrase path.
+ */
+async function disconnectCodexWorkerForStopPhrase(
+  worker: StoredAgentSessionState | null,
+): Promise<void> {
+  markAgentSessionEnded(worker?.session_id ?? null);
+  const live = worker?.session_id
+    ? listStoredCodexLiveSessions().find((session) => session.agent_session_id === worker.session_id) ?? null
+    : null;
+  if (live) {
+    killOwnedAppServer(live);
+    clearSessionMonitor(live.session_id);
+  }
 }
 
-function stopSessionAfterRoomStopPhrase(sessionId: string): void {
-  const updated = updateCodexLiveSession(sessionId, (current) => ({
-    ...current,
-    status: "interrupted",
-    last_error: null,
-    updated_at: new Date().toISOString(),
-  }));
-  if (!updated) {
-    return;
-  }
-  killOwnedAppServer(updated);
-  clearSessionMonitor(updated.session_id);
-}
+/**
+ * Codex is ported onto the shared managed-agent event-turn engine. The engine
+ * owns the per-session queue, active-turn tracking, and the completed/publish/
+ * stop-phrase ladder. Codex keeps everything the engine never learns about:
+ * the app-server readiness probe, the JSON-RPC client lifecycle, the wait-for-
+ * idle preamble (both inside beforeTurnReadiness), and the context-request /
+ * room-tool loop (inside runTurn).
+ *
+ * Five engine seams keep Codex's behavior byte-for-byte:
+ *   - maxConsecutiveTurnErrors: Infinity  -> no error budget, no parking; a
+ *     failing turn stays "unknown" and keeps retrying (Phase 3.2 deferred).
+ *   - resolveErrorTurnStatus                -> Codex's turn machinery persists a
+ *     precise status ("failed" when an owned app-server exits, "unknown" for
+ *     malformed/capped/timed-out turns, ...); this preserves it instead of
+ *     collapsing everything onto the engine's generic "unknown".
+ *   - beforeTurnReadiness                    -> the readiness probe and wait-for-
+ *     idle run BEFORE the engine marks the session active and captures the
+ *     change baseline, so a previous turn's working-tree changes are never
+ *     attributed to the new event and the session never shows active for an
+ *     event it has not started.
+ *   - resolveStorageAtEnqueue: true          -> the room's storage destination is
+ *     snapshotted when the event arrives, so a storage-mode flip while the
+ *     event waits behind an active turn cannot reroute the reply.
+ *   - stopAfterTurnOnError: true              -> an explicit stop phrase still
+ *     tears down the worker when its acknowledgement turn is interrupted or
+ *     times out.
+ */
+const codexEventTurnEngine = createManagedAgentEventTurnEngine<
+  DesktopCodexLiveSessionState,
+  ManagedAgentEventTurnResult
+>({
+  now: () => new Date().toISOString(),
+  resolveStorage: (roomIdentifier) => resolveLocalAwareRoomStorageMode(roomIdentifier),
+  resolveStorageAtEnqueue: true,
+  getStoredSession: getStoredCodexLiveSession,
+  toPublicSession: toPublicManagedAgentSession,
+  updateSession: updateCodexLiveSession,
+  emitSessionUpdate: emitManagedAgentSessionUpdate,
+  publishReply: publishDesktopManagedAgentReply,
+  beforeTurnReadiness: waitForCodexEventTurnReadiness,
+  runTurn: runDesktopEventCodexTurn,
+  // Codex persists thread_id/turn_id live inside runTurn (the app-server hands
+  // back a new turn id per turn/start), so there is nothing to fold here.
+  applyTurnResult: (current) => current,
+  // A newer room event never interrupts an in-flight Codex turn: Codex waits
+  // for the current turn to go idle instead of preempting it.
+  shouldPreemptOnEnqueue: () => false,
+  replyChangeSessionKey: codexReplyChangeSessionKey,
+  disconnectWorker: disconnectCodexWorkerForStopPhrase,
+  maxConsecutiveTurnErrors: Number.POSITIVE_INFINITY,
+  // Codex historically honored the stop phrase after a non-throwing timeout
+  // or interrupted acknowledgement turn; preserve that explicit stop request.
+  stopAfterTurnOnError: true,
+  resolveErrorTurnStatus: (session) => ({
+    status: session.status,
+    lastError: session.last_error ?? null,
+  }),
+});
 
 function activeWorkForEvent(event: ManagedRoomEvent): NonNullable<DesktopCodexLiveSessionState["active_work"]> {
   return {
@@ -1537,15 +1578,37 @@ async function executeManagedAgentContextRequestWithTimeout(
   }
 }
 
-async function deliverDesktopEventTurn(
-  sessionId: string,
-  event: ManagedRoomEvent,
-  storage: DesktopRoomStorageState,
-): Promise<void> {
-  const session = getStoredCodexLiveSession(sessionId);
-  if (!session || !canDeliverDesktopEventToSession(session)) {
-    return;
-  }
+/**
+ * Run one full Codex event turn for the shared engine. Owns the transport that
+ * the engine never learns about: the app-server readiness probe, the JSON-RPC
+ * client lifecycle, the wait-for-idle preamble, and the context-request / room-
+ * tool loop. The engine owns marking the session active, the reply publication,
+ * and the final status ladder.
+ *
+ * The result's `status` is "error" for anything that is not a clean completion
+ * so the engine does not overwrite the precise status the turn machinery already
+ * persisted; `resolveErrorTurnStatus` then preserves that status.
+ */
+/**
+ * Engine readiness preflight (`beforeTurnReadiness`): the app-server readiness
+ * probe plus the wait for the session's current turn to go idle. Runs BEFORE
+ * the engine marks the session active for the event and captures the change
+ * baseline, preserving the historical ordering:
+ *
+ *   const idleSession = await waitForCurrentTurnToIdle(client, session.session_id);
+ *   if (!idleSession || !canDeliverDesktopEventToSession(idleSession)) return;
+ *   const stopAfterTurn = ...; const prompt = ...;
+ *   const beforeChangeSignature = await desktopManagedAgentReplyChangeSignature(...);
+ *
+ * Returning null skips the delivery silently; the engine re-checks
+ * deliverability on the returned session (the `canDeliver...` half above).
+ */
+async function waitForCodexEventTurnReadiness(input: {
+  session: DesktopCodexLiveSessionState;
+  event: ManagedRoomEvent;
+}): Promise<DesktopCodexLiveSessionState | null> {
+  const sessionId = input.session.session_id;
+  const session = getStoredCodexLiveSession(sessionId) ?? input.session;
 
   const serverReachable = await isCodexAppServerReady(session.server_url);
   if (!serverReachable) {
@@ -1562,7 +1625,7 @@ async function deliverDesktopEventTurn(
       killOwnedAppServer(updated);
       clearSessionMonitor(updated.session_id);
     }
-    return;
+    return null;
   }
 
   const client = new CodexRpcClient(session.server_url, (notification) => {
@@ -1570,35 +1633,59 @@ async function deliverDesktopEventTurn(
   });
   try {
     await client.connect();
-    const idleSession = await waitForCurrentTurnToIdle(client, session.session_id);
-    if (!idleSession || !canDeliverDesktopEventToSession(idleSession)) {
-      return;
-    }
+    return await waitForCurrentTurnToIdle(client, session.session_id);
+  } finally {
+    client.close();
+  }
+}
 
-    const stopAfterTurn = isStopPhraseRoomStreamEvent(idleSession, event);
-    const prompt = buildDesktopEventPrompt(bindCodexLiveSessionToWorker(idleSession), event);
-    const beforeChangeSignature = await desktopManagedAgentReplyChangeSignature(
-      toPublicManagedAgentSession(bindCodexLiveSessionToWorker(idleSession)),
-    );
-    const completed = await runDesktopEventTurnWithContext({
+async function runDesktopEventCodexTurn(input: {
+  active: DesktopCodexLiveSessionState;
+  event: ManagedRoomEvent;
+  storage: DesktopRoomStorageState;
+  abortController: AbortController;
+}): Promise<ManagedAgentEventTurnResult> {
+  const sessionId = input.active.session_id;
+  const session = getStoredCodexLiveSession(sessionId) ?? input.active;
+
+  const client = new CodexRpcClient(session.server_url, (notification) => {
+    publishCodexRuntimeNotification(session.session_id, notification);
+  });
+  // Bridge an engine-driven abort (preempt/stop) onto a Codex turn interrupt.
+  // Codex never preempts on enqueue and drives its own stop path, so this only
+  // fires if a future caller aborts the engine turn directly.
+  const onAbort = (): void => {
+    const latest = getStoredCodexLiveSession(sessionId) ?? session;
+    void client
+      .request("turn/interrupt", { threadId: latest.thread_id, turnId: latest.turn_id })
+      .catch(() => {
+        // Best effort; the engine owns the resulting status.
+      });
+  };
+  input.abortController.signal.addEventListener("abort", onAbort);
+  try {
+    await client.connect();
+    const stopAfterTurn = isStopPhraseRoomStreamEvent(session, input.event);
+    const prompt = buildDesktopEventPrompt(bindCodexLiveSessionToWorker(session), input.event);
+    const outcome = await runDesktopEventTurnWithContext({
       client,
-      session: idleSession,
-      event,
-      storage,
+      session,
+      event: input.event,
+      storage: input.storage,
       prompt,
       allowContextRequests: !stopAfterTurn,
     });
-    await publishDesktopManagedAgentReply({
-      session: completed.session,
-      event,
-      storage,
-      text: completed.text,
-      beforeChangeSignature,
-    });
-    if (stopAfterTurn) {
-      stopSessionAfterRoomStopPhrase(idleSession.session_id);
-    }
+
+    const latest = getStoredCodexLiveSession(sessionId) ?? outcome.session;
+    const status = latest.status === "completed" ? "completed" : "error";
+    return {
+      sessionId,
+      text: outcome.text,
+      status,
+      error: status === "error" ? latest.last_error ?? null : null,
+    };
   } finally {
+    input.abortController.signal.removeEventListener("abort", onAbort);
     client.close();
   }
 }
