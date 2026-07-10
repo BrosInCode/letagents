@@ -8,7 +8,6 @@
   color: var(--text-secondary);
   cursor: pointer;
   transition:
-    transform 160ms ease,
     border-color 160ms ease,
     background 160ms ease,
     color 160ms ease;
@@ -17,12 +16,13 @@
 .desktop-composer-add-agent {
   position: relative;
   flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   padding: 0;
   border-radius: 10px;
-  background: var(--text);
-  color: #080808;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
 }
 
 .desktop-composer-add-agent svg {
@@ -32,26 +32,20 @@
 
 .desktop-composer-add-agent:hover,
 .desktop-activity-add-agent:hover {
-  transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.2);
   background: rgba(255, 255, 255, 0.11);
   color: var(--text);
 }
 
 .desktop-composer-add-agent:hover {
-  border-color: rgba(255, 255, 255, 0.28);
-  background: rgba(255, 255, 255, 0.86);
-  color: #080808;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
 }
 
 .desktop-composer-add-agent:disabled {
   cursor: not-allowed;
   opacity: 0.42;
-}
-
-.desktop-composer-add-agent:active,
-.desktop-activity-add-agent:active {
-  transform: translateY(0);
 }
 
 .desktop-activity-add-agent {

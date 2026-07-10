@@ -2,7 +2,7 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: end;
-  gap: 8px;
+  gap: 7px;
 }
 
 .desktop-composer-events {
@@ -213,7 +213,7 @@
 
 .desktop-composer-input {
   width: 100%;
-  min-height: 34px;
+  min-height: 38px;
   max-height: 156px;
   resize: none;
   overflow-y: hidden;
@@ -222,9 +222,9 @@
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 0.86rem;
-  line-height: 1.38;
-  padding: 7px 2px;
+  font-size: 0.88rem;
+  line-height: 1.42;
+  padding: 8px 3px;
 }
 
 .desktop-composer-input:disabled {
@@ -249,31 +249,49 @@
 }
 
 .desktop-composer-send {
-  min-width: 58px;
-  height: 36px;
-  padding: 0 14px;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
   border-radius: 10px;
-  background: var(--text);
-  color: #080808;
-  font-size: 0.78rem;
-  font-weight: 900;
+  background: #4da3ff;
+  color: #06111d;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 140ms var(--ease-out),
+    opacity 140ms ease;
+}
+
+.desktop-composer-send:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.desktop-composer-send svg {
+  stroke-width: 2.25;
+}
+
+.desktop-composer-send .lucide-loader-circle {
+  animation: composer-send-spin 700ms linear infinite;
 }
 
 .desktop-composer-attach {
   margin-left: auto;
   display: inline-grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   padding: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.065);
+  border-radius: 9px;
+  background: transparent;
   color: var(--text-secondary);
 }
 
 .desktop-composer-attach svg {
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
 }
 
 .desktop-composer-attach:hover:not(:disabled) {
@@ -288,5 +306,13 @@
 
 .desktop-composer-send:disabled {
   cursor: not-allowed;
-  opacity: 0.45;
+  background: rgba(255, 255, 255, 0.065);
+  color: var(--text-tertiary);
+  opacity: 1;
+}
+
+@keyframes composer-send-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

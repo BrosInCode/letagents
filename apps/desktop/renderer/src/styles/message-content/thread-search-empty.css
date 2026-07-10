@@ -52,16 +52,44 @@
   display: grid;
   align-self: center;
   place-items: center;
-  gap: 7px;
-  width: min(100%, var(--room-chat-content-max, 920px));
-  min-height: 360px;
+  gap: 6px;
+  width: min(100%, 420px);
+  min-height: 280px;
+  margin: auto;
+  padding: 36px 24px;
   text-align: center;
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-  border-radius: var(--radius-lg);
-  background: rgba(255, 255, 255, 0.018);
+  border: 0;
+  background: transparent;
 }
 
 .room-empty-card h3 {
   margin: 0;
-  font-size: 1.05rem;
+  color: rgba(245, 245, 247, 0.92);
+  font-size: 0.96rem;
+  font-weight: 680;
+}
+
+.room-empty-card p {
+  max-width: 340px;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
+
+.room-empty-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  color: rgba(166, 167, 174, 0.88);
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .room-chat-page .room-empty-card {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
 }
