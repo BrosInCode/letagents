@@ -1,22 +1,14 @@
-import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 
-import { localChatDatabasePath } from "../../chat-storage/settings.js";
 import type { RoomMessageAttachmentPayload } from "../../attachments/mappers.js";
 import type { RoomMessagePayload } from "./mappers.js";
-
-type SqliteStatement = {
-  all: (...params: unknown[]) => Record<string, unknown>[];
-  get: (...params: unknown[]) => Record<string, unknown> | undefined;
-  run: (...params: unknown[]) => unknown;
-};
-
-type SqliteDatabase = {
-  exec: (sql: string) => void;
-  prepare: (sql: string) => SqliteStatement;
-};
+import {
+  addColumnIfMissing,
+  beginImmediate,
+  getLocalChatDatabase,
+  rollback,
+  type SqliteDatabase,
+} from "../local-db.js";
 
 type LocalMessageRow = {
   room_id: string;
@@ -87,10 +79,8 @@ type LocalReaderOptions = {
   readerKey?: string | null;
 };
 
-const require = createRequire(import.meta.url);
-let db: SqliteDatabase | null = null;
-let initialized = false;
 const legacyLocalThreadReaderKey = "local:legacy";
+let schemaInitialized = false;
 
 function formatMessageId(number: number): string {
   return `msg_${number}`;
@@ -110,17 +100,9 @@ function clampLimit(limit?: number): number {
 }
 
 async function getDb(): Promise<SqliteDatabase> {
-  if (db) return db;
-  await mkdir(dirname(localChatDatabasePath), { recursive: true });
-  const { DatabaseSync } = require("node:sqlite") as {
-    DatabaseSync: new (path: string) => SqliteDatabase;
-  };
-  db = new DatabaseSync(localChatDatabasePath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 5000");
-  if (!initialized) {
-    db.exec(`
+  const database = await getLocalChatDatabase();
+  if (!schemaInitialized) {
+    database.exec(`
       CREATE TABLE IF NOT EXISTS local_chat_room_sequences (
         room_id TEXT PRIMARY KEY,
         next_number INTEGER NOT NULL
@@ -170,11 +152,11 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE INDEX IF NOT EXISTS local_chat_attachments_message_idx
         ON local_chat_attachments (room_id, message_number);
     `);
-    addColumnIfMissing(db, "local_chat_messages", "thread_root_number", "INTEGER");
-    addColumnIfMissing(db, "local_chat_messages", "sync_key", "TEXT");
-    addColumnIfMissing(db, "local_chat_messages", "sync_started_at", "TEXT");
-    ensureLocalThreadReadsSchema(db);
-    db.exec(`
+    addColumnIfMissing(database, "local_chat_messages", "thread_root_number", "INTEGER");
+    addColumnIfMissing(database, "local_chat_messages", "sync_key", "TEXT");
+    addColumnIfMissing(database, "local_chat_messages", "sync_started_at", "TEXT");
+    ensureLocalThreadReadsSchema(database);
+    database.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
         ON local_chat_messages (room_id, sync_key)
         WHERE sync_key IS NOT NULL;
@@ -188,24 +170,9 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE INDEX IF NOT EXISTS local_chat_thread_reads_reader_idx
         ON local_chat_thread_reads (reader_key);
     `);
-    initialized = true;
+    schemaInitialized = true;
   }
-  return db;
-}
-
-function addColumnIfMissing(
-  database: SqliteDatabase,
-  tableName: string,
-  columnName: string,
-  definition: string,
-): void {
-  try {
-    database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
-  } catch (error) {
-    if (!String(error).toLowerCase().includes("duplicate column")) {
-      throw error;
-    }
-  }
+  return database;
 }
 
 function ensureLocalThreadReadsSchema(database: SqliteDatabase): void {
@@ -527,18 +494,6 @@ function buildLocalThreadParticipants(
 
 function syncKeyForMessage(roomId: string, number: number): string {
   return `local-chat:${roomId}:${number}`;
-}
-
-function beginImmediate(database: SqliteDatabase): void {
-  database.exec("BEGIN IMMEDIATE");
-}
-
-function rollback(database: SqliteDatabase): void {
-  try {
-    database.exec("ROLLBACK");
-  } catch {
-    // The transaction may already be closed by SQLite after an error.
-  }
 }
 
 function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): number {
