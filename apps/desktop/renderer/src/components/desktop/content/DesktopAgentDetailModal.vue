@@ -262,6 +262,7 @@ import {
 import { formatShortDateTime } from "../../../domain/time";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
+import { desktopIpc } from "../../../ipc/index.js";
 import {
   currentFocusableElement,
   restoreFocus,
@@ -451,7 +452,7 @@ async function loadManagedSessions(options: { quiet?: boolean; refreshChanges?: 
   }
   managedSessionError.value = null;
   try {
-    const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(props.roomIdentifier);
+    const sessions = await desktopIpc.workers.listManagedAgentSessions(props.roomIdentifier);
     if (!isCurrentModalState(requestVersion)) return;
     managedSessions.value = sessions;
     await refreshMatchingManagedSessionDetails({
@@ -500,7 +501,7 @@ async function inspectManagedSession(
     [sessionId]: true,
   };
   try {
-    const inspected = await window.letagentsDesktop.workers.inspectManagedAgent(sessionId, props.roomIdentifier);
+    const inspected = await desktopIpc.workers.inspectManagedAgent(sessionId, props.roomIdentifier);
     if (!isCurrentModalState(requestVersion)) return;
     if (!inspected) {
       return;
@@ -536,7 +537,7 @@ async function loadManagedAgentChangeSummary(
     [session.id]: true,
   };
   try {
-    const summary = await window.letagentsDesktop.workers.getManagedAgentChangeSummary(session.id, props.roomIdentifier);
+    const summary = await desktopIpc.workers.getManagedAgentChangeSummary(session.id, props.roomIdentifier);
     if (!isCurrentModalState(requestVersion)) return;
     managedChangeSummaries.value = {
       ...managedChangeSummaries.value,
@@ -594,7 +595,7 @@ async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"
     : "Checking current turn...";
   managedSessionError.value = null;
   try {
-    const stopped = await window.letagentsDesktop.workers.stopManagedAgent({
+    const stopped = await desktopIpc.workers.stopManagedAgent({
       sessionId,
       stopMode,
     });
@@ -644,7 +645,7 @@ async function resolveManagedPermission(
   };
   managedSessionError.value = null;
   try {
-    const result = await window.letagentsDesktop.workers.resolveManagedAgentPermission({
+    const result = await desktopIpc.workers.resolveManagedAgentPermission({
       requestId: request.id,
       sessionId: request.sessionId,
       behavior,

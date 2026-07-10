@@ -314,6 +314,7 @@ import type {
   DesktopRentalSession,
 } from "../../../../../electron/ipc-types";
 import RentListingFormModal from "./RentListingFormModal.vue";
+import { desktopIpc } from "../../../ipc/index.js";
 import {
   canPauseListing,
   canResumeListing,
@@ -363,7 +364,7 @@ onMounted(() => {
 });
 
 async function refresh(): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
+  const bridge = desktopIpc.rental;
   if (!bridge?.getProviderDashboard) {
     state.value = "disabled";
     return;
@@ -387,7 +388,7 @@ async function refresh(): Promise<void> {
 }
 
 async function accept(requestId: string): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
+  const bridge = desktopIpc.rental;
   if (!bridge?.acceptRequest) return;
   actionBusyFor.value = requestId;
   actionKind.value = "accept";
@@ -408,7 +409,7 @@ async function accept(requestId: string): Promise<void> {
 }
 
 async function decline(requestId: string): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
+  const bridge = desktopIpc.rental;
   if (!bridge?.declineRequest) return;
   actionBusyFor.value = requestId;
   actionKind.value = "decline";
@@ -489,14 +490,14 @@ async function resumeListing(listingId: string): Promise<void> {
   await runListingAction(listingId, (bridge) => bridge.resumeListing(listingId), "Could not resume the listing.");
 }
 
-type RentalBridge = NonNullable<NonNullable<typeof window.letagentsDesktop>["rental"]>;
+type RentalBridge = NonNullable<NonNullable<typeof desktopIpc>["rental"]>;
 
 async function runListingAction(
   listingId: string,
   action: (bridge: RentalBridge) => Promise<unknown>,
   failureMessage: string,
 ): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
+  const bridge = desktopIpc.rental;
   if (!bridge) return;
   listingBusyFor.value = listingId;
   actionError.value = null;
@@ -515,7 +516,7 @@ async function runListingAction(
 }
 
 async function runPreflight(): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
+  const bridge = desktopIpc.rental;
   if (!bridge?.runPreflight) return;
   preflightBusy.value = true;
   actionError.value = null;

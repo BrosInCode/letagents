@@ -503,7 +503,6 @@ import {
 } from "../../../domain/managed-agents";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
-import { toIpcPayload } from "../../../domain/ipc-payload";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
 import {
   currentFocusableElement,
@@ -511,6 +510,7 @@ import {
   trapFocusInDialog,
 } from "./modal-focus";
 import DesktopSelectField, { type DesktopSelectOption } from "../controls/DesktopSelectField.vue";
+import { desktopIpc } from "../../../ipc/index.js";
 
 const props = defineProps<{
   open: boolean;
@@ -914,7 +914,7 @@ async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<v
   if (!props.open) return;
   const requestVersion = modalStateVersion;
   try {
-    const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(props.roomIdentifier);
+    const sessions = await desktopIpc.workers.listManagedAgentSessions(props.roomIdentifier);
     if (!isCurrentModalState(requestVersion)) return;
     emit("managed-sessions-updated", sessions);
   } catch (error) {
@@ -941,7 +941,7 @@ async function loadProviders(): Promise<void> {
   loadError.value = null;
   try {
     const nextProviders = visibleDesktopAgentProviders(
-      await window.letagentsDesktop.workers.listAgentProviders(),
+      await desktopIpc.workers.listAgentProviders(),
     );
     if (!isCurrentModalState(requestVersion)) return;
     providers.value = nextProviders;
@@ -973,7 +973,7 @@ async function startManagedAgent(): Promise<void> {
   setupMessage.value = null;
   startManagedSessionRefreshTimer(1_000);
   try {
-    const result = await window.letagentsDesktop.workers.startManagedAgent(toIpcPayload({
+    const result = await desktopIpc.workers.startManagedAgent({
       providerId: selectedProviderId.value,
       roomIdentifier: props.roomIdentifier,
       roomGitRoom: props.roomGitRoom,
@@ -985,7 +985,7 @@ async function startManagedAgent(): Promise<void> {
       model: selectedModel.value,
       modelSource: selectedModelSource.value,
       effort: selectedEffort.value || null,
-    }));
+    });
     if (!isCurrentModalState(requestVersion)) return;
     setupMessage.value = result.message;
     upsertManagedSession(result.session);
@@ -1009,7 +1009,7 @@ async function stopManagedAgent(sessionId: string): Promise<void> {
   stoppingSessionId.value = sessionId;
   setupMessage.value = "Stopping local agent...";
   try {
-    const session = await window.letagentsDesktop.workers.stopManagedAgent({
+    const session = await desktopIpc.workers.stopManagedAgent({
       sessionId,
       stopMode: "worker",
     });
@@ -1033,7 +1033,7 @@ async function loadOpenModelSettings(): Promise<void> {
   if (!showOpenModelConfig.value) return;
   const requestVersion = modalStateVersion;
   try {
-    const status = await window.letagentsDesktop.openModel.getSettingsStatus();
+    const status = await desktopIpc.openModel.getSettingsStatus();
     if (!isCurrentModalState(requestVersion)) return;
     openModelStatus.value = status;
     openModelBaseUrl.value = status.baseUrl;
@@ -1052,7 +1052,7 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
   const requestVersion = modalStateVersion;
   const requestId = ++modelRequestId;
   const requestProviderId = selectedProviderId.value;
-  const listModels = window.letagentsDesktop.workers.listAgentProviderModels;
+  const listModels = desktopIpc.workers.listAgentProviderModels;
   if (typeof listModels !== "function") {
     providerModels.value = {
       providerId: requestProviderId,
@@ -1068,7 +1068,7 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
   try {
     const result = await listModels(
       requestProviderId,
-      toIpcPayload({
+      {
         roomIdentifier: props.roomIdentifier,
         roomGitRoom: props.roomGitRoom,
         repoRootPath: props.repoRootPath,
@@ -1077,7 +1077,7 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
         modelSource: selectedModelSource.value,
         effort: selectedEffort.value || null,
         refreshModels: options.refresh,
-      }),
+      },
     );
     if (
       isCurrentModalState(requestVersion) &&
@@ -1155,7 +1155,7 @@ async function applyOpenModelSettings(input: {
   savingOpenModelSettings.value = true;
   setupMessage.value = null;
   try {
-    const status = await window.letagentsDesktop.openModel.saveSettings(input);
+    const status = await desktopIpc.openModel.saveSettings(input);
     if (!isCurrentModalState(requestVersion)) return;
     openModelStatus.value = status;
     openModelBaseUrl.value = status.baseUrl;
@@ -1407,9 +1407,9 @@ async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<
   loadError.value = null;
   setupConfirmation.value = null;
   try {
-    const result = await window.letagentsDesktop.workers.runAgentProviderPreflight(
+    const result = await desktopIpc.workers.runAgentProviderPreflight(
       requestProviderId,
-      toIpcPayload({
+      {
         roomIdentifier: props.roomIdentifier,
         roomGitRoom: props.roomGitRoom,
         repoRootPath: props.repoRootPath,
@@ -1419,7 +1419,7 @@ async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<
         modelSource: selectedModelSource.value,
         effort: selectedEffort.value || null,
         refreshModels: options.refreshModels,
-      }),
+      },
     );
     if (
       isCurrentModalState(requestVersion) &&
@@ -1456,7 +1456,7 @@ async function runSetupAction(action: DesktopAgentProviderSetupAction): Promise<
   setupMessage.value = null;
   const requestVersion = modalStateVersion;
   try {
-    const result = await window.letagentsDesktop.workers.runAgentProviderSetup(
+    const result = await desktopIpc.workers.runAgentProviderSetup(
       providerId,
       {
         action,
@@ -1498,7 +1498,7 @@ async function createWorktree(): Promise<void> {
       repoRoot,
       branch,
       createWorktree: (root, branchName) =>
-        window.letagentsDesktop.repos.createWorktree(root, branchName),
+        desktopIpc.repos.createWorktree(root, branchName),
       chooseWorktree: (rootPath) => emit("choose-worktree", rootPath),
     });
     if (errorMessage) {

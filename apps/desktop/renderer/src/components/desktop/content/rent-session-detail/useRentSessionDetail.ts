@@ -9,8 +9,9 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import type { RentSessionDetailTab } from "./tabs";
 import { canCancelSessionStatus, countPendingContextRequests } from "./presentation";
+import { desktopIpc } from "../../../../ipc/index.js";
 
-type RentalBridge = NonNullable<typeof window.letagentsDesktop.rental>;
+type RentalBridge = NonNullable<typeof desktopIpc.rental>;
 
 interface UseRentSessionDetailOptions {
   open: Readonly<Ref<boolean>>;
@@ -284,7 +285,7 @@ export function useRentSessionDetail(options: UseRentSessionDetailOptions) {
   }
 
   function getRentalBridge(): RentalBridge | null {
-    const bridge = window.letagentsDesktop?.rental;
+    const bridge = desktopIpc.rental;
     if (!bridge) {
       errorMessage.value = "Rent an Agent is not enabled.";
       return null;

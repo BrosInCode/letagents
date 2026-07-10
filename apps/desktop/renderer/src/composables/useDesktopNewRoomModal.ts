@@ -3,6 +3,7 @@ import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "
 import { copyTextToClipboard } from "../domain/clipboard";
 import { normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
+import { desktopIpc } from "../ipc/index.js";
 
 export type NewRoomStep =
   | "chooser"
@@ -212,7 +213,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
 
     try {
       if (newRoomStorage.value === "local") {
-        const bridge = window.letagentsDesktop.chatStorage;
+        const bridge = desktopIpc.chatStorage;
         if (!bridge?.createLocalRoom) {
           throw new Error("Restart LetAgents Desktop to enable local rooms.");
         }
@@ -231,14 +232,14 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
           },
         };
       } else {
-        const result = await window.letagentsDesktop.room.createInviteRoom();
+        const result = await desktopIpc.room.createInviteRoom();
         let snapshot = result.snapshot;
         let roomName =
           snapshot.room?.displayName ||
           snapshot.room?.name ||
           result.code;
         let namingWarning: string | null = null;
-        const rename = window.letagentsDesktop.room.rename;
+        const rename = desktopIpc.room.rename;
         if (rename && displayName) {
           try {
             const renamed = await rename(result.roomIdentifier, displayName);
@@ -320,7 +321,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
     try {
-      const result = await window.letagentsDesktop.repos.pickRoom();
+      const result = await desktopIpc.repos.pickRoom();
       if (result.canceled) {
         newRoomStep.value = "project";
         newRoomStatusMessage.value = null;
@@ -387,7 +388,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
     try {
-      const snapshot = await window.letagentsDesktop.room.getSnapshot(validation.normalized);
+      const snapshot = await desktopIpc.room.getSnapshot(validation.normalized);
       if (snapshot.access.status !== "ready") {
         newRoomFeedback.value = snapshot.access.message || "You do not have access to that room.";
         newRoomFeedbackState.value = "error";

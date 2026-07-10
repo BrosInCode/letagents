@@ -95,6 +95,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import { displayNameFromActor } from "../../../domain/agents";
 import { formatShortDateTime, timestampValue } from "../../../domain/time";
+import { desktopIpc } from "../../../ipc/index.js";
 
 interface ReasoningField {
   label: string;
@@ -346,7 +347,7 @@ watch(
       return;
     }
     try {
-      const result = await window.letagentsDesktop.room.getReasoningSession(roomIdentifier, sessionId);
+      const result = await desktopIpc.room.getReasoningSession(roomIdentifier, sessionId);
       if (serial !== fetchSerial) return;
       detailSession.value = result.session;
       detailUpdates.value = [...result.updates].sort((left, right) =>

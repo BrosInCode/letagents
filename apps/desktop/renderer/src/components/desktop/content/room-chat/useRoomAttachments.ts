@@ -5,6 +5,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import type { PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import { formatBytes } from "../attachments/formatting";
+import { desktopIpc } from "../../../../ipc/index.js";
 import {
   hasDraggedFiles,
   readDroppedAttachmentContent,
@@ -40,7 +41,7 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
     attaching.value = true;
     attachmentError.value = null;
     try {
-      const staged = await window.letagentsDesktop.room.pickAttachments(options.roomIdentifier.value);
+      const staged = await desktopIpc.room.pickAttachments(options.roomIdentifier.value);
       attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
     } catch (error) {
       attachmentError.value = error instanceof Error ? error.message : "Attachment could not be added.";
@@ -76,7 +77,7 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
     pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
     attaching.value = true;
     try {
-      const stageDroppedAttachmentContents = window.letagentsDesktop.room.stageDroppedAttachmentContents;
+      const stageDroppedAttachmentContents = desktopIpc.room.stageDroppedAttachmentContents;
       if (!stageDroppedAttachmentContents) {
         throw new Error("Restart LetAgents Desktop to enable drag and drop attachments.");
       }

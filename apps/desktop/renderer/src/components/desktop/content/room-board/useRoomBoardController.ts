@@ -10,6 +10,7 @@ import { normalizeRoom, readableStatus } from "./formatters";
 import { parseReviewCandidateValue, reviewAssignmentCandidates as getReviewAssignmentCandidates } from "./review-candidates";
 import { reviewLeases, shouldShowReviewPanel, workLease } from "./task-state";
 import type { TaskAction, TaskGroup } from "./types";
+import { desktopIpc } from "../../../../ipc/index.js";
 
 interface RoomBoardControllerProps {
   roomIdentifier: string;
@@ -62,7 +63,7 @@ export function useRoomBoardController(
     const title = input.title.trim();
     if (!title) return false;
     return runBoardMutation("add", async () => {
-      const result = await window.letagentsDesktop.room.addTask(props.roomIdentifier, {
+      const result = await desktopIpc.room.addTask(props.roomIdentifier, {
         title,
         description: input.description?.trim() || null,
       });
@@ -132,7 +133,7 @@ export function useRoomBoardController(
         label: "Release worker",
         busyLabel: "Releasing...",
         tone: "neutral",
-        run: async (nextTask) => (await window.letagentsDesktop.room.updateTaskLease(props.roomIdentifier, nextTask.id, {
+        run: async (nextTask) => (await desktopIpc.room.updateTaskLease(props.roomIdentifier, nextTask.id, {
           action: "release",
           lease_id: work.id,
           reason: `Released work lease for ${nextTask.id} from desktop board.`,
@@ -147,13 +148,13 @@ export function useRoomBoardController(
         tone: "neutral",
         run: async (nextTask) => {
           if (workerReviewsTask) {
-            return (await window.letagentsDesktop.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
+            return (await desktopIpc.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
               action: "release",
               lease_id: review.id,
               reason: `Released board review authority for ${nextTask.id} from desktop board.`,
             })).task;
           }
-          return (await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, nextTask.id, {
+          return (await desktopIpc.room.updateTaskReviewLease(props.roomIdentifier, nextTask.id, {
             action: "release",
             lease_id: review.id,
             reason: `Released board review authority for ${nextTask.id} from desktop board.`,
@@ -167,7 +168,7 @@ export function useRoomBoardController(
         label: "Claim review",
         busyLabel: "Claiming...",
         tone: "primary",
-        run: async (nextTask) => (await window.letagentsDesktop.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
+        run: async (nextTask) => (await desktopIpc.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
           action: "claim",
           reason: `Claimed board review authority for ${nextTask.id} from desktop board.`,
         })).task,
@@ -196,7 +197,7 @@ export function useRoomBoardController(
     const selected = parseReviewCandidateValue(selectedReviewerByTask.value[task.id] || "");
     if (!selected) return;
     await runBoardMutation(`${task.id}:assign-review`, async () => {
-      const result = await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, task.id, {
+      const result = await desktopIpc.room.updateTaskReviewLease(props.roomIdentifier, task.id, {
         action: "assign",
         target_actor_key: selected.agentKey,
         target_actor_instance_id: selected.agentInstanceId,
@@ -239,7 +240,7 @@ export function useRoomBoardController(
       busyLabel,
       tone,
       targetStatus: draggable ? status : undefined,
-      run: async (task) => (await window.letagentsDesktop.room.updateTask(props.roomIdentifier, task.id, { status })).task,
+      run: async (task) => (await desktopIpc.room.updateTask(props.roomIdentifier, task.id, { status })).task,
     };
   }
 
@@ -268,7 +269,7 @@ export function useRoomBoardController(
       busyLabel: busyLabelByAction[action],
       tone,
       targetStatus: targetStatusByAction[action],
-      run: async (task) => (await window.letagentsDesktop.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,
+      run: async (task) => (await desktopIpc.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,
     };
   }
 

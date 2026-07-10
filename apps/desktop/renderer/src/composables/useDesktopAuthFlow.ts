@@ -1,5 +1,6 @@
 import { ref, type Ref } from "vue";
 import type { DesktopAuthStatus } from "../../../electron/ipc-types";
+import { desktopIpc } from "../ipc/index.js";
 
 interface DesktopAuthFlowOptions {
   authStatus?: Ref<DesktopAuthStatus | null>;
@@ -37,10 +38,10 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     authBusy.value = true;
     authFeedback.value = null;
     try {
-      const result = await window.letagentsDesktop.auth.startDeviceFlow(options.getRoomIdentifier());
+      const result = await desktopIpc.auth.startDeviceFlow(options.getRoomIdentifier());
       authStatus.value = result.authStatus;
       authFeedback.value = "GitHub is open. Enter the code here, then come back to LetAgents. This app will keep checking.";
-      await window.letagentsDesktop.auth.openVerification(result.pendingDeviceAuth.verificationUri);
+      await desktopIpc.auth.openVerification(result.pendingDeviceAuth.verificationUri);
       scheduleAuthPoll();
     } catch (error) {
       authFeedback.value = error instanceof Error ? error.message : "Could not start GitHub approval.";
@@ -53,7 +54,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     authBusy.value = true;
     authFeedback.value = null;
     try {
-      await window.letagentsDesktop.auth.openVerification(url);
+      await desktopIpc.auth.openVerification(url);
       authFeedback.value = "Use the code shown here in GitHub, then return and approve the room.";
     } catch (error) {
       authFeedback.value = error instanceof Error ? error.message : "Could not open GitHub.";
@@ -68,7 +69,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     }
     authFeedback.value = null;
     try {
-      const result = await window.letagentsDesktop.auth.pollDeviceFlow();
+      const result = await desktopIpc.auth.pollDeviceFlow();
       authStatus.value = result.authStatus;
 
       if (result.status === "authorized") {
@@ -104,7 +105,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     authBusy.value = true;
     authFeedback.value = null;
     try {
-      authStatus.value = await window.letagentsDesktop.auth.signOut();
+      authStatus.value = await desktopIpc.auth.signOut();
       authFeedback.value = "Signed out locally. Connect a GitHub account to try again.";
       await options.onSignedOut();
     } catch (error) {

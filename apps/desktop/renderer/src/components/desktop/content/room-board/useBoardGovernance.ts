@@ -1,4 +1,5 @@
 import { computed, ref } from "vue";
+import { desktopIpc } from "../../../../ipc/index.js";
 import type {
   DesktopBoardGovernanceSection,
   DesktopBoardGovernanceSnapshot,
@@ -44,7 +45,7 @@ export function useBoardGovernance(roomIdentifier: string) {
     governanceLoading.value = true;
     governanceError.value = null;
     try {
-      governance.value = await window.letagentsDesktop.room.getBoardGovernance(roomIdentifier);
+      governance.value = await desktopIpc.room.getBoardGovernance(roomIdentifier);
       if (!selectedCandidateId.value && governance.value.activeManager) {
         selectedCandidateId.value = governance.value.activeManager.agentSessionId;
       }
@@ -82,25 +83,25 @@ export function useBoardGovernance(roomIdentifier: string) {
 
   async function assignManager(agentSessionId: string): Promise<void> {
     await runMutation(() =>
-      window.letagentsDesktop.room.assignBoardManager(roomIdentifier, { agentSessionId })
+      desktopIpc.room.assignBoardManager(roomIdentifier, { agentSessionId })
     );
   }
 
   async function releaseManager(reason?: string | null): Promise<void> {
     await runMutation(() =>
-      window.letagentsDesktop.room.releaseBoardManager(roomIdentifier, { reason })
+      desktopIpc.room.releaseBoardManager(roomIdentifier, { reason })
     );
   }
 
   async function setManagerMode(managerMode: DesktopBoardManagerMode): Promise<void> {
     await runMutation(() =>
-      window.letagentsDesktop.room.setBoardManagerMode(roomIdentifier, { managerMode })
+      desktopIpc.room.setBoardManagerMode(roomIdentifier, { managerMode })
     );
   }
 
   async function decideIntent(intentId: string, decision: "approve" | "deny", reason?: string | null): Promise<void> {
     await runMutation(() =>
-      window.letagentsDesktop.room.decideBoardIntent(roomIdentifier, intentId, { decision, reason })
+      desktopIpc.room.decideBoardIntent(roomIdentifier, intentId, { decision, reason })
     );
   }
 

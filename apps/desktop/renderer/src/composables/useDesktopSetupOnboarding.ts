@@ -12,6 +12,7 @@ import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { setupEntry } from "../domain/desktop-navigation";
 import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mcp-install";
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
+import { desktopIpc } from "../ipc/index.js";
 
 interface OpenRoomOptions {
   displayName?: string | null;
@@ -55,7 +56,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
   });
 
   const setupApiAvailable = computed(() => {
-    return Boolean(window.letagentsDesktop?.setup);
+    return Boolean(desktopIpc.setup);
   });
 
   const firstRunFeedback = computed(() => {
@@ -68,12 +69,12 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.loading.value = true;
     options.setupLoadError.value = null;
     try {
-      if (!window.letagentsDesktop?.setup) {
+      if (!desktopIpc.setup) {
         throw new Error("The desktop app connection is stale. Restart LetAgents Desktop so setup can install agent app connections automatically.");
       }
       const [nextMcpInstallState, nextAuthStatus] = await Promise.all([
-        window.letagentsDesktop.setup.getMcpInstallState(),
-        window.letagentsDesktop.auth.getStatus(),
+        desktopIpc.setup.getMcpInstallState(),
+        desktopIpc.auth.getStatus(),
       ]);
       options.mcpInstallState.value = nextMcpInstallState;
       options.authStatus.value = nextAuthStatus;
@@ -142,10 +143,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.setupLoadError.value = null;
     firstRunRoomSelected.value = false;
     try {
-      if (!window.letagentsDesktop?.repos?.pickRoom) {
+      if (!desktopIpc.repos?.pickRoom) {
         throw new Error("Restart LetAgents Desktop so the repo picker can open.");
       }
-      const result = await window.letagentsDesktop.repos.pickRoom();
+      const result = await desktopIpc.repos.pickRoom();
       if (result.canceled) return false;
       if (result.error || !result.snapshot) {
         options.authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
@@ -186,10 +187,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.setupLoadError.value = null;
     firstRunRoomSelected.value = false;
     try {
-      if (!window.letagentsDesktop?.room?.getSnapshot) {
+      if (!desktopIpc.room?.getSnapshot) {
         throw new Error("Restart LetAgents Desktop so the room can be joined.");
       }
-      const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+      const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
       if (!canSelectFirstRunRoom(snapshot.access.status)) {
         options.authFeedback.value = roomAccessFeedback(snapshot);
         return;
@@ -232,7 +233,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     targetIds: DesktopMcpInstallTargetId[],
   ): Promise<string | null> {
     if (!targetIds.includes("codex")) return null;
-    const workers = window.letagentsDesktop?.workers;
+    const workers = desktopIpc.workers;
     if (!workers?.runAgentProviderPreflight || !workers?.runAgentProviderSetup) return null;
 
     const preflight = await workers.runAgentProviderPreflight("codex", {});
@@ -264,11 +265,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpInstallFeedback.value = null;
     options.setupLoadError.value = null;
     try {
-      if (!window.letagentsDesktop?.setup) {
+      if (!desktopIpc.setup) {
         throw new Error("Restart LetAgents Desktop so setup can install MCP automatically.");
       }
       const runtimeMessage = await installCodexRuntimeIfMissing(targetIds);
-      const result = await window.letagentsDesktop.setup.installMcpServers(targetIds);
+      const result = await desktopIpc.setup.installMcpServers(targetIds);
       options.mcpInstallState.value = result.installState;
       options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
       options.mcpInstallFeedback.value = [runtimeMessage, result.message].filter(Boolean).join(" ");
@@ -309,13 +310,13 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpInstallFeedback.value = null;
     options.setupLoadError.value = null;
     try {
-      if (!window.letagentsDesktop?.setup) {
+      if (!desktopIpc.setup) {
         throw new Error("Restart LetAgents Desktop so setup can finish.");
       }
-      if (!window.letagentsDesktop?.room?.getSnapshot) {
+      if (!desktopIpc.room?.getSnapshot) {
         throw new Error("Restart LetAgents Desktop so the selected room can be verified.");
       }
-      const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+      const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
       if (snapshot.access.status !== "ready") {
         firstRunRoomSelected.value = snapshot.access.status === "auth_required";
         options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
@@ -323,7 +324,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         return;
       }
       options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
-      options.mcpInstallState.value = await window.letagentsDesktop.setup.completeMcpOnboarding();
+      options.mcpInstallState.value = await desktopIpc.setup.completeMcpOnboarding();
       options.activeEntry.value = options.pinnedRoom.value;
       await options.refresh();
     } catch (error) {

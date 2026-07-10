@@ -186,6 +186,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
+import { desktopIpc } from "../../../ipc/index.js";
 import type {
   DesktopRentalIdeKind,
   DesktopRentalListing,
@@ -273,7 +274,7 @@ function cancel(): void {
 async function submit(): Promise<void> {
   if (!canSubmit.value) return;
 
-  const bridge = window.letagentsDesktop?.rental;
+  const bridge = desktopIpc.rental;
   if (!bridge?.createListing || !bridge.updateListing) {
     errorMessage.value = "Rent an Agent is turned off in this desktop app.";
     return;

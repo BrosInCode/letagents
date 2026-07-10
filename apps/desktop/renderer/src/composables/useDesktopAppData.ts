@@ -29,6 +29,7 @@ import {
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
+import { desktopIpc } from "../ipc/index.js";
 import {
   normalizeRoomIdentifier,
   resolveAccountRoomAliasIdentifier,
@@ -108,17 +109,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextAccountRooms,
         nextSettingsAccountRooms,
       ] = await Promise.all([
-        window.letagentsDesktop.app.getInfo(),
+        desktopIpc.app.getInfo(),
         loadRootRoomContext({
           roomIdentifier: requestedRootRoomIdentifier,
           rootPath: requestedRootPath,
         }),
-        window.letagentsDesktop.workers.list(),
-        window.letagentsDesktop.diagnostics.getSnapshot(),
-        window.letagentsDesktop.auth.getStatus(),
-        window.letagentsDesktop.setup.getMcpInstallState(),
-        window.letagentsDesktop.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
-        window.letagentsDesktop.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
+        desktopIpc.workers.list(),
+        desktopIpc.diagnostics.getSnapshot(),
+        desktopIpc.auth.getStatus(),
+        desktopIpc.setup.getMcpInstallState(),
+        desktopIpc.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
+        desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
       ]);
       const nextRootRoomSnapshot = await recoverRootRoomSnapshot(
         requestedRootRoomIdentifier,
@@ -167,11 +168,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     const accountRoomIdentifier = resolveAccountRoomAliasIdentifier(requestedRoomIdentifier, accountRooms);
     if (accountRoomIdentifier) {
-      const recoveredSnapshot = await window.letagentsDesktop.room.getSnapshot(accountRoomIdentifier);
+      const recoveredSnapshot = await desktopIpc.room.getSnapshot(accountRoomIdentifier);
       if (recoveredSnapshot.access.status === "ready") return recoveredSnapshot;
     }
 
-    const workspaceSnapshot = await window.letagentsDesktop.room.getSnapshot(null);
+    const workspaceSnapshot = await desktopIpc.room.getSnapshot(null);
     return workspaceSnapshot.access.status === "ready"
       ? workspaceSnapshot
       : snapshot;
@@ -185,13 +186,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     repoStatus: RepoStatus;
     openedRoom: DesktopRepoRoomSelection | null;
   }> {
-    if (input.rootPath && window.letagentsDesktop.repos.openRoom) {
+    if (input.rootPath && desktopIpc.repos.openRoom) {
       try {
-        const openedRoom = await window.letagentsDesktop.repos.openRoom(input.rootPath);
+        const openedRoom = await desktopIpc.repos.openRoom(input.rootPath);
         if (!openedRoom.error && openedRoom.snapshot) {
           return {
             snapshot: openedRoom.snapshot,
-            repoStatus: openedRoom.repoStatus || await window.letagentsDesktop.repos.getStatus(openedRoom.repoPath || input.rootPath),
+            repoStatus: openedRoom.repoStatus || await desktopIpc.repos.getStatus(openedRoom.repoPath || input.rootPath),
             openedRoom,
           };
         }
@@ -201,8 +202,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     const [repoStatus, snapshot] = await Promise.all([
-      window.letagentsDesktop.repos.getStatus(input.rootPath),
-      window.letagentsDesktop.room.getSnapshot(input.roomIdentifier),
+      desktopIpc.repos.getStatus(input.rootPath),
+      desktopIpc.room.getSnapshot(input.roomIdentifier),
     ]);
     return {
       snapshot,
@@ -213,8 +214,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   async function refreshAccountRooms(): Promise<void> {
     const [nextAccountRooms, nextSettingsAccountRooms] = await Promise.all([
-      window.letagentsDesktop.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
-      window.letagentsDesktop.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
+      desktopIpc.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
+      desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
     ]);
     options.accountRooms.value = nextAccountRooms || [];
     options.settingsAccountRooms.value = nextSettingsAccountRooms || nextAccountRooms || [];
@@ -305,7 +306,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
     }
     try {
-      const nextSnapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+      const nextSnapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier });
     } finally {
