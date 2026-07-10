@@ -1,14 +1,11 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import type {
   DesktopManagedAgentChangedFile,
   DesktopManagedAgentChangeFileStatus,
   DesktopManagedAgentChangeSummary,
   DesktopManagedAgentSession,
 } from "../../ipc-types.js";
+import { runGit } from "../git-exec.js";
 
-const execFileAsync = promisify(execFile);
 const DEFAULT_FILE_LIMIT = 20;
 const GIT_TIMEOUT_MS = 5_000;
 const GIT_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
@@ -252,17 +249,18 @@ function safeNumber(value: string): number {
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-      encoding: "utf8",
-      maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
-      timeout: GIT_TIMEOUT_MS,
-      windowsHide: true,
-    });
-    return stdout;
-  } catch (error) {
-    throw new Error(gitErrorMessage(error));
+  const result = await runGit(cwd, args, {
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
+    windowsHide: true,
+  });
+  if (result.code !== 0) {
+    throw new Error(gitErrorMessage({
+      stderr: result.stderr,
+      message: result.stderr || `git ${args.join(" ")} failed`,
+    }));
   }
+  return result.stdout;
 }
 
 function gitErrorMessage(error: unknown): string {
