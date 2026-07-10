@@ -233,7 +233,36 @@ export function createDesktopClaudeCodeRuntime(
   const queues = new Map<string, Promise<void>>();
   const activeTurns = new Map<string, ActiveClaudeCodeTurn>();
   const consecutiveTurnErrors = new Map<string, number>();
+  const verifiedStartModels = new Set<string>();
   const pendingPermissionResolvers = new Map<string, (decision: ManagedAgentPermissionDecision) => void>();
+
+  /**
+   * The Claude Code CLI has no model-list command, so the picker's static
+   * entries cannot be validated ahead of time. Run one minimal turn before
+   * registering the worker: an unsupported model then fails the start with
+   * the CLI's own message instead of registering an agent that errors on
+   * every room event. Verified models are cached for the app session, so
+   * only the first start with a given model pays the probe.
+   */
+  async function verifySelectedClaudeCodeModel(model: string, cwd: string): Promise<void> {
+    if (verifiedStartModels.has(model)) {
+      return;
+    }
+    const probe = await runner.runTurn({
+      prompt: "This is an automated model verification probe. Reply with exactly: ok",
+      cwd,
+      model,
+      canUseTool: async () => ({
+        behavior: "deny",
+        message: "Model verification probes must not use tools.",
+        interrupt: true,
+      }),
+    });
+    if (probe.status === "error") {
+      throw new Error(probe.error || `Claude Code could not start with model "${model}".`);
+    }
+    verifiedStartModels.add(model);
+  }
 
   function recordConsecutiveTurnError(sessionId: string): boolean {
     const errorCount = (consecutiveTurnErrors.get(sessionId) ?? 0) + 1;
@@ -299,6 +328,9 @@ export function createDesktopClaudeCodeRuntime(
     const permissionProfile = assertManagedAgentPermissionProfileAvailable("claude-code", input.permissionProfileId);
     const selectedModel = normalizeManagedAgentModel(input.model);
     const selectedEffort = normalizeManagedAgentEffortForProvider("claude-code", input.effort);
+    if (selectedModel) {
+      await verifySelectedClaudeCodeModel(selectedModel, cwd);
+    }
 
     const token = makeClaudeCodeStopToken();
     const displayName = suggestLetAgentsCodename(listClaudeCodeDisplayNamesForRoom(roomIdentifier), token);
