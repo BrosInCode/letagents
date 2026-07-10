@@ -102,7 +102,7 @@ test("Codex model parser handles refreshed catalog JSON", () => {
 test("known and custom model validation use the selected source intentionally", async () => {
   const claudeModels = await listDesktopAgentProviderModels("claude-code");
   assert.deepEqual(claudeModels.models.slice(0, 4).map((model) => model.label), [
-    "Fable (latest)",
+    "Fable 5",
     "Opus (latest)",
     "Sonnet (latest)",
     "Haiku (latest)",

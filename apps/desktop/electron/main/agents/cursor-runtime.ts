@@ -84,6 +84,9 @@ import {
 } from "./state.js";
 
 const DEFAULT_CURSOR_STOP_PHRASE = "/stop-cursor-room";
+// See claude-code-runtime: park always-erroring sessions as terminal instead
+// of leaving them deliverable-but-invisible in status "unknown".
+const MAX_CONSECUTIVE_TURN_ERRORS = 3;
 
 function cursorReplyChangeSessionKey(sessionId: string): string {
   return `cursor:${sessionId}`;
@@ -185,6 +188,26 @@ export function createDesktopCursorRuntime(
   const now = dependencies.now ?? (() => new Date().toISOString());
   const queues = new Map<string, Promise<void>>();
   const activeTurns = new Map<string, ActiveCursorTurn>();
+  const consecutiveTurnErrors = new Map<string, number>();
+
+  function recordConsecutiveTurnError(sessionId: string): boolean {
+    const errorCount = (consecutiveTurnErrors.get(sessionId) ?? 0) + 1;
+    consecutiveTurnErrors.set(sessionId, errorCount);
+    return errorCount >= MAX_CONSECUTIVE_TURN_ERRORS;
+  }
+
+  function exhaustedTurnError(errorText: string): string {
+    return `Stopped after ${MAX_CONSECUTIVE_TURN_ERRORS} consecutive turn errors. Last error: ${errorText}`;
+  }
+
+  /** See claude-code-runtime: release worker registration when parking. */
+  async function endExhaustedSessionWorker(sessionId: string): Promise<void> {
+    clearDesktopManagedAgentReplyChangeState(cursorReplyChangeSessionKey(sessionId));
+    cleanupAgentSessionAttachments(sessionId);
+    consecutiveTurnErrors.delete(sessionId);
+    const liveSession = getStoredCursorLiveSession(sessionId);
+    await disconnectWorker(getStoredAgentSession(liveSession?.agent_session_id ?? null));
+  }
 
   function listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
     return listDesktopManagedCursorLiveSessions(roomIdentifier)
@@ -309,6 +332,7 @@ export function createDesktopCursorRuntime(
     }
     clearDesktopManagedAgentReplyChangeState(cursorReplyChangeSessionKey(session.session_id));
     cleanupAgentSessionAttachments(session.session_id);
+    consecutiveTurnErrors.delete(session.session_id);
     const updated = updateCursorLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -342,14 +366,23 @@ export function createDesktopCursorRuntime(
     const next = previous
       .catch(() => undefined)
       .then(async () => deliverDesktopEventTurn(session.session_id, event, await resolveStorage(event.roomIdentifier)))
-      .catch((error) => {
+      .catch(async (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        const stored = getStoredCursorLiveSession(session.session_id);
+        if (stored && (stored.status === "interrupted" || stored.status === "failed")) {
+          return;
+        }
+        const exhausted = recordConsecutiveTurnError(session.session_id);
         const updated = clearSessionActiveWork(session.session_id, (current) => ({
           ...current,
-          status: "unknown",
-          last_error: error instanceof Error ? error.message : String(error),
+          status: exhausted ? "failed" : "unknown",
+          last_error: exhausted ? exhaustedTurnError(message) : message,
           updated_at: now(),
         }));
         emitSessionUpdate(updated);
+        if (exhausted) {
+          await endExhaustedSessionWorker(session.session_id);
+        }
       });
     queues.set(session.session_id, next);
     void next.finally(() => {
@@ -399,15 +432,30 @@ export function createDesktopCursorRuntime(
 
       if (result.status === "error") {
         const wasPreempted = abortController.signal.aborted && activeTurn.interruptReason === "preempt";
+        const aborted = abortController.signal.aborted;
+        const exhausted = !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
         const updated = clearSessionActiveWork(sessionId, (current) => ({
           ...current,
           cursor_session_id: result.sessionId ?? current.cursor_session_id ?? null,
-          status: wasPreempted ? "completed" : abortController.signal.aborted ? "interrupted" : "unknown",
-          last_error: wasPreempted ? null : result.error,
+          status: wasPreempted
+            ? "completed"
+            : aborted
+              ? "interrupted"
+              : exhausted
+                ? "failed"
+                : "unknown",
+          last_error: wasPreempted
+            ? null
+            : exhausted
+              ? exhaustedTurnError(String(result.error))
+              : result.error,
           recent_items: result.recentItems,
           updated_at: now(),
         }));
         emitSessionUpdate(updated);
+        if (exhausted) {
+          await endExhaustedSessionWorker(sessionId);
+        }
         return;
       }
 
@@ -427,6 +475,8 @@ export function createDesktopCursorRuntime(
         text: result.text,
         beforeChangeSignature,
       });
+      // Reset only after full delivery succeeds; see claude-code-runtime.
+      consecutiveTurnErrors.delete(sessionId);
       if (stopAfterTurn) {
         await stopAfterRoomStopPhrase(completed);
       }

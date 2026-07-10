@@ -37,7 +37,10 @@ const MODEL_LIST_MAX_BUFFER = 8 * 1024 * 1024;
 const modelListCache = new Map<string, ModelListCacheEntry>();
 
 const CLAUDE_CODE_KNOWN_MODELS: DesktopAgentProviderModelOption[] = [
-  { id: "fable", label: "Fable (latest)", source: "known" },
+  // Full model id on purpose: shipped Claude Code CLIs reject the bare
+  // "fable" alias ("issue with the selected model"), while full ids pass
+  // through to the API on every CLI version.
+  { id: "claude-fable-5", label: "Fable 5", source: "known" },
   { id: "opus", label: "Opus (latest)", source: "known" },
   { id: "sonnet", label: "Sonnet (latest)", source: "known" },
   { id: "haiku", label: "Haiku (latest)", source: "known" },

@@ -102,6 +102,11 @@ import {
 } from "./managed-agent-reply-changes.js";
 
 const DEFAULT_CLAUDE_CODE_STOP_PHRASE = "/stop-claude-code-room";
+// After this many consecutive failed turns the session is parked as "failed"
+// (terminal) instead of "unknown", which stays deliverable: a session that
+// errors on every turn (for example an unsupported model) would otherwise
+// keep consuming room events forever while being hidden from every UI list.
+const MAX_CONSECUTIVE_TURN_ERRORS = 3;
 
 type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
 
@@ -227,7 +232,35 @@ export function createDesktopClaudeCodeRuntime(
   const now = dependencies.now ?? (() => new Date().toISOString());
   const queues = new Map<string, Promise<void>>();
   const activeTurns = new Map<string, ActiveClaudeCodeTurn>();
+  const consecutiveTurnErrors = new Map<string, number>();
   const pendingPermissionResolvers = new Map<string, (decision: ManagedAgentPermissionDecision) => void>();
+
+  function recordConsecutiveTurnError(sessionId: string): boolean {
+    const errorCount = (consecutiveTurnErrors.get(sessionId) ?? 0) + 1;
+    consecutiveTurnErrors.set(sessionId, errorCount);
+    return errorCount >= MAX_CONSECUTIVE_TURN_ERRORS;
+  }
+
+  function exhaustedTurnError(errorText: string): string {
+    return `Stopped after ${MAX_CONSECUTIVE_TURN_ERRORS} consecutive turn errors. Last error: ${errorText}`;
+  }
+
+  /**
+   * Parked sessions are hidden and cannot be stopped from the UI, so ending
+   * the worker registration here is what releases presence and server-side
+   * session state.
+   */
+  async function endExhaustedSessionWorker(sessionId: string): Promise<void> {
+    clearPendingPermissionRequestsForSession(
+      sessionId,
+      "Permission request was cancelled because the managed agent session failed.",
+    );
+    clearDesktopManagedAgentReplyChangeState(claudeCodeReplyChangeSessionKey(sessionId));
+    cleanupAgentSessionAttachments(sessionId);
+    consecutiveTurnErrors.delete(sessionId);
+    const liveSession = getStoredClaudeCodeLiveSession(sessionId);
+    await disconnectWorker(getStoredAgentSession(liveSession?.agent_session_id ?? null));
+  }
 
   function listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
     return listDesktopManagedClaudeCodeLiveSessions(roomIdentifier)
@@ -357,6 +390,7 @@ export function createDesktopClaudeCodeRuntime(
     );
     clearDesktopManagedAgentReplyChangeState(claudeCodeReplyChangeSessionKey(session.session_id));
     cleanupAgentSessionAttachments(session.session_id);
+    consecutiveTurnErrors.delete(session.session_id);
     const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -393,14 +427,23 @@ export function createDesktopClaudeCodeRuntime(
     const next = previous
       .catch(() => undefined)
       .then(async () => deliverDesktopEventTurn(session.session_id, event, await resolveStorage(event.roomIdentifier)))
-      .catch((error) => {
+      .catch(async (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        const stored = getStoredClaudeCodeLiveSession(session.session_id);
+        if (stored && (stored.status === "interrupted" || stored.status === "failed")) {
+          return;
+        }
+        const exhausted = recordConsecutiveTurnError(session.session_id);
         const updated = clearSessionActiveWork(session.session_id, (current) => ({
           ...current,
-          status: "unknown",
-          last_error: error instanceof Error ? error.message : String(error),
+          status: exhausted ? "failed" : "unknown",
+          last_error: exhausted ? exhaustedTurnError(message) : message,
           updated_at: now(),
         }));
         emitSessionUpdate(updated);
+        if (exhausted) {
+          await endExhaustedSessionWorker(session.session_id);
+        }
       });
     queues.set(session.session_id, next);
     void next.finally(() => {
@@ -456,15 +499,30 @@ export function createDesktopClaudeCodeRuntime(
 
       if (result.status === "error") {
         const wasPreempted = abortController.signal.aborted && activeTurn.interruptReason === "preempt";
+        const aborted = abortController.signal.aborted;
+        const exhausted = !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
         const updated = clearSessionActiveWork(sessionId, (current) => ({
           ...current,
           claude_session_id: result.sessionId ?? current.claude_session_id ?? null,
-          status: wasPreempted ? "completed" : abortController.signal.aborted ? "interrupted" : "unknown",
-          last_error: wasPreempted ? null : result.error,
+          status: wasPreempted
+            ? "completed"
+            : aborted
+              ? "interrupted"
+              : exhausted
+                ? "failed"
+                : "unknown",
+          last_error: wasPreempted
+            ? null
+            : exhausted
+              ? exhaustedTurnError(String(result.error))
+              : result.error,
           recent_items: result.recentItems,
           updated_at: now(),
         }));
         emitSessionUpdate(updated);
+        if (exhausted) {
+          await endExhaustedSessionWorker(sessionId);
+        }
         return;
       }
 
@@ -484,6 +542,10 @@ export function createDesktopClaudeCodeRuntime(
         text: result.text,
         beforeChangeSignature,
       });
+      // The error budget resets only after the WHOLE delivery (turn + reply
+      // publication) succeeded, so persistent publish/storage failures still
+      // exhaust the budget via the outer catch below.
+      consecutiveTurnErrors.delete(sessionId);
       if (stopAfterTurn) {
         await stopAfterRoomStopPhrase(completed);
       }
