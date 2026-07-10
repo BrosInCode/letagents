@@ -670,17 +670,17 @@ function dedupeDesktopManagedCodexLiveSessions(
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
+export { bindCodexLiveSessionToWorker } from "./codex-live-session-binding.js";
 export {
-  bindCodexLiveSessionToWorker,
   codexWorkerSessionForLiveSession,
   persistedWorkerSessionIsInvalid,
   type BindCodexLiveSessionOptions,
-} from "./codex-live-session-binding.js";
+} from "./codex-live-session-lookup.js";
 
 import {
   codexWorkerSessionForLiveSession,
   workerCanBindToLiveSession,
-} from "./codex-live-session-binding.js";
+} from "./codex-live-session-lookup.js";
 
 export function managedAgentDeliveryMode(
   session: DesktopCodexLiveSessionState,
