@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import test from "node:test";
 
+import { sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 const testDatabaseUrl = process.env.TEST_DB_URL;
@@ -21,6 +22,7 @@ const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/in
 const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.js");
 const { registerRoomTaskRoutes } = await import("../routes/rooms/tasks/index.js");
 const { buildAgentActorLabel } = await import("../../shared/agent-identity.js");
+const { buildAgentRoomParticipantKey } = await import("../../shared/room-participant.js");
 const {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
@@ -35,9 +37,13 @@ const createProjectWithName = dbModule?.createProjectWithName;
 const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const createTask = dbModule?.createTask;
 const endRoomAgentSession = dbModule?.endRoomAgentSession;
+const getActiveRoomAgentSessionsForWorkerIdentity = dbModule?.getActiveRoomAgentSessionsForWorkerIdentity;
 const getRoomAgentDeliverySessions = dbModule?.getRoomAgentDeliverySessions;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
+const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconnected;
 const updateTask = dbModule?.updateTask;
+const upsertRoomParticipant = dbModule?.upsertRoomParticipant;
+const room_agent_delivery_sessions = schemaModule?.room_agent_delivery_sessions;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
 const ownerAccount = {
@@ -379,6 +385,101 @@ async function invoke(
   await handler(req, res);
   return res;
 }
+
+test(
+  "worker registration cleans up an unreachable prior worker session before picking a display name",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (
+      !db ||
+      !getActiveRoomAgentSessionsForWorkerIdentity ||
+      !markRoomAgentDeliveryConnected ||
+      !markRoomAgentDeliveryDisconnected ||
+      !upsertRoomParticipant ||
+      !room_agent_delivery_sessions
+    ) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+
+    const { room, worker } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_key: worker.agent_key,
+      agent_instance_id: worker.agent_instance_id,
+      agent_session_id: worker.session_id,
+      session_kind: "worker",
+      runtime: "codex",
+      display_name: worker.display_name,
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+      transport: "long_poll",
+    });
+    await upsertRoomParticipant({
+      room_id: room.id,
+      participant_key: buildAgentRoomParticipantKey(worker.actor_label),
+      kind: "agent",
+      actor_label: worker.actor_label,
+      agent_key: worker.agent_key,
+      display_name: worker.display_name,
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+    });
+    await markRoomAgentDeliveryDisconnected({
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_session_id: worker.session_id,
+    });
+    await db
+      .update(room_agent_delivery_sessions)
+      .set({
+        reconnect_grace_expires_at: "2026-04-01T00:00:00.000Z",
+        updated_at: "2026-04-01T00:00:00.000Z",
+      })
+      .where(sql`${room_agent_delivery_sessions.room_id} = ${room.id} AND ${room_agent_delivery_sessions.agent_session_id} = ${worker.session_id}`);
+
+    const registrationRes = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        {
+          actor_key: worker.agent_key,
+          actor_label: worker.actor_label,
+          display_name: worker.display_name,
+          ide_label: "Codex",
+          agent_instance_id: worker.agent_instance_id,
+          session_kind: "worker",
+          runtime: "codex",
+        },
+        { params: { 0: room.id } }
+      )
+    );
+
+    assert.equal(registrationRes.statusCode, 201, JSON.stringify(registrationRes.body));
+    const replacement = registrationRes.body as {
+      session_id?: string;
+      display_name?: string;
+    };
+    assert.ok(replacement.session_id);
+    assert.notEqual(replacement.session_id, worker.session_id);
+    assert.equal(replacement.display_name, "OwlSolar");
+
+    const activeSessions = await getActiveRoomAgentSessionsForWorkerIdentity({
+      room_id: room.id,
+      agent_key: worker.agent_key,
+    });
+    assert.equal(activeSessions.some((session) => session.session_id === worker.session_id), false);
+    assert.equal(
+      activeSessions.filter((session) => session.display_name === "OwlSolar").length,
+      1
+    );
+  }
+);
 
 test(
   "agent session registration creates independent workers for reused MCP identity",

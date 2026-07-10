@@ -24,7 +24,7 @@ export { setRoomLiveAgentSuppressed, getRoomAgentPresence, getRoomAgentPresenceS
 export { upsertRoomParticipant, getRoomParticipants, getRoomParticipantsForRooms, setRoomParticipantsHidden } from "./db/participants.js";
 export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession } from "./db/reasoning.js";
 export { createAuthState, consumeAuthState, upsertAccount, createSession, refreshProviderAccessTokenForAccount, getSessionAccountByToken, deleteSessionByToken, createOwnerToken } from "./db/auth.js";
-export { getOwnerTokenAccountByToken, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, touchRoomAgentSession } from "./db/auth.js";
+export { getOwnerTokenAccountByToken, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, endUnreachableRoomAgentSessionsForWorkerIdentity, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, touchRoomAgentSession } from "./db/auth.js";
 export {
   endRoomAgentSession,
   assignProjectAdmin,
