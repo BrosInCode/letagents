@@ -476,6 +476,7 @@ import { formatShortDateTime } from "../../../domain/time";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
 import RepoStatusView from "./RepoStatusView.vue";
+import { desktopIpc } from "../../../ipc/index.js";
 import type {
   DesktopFocusActivityScope,
   DesktopGitRoomInfo,
@@ -917,7 +918,7 @@ async function createAdHocFocusRoom(): Promise<void> {
   creatingAdHoc.value = true;
   setFeedback(null);
   try {
-    const result = await window.letagentsDesktop.room.createAdHocFocusRoom(props.room.identifier, title);
+    const result = await desktopIpc.room.createAdHocFocusRoom(props.room.identifier, title);
     adHocTitle.value = "";
     selectedFocusRoomId.value = result.focusRoom.roomId;
     selectedTaskId.value = null;
@@ -941,7 +942,7 @@ async function openOrCreateTaskFocusRoom(task: DesktopTaskSummary): Promise<void
   creatingTaskFocus.value = true;
   setFeedback(null);
   try {
-    const result = await window.letagentsDesktop.room.createTaskFocusRoom(props.room.identifier, task.id);
+    const result = await desktopIpc.room.createTaskFocusRoom(props.room.identifier, task.id);
     emit("refresh-room");
     openFocusRoom(result.focusRoom.identifier);
   } catch (error) {
@@ -957,7 +958,7 @@ async function saveSettings(): Promise<void> {
   savingSettings.value = true;
   setFeedback(null);
   try {
-    const result = await window.letagentsDesktop.room.updateFocusRoomSettings(
+    const result = await desktopIpc.room.updateFocusRoomSettings(
       target.parentRoomId,
       target.focusKey,
       { ...settingsDraft },
@@ -992,7 +993,7 @@ async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
   closingFocusKey.value = focusKey;
   setFeedback(null);
   try {
-    await window.letagentsDesktop.room.concludeFocusRoom(
+    await desktopIpc.room.concludeFocusRoom(
       parentRoomId,
       focusKey,
       summary,
@@ -1030,7 +1031,7 @@ async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> 
   archivingFocusKey.value = focusKey;
   setFeedback(null);
   try {
-    await window.letagentsDesktop.room.archiveFocusRoom(parentRoomId, focusKey);
+    await desktopIpc.room.archiveFocusRoom(parentRoomId, focusKey);
     if (selectedFocusRoomId.value === focusRoom.roomId) {
       selectedFocusRoomId.value = null;
     }
@@ -1054,7 +1055,7 @@ async function shareFocusRoomResult(): Promise<void> {
   sharingResult.value = true;
   setFeedback(null);
   try {
-    await window.letagentsDesktop.room.concludeFocusRoom(
+    await desktopIpc.room.concludeFocusRoom(
       parentRoomId,
       focusKey,
       resultSummary.value.trim(),

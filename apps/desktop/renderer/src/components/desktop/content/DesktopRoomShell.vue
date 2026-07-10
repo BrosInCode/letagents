@@ -365,6 +365,7 @@ import {
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { isThreadReplyMessage } from "./room-shell/threading";
+import { desktopIpc } from "../../../ipc/index.js";
 
 type RoomTabIndicatorTone = NonNullable<NonNullable<RoomTab["indicator"]>["tone"]>;
 
@@ -783,7 +784,7 @@ onBeforeUnmount(() => {
 });
 
 onMounted(() => {
-  unsubscribeManagedAgentSessionUpdate = window.letagentsDesktop?.workers?.onManagedAgentSessionUpdate?.((session) => {
+  unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
     if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
       return;
     }
@@ -981,7 +982,7 @@ function resetInboxState(): void {
 }
 
 async function loadInboxThreads(options: { append?: boolean; baselineIndicator?: boolean } = {}): Promise<void> {
-  const roomApi = window.letagentsDesktop?.room;
+  const roomApi = desktopIpc.room;
   const requestKey = currentInboxLoadKey();
   const append = Boolean(options.append);
   const shouldBaselineIndicator = !append && (options.baselineIndicator || inboxThreadBaselinePending);
@@ -1161,11 +1162,11 @@ function scheduleInboxRefresh(delayMs: number): void {
 }
 
 async function refreshGitHubEvents(): Promise<void> {
-  if (!showEventsTab.value || !window.letagentsDesktop?.room?.getGitHubEvents) return;
+  if (!showEventsTab.value || !desktopIpc.room?.getGitHubEvents) return;
   eventsLoading.value = true;
   eventsError.value = null;
   try {
-    const nextPage = await window.letagentsDesktop.room.getGitHubEvents(props.room.identifier, { limit: 100 });
+    const nextPage = await desktopIpc.room.getGitHubEvents(props.room.identifier, { limit: 100 });
     eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
   } catch (error) {
     eventsError.value = error instanceof Error ? error.message : "GitHub events could not be loaded.";
@@ -1175,7 +1176,7 @@ async function refreshGitHubEvents(): Promise<void> {
 }
 
 async function loadOlderGitHubEvents(): Promise<void> {
-  if (!showEventsTab.value || !window.letagentsDesktop?.room?.getGitHubEvents || eventsLoadingOlder.value) return;
+  if (!showEventsTab.value || !desktopIpc.room?.getGitHubEvents || eventsLoadingOlder.value) return;
   const after = eventsPage.value?.events.at(-1)?.id || null;
   if (!after) return;
   eventsLoadingOlder.value = true;
@@ -1183,7 +1184,7 @@ async function loadOlderGitHubEvents(): Promise<void> {
   eventsLoadedOlderWithoutMatches.value = false;
   const beforeCount = eventsPage.value?.events.length || 0;
   try {
-    const nextPage = await window.letagentsDesktop.room.getGitHubEvents(props.room.identifier, {
+    const nextPage = await desktopIpc.room.getGitHubEvents(props.room.identifier, {
       limit: 100,
       after,
     });
@@ -1229,11 +1230,11 @@ async function openGitHubEventFromChat(url: string): Promise<void> {
 }
 
 async function openGitHubUrlExternally(url: string): Promise<void> {
-  if (window.letagentsDesktop?.app?.openGitHubUrl) {
-    await window.letagentsDesktop.app.openGitHubUrl(url);
+  if (desktopIpc.app?.openGitHubUrl) {
+    await desktopIpc.app.openGitHubUrl(url);
     return;
   }
-  await window.letagentsDesktop?.auth?.openVerification?.(url);
+  await desktopIpc.auth?.openVerification?.(url);
 }
 
 function scheduleGitHubEventsRefresh(delayMs: number): void {
@@ -1316,16 +1317,16 @@ function setEnvironmentPanelOpen(open: boolean): void {
 
 async function refreshEnvironmentRepoStatus(): Promise<void> {
   const rootPath = props.repoStatus.rootPath?.trim();
-  if (!rootPath || !window.letagentsDesktop?.repos?.getStatus) return;
+  if (!rootPath || !desktopIpc.repos?.getStatus) return;
   const requestId = ++environmentRepoStatusRefreshRequestId;
-  const nextStatus = await window.letagentsDesktop.repos.getStatus(rootPath).catch(() => null);
+  const nextStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
   if (requestId !== environmentRepoStatusRefreshRequestId || !nextStatus) return;
   if (nextStatus.rootPath !== props.repoStatus.rootPath) return;
   refreshedEnvironmentRepoStatus.value = nextStatus;
 }
 
 async function setRoomStorageMode(mode: DesktopRoomStorageState["overrideMode"]): Promise<void> {
-  const bridge = window.letagentsDesktop?.chatStorage;
+  const bridge = desktopIpc.chatStorage;
   if (!bridge?.setRoomMode || storageBusy.value) return;
   if (mode === "local" && !props.storage.localRoom) {
     await forkRoomToLocal();
@@ -1334,7 +1335,7 @@ async function setRoomStorageMode(mode: DesktopRoomStorageState["overrideMode"])
   storageBusy.value = true;
   try {
     await bridge.setRoomMode(props.room.identifier, mode);
-    const snapshot = await window.letagentsDesktop?.room?.getSnapshot?.(props.room.identifier);
+    const snapshot = await desktopIpc.room?.getSnapshot?.(props.room.identifier);
     emit("refresh-room", snapshot);
   } finally {
     storageBusy.value = false;
@@ -1342,7 +1343,7 @@ async function setRoomStorageMode(mode: DesktopRoomStorageState["overrideMode"])
 }
 
 async function forkRoomToLocal(): Promise<void> {
-  const bridge = window.letagentsDesktop?.chatStorage;
+  const bridge = desktopIpc.chatStorage;
   if (!bridge?.forkRoomToLocal || storageBusy.value) return;
   const confirmed = window.confirm(
     "Switch this room to Local on this device? Desktop will import the current chat and board into local storage, keep this same room visible, and keep new updates on this device until you publish.",
@@ -1351,7 +1352,7 @@ async function forkRoomToLocal(): Promise<void> {
   storageBusy.value = true;
   try {
     const result = await bridge.forkRoomToLocal(props.room.identifier);
-    await window.letagentsDesktop?.room?.stopStream?.(props.room.identifier);
+    await desktopIpc.room?.stopStream?.(props.room.identifier);
     actionPanelOpen.value = false;
     emit("refresh-room", result.snapshot);
   } finally {
@@ -1360,12 +1361,12 @@ async function forkRoomToLocal(): Promise<void> {
 }
 
 async function publishLocalRoom(): Promise<void> {
-  const bridge = window.letagentsDesktop?.chatStorage;
+  const bridge = desktopIpc.chatStorage;
   if (!bridge?.publishLocalRoom || storageBusy.value) return;
   storageBusy.value = true;
   try {
     await bridge.publishLocalRoom(props.room.identifier);
-    const snapshot = await window.letagentsDesktop?.room?.getSnapshot?.(props.room.identifier);
+    const snapshot = await desktopIpc.room?.getSnapshot?.(props.room.identifier);
     emit("refresh-room", snapshot);
   } finally {
     storageBusy.value = false;
@@ -1446,10 +1447,10 @@ function openAddAgentModal(): void {
 }
 
 async function refreshManagedAgentSessions(): Promise<void> {
-  if (!window.letagentsDesktop?.workers?.listManagedAgentSessions || !props.room.identifier) return;
+  if (!desktopIpc.workers?.listManagedAgentSessions || !props.room.identifier) return;
   const roomIdentifier = props.room.identifier;
   try {
-    const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(roomIdentifier);
+    const sessions = await desktopIpc.workers.listManagedAgentSessions(roomIdentifier);
     if (props.room.identifier !== roomIdentifier) return;
     managedAgentSessions.value = sessions;
   } catch {
@@ -1486,7 +1487,7 @@ async function resolveComposerPermission(
   };
   composerPermissionError.value = null;
   try {
-    const result = await window.letagentsDesktop.workers.resolveManagedAgentPermission({
+    const result = await desktopIpc.workers.resolveManagedAgentPermission({
       requestId: approval.request.id,
       sessionId: approval.request.sessionId,
       behavior,
@@ -1526,7 +1527,7 @@ function agentTargetForManagedSession(session: DesktopManagedAgentSession): Agen
 
 function restartManagedAgentSessionsRefreshTimer(): void {
   stopManagedAgentSessionsRefreshTimer();
-  if (!props.room.identifier || !window.letagentsDesktop?.workers?.listManagedAgentSessions) return;
+  if (!props.room.identifier || !desktopIpc.workers?.listManagedAgentSessions) return;
   managedAgentSessionsRefreshTimer = window.setInterval(() => {
     void refreshManagedAgentSessions();
   }, 4_000);

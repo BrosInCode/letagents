@@ -2,6 +2,7 @@ import type { ComputedRef, Ref } from "vue";
 import type { DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
 import { mergeRoomSnapshotMessages, roomSnapshotsMatch } from "../domain/desktop-room-snapshots";
 import { normalizeRoomIdentifier } from "../domain/sidebar-rooms";
+import { desktopIpc } from "../ipc/index.js";
 
 interface DesktopRoomLiveSyncOptions {
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
@@ -20,8 +21,8 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     if (!roomIdentifier) return;
     const refreshSequence = ++liveMetadataRefreshSequence;
     const [snapshot, nextWorkers] = await Promise.all([
-      window.letagentsDesktop.room.getSnapshot(roomIdentifier),
-      window.letagentsDesktop.workers.list().catch(() => options.workers.value),
+      desktopIpc.room.getSnapshot(roomIdentifier),
+      desktopIpc.workers.list().catch(() => options.workers.value),
     ]);
     if (
       refreshSequence !== liveMetadataRefreshSequence
@@ -66,14 +67,14 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   }
 
   async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
-    if (!window.letagentsDesktop?.room?.startStream) return;
+    if (!desktopIpc.room?.startStream) return;
     if (!roomIdentifier) {
       clearLiveMetadataRefreshInterval();
-      await window.letagentsDesktop.room.stopStream();
+      await desktopIpc.room.stopStream();
       return;
     }
     const latestMessageId = options.selectedSnapshot.value?.messages.at(-1)?.id || null;
-    await window.letagentsDesktop.room.startStream(roomIdentifier, latestMessageId);
+    await desktopIpc.room.startStream(roomIdentifier, latestMessageId);
     startLiveMetadataRefreshInterval();
   }
 

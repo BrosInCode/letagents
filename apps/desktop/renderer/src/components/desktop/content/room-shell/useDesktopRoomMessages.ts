@@ -13,6 +13,7 @@ import {
   isLowSignalGitHubCheckMessage,
 } from "../desktop-chat-message/github-event";
 import { roomTimelineMessages } from "../room-chat/thread-utils";
+import { desktopIpc } from "../../../../ipc/index.js";
 
 const messageHistoryPageSize = 150;
 const maxAutoHistoryBackfillPages = 5;
@@ -109,7 +110,7 @@ export function useDesktopRoomMessages(options: {
     sendingMessage.value = true;
     sendError.value = null;
     try {
-      const result = await window.letagentsDesktop.room.sendMessage(
+      const result = await desktopIpc.room.sendMessage(
         options.room.value.identifier,
         trimmedText,
         replyTo,
@@ -128,7 +129,7 @@ export function useDesktopRoomMessages(options: {
   }
 
   async function discardAttachment(uploadId: string): Promise<void> {
-    await window.letagentsDesktop.room.discardAttachment(options.room.value.identifier, uploadId);
+    await desktopIpc.room.discardAttachment(options.room.value.identifier, uploadId);
   }
 
   async function loadOlderMessages(): Promise<void> {
@@ -142,7 +143,7 @@ export function useDesktopRoomMessages(options: {
 
     loadingOlderMessages.value = true;
     try {
-      const page = await window.letagentsDesktop.room.getMessagesBefore(
+      const page = await desktopIpc.room.getMessagesBefore(
         roomIdentifier,
         firstMessageId,
         messageHistoryPageSize

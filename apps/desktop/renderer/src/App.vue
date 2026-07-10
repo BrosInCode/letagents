@@ -356,6 +356,7 @@ import {
   appAgentRefreshTargets,
 } from "./domain/app-agent";
 import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
+import { desktopIpc } from "./ipc/index.js";
 
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
@@ -626,7 +627,7 @@ async function refreshActiveRepoStatus(): Promise<void> {
   if (!rootPath) return;
   repoStatusRefreshInFlight = true;
   try {
-    const nextRepoStatus = await window.letagentsDesktop.repos.getStatus(rootPath).catch(() => null);
+    const nextRepoStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
     if (nextRepoStatus) repoStatus.value = nextRepoStatus;
   } finally {
     repoStatusRefreshInFlight = false;
@@ -642,15 +643,15 @@ function activeProjectRootPath(): string | null {
 }
 
 async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
-  if (!window.letagentsDesktop?.repos?.startStatusWatch) return;
+  if (!desktopIpc.repos?.startStatusWatch) return;
   const nextRootPath = rootPath?.trim() || null;
   if (repoStatusWatchRootPath === nextRootPath) return;
   const requestId = ++repoStatusWatchRequestId;
   repoStatusWatchRootPath = nextRootPath;
-  await window.letagentsDesktop.repos.stopStatusWatch?.().catch(() => undefined);
+  await desktopIpc.repos.stopStatusWatch?.().catch(() => undefined);
   if (requestId !== repoStatusWatchRequestId || repoStatusWatchRootPath !== nextRootPath) return;
   if (!nextRootPath) return;
-  const nextStatus = await window.letagentsDesktop.repos.startStatusWatch(nextRootPath).catch(() => null);
+  const nextStatus = await desktopIpc.repos.startStatusWatch(nextRootPath).catch(() => null);
   if (requestId === repoStatusWatchRequestId && nextStatus && activeProjectRootPath() === nextRootPath) {
     repoStatus.value = nextStatus;
   }
@@ -682,7 +683,7 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
   if (!rootPath) return false;
   loading.value = true;
   try {
-    const selection = await window.letagentsDesktop.repos.openRoom(rootPath);
+    const selection = await desktopIpc.repos.openRoom(rootPath);
     if (selection.error || !selection.snapshot) {
       return false;
     }
@@ -715,12 +716,12 @@ function handleWindowFocus(): void {
 
 async function refreshSidebarLatestMessages(): Promise<void> {
   const roomIdentifiers = sidebarRoomIdentifiers();
-  if (!roomIdentifiers.length || !window.letagentsDesktop.room.getLatestMessages) {
+  if (!roomIdentifiers.length || !desktopIpc.room.getLatestMessages) {
     sidebarLatestMessages.value = {};
     return;
   }
 
-  const latestMessages = await window.letagentsDesktop.room.getLatestMessages(roomIdentifiers).catch(() => []);
+  const latestMessages = await desktopIpc.room.getLatestMessages(roomIdentifiers).catch(() => []);
   const nextLatestMessages: Record<string, DesktopRoomLatestMessage> = {};
   for (const latestMessage of latestMessages) {
     const key = roomReadKey(latestMessage.roomIdentifier);
@@ -1075,8 +1076,8 @@ async function openWorktreeForAgent(rootPath: string): Promise<void> {
   });
 }
 
-function getChatStorageBridge(): typeof window.letagentsDesktop.chatStorage | null {
-  const bridge = window.letagentsDesktop?.chatStorage;
+function getChatStorageBridge(): typeof desktopIpc.chatStorage | null {
+  const bridge = desktopIpc.chatStorage;
   if (!bridge) {
     chatStorageAvailable.value = false;
     chatStorageFeedback.value = {
@@ -1107,7 +1108,7 @@ async function loadChatStorageSettings(): Promise<void> {
 
 async function loadAppAgentSettingsStatus(): Promise<void> {
   try {
-    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.getSettingsStatus();
+    appAgentSettingsStatus.value = await desktopIpc.appAgent.getSettingsStatus();
   } catch (error) {
     appAgentFeedback.value = {
       state: "error",
@@ -1121,7 +1122,7 @@ async function loadAppAgentSettingsStatus(): Promise<void> {
 
 async function loadAppAgentActions(): Promise<void> {
   try {
-    appAgentActions.value = await window.letagentsDesktop.appAgent.listActions();
+    appAgentActions.value = await desktopIpc.appAgent.listActions();
   } catch (error) {
     appAgentFeedback.value = {
       state: "error",
@@ -1137,7 +1138,7 @@ async function saveAppAgentSettings(input: DesktopAppAgentSaveSettingsInput): Pr
   appAgentBusy.value = true;
   appAgentFeedback.value = null;
   try {
-    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.saveSettings(input);
+    appAgentSettingsStatus.value = await desktopIpc.appAgent.saveSettings(input);
     appAgentFeedback.value = {
       state: "success",
       message: "App Agent settings saved.",
@@ -1182,7 +1183,7 @@ async function runAppAgent(input: DesktopAppAgentRunInput): Promise<void> {
       activeRoomGitRoom:
         input.activeRoomGitRoom || selectedRoomInfo.value.gitRoom || null,
     };
-    const result = await window.letagentsDesktop.appAgent.run(runInput);
+    const result = await desktopIpc.appAgent.run(runInput);
     appAgentResult.value = result;
     if (result.settingsStatus) {
       appAgentSettingsStatus.value = result.settingsStatus;
@@ -1373,7 +1374,7 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
     .find((room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier);
   loading.value = true;
   try {
-    const snapshot = await window.letagentsDesktop.room.getSnapshot(normalizedIdentifier);
+    const snapshot = await desktopIpc.room.getSnapshot(normalizedIdentifier);
     openRoomSnapshot(snapshot, {
       kind: "room",
       rootPath: null,
@@ -1385,13 +1386,13 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
 }
 
 async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
-  await window.letagentsDesktop.room.stopStream();
+  await desktopIpc.room.stopStream();
   await refreshActiveRepoStatus();
   clearSelectedSnapshotCache();
   selectedSnapshot.value = null;
   const rootRoomIdentifier = selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier || null;
   if (rootRoomIdentifier) {
-    const nextRootSnapshot = await window.letagentsDesktop.room.getSnapshot(rootRoomIdentifier);
+    const nextRootSnapshot = await desktopIpc.room.getSnapshot(rootRoomIdentifier);
     rootRoomSnapshot.value = nextRootSnapshot;
     selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
     rememberRootRoomSnapshot(nextRootSnapshot);
@@ -1643,9 +1644,9 @@ watch(
 );
 
 onMounted(() => {
-  unsubscribeRoomStream = window.letagentsDesktop?.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
-  unsubscribeOpenSettings = window.letagentsDesktop?.ui?.onOpenSettings(openSettingsSurface) || null;
-  unsubscribeRepoStatusChanged = window.letagentsDesktop?.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
+  unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
+  unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
+  unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
   accountRoomsRefreshInterval = window.setInterval(() => {
     void refreshSidebarRoomMetadata();
   }, 5_000);
@@ -1677,7 +1678,7 @@ onBeforeUnmount(() => {
   unsubscribeOpenSettings = null;
   unsubscribeRepoStatusChanged?.();
   unsubscribeRepoStatusChanged = null;
-  void window.letagentsDesktop?.repos?.stopStatusWatch?.();
-  void window.letagentsDesktop?.room?.stopStream?.();
+  void desktopIpc.repos?.stopStatusWatch?.();
+  void desktopIpc.room?.stopStream?.();
 });
 </script>

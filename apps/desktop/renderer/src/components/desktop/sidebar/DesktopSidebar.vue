@@ -312,6 +312,7 @@ import {
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
 import type { ProjectGroup, SidebarEntry, SidebarMode, SystemEntry, RoomEntry } from "../types";
+import { desktopIpc } from "../../../ipc/index.js";
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
@@ -446,7 +447,7 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
     "copy-branch-name": () => void copyText(menu.entry.gitRoom?.ref.name ?? null),
     "open-on-github": () => {
       const url = buildGitRoomWebUrl(menu.entry.gitRoom ?? null);
-      if (url) void window.letagentsDesktop.app.openGitHubUrl(url);
+      if (url) void desktopIpc.app.openGitHubUrl(url);
     },
     "toggle-project": () => {
       if (menu.projectId) emit("toggle-project", menu.projectId);

@@ -1,6 +1,7 @@
 import { ref, type Ref } from "vue";
 import type { DesktopAccountRoomEntry, DesktopRoomInfo, DesktopRoomSnapshot } from "../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
+import { desktopIpc } from "../ipc/index.js";
 import {
   buildRoomPinMutation,
   normalizeRoomIdentifier,
@@ -62,7 +63,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsFeedback.value = { message: `Opening ${room.displayName}...`, state: "info" };
     options.loading.value = true;
     try {
-      const snapshot = await window.letagentsDesktop.room.getSnapshot(room.roomIdentifier);
+      const snapshot = await desktopIpc.room.getSnapshot(room.roomIdentifier);
       options.openRoomSnapshot(snapshot, {
         kind: "room",
         rootPath: null,
@@ -87,7 +88,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsRoomActionBusyKey.value = settingsRoomActionKey("leave", room);
     settingsFeedback.value = { message: `Leaving ${room.displayName}...`, state: "info" };
     try {
-      await window.letagentsDesktop.room.leaveAccountRoom(room.roomIdentifier);
+      await desktopIpc.room.leaveAccountRoom(room.roomIdentifier);
       forgetRecentRootRoom(room.roomIdentifier);
       await options.refreshAccountRooms();
       settingsFeedback.value = { message: `Left ${room.displayName}.`, state: "success" };
@@ -109,7 +110,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       state: "info",
     };
     try {
-      await window.letagentsDesktop.room.updateAccountRoom(room.roomIdentifier, { pinned: nextPinned });
+      await desktopIpc.room.updateAccountRoom(room.roomIdentifier, { pinned: nextPinned });
       await options.refreshAccountRooms();
       settingsFeedback.value = {
         message: nextPinned ? `${room.displayName} pinned.` : `${room.displayName} unpinned.`,
@@ -129,7 +130,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsRoomActionBusyKey.value = settingsRoomActionKey("restore", room);
     settingsFeedback.value = { message: `Restoring ${room.displayName}...`, state: "info" };
     try {
-      await window.letagentsDesktop.room.updateAccountRoom(room.roomIdentifier, { archived: false });
+      await desktopIpc.room.updateAccountRoom(room.roomIdentifier, { archived: false });
       await options.refreshAccountRooms();
       settingsFeedback.value = { message: `${room.displayName} restored to your sidebar.`, state: "success" };
     } catch (error) {
@@ -148,7 +149,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     if (!displayName || displayName === entry.title.trim()) return;
     settingsRoomActionBusyKey.value = `rename:${entry.roomIdentifier}`;
     try {
-      const room = await window.letagentsDesktop.room.rename(entry.roomIdentifier, displayName);
+      const room = await desktopIpc.room.rename(entry.roomIdentifier, displayName);
       options.onRoomRenamed?.(room);
       await options.refreshAccountRooms();
       reportSidebarRoomAction(`Renamed to ${room.displayName || displayName}.`, "success");
@@ -171,7 +172,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     if (!confirmed) return;
     settingsRoomActionBusyKey.value = `archive-focus:${entry.roomIdentifier || entry.focusKey}`;
     try {
-      await window.letagentsDesktop.room.archiveFocusRoom(entry.parentRoomIdentifier, entry.focusKey);
+      await desktopIpc.room.archiveFocusRoom(entry.parentRoomIdentifier, entry.focusKey);
       await options.refresh();
       reportSidebarRoomAction(`${displayName} hidden.`, "success");
     } catch (error) {
@@ -195,7 +196,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       // every request even when one fails: some may still have succeeded, and
       // the sidebar must be refreshed to whatever state the server now holds.
       const results = await Promise.allSettled(mutation.roomIdentifiers.map((roomIdentifier) =>
-        window.letagentsDesktop.room.updateAccountRoom(roomIdentifier, { pinned: mutation.pinned })
+        desktopIpc.room.updateAccountRoom(roomIdentifier, { pinned: mutation.pinned })
       ));
       await options.refreshAccountRooms();
       const failures = results.filter(
@@ -239,7 +240,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsFeedback.value = { message: `Hiding ${displayName}...`, state: "info" };
     try {
       if (isAccountRoom) {
-        await window.letagentsDesktop.room.updateAccountRoom(roomIdentifier, { archived: true });
+        await desktopIpc.room.updateAccountRoom(roomIdentifier, { archived: true });
       }
       forgetRecentRootRoom(roomIdentifier, displayName);
       await options.refreshAccountRooms();
@@ -270,7 +271,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsRoomActionBusyKey.value = settingsRoomActionKey("delete", room);
     settingsFeedback.value = { message: `Deleting ${room.displayName}...`, state: "info" };
     try {
-      await window.letagentsDesktop.room.deleteAccountRoom(room.roomIdentifier);
+      await desktopIpc.room.deleteAccountRoom(room.roomIdentifier);
       forgetRecentRootRoom(room.roomIdentifier);
       options.accountRooms.value = options.accountRooms.value.filter(
         (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)

@@ -196,6 +196,7 @@ import {
 import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher";
 import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
+import { desktopIpc } from "../../../ipc/index.js";
 
 const props = defineProps<{
   active: boolean;
@@ -499,7 +500,7 @@ async function loadThread(threadRootId: string): Promise<void> {
   const roomIdentifier = props.roomIdentifier;
   const messageNamespace = props.messageNamespace;
   if (!roomIdentifier) return;
-  const roomApi = window.letagentsDesktop?.room;
+  const roomApi = desktopIpc.room;
   if (!roomApi?.getThread) return;
   try {
     const page = await roomApi.getThread(roomIdentifier, threadRootId);
@@ -522,7 +523,7 @@ async function loadOlderThreadReplies(): Promise<void> {
   const roomIdentifier = props.roomIdentifier;
   const messageNamespace = props.messageNamespace;
   if (!threadRootId || !roomIdentifier || loadingOlderThreadReplies.value || !activeThreadHasOlder.value) return;
-  const roomApi = window.letagentsDesktop?.room;
+  const roomApi = desktopIpc.room;
   if (!roomApi?.getThread) return;
   const beforeMessageId = fetchedThreadReplies.value[0]?.id || null;
   if (!beforeMessageId) return;
@@ -552,7 +553,7 @@ async function markThreadRead(
   messageNamespace = props.messageNamespace,
 ): Promise<void> {
   if (!roomIdentifier || !props.active) return;
-  const roomApi = window.letagentsDesktop?.room;
+  const roomApi = desktopIpc.room;
   if (!roomApi?.markThreadRead) return;
   const readKey = `${threadRootId}:${messageId}`;
   if (lastMarkedThreadReadKey.value === readKey) return;

@@ -100,6 +100,7 @@ import {
 import DesktopEnvironmentPanel from "../../controls/DesktopEnvironmentPanel.vue";
 import DesktopEnvironmentRow from "../../controls/DesktopEnvironmentRow.vue";
 import DesktopEnvironmentSection from "../../controls/DesktopEnvironmentSection.vue";
+import { desktopIpc } from "../../../../ipc/index.js";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
@@ -239,9 +240,9 @@ function openPullRequest(): void {
 
 async function refreshPullRequestStats(url: string | null): Promise<void> {
   livePullRequestStats.value = null;
-  if (!url || !window.letagentsDesktop?.app?.getGitHubPullRequestStats) return;
+  if (!url || !desktopIpc.app?.getGitHubPullRequestStats) return;
   const requestId = ++pullRequestStatsRequestId;
-  const stats = await window.letagentsDesktop.app.getGitHubPullRequestStats(url).catch(() => null);
+  const stats = await desktopIpc.app.getGitHubPullRequestStats(url).catch(() => null);
   if (requestId !== pullRequestStatsRequestId) return;
   livePullRequestStats.value = stats;
 }
