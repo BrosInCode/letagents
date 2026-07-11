@@ -1,10 +1,14 @@
 import type {
+  RoomSharedArtifactDetail,
   RoomSharedArtifactKind,
   RoomSharedArtifactProvider,
   RoomSharedArtifactSource,
 } from "../schema.js";
 
 export type {
+  RoomSharedArtifactChangedFile,
+  RoomSharedArtifactChangeSummaryDetail,
+  RoomSharedArtifactDetail,
   RoomSharedArtifactKind,
   RoomSharedArtifactProvider,
   RoomSharedArtifactSource,
@@ -21,6 +25,7 @@ export interface RoomSharedArtifact {
   url: string | null;
   ref: string | null;
   state: string | null;
+  detail: RoomSharedArtifactDetail | null;
   source: RoomSharedArtifactSource;
   first_seen_at: string;
   updated_at: string;

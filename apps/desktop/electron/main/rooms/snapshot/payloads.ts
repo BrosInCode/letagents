@@ -1,4 +1,4 @@
-import type { DesktopReasoningSession } from "../../../ipc-types.js";
+import type { DesktopReasoningSession, DesktopRoomSharedArtifactDetail } from "../../../ipc-types.js";
 import type { GitHubEventsResponse } from "../events.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import type { DesktopTaskSummaryPayload } from "../tasks/mappers.js";
@@ -196,6 +196,7 @@ export interface RoomArtifactsResponse {
     url?: string | null;
     ref?: string | null;
     state?: string | null;
+    detail?: DesktopRoomSharedArtifactDetail | null;
     source?: string | null;
     first_seen_at?: string | null;
     updated_at?: string | null;

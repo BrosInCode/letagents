@@ -1,3 +1,11 @@
+import type { RoomSharedArtifactDetail } from "../db/schema/artifacts.js";
+
+export type {
+  RoomSharedArtifactChangedFile,
+  RoomSharedArtifactChangeSummaryDetail,
+  RoomSharedArtifactDetail,
+} from "../db/schema/artifacts.js";
+
 export type RepoWorkflowProvider = "github" | "gitlab" | "bitbucket";
 
 export interface RepoRoomRef {
@@ -146,6 +154,7 @@ export interface TaskWorkflowArtifact {
   url?: string | null;
   ref?: string | null;
   state?: string | null;
+  detail?: RoomSharedArtifactDetail | null;
 }
 
 export interface TaskWorkflowArtifactMatch {

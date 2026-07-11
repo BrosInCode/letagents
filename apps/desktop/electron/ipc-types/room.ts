@@ -58,6 +58,36 @@ export type DesktopRoomSharedArtifactSource =
   | "github_event"
   | "manual";
 
+// Structured per-artifact detail, mirroring the API's RoomSharedArtifactDetail.
+// Discriminated on `type` + `version`; only change_summary today. For change
+// summaries this is file paths + counts (numstat) — never source code.
+export interface DesktopRoomSharedArtifactChangedFile {
+  path: string;
+  previousPath: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export interface DesktopRoomSharedArtifactChangeSummaryDetail {
+  type: "change_summary";
+  version: 1;
+  changedFileCount: number;
+  additions: number;
+  deletions: number;
+  stagedFileCount: number;
+  unstagedFileCount: number;
+  untrackedFileCount: number;
+  hiddenFileCount: number;
+  files: DesktopRoomSharedArtifactChangedFile[];
+}
+
+export type DesktopRoomSharedArtifactDetail = DesktopRoomSharedArtifactChangeSummaryDetail;
+
 export interface DesktopRoomSharedArtifact {
   roomId: string;
   identityKey: string;
@@ -69,6 +99,7 @@ export interface DesktopRoomSharedArtifact {
   url: string | null;
   ref: string | null;
   state: string | null;
+  detail: DesktopRoomSharedArtifactDetail | null;
   source: DesktopRoomSharedArtifactSource;
   firstSeenAt: string;
   updatedAt: string;

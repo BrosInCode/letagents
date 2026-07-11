@@ -59,6 +59,9 @@ export function preserveManualRoomSharedArtifactInput(input: {
       url: nextValue(artifact.url, existing.url),
       ref: nextValue(artifact.ref, existing.ref),
       state: nextValue(artifact.state, existing.state),
+      // detail is intentionally NOT preserved here — it is derived current-state
+      // data owned wholesale by each publish (see upsertRoomSharedArtifact), so a
+      // clean update (no detail) must clear a prior file list rather than keep it.
     },
   };
 }
@@ -80,6 +83,19 @@ export async function upsertRoomSharedArtifact(input: {
     source: requestedSource,
     existing: existingArtifact,
   });
+  // Detail write action, computed in JS so null vs undefined is distinguishable:
+  //  - clear   : state === "clean" or explicit null  -> write null
+  //  - set     : a provided value                     -> write it
+  //  - preserve : omitted (undefined)                 -> leave the column untouched
+  // Preserve is implemented by OMITTING detail from the UPDATE set (not by reading
+  // the existing value and writing it back), which avoids a lost-update race.
+  const detailAction: "set" | "clear" | "preserve" =
+    input.artifact.state === "clean" || input.artifact.detail === null
+      ? "clear"
+      : input.artifact.detail !== undefined
+        ? "set"
+        : "preserve";
+  const detailValue = detailAction === "set" ? (input.artifact.detail ?? null) : null;
 
   const [row] = await db
     .insert(room_shared_artifacts)
@@ -94,6 +110,7 @@ export async function upsertRoomSharedArtifact(input: {
       url: artifact.url ?? null,
       ref: artifact.ref ?? null,
       state: artifact.state ?? null,
+      detail: detailValue,
       source,
       first_seen_at: now,
       updated_at: now,
@@ -111,6 +128,8 @@ export async function upsertRoomSharedArtifact(input: {
         state: artifact.state ?? null,
         source,
         updated_at: now,
+        // Omitted entirely on "preserve" so the stored file list is left intact.
+        ...(detailAction !== "preserve" ? { detail: detailValue } : {}),
       },
     })
     .returning();

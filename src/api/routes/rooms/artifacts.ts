@@ -80,6 +80,9 @@ function normalizePublishedArtifact(artifact: TaskWorkflowArtifact): TaskWorkflo
     ...(artifact.url !== undefined ? { url: normalizeOptionalArtifactString(artifact.url) } : {}),
     ...(artifact.ref !== undefined ? { ref: normalizeOptionalArtifactString(artifact.ref) } : {}),
     ...(artifact.state !== undefined ? { state: normalizeOptionalArtifactString(artifact.state) } : {}),
+    // Detail is already validated/clamped by validateTaskWorkflowArtifactsInput; pass it
+    // through verbatim. Omitting this line silently drops the whole field.
+    ...(artifact.detail !== undefined ? { detail: artifact.detail } : {}),
   };
 }
 
@@ -106,6 +109,7 @@ function artifactInputFromBody(body: Record<string, unknown>): unknown {
     url: body.url,
     ref: body.ref,
     state: body.state,
+    detail: body.detail,
   };
 }
 
@@ -116,6 +120,49 @@ function parsePublishedArtifact(body: Record<string, unknown>): TaskWorkflowArti
     throw new Error("artifact requires at least one stable identity: url, id, number, or ref");
   }
   return artifact;
+}
+
+// A managed-agent change-summary id is `managed-agent:key:<agentKey>:branch:<branch>`
+// or `managed-agent:session:<sessionId>:branch:<branch>`. The id is client-supplied,
+// so a worker must not be able to publish under another worker's identity. Returns
+// an error string when the id's identity doesn't match the authenticated worker, or
+// when a managed-agent id uses an unrecognized identity form.
+const MANAGED_AGENT_ID_PREFIX = "managed-agent:";
+
+interface OwnershipWorkerIdentity {
+  agent_key: string;
+  agent_session_id: string | null;
+}
+
+function changeSummaryOwnershipError(
+  artifact: TaskWorkflowArtifact,
+  worker: OwnershipWorkerIdentity | null,
+): string | null {
+  if (artifact.kind !== "change_summary" || !artifact.id) return null;
+  if (!artifact.id.startsWith(MANAGED_AGENT_ID_PREFIX)) return null;
+  if (!worker) {
+    return "change_summary artifact id could not be bound to a worker identity";
+  }
+  const rest = artifact.id.slice(MANAGED_AGENT_ID_PREFIX.length);
+  const branchMarker = ":branch:";
+  const branchAt = rest.lastIndexOf(branchMarker);
+  // A well-formed managed-agent id must carry a non-empty :branch:<branch> suffix.
+  if (branchAt < 0 || !rest.slice(branchAt + branchMarker.length)) {
+    return "change_summary artifact id is missing a branch segment";
+  }
+  const identityPart = rest.slice(0, branchAt);
+  if (identityPart.startsWith("key:")) {
+    return identityPart.slice("key:".length) === worker.agent_key
+      ? null
+      : "change_summary artifact id does not match the authenticated worker identity";
+  }
+  if (identityPart.startsWith("session:")) {
+    const sessionInId = identityPart.slice("session:".length);
+    return worker.agent_session_id && sessionInId === worker.agent_session_id
+      ? null
+      : "change_summary artifact id does not match the authenticated worker session";
+  }
+  return "change_summary artifact id has an unrecognized managed-agent identity form";
 }
 
 function hasAgentSessionCredentials(body: Record<string, unknown>): boolean {
@@ -189,6 +236,7 @@ export function registerRoomArtifactRoutes(
     // Presenting credentials means the caller claims to be an agent, so bad
     // credentials are an error rather than a silent downgrade to manual.
     let source: PublishedArtifactSource = "manual";
+    let workerIdentity: OwnershipWorkerIdentity | null = null;
     if (req.authKind === "owner_token" && hasAgentSessionCredentials(body)) {
       const worker = await deps.requireWorkerRequestAgentIdentity({
         req,
@@ -200,10 +248,19 @@ export function registerRoomArtifactRoutes(
         return;
       }
       source = "task_workflow_artifact";
+      workerIdentity = {
+        agent_key: worker.identity.agent_key,
+        agent_session_id: worker.identity.agent_session_id,
+      };
     }
 
     try {
       const artifact = parsePublishedArtifact(body);
+      const ownershipError = changeSummaryOwnershipError(artifact, workerIdentity);
+      if (ownershipError) {
+        res.status(403).json({ error: ownershipError });
+        return;
+      }
       const linkedTaskIds = parseLinkedTaskIds(body);
       const sharedArtifact = await deps.upsertRoomSharedArtifact({
         room_id: project.id,

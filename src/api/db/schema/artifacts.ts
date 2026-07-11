@@ -1,7 +1,40 @@
 import { sql } from "drizzle-orm";
-import { bigint as pgBigInt, check, foreignKey, index, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
+import { bigint as pgBigInt, check, foreignKey, index, jsonb, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 
 import { rooms } from "./core.js";
+
+// Structured per-artifact detail. Stored as a single JSONB column and shaped as a
+// discriminated union on `type` + `version`, so new artifact kinds can grow their
+// own detail variant without a schema change. Only `change_summary` is populated
+// today. Never carries source code — for change summaries it is file paths and
+// +/- counts (git numstat), safe to share with every room member.
+export interface RoomSharedArtifactChangedFile {
+  path: string;
+  previousPath: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export interface RoomSharedArtifactChangeSummaryDetail {
+  type: "change_summary";
+  version: 1;
+  changedFileCount: number;
+  additions: number;
+  deletions: number;
+  stagedFileCount: number;
+  unstagedFileCount: number;
+  untrackedFileCount: number;
+  hiddenFileCount: number;
+  files: RoomSharedArtifactChangedFile[];
+}
+
+// Extend this union as other kinds gain structured detail (pull_request, review, ...).
+export type RoomSharedArtifactDetail = RoomSharedArtifactChangeSummaryDetail;
 
 export const ROOM_SHARED_ARTIFACT_PROVIDERS = [
   "git",
@@ -49,6 +82,7 @@ export const room_shared_artifacts = pgTable(
     url: text("url"),
     ref: text("ref"),
     state: text("state"),
+    detail: jsonb("detail").$type<RoomSharedArtifactDetail>(),
     source: text("source").notNull().$type<RoomSharedArtifactSource>(),
     first_seen_at: timestamp("first_seen_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),

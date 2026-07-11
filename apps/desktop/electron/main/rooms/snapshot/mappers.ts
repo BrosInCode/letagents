@@ -325,6 +325,7 @@ export function mapRoomArtifactPayload(
     url: artifact.url || null,
     ref: artifact.ref || null,
     state: artifact.state || null,
+    detail: artifact.detail ?? null,
     source: normalizeArtifactSource(artifact.source),
     firstSeenAt: artifact.first_seen_at || "",
     updatedAt: artifact.updated_at || artifact.first_seen_at || "",

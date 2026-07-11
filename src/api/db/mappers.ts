@@ -95,6 +95,7 @@ export function toRoomSharedArtifact(
     url: row.url,
     ref: row.ref,
     state: row.state,
+    detail: row.detail ?? null,
     source: row.source,
     first_seen_at: row.first_seen_at,
     updated_at: row.updated_at,

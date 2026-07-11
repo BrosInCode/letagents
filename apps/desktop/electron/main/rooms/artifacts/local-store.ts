@@ -1,10 +1,13 @@
 import type {
+  DesktopRoomSharedArtifactChangedFile,
+  DesktopRoomSharedArtifactDetail,
   DesktopRoomSharedArtifactKind,
   DesktopRoomSharedArtifactProvider,
   DesktopRoomSharedArtifactSource,
 } from "../../../ipc-types.js";
 import type { RoomArtifactsResponse } from "../snapshot/payloads.js";
 import {
+  addColumnIfMissing,
   beginImmediate,
   getLocalChatDatabase,
   rollback,
@@ -20,6 +23,7 @@ type LocalRoomArtifactInput = {
   url?: string | null;
   ref?: string | null;
   state?: string | null;
+  detail?: DesktopRoomSharedArtifactDetail | null;
 };
 
 type NormalizeLocalArtifactOptions = {
@@ -37,6 +41,7 @@ type LocalRoomArtifactRow = {
   url: string | null;
   ref: string | null;
   state: string | null;
+  detail: DesktopRoomSharedArtifactDetail | null;
   source: DesktopRoomSharedArtifactSource;
   first_seen_at: string;
   updated_at: string;
@@ -79,6 +84,7 @@ async function getDb(): Promise<SqliteDatabase> {
         url TEXT,
         ref TEXT,
         state TEXT,
+        detail TEXT,
         source TEXT NOT NULL,
         first_seen_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -100,6 +106,8 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE INDEX IF NOT EXISTS local_room_artifact_tasks_task_idx
         ON local_room_artifact_tasks (room_id, task_id);
     `);
+    // Additive migration for local DBs created before the detail column existed.
+    addColumnIfMissing(database, "local_room_artifacts", "detail", "TEXT");
     schemaInitialized = true;
   }
   return database;
@@ -123,6 +131,103 @@ function boundedLimit(value: number | undefined, fallback: number, max: number):
   return Math.max(1, Math.min(Math.trunc(value), max));
 }
 
+const MAX_LOCAL_CHANGE_SUMMARY_FILES = 200;
+const MAX_LOCAL_ARTIFACT_PATH_LENGTH = 1024;
+const localChangeSummaryStatuses = new Set([
+  "added",
+  "modified",
+  "deleted",
+  "renamed",
+  "copied",
+  "typechange",
+  "untracked",
+  "unknown",
+]);
+
+function nonNegativeCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function normalizeLocalChangeSummaryFile(value: unknown): DesktopRoomSharedArtifactChangedFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("artifact.detail.files entries must be objects.");
+  }
+  const record = value as Record<string, unknown>;
+  const path = record.path;
+  if (typeof path !== "string" || !path.trim() || path.length > MAX_LOCAL_ARTIFACT_PATH_LENGTH) {
+    throw new Error("artifact.detail.files entry has an invalid path.");
+  }
+  return {
+    path,
+    previousPath:
+      typeof record.previousPath === "string" && record.previousPath.length <= MAX_LOCAL_ARTIFACT_PATH_LENGTH
+        ? record.previousPath
+        : null,
+    status:
+      typeof record.status === "string" && localChangeSummaryStatuses.has(record.status)
+        ? record.status
+        : "unknown",
+    additions: nonNegativeCount(record.additions),
+    deletions: nonNegativeCount(record.deletions),
+    binary: record.binary === true,
+    staged: record.staged === true,
+    unstaged: record.unstaged === true,
+    untracked: record.untracked === true,
+  };
+}
+
+// Validate + clamp structured detail; only change_summary is supported today.
+// Never carries source code.
+function normalizeLocalArtifactDetail(
+  value: unknown,
+): DesktopRoomSharedArtifactDetail | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("artifact.detail must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type !== "change_summary") {
+    throw new Error("artifact.detail.type is unsupported.");
+  }
+  if (record.version !== 1) {
+    throw new Error("artifact.detail.version is unsupported.");
+  }
+  const filesInput = Array.isArray(record.files) ? record.files : [];
+  const files = filesInput
+    .slice(0, MAX_LOCAL_CHANGE_SUMMARY_FILES)
+    .map(normalizeLocalChangeSummaryFile);
+  const droppedByCap = Math.max(0, filesInput.length - files.length);
+  const changedFileCount = nonNegativeCount(record.changedFileCount);
+  const hiddenFileCount = nonNegativeCount(record.hiddenFileCount) + droppedByCap;
+  if (changedFileCount !== files.length + hiddenFileCount) {
+    throw new Error(
+      "artifact.detail is inconsistent: changedFileCount must equal files.length + hiddenFileCount.",
+    );
+  }
+  return {
+    type: "change_summary",
+    version: 1,
+    changedFileCount,
+    additions: nonNegativeCount(record.additions),
+    deletions: nonNegativeCount(record.deletions),
+    stagedFileCount: nonNegativeCount(record.stagedFileCount),
+    unstagedFileCount: nonNegativeCount(record.unstagedFileCount),
+    untrackedFileCount: nonNegativeCount(record.untrackedFileCount),
+    hiddenFileCount,
+    files,
+  };
+}
+
+function parseStoredArtifactDetail(value: unknown): DesktopRoomSharedArtifactDetail | null {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    return normalizeLocalArtifactDetail(JSON.parse(value)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function validateLocalRoomArtifactInputs(
   artifacts: Record<string, unknown>[],
   options: NormalizeLocalArtifactOptions = {},
@@ -144,6 +249,14 @@ function normalizeLocalArtifact(
   if (!kind || !localArtifactKinds.has(kind as DesktopRoomSharedArtifactKind)) {
     throw new Error("artifact.kind is invalid.");
   }
+  const detail =
+    input.detail !== undefined ? normalizeLocalArtifactDetail(input.detail) : undefined;
+  if (detail?.type === "change_summary" && kind !== "change_summary") {
+    throw new Error('artifact.detail of type "change_summary" requires kind "change_summary".');
+  }
+  if (detail && stringValue(input.state) === "clean") {
+    throw new Error('artifact.detail cannot be present while state is "clean".');
+  }
   const artifact: LocalRoomArtifactInput = {
     provider: provider as DesktopRoomSharedArtifactProvider,
     kind: kind as DesktopRoomSharedArtifactKind,
@@ -153,6 +266,7 @@ function normalizeLocalArtifact(
     ...(input.url !== undefined ? { url: stringValue(input.url) } : {}),
     ...(input.ref !== undefined ? { ref: stringValue(input.ref) } : {}),
     ...(input.state !== undefined ? { state: stringValue(input.state) } : {}),
+    ...(detail !== undefined ? { detail } : {}),
   };
   const hasStableIdentity = Boolean(
     artifact.url ||
@@ -219,6 +333,7 @@ function mapArtifactRow(row: Record<string, unknown>): LocalRoomArtifactRow {
     url: stringValue(row.url),
     ref: stringValue(row.ref),
     state: stringValue(row.state),
+    detail: parseStoredArtifactDetail(row.detail),
     source: source === "github_event" || source === "task_workflow_artifact"
       ? source
       : "manual",
@@ -242,6 +357,7 @@ function toPayload(
     url: artifact.url,
     ref: artifact.ref,
     state: artifact.state,
+    detail: artifact.detail,
     source: artifact.source,
     first_seen_at: artifact.first_seen_at,
     updated_at: artifact.updated_at,
@@ -295,6 +411,21 @@ async function upsertLocalRoomArtifact(input: {
     taskId: input.taskId,
     linkedTaskIds: input.linkedTaskIds,
   });
+  // Detail write action (null vs undefined distinguished in JS before building SQL):
+  //  - clear   : state === "clean" or explicit null -> write NULL
+  //  - set     : a provided value                    -> write it
+  //  - preserve : omitted                            -> leave the column untouched
+  // Preserve omits the `detail` assignment from the UPDATE set so the existing
+  // file list is kept without a read-copy-write.
+  const detailAction: "set" | "clear" | "preserve" =
+    artifact.state === "clean" || artifact.detail === null
+      ? "clear"
+      : artifact.detail !== undefined
+        ? "set"
+        : "preserve";
+  const detailJson = detailAction === "set" ? JSON.stringify(artifact.detail) : null;
+  const detailUpdateClause =
+    detailAction === "preserve" ? "" : "detail = excluded.detail,\n          ";
   const database = await getDb();
   const now = new Date().toISOString();
   beginImmediate(database);
@@ -303,9 +434,9 @@ async function upsertLocalRoomArtifact(input: {
       .prepare(`
         INSERT INTO local_room_artifacts (
           room_id, identity_key, provider, kind, artifact_id, artifact_number,
-          title, url, ref, state, source, first_seen_at, updated_at
+          title, url, ref, state, detail, source, first_seen_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(room_id, identity_key) DO UPDATE SET
           provider = excluded.provider,
           kind = excluded.kind,
@@ -339,7 +470,7 @@ async function upsertLocalRoomArtifact(input: {
               THEN COALESCE(local_room_artifacts.state, excluded.state)
             ELSE COALESCE(excluded.state, local_room_artifacts.state)
           END,
-          source = CASE
+          ${detailUpdateClause}source = CASE
             WHEN excluded.source = 'manual' OR local_room_artifacts.source = 'manual'
               THEN local_room_artifacts.source
             ELSE excluded.source
@@ -357,6 +488,7 @@ async function upsertLocalRoomArtifact(input: {
         artifact.url ?? null,
         artifact.ref ?? null,
         artifact.state ?? null,
+        detailJson,
         input.source,
         now,
         now,
