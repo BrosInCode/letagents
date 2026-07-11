@@ -31,6 +31,7 @@
           :highlight-query="searchQuery"
           :message-reference-ids="messageReferenceIds"
           :search-active="entry.message.id === activeSearchMessageId"
+          :animate-arrival="arrivingMessageIds.has(entry.message.id)"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
@@ -128,6 +129,7 @@ import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
+import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
 import { buildMessageTimelineEntries } from "./timeline";
 
@@ -197,6 +199,8 @@ const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
 const autoViewportBackfillCount = ref(0);
+const arrivingMessageIds = ref<ReadonlySet<string>>(new Set());
+const arrivalTimers = new Map<string, number>();
 let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
@@ -218,6 +222,11 @@ const messageReferenceIds = computed(() =>
 watch(
   () => props.messages,
   async (newMessages, oldMessages) => {
+    const appendedIds = getAppendedMessageIds(
+      (oldMessages || []).map((message) => message.id),
+      newMessages.map((message) => message.id),
+    );
+    markMessagesArriving(appendedIds);
     const previousScrollHeight = messagesElement.value?.scrollHeight || 0;
     const oldFirstId = oldMessages?.[0]?.id;
     const oldLastId = oldMessages?.[oldMessages.length - 1]?.id;
@@ -403,6 +412,7 @@ watch(
 watch(
   () => props.roomIdentifier,
   () => {
+    clearMessageArrivals();
     unreadCount.value = 0;
     threadActivityNotice.value = null;
     isScrolledFarUp.value = false;
@@ -454,11 +464,35 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  clearMessageArrivals();
   cancelAutoFillViewport();
   cancelLayoutAnchorRestore();
   rememberScrollAnchor();
   emitScrollPosition();
 });
+
+function markMessagesArriving(messageIds: readonly string[]): void {
+  if (!messageIds.length) return;
+  const nextIds = new Set(arrivingMessageIds.value);
+  for (const messageId of messageIds) {
+    nextIds.add(messageId);
+    const existingTimer = arrivalTimers.get(messageId);
+    if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+    arrivalTimers.set(messageId, window.setTimeout(() => {
+      arrivalTimers.delete(messageId);
+      const remainingIds = new Set(arrivingMessageIds.value);
+      remainingIds.delete(messageId);
+      arrivingMessageIds.value = remainingIds;
+    }, 320));
+  }
+  arrivingMessageIds.value = nextIds;
+}
+
+function clearMessageArrivals(): void {
+  for (const timer of arrivalTimers.values()) window.clearTimeout(timer);
+  arrivalTimers.clear();
+  arrivingMessageIds.value = new Set();
+}
 
 function scheduleAutoFillViewport(): void {
   cancelAutoFillViewport();

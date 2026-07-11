@@ -12,9 +12,9 @@
     @keydown.escape.stop.prevent="$emit('close')"
   >
     <header class="room-thread-header">
-      <div>
-        <p>Thread</p>
-        <strong>{{ replyCountLabel }}</strong>
+      <div class="room-thread-heading">
+        <strong>Thread</strong>
+        <span>{{ replyCountLabel }}</span>
       </div>
       <div class="room-thread-header-actions">
         <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-pill">
@@ -42,67 +42,28 @@
         </button>
       </div>
 
-      <article
-        class="room-thread-message is-root"
-        :class="{ 'is-search-active': parent.id === activeSearchMessageId }"
-        :data-thread-message-id="parent.id"
-        :data-testid="`room-thread-message-${parent.id}`"
-      >
-        <div class="room-thread-avatar" :style="{ '--avatar-color': senderColor(parent) }" aria-hidden="true"></div>
-        <div class="room-thread-message-content">
-          <div class="room-thread-message-meta">
-            <div class="room-thread-author-stack">
-              <button
-                v-if="isAgentMessage(parent)"
-                class="room-thread-author-button"
-                type="button"
-                :title="`Show ${displayName(parent)} details`"
-                @click="$emit('open-agent', agentTarget(parent))"
-              >
-                {{ displayName(parent) }}
-              </button>
-              <strong v-else>{{ displayName(parent) }}</strong>
-              <span v-if="ownerAttribution(parent)" class="room-thread-owner">{{ ownerAttribution(parent) }}</span>
-              <span v-if="ideLabel(parent)" class="room-thread-ide">{{ ideLabel(parent) }}</span>
-            </div>
-            <div class="room-thread-message-tail">
-              <span class="room-thread-provenance" :data-kind="sourceKind(parent)">
-                {{ sourceKind(parent) }}
-              </span>
-              <time :datetime="parent.timestamp">{{ formatTimestamp(parent.timestamp) }}</time>
-            </div>
-          </div>
-          <div class="room-thread-message-actions" aria-label="Thread root actions">
-            <button type="button" title="Quote root" aria-label="Quote root" @click="quoteInThread(parent)">
-              <CornerUpLeft :size="14" aria-hidden="true" />
-            </button>
-            <button type="button" title="Jump to root" aria-label="Jump to root message" @click="$emit('jump-message', parent.id)">
-              <LocateFixed :size="14" aria-hidden="true" />
-            </button>
-          </div>
-          <DesktopGitHubEventCard
-            v-if="githubEvent(parent)"
-            :event="githubEvent(parent)!"
-            @open-event="$emit('open-github-event', $event)"
-          />
-          <DesktopLongMessageContent
-            v-else
-            :text="parent.text || 'No message body.'"
-            :html="renderMessageText(parent.text || 'No message body.', searchQuery, threadMessageReferenceIds)"
-            :message-id="`${parent.id}-thread-parent`"
-            @message-reference-click="jumpToThreadMessageReference"
-          />
-          <DesktopMessageAttachments
-            v-if="parent.attachments.length"
-            :message-id="parent.id"
-            :attachments="parent.attachments"
-            @open-image="$emit('open-image', $event)"
-          />
-        </div>
-      </article>
+      <div class="room-thread-conversation">
+      <DesktopChatMessage
+        context="thread-root"
+        :message="parent"
+        :thread-summary="threadSummary"
+        :active-thread-root="false"
+        :highlight-query="searchQuery"
+        :message-reference-ids="threadMessageReferenceIds"
+        :search-active="parent.id === activeSearchMessageId"
+        :thread-message-id="parent.id"
+        :test-id="`room-thread-message-${parent.id}`"
+        @quote-reply="quoteInThread(parent)"
+        @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
+        @jump-to-thread-root="$emit('jump-message', parent.id)"
+        @scroll-to-message="navigateThreadMessageReference"
+        @open-image="$emit('open-image', $event)"
+        @open-agent="$emit('open-agent', $event)"
+        @open-github-event="$emit('open-github-event', $event)"
+      />
 
       <div class="room-thread-divider">
-        <span>{{ replyCountLabel }}</span>
+        <span>Replies</span>
       </div>
 
       <template v-for="reply in replies" :key="reply.id">
@@ -113,64 +74,24 @@
         >
           <span>New replies</span>
         </div>
-        <article
-          class="room-thread-message"
-          :class="{ 'is-search-active': reply.id === activeSearchMessageId }"
-          :data-thread-message-id="reply.id"
-          :data-testid="`room-thread-reply-${reply.id}`"
-        >
-          <div class="room-thread-avatar" :style="{ '--avatar-color': senderColor(reply) }" aria-hidden="true"></div>
-          <div class="room-thread-message-content">
-            <div class="room-thread-message-meta">
-              <div class="room-thread-author-stack">
-                <button
-                  v-if="isAgentMessage(reply)"
-                  class="room-thread-author-button"
-                  type="button"
-                  :title="`Show ${displayName(reply)} details`"
-                  @click="$emit('open-agent', agentTarget(reply))"
-                >
-                  {{ displayName(reply) }}
-                </button>
-                <strong v-else>{{ displayName(reply) }}</strong>
-                <span v-if="ownerAttribution(reply)" class="room-thread-owner">{{ ownerAttribution(reply) }}</span>
-                <span v-if="ideLabel(reply)" class="room-thread-ide">{{ ideLabel(reply) }}</span>
-              </div>
-              <div class="room-thread-message-tail">
-                <span class="room-thread-provenance" :data-kind="sourceKind(reply)">
-                  {{ sourceKind(reply) }}
-                </span>
-                <time :datetime="reply.timestamp">{{ formatTimestamp(reply.timestamp) }}</time>
-              </div>
-            </div>
-            <div class="room-thread-message-actions" aria-label="Thread reply actions">
-              <button type="button" title="Quote reply" aria-label="Quote reply" @click="quoteInThread(reply)">
-                <CornerUpLeft :size="14" aria-hidden="true" />
-              </button>
-              <button type="button" title="Jump to root" aria-label="Jump to root message" @click="$emit('jump-message', parent.id)">
-                <LocateFixed :size="14" aria-hidden="true" />
-              </button>
-            </div>
-            <DesktopGitHubEventCard
-              v-if="githubEvent(reply)"
-              :event="githubEvent(reply)!"
-              @open-event="$emit('open-github-event', $event)"
-            />
-            <DesktopLongMessageContent
-              v-else
-              :text="reply.text || 'No message body.'"
-              :html="renderMessageText(reply.text || 'No message body.', searchQuery, threadMessageReferenceIds)"
-              :message-id="`${reply.id}-thread-reply`"
-              @message-reference-click="jumpToThreadMessageReference"
-            />
-            <DesktopMessageAttachments
-              v-if="reply.attachments.length"
-              :message-id="reply.id"
-              :attachments="reply.attachments"
-              @open-image="$emit('open-image', $event)"
-            />
-          </div>
-        </article>
+        <DesktopChatMessage
+          context="thread-reply"
+          :message="reply"
+          :thread-summary="emptyThreadSummary"
+          :active-thread-root="false"
+          :highlight-query="searchQuery"
+          :message-reference-ids="threadMessageReferenceIds"
+          :search-active="reply.id === activeSearchMessageId"
+          :thread-message-id="reply.id"
+          :test-id="`room-thread-reply-${reply.id}`"
+          @quote-reply="quoteInThread(reply)"
+          @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
+          @jump-to-thread-root="$emit('jump-message', parent.id)"
+          @scroll-to-message="navigateThreadMessageReference"
+          @open-image="$emit('open-image', $event)"
+          @open-agent="$emit('open-agent', $event)"
+          @open-github-event="$emit('open-github-event', $event)"
+        />
       </template>
 
       <div v-if="!replies.length" class="room-thread-empty" data-testid="room-thread-empty">
@@ -180,28 +101,35 @@
           <span>Reply here to keep follow-up out of the main timeline.</span>
         </div>
       </div>
+      </div>
     </section>
 
     <form class="room-thread-composer" data-testid="room-thread-composer" @submit.prevent="submitThreadReply">
       <div v-if="quoteTarget" class="room-thread-quote-preview" data-testid="room-thread-quote-preview">
         <div>
-          <strong>Quoting {{ displayName(quoteTarget) }}</strong>
-          <span>{{ threadQuotePreview(quoteTarget) }}</span>
+          <strong>{{ selectedQuoteText ? "Quoting selection from" : "Quoting" }} {{ displayName(quoteTarget) }}</strong>
+          <span>{{ selectedQuoteText || threadQuotePreview(quoteTarget) }}</span>
         </div>
-        <button type="button" aria-label="Cancel quote" @click="quoteTarget = null">
+        <button type="button" aria-label="Cancel quote" @click="clearThreadQuote">
           <X :size="14" aria-hidden="true" />
         </button>
       </div>
       <textarea
         ref="textareaElement"
         v-model="draft"
-        rows="3"
+        rows="2"
         :disabled="sending || !roomIdentifier"
         :placeholder="composerPlaceholder"
+        role="combobox"
+        aria-autocomplete="list"
+        :aria-expanded="mentionOpen"
+        aria-controls="room-thread-mention-listbox"
+        :aria-activedescendant="mentionOpen ? `room-thread-mention-option-${mentionCandidates[activeMentionIndex]?.participantKey}` : undefined"
         data-testid="room-thread-composer-input"
         @input="handleDraftInput"
         @keydown.down="handleMentionArrow($event, 1)"
         @keydown.up="handleMentionArrow($event, -1)"
+        @keydown.tab="closeMentionForTab"
         @keydown.enter="handleEnterKey"
         @keydown.escape.stop="handleComposerEscape"
       />
@@ -210,11 +138,21 @@
         :pending-attachments="pendingAttachmentDrafts"
         @remove="$emit('remove-attachment', $event)"
       />
-      <div v-if="mentionOpen" class="desktop-mention-panel room-thread-mention-panel" data-testid="room-thread-mention-panel">
+      <div
+        v-if="mentionOpen"
+        id="room-thread-mention-listbox"
+        class="desktop-mention-panel room-thread-mention-panel"
+        role="listbox"
+        data-testid="room-thread-mention-panel"
+      >
         <button
           v-for="(candidate, index) in mentionCandidates"
           :key="candidate.participantKey"
           class="desktop-mention-option"
+          :id="`room-thread-mention-option-${candidate.participantKey}`"
+          role="option"
+          tabindex="-1"
+          :aria-selected="index === activeMentionIndex"
           :data-active="index === activeMentionIndex"
           :data-testid="`room-thread-mention-option-${candidate.participantKey}`"
           type="button"
@@ -251,7 +189,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { CornerUpLeft, LocateFixed, MessageSquarePlus, Paperclip, X } from "@lucide/vue";
+import { MessageSquarePlus, Paperclip, X } from "@lucide/vue";
 import type {
   DesktopParticipantSummary,
   DesktopRoomMessage,
@@ -260,19 +198,18 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
-import DesktopGitHubEventCard from "../desktop-chat-message/DesktopGitHubEventCard.vue";
-import DesktopMessageAttachments from "../desktop-chat-message/DesktopMessageAttachments.vue";
-import { parseGitHubEvent } from "../desktop-chat-message/github-event";
-import { getSenderColor, parseSenderIdentity } from "../desktop-chat-message/identity";
-import { formatTimestamp, renderMessageText } from "../desktop-chat-message/message-rendering";
+import DesktopChatMessage from "../DesktopChatMessage.vue";
+import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
-import DesktopLongMessageContent from "../DesktopLongMessageContent.vue";
+import { applySelectedTextQuoteToDraft } from "./message-format";
 import {
   applyThreadQuoteToDraft,
   buildThreadIndicatorSummary,
+  scrollThreadMessageIntoView,
   threadQuotePreview,
   threadReadState,
 } from "./thread-utils";
+import type { ThreadIndicatorSummary } from "./thread-utils";
 
 const props = defineProps<{
   parent: DesktopRoomMessage;
@@ -307,11 +244,22 @@ const emit = defineEmits<{
 
 const draft = ref("");
 const quoteTarget = ref<DesktopRoomMessage | null>(null);
+const selectedQuoteText = ref<string | null>(null);
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
+const emptyThreadSummary: ThreadIndicatorSummary = {
+  count: 0,
+  unreadCount: 0,
+  latest: null,
+  latestPreview: null,
+  latestTimestamp: null,
+  participants: [],
+  hasPartialHistory: false,
+  loadingEarlier: false,
+};
 
 const threadSummary = computed(() =>
   buildThreadIndicatorSummary(props.parent, {
@@ -348,6 +296,7 @@ watch(
   async () => {
     draft.value = "";
     quoteTarget.value = null;
+    selectedQuoteText.value = null;
     mentionQuery.value = null;
     await nextTick();
     panelElement.value?.focus({ preventScroll: true });
@@ -391,49 +340,21 @@ function displayName(message: DesktopRoomMessage): string {
   return message.agentIdentity?.displayName || parseSenderIdentity(message).displayName;
 }
 
-function ownerAttribution(message: DesktopRoomMessage): string | null {
-  return message.agentIdentity?.ownerAttribution || parseSenderIdentity(message).ownerAttribution;
-}
-
-function ideLabel(message: DesktopRoomMessage): string | null {
-  return message.agentIdentity?.ideLabel || parseSenderIdentity(message).ideLabel;
-}
-
-function sourceKind(message: DesktopRoomMessage): string {
-  if (message.source === "github") return "github";
-  if (message.source === "agent" || ownerAttribution(message) || ideLabel(message)) return "agent";
-  if (message.source === "browser" || message.source === "user") return "human";
-  if (["system", "letagents"].includes(message.sender.toLowerCase())) return "system";
-  return message.source || "room";
-}
-
-function isAgentMessage(message: DesktopRoomMessage): boolean {
-  return sourceKind(message) === "agent";
-}
-
-function senderColor(message: DesktopRoomMessage): string {
-  return getSenderColor(message.sender, message.source);
-}
-
-function agentTarget(message: DesktopRoomMessage): AgentModalTarget {
-  return {
-    actorLabel: message.actorLabel || message.agentIdentity?.actorLabel || message.sender,
-    displayName: displayName(message),
-    ownerAttribution: ownerAttribution(message),
-    ideLabel: ideLabel(message),
-    sender: message.sender,
-    agentKey: message.agentIdentity?.agentKey || null,
-    agentSessionId: message.agentIdentity?.agentSessionId || null,
-  };
-}
-
-function githubEvent(message: DesktopRoomMessage) {
-  return parseGitHubEvent(message);
-}
-
 function quoteInThread(message: DesktopRoomMessage): void {
   quoteTarget.value = message;
+  selectedQuoteText.value = null;
   void nextTick(() => textareaElement.value?.focus());
+}
+
+function quoteSelectionInThread(message: DesktopRoomMessage, text: string): void {
+  quoteTarget.value = message;
+  selectedQuoteText.value = text;
+  void nextTick(() => textareaElement.value?.focus());
+}
+
+function clearThreadQuote(): void {
+  quoteTarget.value = null;
+  selectedQuoteText.value = null;
 }
 
 function scrollActiveSearchMessage(): boolean {
@@ -441,19 +362,25 @@ function scrollActiveSearchMessage(): boolean {
   if (!messageId || (messageId !== props.parent.id && !props.replies.some((reply) => reply.id === messageId))) {
     return false;
   }
-  const target = [...(panelElement.value?.querySelectorAll<HTMLElement>("[data-thread-message-id]") ?? [])]
-    .find((element) => element.dataset.threadMessageId === messageId);
-  target?.scrollIntoView({ block: "center" });
+  const target = scrollThreadMessageIntoView(panelElement.value, messageId);
   return Boolean(target);
 }
 
 function jumpToThreadMessageReference(messageId: string): void {
-  const target = [...(panelElement.value?.querySelectorAll<HTMLElement>("[data-thread-message-id]") ?? [])]
-    .find((element) => element.dataset.threadMessageId === messageId);
+  const target = scrollThreadMessageIntoView(panelElement.value, messageId, "smooth");
   if (!target) return;
-  target.scrollIntoView({ behavior: "smooth", block: "center" });
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
+}
+
+function navigateThreadMessageReference(messageId: string | null): void {
+  if (!messageId) return;
+  const isInThread = messageId === props.parent.id || props.replies.some((reply) => reply.id === messageId);
+  if (isInThread) {
+    jumpToThreadMessageReference(messageId);
+    return;
+  }
+  emit("jump-message", messageId);
 }
 
 function handleAttachmentDrop(event: DragEvent): void {
@@ -466,13 +393,16 @@ function submitThreadReply(): void {
   if ((!text && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
   emit(
     "send-thread-message",
-    applyThreadQuoteToDraft(text, quoteTarget.value),
+    selectedQuoteText.value
+      ? applySelectedTextQuoteToDraft(text, selectedQuoteText.value, quoteTarget.value?.id)
+      : applyThreadQuoteToDraft(text, quoteTarget.value),
     props.parent.id,
     quoteTarget.value?.id || props.parent.id,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
   );
   draft.value = "";
   quoteTarget.value = null;
+  selectedQuoteText.value = null;
   mentionQuery.value = null;
 }
 
@@ -503,7 +433,7 @@ function handleEnterKey(event: KeyboardEvent): void {
 }
 
 function handleDraftInput(): void {
-  const match = /(^|\s)@([A-Za-z0-9._-]*)$/.exec(draft.value);
+  const match = /(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/.exec(draft.value);
   mentionQuery.value = match ? match[2] : null;
   activeMentionIndex.value = 0;
 }
@@ -514,8 +444,12 @@ function handleMentionArrow(event: KeyboardEvent, delta: number): void {
   activeMentionIndex.value = (activeMentionIndex.value + delta + mentionCandidates.value.length) % mentionCandidates.value.length;
 }
 
+function closeMentionForTab(): void {
+  if (mentionOpen.value) mentionQuery.value = null;
+}
+
 function insertMention(mentionText: string): void {
-  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._-]*)$/, `$1@${mentionText} `);
+  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/, `$1@${mentionText} `);
   mentionQuery.value = null;
   void nextTick(() => textareaElement.value?.focus());
 }

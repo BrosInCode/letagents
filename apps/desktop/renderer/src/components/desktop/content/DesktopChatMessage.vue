@@ -1,6 +1,7 @@
 <template>
   <article
     class="room-chat-message"
+    tabindex="-1"
     :class="{
       'is-system-message': isSystem,
       'is-github-message': Boolean(githubEvent),
@@ -8,10 +9,17 @@
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
       'is-compact-continuation': compactWithPrevious,
+      'is-ambient-system-message': isAmbientSystem,
+      'is-arriving': animateArrival,
+      'is-thread-context': context !== 'timeline',
+      'is-thread-root-context': context === 'thread-root',
+      'is-thread-reply-context': context === 'thread-reply',
     }"
+    :style="{ '--message-accent': senderColor }"
     :data-owner-kind="ownerKind"
     :data-message-id="message.id"
-    :data-testid="`room-message-${message.id}`"
+    :data-thread-message-id="threadMessageId || undefined"
+    :data-testid="testId || `room-message-${message.id}`"
     @contextmenu="openContextMenu"
     @pointerup="handleSelectionPointerUp"
   >
@@ -62,14 +70,15 @@
           <button
             class="room-message-reply-action room-message-thread-action"
             type="button"
-            title="Reply in thread"
-            aria-label="Reply in thread"
-            @click="$emit('open-thread', message.id)"
+            :title="tertiaryActionLabel"
+            :aria-label="tertiaryActionLabel"
+            @click="handleTertiaryAction"
           >
-            <MessageSquare :size="14" aria-hidden="true" />
+            <LocateFixed v-if="context !== 'timeline'" :size="14" aria-hidden="true" />
+            <MessageSquare v-else :size="14" aria-hidden="true" />
           </button>
-          <span class="room-message-provenance" :data-kind="ownerKind">
-            {{ ownerKind }}
+          <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
+            {{ provenanceLabel }}
           </span>
           <time :datetime="message.timestamp">{{ formattedTime }}</time>
         </div>
@@ -110,7 +119,7 @@
       </div>
 
       <button
-        v-if="threadIndicatorVisible"
+        v-if="context === 'timeline' && threadIndicatorVisible"
         class="room-thread-marker"
         :class="{ 'is-active': activeThreadRoot }"
         type="button"
@@ -142,29 +151,29 @@
       </button>
     </div>
 
-    <div
-      v-if="contextMenuOpen"
-      class="room-message-context-menu"
-      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
-      role="menu"
-      data-testid="room-message-context-menu"
-      @keydown.down.prevent="focusContextMenuItem(1)"
-      @keydown.up.prevent="focusContextMenuItem(-1)"
-      @pointerdown.stop
-      @contextmenu.prevent.stop
-    >
-      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
-        <span>Copy message</span>
-      </button>
-      <button type="button" role="menuitem" @click="quoteReplyFromContext">
-        <span>Quote reply</span>
-      </button>
-      <button type="button" role="menuitem" @click="openThreadFromContext">
-        <span>Reply in thread</span>
-      </button>
-    </div>
-
     <Teleport to="body">
+      <div
+        v-if="contextMenuOpen"
+        class="room-message-context-menu"
+        :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
+        role="menu"
+        data-testid="room-message-context-menu"
+        @keydown.down.prevent="focusContextMenuItem(1)"
+        @keydown.up.prevent="focusContextMenuItem(-1)"
+        @pointerdown.stop
+        @contextmenu.prevent.stop
+      >
+        <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
+          <span>Copy message</span>
+        </button>
+        <button type="button" role="menuitem" @click="quoteReplyFromContext">
+          <span>Quote reply</span>
+        </button>
+        <button type="button" role="menuitem" @click="tertiaryActionFromContext">
+          <span>{{ tertiaryActionLabel }}</span>
+        </button>
+      </div>
+
       <div
         v-if="selectionPopoverOpen"
         class="room-selection-popover"
@@ -173,7 +182,7 @@
         @pointerdown.stop.prevent
       >
         <button type="button" @click="addSelectionToChat">
-          Add to chat
+          {{ selectionActionLabel }}
         </button>
       </div>
     </Teleport>
@@ -182,7 +191,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
-import { Check, Copy, CornerUpLeft, MessageSquare } from "@lucide/vue";
+import { Check, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
@@ -190,18 +199,26 @@ import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAtta
 import {
   getSenderColor,
   parseSenderIdentity,
+  resolveOwnerAttribution,
 } from "./desktop-chat-message/identity";
 import { parseGitHubEvent } from "./desktop-chat-message/github-event";
 import {
+  restoreContextMenuFocus,
+  shouldRestoreContextMenuFocus,
+  type ContextMenuCloseReason,
+} from "./desktop-chat-message/context-menu-focus";
+import {
   formatTimestamp,
   renderMessageText,
+  isAmbientSystemMessage,
+  stripStatusPrefix,
   truncate,
 } from "./desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   message: DesktopRoomMessage;
   compactWithPrevious?: boolean;
   threadSummary: ThreadIndicatorSummary;
@@ -209,7 +226,13 @@ const props = defineProps<{
   highlightQuery: string;
   messageReferenceIds?: ReadonlySet<string>;
   searchActive: boolean;
-}>();
+  animateArrival?: boolean;
+  context?: "timeline" | "thread-root" | "thread-reply";
+  threadMessageId?: string;
+  testId?: string;
+}>(), {
+  context: "timeline",
+});
 
 const emit = defineEmits<{
   "quote-reply": [messageId: string];
@@ -219,11 +242,13 @@ const emit = defineEmits<{
   "open-agent": [target: AgentModalTarget];
   "open-github-event": [url: string];
   "quote-selection": [messageId: string, text: string];
+  "jump-to-thread-root": [messageId: string];
 }>();
 
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
+const contextMenuInvoker = ref<HTMLElement | null>(null);
 const { copied, copy: copyToClipboard } = useCopyIndicator(1400);
 const selectionPopoverOpen = ref(false);
 const selectionPopoverPosition = ref({ x: 0, y: 0 });
@@ -231,9 +256,17 @@ const selectedQuoteText = ref("");
 let selectionOutsideListenerActive = false;
 const identity = computed(() => parseSenderIdentity(props.message));
 const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
-const ownerAttribution = computed(() => props.message.agentIdentity?.ownerAttribution || identity.value.ownerAttribution);
+const ownerAttribution = computed(() => resolveOwnerAttribution({
+  ownerAttribution: props.message.agentIdentity?.ownerAttribution,
+  ownerLabel: props.message.agentIdentity?.ownerLabel,
+  actorLabel: props.message.agentIdentity?.actorLabel || props.message.actorLabel,
+  sender: props.message.sender,
+}));
 const ideLabel = computed(() => props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
 const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
+const isAmbientSystem = computed(() =>
+  isAmbientSystemMessage(props.message.sender, props.message.text || "")
+);
 const githubEvent = computed(() => parseGitHubEvent(props.message));
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source));
 const ownerKind = computed(() => {
@@ -243,15 +276,25 @@ const ownerKind = computed(() => {
   if (props.message.source === "browser") return "human";
   return "room";
 });
+const provenanceLabel = computed(() =>
+  ownerKind.value === "agent" && ownerAttribution.value ? null : ownerKind.value
+);
 const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedText = computed(() =>
-  renderMessageText(props.message.text || "No message body.", props.highlightQuery, props.messageReferenceIds)
-);
+const renderedText = computed(() => {
+  const text = props.message.text || "No message body.";
+  return renderMessageText(
+    isAmbientSystem.value ? stripStatusPrefix(text) : text,
+    props.highlightQuery,
+    props.messageReferenceIds,
+  );
+});
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
+const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");
+const selectionActionLabel = computed(() => props.context === "timeline" ? "Add to chat" : "Add to thread");
 const threadIndicatorVisible = computed(() =>
   props.threadSummary.count > 0 || props.threadSummary.hasPartialHistory || props.threadSummary.loadingEarlier
 );
@@ -297,6 +340,9 @@ function openContextMenu(event: MouseEvent): void {
     return;
   }
   event.preventDefault();
+  const article = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
   closeSelectionPopover();
   const menuWidth = 180;
   const menuHeight = 122;
@@ -307,7 +353,7 @@ function openContextMenu(event: MouseEvent): void {
   contextMenuOpen.value = true;
   void nextTick(() => firstContextMenuButton.value?.focus());
   window.setTimeout(() => {
-    window.addEventListener("pointerdown", closeContextMenu, { once: true });
+    window.addEventListener("pointerdown", closeContextMenuFromOutside, { once: true });
     window.addEventListener("keydown", handleContextMenuKeydown);
   }, 0);
 }
@@ -317,13 +363,23 @@ function shouldUseNativeContextMenu(event: MouseEvent): boolean {
   return Boolean(target?.closest("a, button, input, textarea, select, [contenteditable='true']"));
 }
 
-function closeContextMenu(): void {
+function closeContextMenu(reason: ContextMenuCloseReason): void {
   contextMenuOpen.value = false;
   window.removeEventListener("keydown", handleContextMenuKeydown);
+  window.removeEventListener("pointerdown", closeContextMenuFromOutside);
+  if (shouldRestoreContextMenuFocus(reason)) {
+    const invoker = contextMenuInvoker.value;
+    void nextTick(() => restoreContextMenuFocus(invoker));
+  }
+  contextMenuInvoker.value = null;
+}
+
+function closeContextMenuFromOutside(): void {
+  closeContextMenu("outside");
 }
 
 function handleContextMenuKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeContextMenu();
+  if (event.key === "Escape") closeContextMenu("escape");
 }
 
 function focusContextMenuItem(direction: 1 | -1): void {
@@ -335,17 +391,25 @@ function focusContextMenuItem(direction: 1 | -1): void {
 }
 
 function quoteReplyFromContext(): void {
-  closeContextMenu();
+  closeContextMenu("action");
   emit("quote-reply", props.message.id);
 }
 
-function openThreadFromContext(): void {
-  closeContextMenu();
-  emit("open-thread", props.message.id);
+function tertiaryActionFromContext(): void {
+  closeContextMenu("action");
+  handleTertiaryAction();
+}
+
+function handleTertiaryAction(): void {
+  if (props.context === "timeline") {
+    emit("open-thread", props.message.id);
+    return;
+  }
+  emit("jump-to-thread-root", props.message.id);
 }
 
 async function copyFromContext(): Promise<void> {
-  closeContextMenu();
+  closeContextMenu("copy");
   await copyMessage();
 }
 
@@ -455,6 +519,7 @@ function normalizedSelectedText(selection: Selection | null): string {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleContextMenuKeydown);
+  window.removeEventListener("pointerdown", closeContextMenuFromOutside);
   removeSelectionOutsidePointerListener();
   window.removeEventListener("keydown", handleSelectionKeydown);
 });

@@ -123,7 +123,7 @@ export function desktopManagedAgentMessageActivationDecision(
   if (mentions.some(isBroadcastHandle)) {
     return "activate";
   }
-  if (mentions.some((mention) => managedAgentAliases(worker).has(normalizeHandle(mention)))) {
+  if (mentions.some((mention) => managedAgentAliases(worker).has(normalizeMentionIdentityHandle(mention)))) {
     return "activate";
   }
   if (hasBroadcastAddress(message.text)) {
@@ -255,7 +255,7 @@ function managedAgentAliases(
 function extractMentionHandles(text: string | null | undefined): string[] {
   const raw = typeof text === "string" ? text : "";
   const mentions: string[] = [];
-  for (const match of raw.matchAll(/(^|[\s([{:;,])@([A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)?)/g)) {
+  for (const match of raw.matchAll(/(^|[\s([{:;,])@([A-Za-z0-9][A-Za-z0-9_.:-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)*)/g)) {
     mentions.push(match[2]);
   }
   return mentions;
@@ -270,8 +270,9 @@ function isLikelyAgentMentionHandle(handle: string): boolean {
   const raw = String(handle || "").trim();
   if (!raw) return false;
   const normalized = raw.toLowerCase();
-  if (normalized.includes("/") && normalized === raw) return false;
   const firstSegment = normalized.split("/", 1)[0].replace(/_/g, "-");
+  if (normalized.startsWith("agent:")) return true;
+  if (normalized.includes("/") && normalized === raw) return false;
   return !NON_AGENT_AT_HANDLES.has(firstSegment);
 }
 
@@ -281,5 +282,10 @@ function hasBroadcastAddress(text: string | null | undefined): boolean {
 }
 
 function normalizeHandle(value: string | null | undefined): string {
-  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "");
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_.:/-]+/g, "");
+}
+
+function normalizeMentionIdentityHandle(value: string | null | undefined): string {
+  const normalized = normalizeHandle(value);
+  return normalized.startsWith("agent:") ? normalized.slice("agent:".length) : normalized;
 }

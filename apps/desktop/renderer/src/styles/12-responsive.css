@@ -237,9 +237,15 @@
   }
 
   .room-chat-message {
-    grid-template-columns: 24px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 8px;
     padding: 11px 0;
+  }
+
+  .room-message-bubble {
+    max-width: 100%;
+    padding: 10px 13px 11px;
+    border-radius: 14px 14px 14px 5px;
   }
 
   .room-message-meta-tail {

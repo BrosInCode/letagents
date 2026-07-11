@@ -137,6 +137,46 @@ test("activation routing activates full agent key mentions", () => {
   );
 });
 
+test("activation routing supports multi-segment canonical keys and silences non-target workers", () => {
+  const localWorker = {
+    ...worker,
+    agent_key: "local/emmy/codex/cometlively",
+  };
+  const localOtherWorker = {
+    ...otherWorker,
+    agent_key: "local/other/codex/dawnridge",
+  };
+  const message = {
+    id: "msg_multi_segment_mention",
+    sender: "EmmyMay",
+    text: "@agent:local/emmy/codex/cometlively please take this",
+  };
+
+  assert.equal(decideAgentMessageActivation(message, localWorker).decision, "activate");
+  assert.deepEqual(decideAgentMessageActivation(message, localOtherWorker), {
+    decision: "silent",
+    reason: "explicit_other_mention",
+    addressed: false,
+  });
+});
+
+test("activation routing does not treat arbitrary scoped packages as agent mentions", () => {
+  for (const packageName of ["@types/node", "@vue/runtime-core", "@babel/core", "@agent/core"]) {
+    assert.deepEqual(
+      decideAgentMessageActivation({
+        id: `msg_package_${packageName}`,
+        sender: "EmmyMay",
+        text: `npm install ${packageName}`,
+      }, worker),
+      {
+        decision: "unclear",
+        reason: "unaddressed",
+        addressed: false,
+      },
+    );
+  }
+});
+
 test("activation routing activates thread participants and direct reply targets", () => {
   assert.deepEqual(
     decideAgentMessageActivation({

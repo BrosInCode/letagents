@@ -60,6 +60,34 @@ export interface ParsedIdentity {
   structured: boolean
 }
 
+export function resolveAgentIdentity(
+  sender: string,
+  structured?: {
+    display_name?: string | null
+    owner_label?: string | null
+    owner_attribution?: string | null
+    ide_label?: string | null
+    actor_label?: string | null
+  } | null,
+): ParsedIdentity {
+  const parsed = parseAgentIdentity(sender)
+  const structuredOwner = String(structured?.owner_label || '').trim()
+  const actorOwner = parseAgentIdentity(structured?.actor_label || '').ownerAttribution
+  const ownerAttribution = structured?.owner_attribution
+    || (structuredOwner
+      ? (/['’]s\s+agent$/i.test(structuredOwner) ? structuredOwner : `${structuredOwner}'s agent`)
+      : null)
+    || actorOwner
+    || parsed.ownerAttribution
+  return {
+    ...parsed,
+    displayName: structured?.display_name || parsed.displayName,
+    ownerAttribution,
+    ideLabel: structured?.ide_label || parsed.ideLabel,
+    structured: Boolean(structured) || parsed.structured,
+  }
+}
+
 export function parseAgentIdentity(sender: string): ParsedIdentity {
   const raw = (sender || '').trim()
   if (!raw)

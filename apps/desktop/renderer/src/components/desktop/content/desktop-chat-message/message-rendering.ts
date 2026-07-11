@@ -14,6 +14,18 @@ export function truncate(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }
 
+export function isAmbientSystemMessage(sender: string, text: string): boolean {
+  const normalizedSender = String(sender || "").trim().toLowerCase();
+  const normalizedText = String(text || "");
+  return ["letagents", "system"].includes(normalizedSender)
+    && /^\[status\]\s*/i.test(normalizedText)
+    && !/\b(stale|blocked|failed|error|cannot|can't|cancelled)\b/i.test(normalizedText);
+}
+
+export function stripStatusPrefix(text: string): string {
+  return String(text || "").replace(/^\[status\]\s*/i, "").trim();
+}
+
 export function renderMessageText(
   value: string,
   highlightQuery: string,

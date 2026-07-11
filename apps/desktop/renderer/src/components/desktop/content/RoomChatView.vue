@@ -255,7 +255,7 @@ interface RoomReplyTarget extends DesktopRoomMessage {
 
 const threadLayoutAnimationMs = 250;
 const threadPaneMinWidth = 320;
-const threadPaneDefaultWidth = 380;
+const threadPaneDefaultWidth = 420;
 const threadPaneHardMaxWidth = 560;
 const threadPaneMinRoomWidth = 560;
 const threadResizeStep = 24;

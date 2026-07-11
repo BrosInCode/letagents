@@ -17,6 +17,21 @@ export interface RoomMentionCandidate {
   label: string;
 }
 
+export function agentOwnerAttribution(
+  ownerLabel: string | null | undefined,
+  actorLabel?: string | null,
+): string {
+  const owner = normalizeDisplayName(ownerLabel) || ownerLabelFromActor(actorLabel);
+  if (!owner) return "Agent";
+  if (/['’]s\s+agent$/i.test(owner)) return owner;
+  return `${owner}'s agent`;
+}
+
+function ownerLabelFromActor(actorLabel: string | null | undefined): string {
+  const parts = normalizeDisplayName(actorLabel).split(" | ").map((part) => part.trim());
+  return parts.length === 3 && /agent$/i.test(parts[1] || "") ? parts[1] : "";
+}
+
 function normalizeDisplayName(value: string | null | undefined): string {
   return String(value ?? "").trim();
 }
@@ -92,16 +107,37 @@ export function roomMentionCandidates(
     candidates.push(EVERYONE_MENTION_CANDIDATE);
   }
 
-  candidates.push(...sortMentionableRoomParticipants(participants
+  const allMentionableParticipants = sortMentionableRoomParticipants(participants
     .filter(isMentionableRoomParticipant)
-    .filter((participant) => participant.displayName.toLowerCase() !== "everyone")
-    .filter((participant) => participant.displayName.toLowerCase().includes(normalizedQuery)))
+    .filter((participant) => participant.displayName.toLowerCase() !== "everyone"));
+  const mentionableParticipants = allMentionableParticipants.filter((participant) => [
+      participant.displayName,
+      participant.ownerLabel,
+      ownerLabelFromActor(participant.actorLabel),
+    ].some((value) => normalizeDisplayName(value).toLowerCase().includes(normalizedQuery)));
+  const agentDisplayNameCounts = new Map<string, number>();
+  for (const participant of allMentionableParticipants) {
+    if (participant.kind !== "agent") continue;
+    const key = participant.displayName.toLowerCase();
+    agentDisplayNameCounts.set(key, (agentDisplayNameCounts.get(key) || 0) + 1);
+  }
+
+  candidates.push(...mentionableParticipants
+    .filter((participant) => participant.kind !== "agent"
+      || (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) <= 1
+      || Boolean(participant.agentKey))
     .map((participant) => ({
       participantKey: participant.participantKey,
       kind: participant.kind,
       displayName: participant.displayName,
-      insertText: participant.displayName,
-      label: participant.kind === "agent" ? "Agent" : "Human",
+      insertText: participant.kind === "agent"
+          && (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) > 1
+          && participant.agentKey
+        ? `agent:${participant.agentKey}`
+        : participant.displayName,
+      label: participant.kind === "agent"
+        ? agentOwnerAttribution(participant.ownerLabel, participant.actorLabel)
+        : "Human",
     })));
 
   return candidates.slice(0, limit);

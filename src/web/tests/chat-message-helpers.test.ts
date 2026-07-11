@@ -2,8 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import type { RoomMessage, StalePromptTaskState } from '../src/composables/useRoom'
-import { renderMessageContent } from '../src/components/room/chat-message/formatting'
+import {
+  isAmbientSystemMessage,
+  renderMessageContent,
+  stripStatusPrefix,
+} from '../src/components/room/chat-message/formatting'
 import { isCurrentStalePrompt, stalePromptTaskIdFor } from '../src/components/room/chat-message/stalePrompt'
+import { resolveAgentIdentity } from '../src/composables/room/identity'
 
 function message(overrides: Partial<RoomMessage>): RoomMessage {
   return {
@@ -28,6 +33,42 @@ test('renderMessageContent linkifies URLs and keeps href attributes escaped', ()
     renderMessageContent('see https://example.com/?q=a&b=c and @codex'),
     'see <a href="https://example.com/?q=a&amp;b=c" target="_blank" rel="noopener noreferrer">https://example.com/?q=a&amp;b=c</a> and <span class="mention-token">@codex</span>',
   )
+})
+
+test('renderMessageContent preserves collision-safe owner/agent mention handles', () => {
+  assert.equal(
+    renderMessageContent('@agent:local/EmmyMay/codex/oak please review'),
+    '<span class="mention-token">@agent:local/EmmyMay/codex/oak</span> please review',
+  )
+})
+
+test('structured message identity recovers owner attribution from owner label and actor label', () => {
+  assert.equal(resolveAgentIdentity('Oak', { owner_label: 'EmmyMay' }).ownerAttribution, "EmmyMay's agent")
+  assert.equal(
+    resolveAgentIdentity('Oak', { actor_label: "Oak | EmmyMay's agent | Codex" }).ownerAttribution,
+    "EmmyMay's agent",
+  )
+})
+
+test('structured message identity overrides an unstructured sender label', () => {
+  const identity = resolveAgentIdentity('MorrowForest 2', {
+    display_name: 'MorrowForest 2',
+    owner_attribution: "EmmyMay's agent",
+    ide_label: 'Codex',
+  })
+  assert.equal(identity.displayName, 'MorrowForest 2')
+  assert.equal(identity.ownerAttribution, "EmmyMay's agent")
+  assert.equal(identity.ideLabel, 'Codex')
+})
+
+test('ambient system messages are limited to status annotations', () => {
+  assert.equal(isAmbientSystemMessage('LetAgents', '[status] task_1 is in review'), true)
+  assert.equal(isAmbientSystemMessage('system', '[STATUS] worker connected'), true)
+  assert.equal(isAmbientSystemMessage('LetAgents', 'Authentication failed'), false)
+  assert.equal(isAmbientSystemMessage('LetAgents', '[status] Stale work detected'), false)
+  assert.equal(isAmbientSystemMessage('LetAgents', '[status] task_1 is blocked'), false)
+  assert.equal(isAmbientSystemMessage('agent', '[status] reviewing PR'), false)
+  assert.equal(stripStatusPrefix('[status] task_1 is done'), 'task_1 is done')
 })
 
 test('stalePromptTaskIdFor accepts only current LetAgents stale prompts', () => {

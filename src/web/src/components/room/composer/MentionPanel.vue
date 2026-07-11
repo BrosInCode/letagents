@@ -1,13 +1,17 @@
 <template>
-  <div class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
+  <div id="composer-mention-listbox" class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
     <button
       v-for="(candidate, index) in candidates"
       :key="candidate.key"
       class="composer-mention-option"
       type="button"
+      :id="`composer-mention-option-${candidate.key}`"
+      role="option"
+      tabindex="-1"
       :data-active="index === activeIndex"
       :aria-selected="index === activeIndex"
-      @mousedown.prevent="emit('select', candidate)"
+      @pointerdown.prevent
+      @click="emit('select', candidate)"
     >
       <span class="composer-mention-copy">
         <strong>{{ candidate.label }}</strong>
@@ -35,6 +39,8 @@ const emit = defineEmits<{
   display: grid;
   gap: 4px;
   padding: 0 8px 8px;
+  transform-origin: 24px 100%;
+  animation: composer-mention-panel-enter 170ms cubic-bezier(0.23, 1, 0.32, 1) both;
 }
 .composer-mention-option {
   width: 100%;
@@ -67,6 +73,25 @@ const emit = defineEmits<{
 .composer-mention-copy span {
   font-size: 0.72rem;
   color: var(--muted, #71717a);
+}
+
+@keyframes composer-mention-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-mention-panel {
+    transform: none;
+    animation: composer-mention-panel-enter-reduced 100ms ease-out both;
+  }
+}
+
+@keyframes composer-mention-panel-enter-reduced {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @media (max-width: 768px) {

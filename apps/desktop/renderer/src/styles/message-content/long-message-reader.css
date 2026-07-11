@@ -1,8 +1,12 @@
 .desktop-long-message-html {
   color: var(--text);
-  font-size: 1rem;
+  font-size: 0.98rem;
+  font-weight: 430;
+  line-height: 1.62;
+  letter-spacing: -0.006em;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 .desktop-long-message-html :is(a) {
@@ -176,8 +180,10 @@
 
 .desktop-reader-content {
   overflow: auto;
-  padding: 22px;
-  line-height: 1.68;
+  width: min(72ch, 100%);
+  margin: 0 auto;
+  padding: 30px clamp(22px, 5vw, 52px) 42px;
+  line-height: 1.7;
 }
 
 .desktop-reader-footer .primary {

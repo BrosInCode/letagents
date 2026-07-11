@@ -10,21 +10,23 @@
       >
         {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
       </button>
-      <ChatMessage
-        v-for="msg in messages"
-        :key="msg.id"
-        :message="msg"
-        :roomIdentifier="roomIdentifier"
-        :thread="threadSummaries.get(msg.id) || null"
-        :stalePromptTaskStates="stalePromptTaskStates"
-        :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
-        :class="searchClasses(msg)"
-        :searchQuery="searchQuery"
-        @reply="emit('reply', $event)"
-        @openImageViewer="emit('openImageViewer', $event)"
-        @scrollToReply="scrollToMessage"
-        @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
-      />
+      <TransitionGroup name="message-arrival" @after-enter="handleAfterEnter">
+        <ChatMessage
+          v-for="msg in messages"
+          :key="msg.id"
+          :message="msg"
+          :roomIdentifier="roomIdentifier"
+          :thread="threadSummaries.get(msg.id) || null"
+          :stalePromptTaskStates="stalePromptTaskStates"
+          :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
+          :class="messageClasses(msg)"
+          :searchQuery="searchQuery"
+          @reply="emit('reply', $event)"
+          @openImageViewer="emit('openImageViewer', $event)"
+          @scrollToReply="scrollToMessage"
+          @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
+        />
+      </TransitionGroup>
     </div>
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
@@ -47,6 +49,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import { getAppendedMessageIds, mergeMessageArrivalIds } from './messageArrival'
 import { buildMessageThreadSummaries } from './messageThreading'
 
 const props = defineProps<{
@@ -68,6 +71,7 @@ const emit = defineEmits<{
 const messagesEl = ref<HTMLElement | null>(null)
 const unreadCount = ref(0)
 const isScrolledFarUp = ref(false)
+const arrivingMessageIds = ref<ReadonlySet<string>>(new Set())
 let isScrolledToBottom = true
 
 const matchedIds = computed(() => {
@@ -95,14 +99,24 @@ const reasoningByAnchorMessage = computed(() => {
   return map
 })
 
-function searchClasses(msg: RoomMessage): Record<string, boolean> {
+function messageClasses(msg: RoomMessage): Record<string, boolean> {
   const q = (props.searchQuery || '').trim()
-  if (!q) return {}
-  const isMatch = matchedIds.value.has(msg.id)
-  return {
-    'search-dim': !isMatch,
-    'search-match': isMatch,
+  const classes: Record<string, boolean> = {
+    'animate-arrival': arrivingMessageIds.value.has(msg.id),
   }
+  if (!q) return classes
+  const isMatch = matchedIds.value.has(msg.id)
+  classes['search-dim'] = !isMatch
+  classes['search-match'] = isMatch
+  return classes
+}
+
+function handleAfterEnter(element: Element) {
+  const messageId = (element as HTMLElement).dataset.msgId
+  if (!messageId || !arrivingMessageIds.value.has(messageId)) return
+  const nextIds = new Set(arrivingMessageIds.value)
+  nextIds.delete(messageId)
+  arrivingMessageIds.value = nextIds
 }
 
 function checkScroll() {
@@ -149,6 +163,10 @@ watch(() => props.searchQuery, async () => {
   }
 })
 
+watch(() => props.roomIdentifier, () => {
+  arrivingMessageIds.value = new Set()
+})
+
 watch(() => props.messages, async (newMessages, oldMessages) => {
   const newLen = newMessages.length
   const oldLen = oldMessages?.length || 0
@@ -166,6 +184,14 @@ watch(() => props.messages, async (newMessages, oldMessages) => {
         el.scrollTop += el.scrollHeight - previousScrollHeight
       }
       return
+    }
+
+    const appendedIds = getAppendedMessageIds(
+      (oldMessages || []).map((message) => message.id),
+      newMessages.map((message) => message.id),
+    )
+    if (appendedIds.length > 0) {
+      arrivingMessageIds.value = mergeMessageArrivalIds(arrivingMessageIds.value, appendedIds)
     }
 
     if (isScrolledToBottom) {
@@ -198,6 +224,71 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   overflow-y: auto;
   padding: 16px 20px;
   scroll-behavior: smooth;
+}
+
+.message-arrival-enter-active.animate-arrival {
+  will-change: transform, opacity;
+  transition:
+    opacity 190ms ease-out,
+    transform 280ms cubic-bezier(0.22, 0.8, 0.2, 1);
+}
+
+.message-arrival-enter-from.animate-arrival {
+  opacity: 0;
+  transform: translateY(12px) scale(0.985);
+}
+
+.message-arrival-enter-to.animate-arrival {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.message-arrival-enter-active.animate-arrival :deep(.message-avatar) {
+  will-change: transform, opacity;
+  transition:
+    opacity 170ms ease-out 25ms,
+    transform 210ms cubic-bezier(0.22, 0.8, 0.2, 1) 25ms;
+}
+
+.message-arrival-enter-from.animate-arrival :deep(.message-avatar) {
+  opacity: 0;
+  transform: translateY(5px) scale(0.72);
+}
+
+.message-arrival-enter-active.animate-arrival :deep(.message-meta) {
+  will-change: transform, opacity;
+  transition:
+    opacity 170ms ease-out 35ms,
+    transform 190ms cubic-bezier(0.22, 0.8, 0.2, 1) 35ms;
+}
+
+.message-arrival-enter-from.animate-arrival :deep(.message-meta) {
+  opacity: 0;
+  transform: translateY(7px);
+}
+
+.message-arrival-enter-active.animate-arrival :deep(.message-bubble) {
+  transform-origin: 14px 100%;
+  will-change: transform, opacity;
+  transition:
+    opacity 190ms ease-out 25ms,
+    transform 250ms cubic-bezier(0.22, 0.8, 0.2, 1) 25ms;
+}
+
+.message-arrival-enter-from.animate-arrival :deep(.message-bubble) {
+  opacity: 0;
+  transform: translateY(7px) scale(0.98);
+}
+
+.message-arrival-enter-active.animate-arrival :deep(.mention-token) {
+  transform-origin: 50% 70%;
+  animation: web-message-mention-arrive 210ms 55ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes web-message-mention-arrive {
+  from { opacity: 0; transform: translateY(3px) scale(0.9); }
+  58% { opacity: 1; transform: translateY(0) scale(1.035); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .load-older-btn {
@@ -255,6 +346,41 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .messages { scroll-behavior: auto; }
+
+  .message-arrival-enter-active.animate-arrival {
+    transition: opacity 160ms ease-out;
+  }
+
+  .message-arrival-enter-from.animate-arrival {
+    transform: none;
+  }
+
+  .message-arrival-enter-active.animate-arrival :deep(.message-avatar),
+  .message-arrival-enter-active.animate-arrival :deep(.message-meta),
+  .message-arrival-enter-active.animate-arrival :deep(.message-bubble) {
+    transition: none;
+  }
+
+  .message-arrival-enter-active.animate-arrival :deep(.mention-token) {
+    transform: none;
+    animation: web-message-mention-arrive-reduced 120ms ease-out both;
+  }
+
+  .message-arrival-enter-from.animate-arrival :deep(.message-avatar),
+  .message-arrival-enter-from.animate-arrival :deep(.message-meta),
+  .message-arrival-enter-from.animate-arrival :deep(.message-bubble) {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes web-message-mention-arrive-reduced {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 </style>
 
 <style>
@@ -263,6 +389,6 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .search-match {
   border-left: 2px solid var(--success, #34d399);
   padding-left: 8px;
-  transition: all 0.2s;
+  transition: border-color 0.2s ease;
 }
 </style>

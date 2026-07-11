@@ -112,8 +112,8 @@ test('buildMentionCandidates only includes live non-hidden agents and visible hu
     candidates.map((candidate) => candidate.label),
     ['@LiveOak', '@GhostAsh', '@EmmyMay'],
   )
-  assert.equal(candidates[0]?.meta.includes('Connected'), true)
-  assert.equal(candidates[1]?.meta.includes('Connected'), true)
+  assert.equal(candidates[0]?.meta, "EmmyMay's agent · Connected")
+  assert.equal(candidates[1]?.meta, "EmmyMay's agent · Connected")
 })
 
 test('buildMentionCandidates treats active presence as reachable even when participant history is offline', () => {
@@ -136,6 +136,47 @@ test('buildMentionCandidates treats active presence as reachable even when parti
     candidates.map((candidate) => candidate.label),
     ['@LiveOak'],
   )
+})
+
+test('buildMentionCandidates uses agent keys when owners share a display name', () => {
+  const participants = [
+    makeParticipant({
+      participant_key: 'agent:alice/oak',
+      actor_label: "Oak | Alice's agent | Agent",
+      agent_key: 'local/Alice/codex/oak',
+      display_name: 'Oak',
+      owner_label: 'Alice',
+    }),
+    makeParticipant({
+      participant_key: 'agent:bob/oak',
+      actor_label: "Oak | Bob's agent | Agent",
+      agent_key: 'local/Bob/codex/oak',
+      display_name: 'Oak',
+      owner_label: 'Bob',
+    }),
+  ]
+  const presence = [
+    makePresence({ actor_label: "Oak | Alice's agent | Agent", agent_key: 'local/Alice/codex/oak', display_name: 'Oak', owner_label: 'Alice' }),
+    makePresence({ actor_label: "Oak | Bob's agent | Agent", agent_key: 'local/Bob/codex/oak', display_name: 'Oak', owner_label: 'Bob' }),
+  ]
+
+  const candidates = buildMentionCandidates({ participants, presence })
+
+  assert.deepEqual(candidates.map((candidate) => candidate.label), ['@agent:local/Alice/codex/oak', '@agent:local/Bob/codex/oak'])
+  assert.deepEqual(candidates.map((candidate) => candidate.meta), ["Alice's agent · Connected", "Bob's agent · Connected"])
+})
+
+test('buildMentionCandidates excludes duplicate agent names without stable agent keys', () => {
+  const participants = [
+    makeParticipant({ actor_label: "Oak | Alice's agent | Agent", agent_key: null, display_name: 'Oak', owner_label: 'Alice' }),
+    makeParticipant({ participant_key: 'agent:bob/oak', actor_label: "Oak | Bob's agent | Agent", agent_key: null, display_name: 'Oak', owner_label: 'Bob' }),
+  ]
+  const presence = [
+    makePresence({ actor_label: "Oak | Alice's agent | Agent", agent_key: null, display_name: 'Oak', owner_label: 'Alice' }),
+    makePresence({ actor_label: "Oak | Bob's agent | Agent", agent_key: null, display_name: 'Oak', owner_label: 'Bob' }),
+  ]
+
+  assert.deepEqual(buildMentionCandidates({ participants, presence }), [])
 })
 
 test('buildMentionCandidates excludes status-only presence without delivery reachability', () => {
