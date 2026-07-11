@@ -298,9 +298,24 @@ export function createManagedAgentEventTurnEngine<
     storage: DesktopRoomStorageState,
   ): Promise<void> {
     const session = adapter.getStoredSession(sessionId);
-    if (!session || !canDeliverDesktopEventToManagedAgent(adapter.toPublicSession(session))) {
+    if (!session) {
       return;
     }
+    if (session.status === "blocked") {
+      const eventId = event.type === "message" ? event.message.id : event.task.id;
+      const updated = adapter.updateSession(sessionId, (current) => {
+        const queued = current.queued_events ?? [];
+        const alreadyQueued = queued.some((entry) =>
+          (entry.type === "message" ? entry.message.id : entry.task.id) === eventId
+        );
+        return alreadyQueued
+          ? current
+          : { ...current, queued_events: [...queued, event].slice(-50), updated_at: adapter.now() };
+      });
+      adapter.emitSessionUpdate(updated);
+      return;
+    }
+    if (!canDeliverDesktopEventToManagedAgent(adapter.toPublicSession(session))) return;
 
     // Provider readiness preflight (codex: readiness probe + wait for the
     // current turn to go idle) runs before the session is marked active and
@@ -402,12 +417,14 @@ export function createManagedAgentEventTurnEngine<
         return;
       }
 
+      const queuedEvents = latest.queued_events ?? [];
       const completed = clearSessionActiveWork(sessionId, (current) => ({
         ...adapter.applyTurnResult(current, result),
         status: "completed",
         last_error: null,
         failure: null,
         pending_event: null,
+        queued_events: [],
         updated_at: adapter.now(),
       })) ?? latest;
       adapter.emitSessionUpdate(completed);
@@ -425,6 +442,10 @@ export function createManagedAgentEventTurnEngine<
       consecutiveTurnErrors.delete(sessionId);
       if (stopAfterTurn) {
         await stopAfterRoomStopPhrase(completed);
+      } else {
+        for (const queuedEvent of queuedEvents) {
+          enqueueDesktopEventTurn(completed, queuedEvent);
+        }
       }
     } finally {
       adapter.onDeliverFinally?.(session.session_id);

@@ -81,7 +81,11 @@ export function shouldDeliverRoomStreamEventToManagedAgent(
   worker: DesktopManagedAgentSession,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): boolean {
-  if (!canDeliverDesktopEventToManagedAgent(worker) || isOwnRoomStreamEventForManagedAgent(worker, event)) {
+  const canReceiveOrQueue = worker.deliveryMode === "desktop_events" &&
+    Boolean(worker.agentSessionId) &&
+    worker.status !== "interrupted" &&
+    worker.status !== "failed";
+  if (!canReceiveOrQueue || isOwnRoomStreamEventForManagedAgent(worker, event)) {
     return false;
   }
 

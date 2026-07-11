@@ -817,6 +817,7 @@ test("Cursor usage-limit errors block immediately and publish one visible failur
   }));
   await runtime.waitForIdle();
   assert.equal(turns, 1, "blocked sessions must not read subsequent room messages");
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.queued_events?.length, 1);
 
   quotaExhausted = false;
   const resumed = await runtime.retry({ sessionId: started.session.id });
@@ -824,5 +825,9 @@ test("Cursor usage-limit errors block immediately and publish one visible failur
   await runtime.waitForIdle();
   assert.equal(getStoredCursorLiveSession(started.session.id)?.status, "completed");
   assert.equal(getStoredCursorLiveSession(started.session.id)?.failure, null);
-  assert.deepEqual(published, [{ text: "Reply after quota recovery.", eventId: "msg_1" }]);
+  assert.equal(turns, 3, "retry must replay the failed message before draining messages queued while blocked");
+  assert.deepEqual(published, [
+    { text: "Reply after quota recovery.", eventId: "msg_1" },
+    { text: "Reply after quota recovery.", eventId: "msg_after_limit" },
+  ]);
 });

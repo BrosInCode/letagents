@@ -69,6 +69,7 @@ export type LocalChatMessageInput = {
   thread_root_id?: string | null;
   attachments?: RoomMessageAttachmentPayload[];
   readerKey?: string | null;
+  idempotency_key?: string | null;
 };
 
 export type LocalSyncMessagePayload = RoomMessagePayload & {
@@ -564,6 +565,17 @@ export async function addLocalChatMessage(
   let row: LocalMessageRow;
   beginImmediate(database);
   try {
+    const idempotencyKey = input.idempotency_key?.trim() || null;
+    const existing = idempotencyKey
+      ? database
+        .prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND sync_key = ?")
+        .get(trimmedRoomId, idempotencyKey)
+      : null;
+    if (existing) {
+      row = mapRow(existing);
+      database.exec("COMMIT");
+      return (await hydrateMessageRows(database, [row], { readerKey: input.readerKey }))[0]!;
+    }
     const number = allocateLocalMessageNumber(database, trimmedRoomId);
     row = {
       room_id: trimmedRoomId,
@@ -577,7 +589,7 @@ export async function addLocalChatMessage(
       timestamp,
       synced_cloud_id: null,
       synced_at: null,
-      sync_key: null,
+      sync_key: idempotencyKey,
       sync_started_at: null,
     };
 
@@ -587,7 +599,7 @@ export async function addLocalChatMessage(
           room_id, number, reply_to_number, thread_root_number, sender, text, agent_prompt_kind, source,
           timestamp, synced_cloud_id, synced_at, sync_key, sync_started_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)
       `)
       .run(
         row.room_id,
@@ -599,6 +611,7 @@ export async function addLocalChatMessage(
         row.agent_prompt_kind,
         row.source,
         row.timestamp,
+        row.sync_key,
       );
     for (const attachment of attachmentRows) {
       database

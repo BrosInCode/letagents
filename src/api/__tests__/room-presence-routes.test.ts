@@ -8,6 +8,18 @@ const {
   isSuppressibleDisconnectedPresence,
   registerRoomPresenceRoutes,
 } = await import("../routes/rooms/presence/index.js");
+const { desktopManagedPausePresence } = await import("../routes/rooms/presence/agent-session-routes.js");
+
+test("desktop closed-room pauses stay distinct from agent failures", () => {
+  assert.deepEqual(desktopManagedPausePresence({ availability: "room_closed" }), {
+    status: "idle",
+    statusText: "Room not open on the managing desktop",
+  });
+  assert.deepEqual(desktopManagedPausePresence({ availability: "failure" }), {
+    status: "blocked",
+    statusText: "Needs attention",
+  });
+});
 
 function createDeps() {
   const unused = async () => {

@@ -35,6 +35,7 @@ export async function persistDesktopManagedAgentLocalReply(input: {
   attachments?: RoomMessageAttachmentPayload[];
   source?: string;
   sender?: string;
+  idempotencyKey?: string | null;
 }): Promise<DesktopRoomMessage | null> {
   if (input.storage.effectiveMode !== "local") {
     return null;
@@ -48,6 +49,7 @@ export async function persistDesktopManagedAgentLocalReply(input: {
     thread_root_id: input.threadRootId ?? null,
     source: input.source || "agent",
     attachments: input.attachments ?? [],
+    idempotency_key: input.idempotencyKey ?? null,
   });
 
   return mapRoomMessagePayload(localMessage);

@@ -28,6 +28,19 @@ import {
 } from "./helpers.js";
 import type { RoomPresenceRouteDeps } from "./types.js";
 
+export function desktopManagedPausePresence(input: {
+  availability?: "failure" | "room_closed";
+  statusText?: string;
+}): { status: "idle" | "blocked"; statusText: string } {
+  const roomClosed = input.availability === "room_closed";
+  return {
+    status: roomClosed ? "idle" : "blocked",
+    statusText: input.statusText?.slice(0, 240) || (roomClosed
+      ? "Room not open on the managing desktop"
+      : "Needs attention"),
+  };
+}
+
 export function registerAgentSessionRoutes(
   app: Express,
   deps: RoomPresenceRouteDeps
@@ -364,7 +377,12 @@ export function registerAgentSessionRoutes(
     const project = await deps.resolveRoomOrReply(roomId, res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
-    const body = req.body as { agent_session_id?: string; agent_session_token?: string; status_text?: string };
+    const body = req.body as {
+      agent_session_id?: string;
+      agent_session_token?: string;
+      status_text?: string;
+      availability?: "failure" | "room_closed";
+    };
     const worker = await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id });
     if (!worker.ok) {
       res.status(worker.status).json({ error: worker.error });
@@ -375,6 +393,10 @@ export function registerAgentSessionRoutes(
       return;
     }
     const identity = worker.identity;
+    const pausePresence = desktopManagedPausePresence({
+      availability: body.availability,
+      statusText: typeof body.status_text === "string" ? body.status_text : undefined,
+    });
     const [delivery, presence] = await Promise.all([
       forceDisconnectRoomAgentDeliverySession({ room_id: project.id, agent_session_id: targetSessionId }),
       upsertRoomAgentPresence({
@@ -388,8 +410,8 @@ export function registerAgentSessionRoutes(
         owner_label: identity.owner_label,
         ide_label: identity.ide_label,
         repo_branch: identity.repo_branch,
-        status: "blocked",
-        status_text: typeof body.status_text === "string" ? body.status_text.slice(0, 240) : "Needs attention",
+        status: pausePresence.status,
+        status_text: pausePresence.statusText,
       }),
     ]);
     res.json({ room_id: project.id, delivery_session: delivery, presence });
