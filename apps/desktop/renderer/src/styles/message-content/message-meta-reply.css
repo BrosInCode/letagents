@@ -201,38 +201,6 @@
   color: var(--text);
 }
 
-.room-message-context-menu {
-  position: fixed;
-  z-index: 20;
-  display: grid;
-  min-width: 168px;
-  padding: 5px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 10px;
-  background: rgba(18, 18, 18, 0.98);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
-}
-
-.room-message-context-menu button {
-  display: flex;
-  align-items: center;
-  min-height: 32px;
-  padding: 0 9px;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 0.78rem;
-  font-weight: 760;
-  text-align: left;
-  cursor: pointer;
-}
-
-.room-message-context-menu button:hover,
-.room-message-context-menu button:focus-visible {
-  background: rgba(255, 255, 255, 0.065);
-  color: var(--text);
-}
-
 .room-selection-popover {
   position: fixed;
   z-index: 120;

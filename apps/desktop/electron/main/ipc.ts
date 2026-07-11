@@ -193,7 +193,7 @@ import {
   stopDesktopRoomStream,
 } from "./room-stream.js";
 import { apiUrl, workspaceRoot } from "./paths.js";
-import { openAllowedExternalUrl } from "./external-url.js";
+import { openAllowedExternalUrl, openExternalWebUrl } from "./external-url.js";
 import { getGitHubPullRequestStats } from "./github-pr-stats.js";
 import {
   getAppAgentSettingsStatus,
@@ -244,6 +244,12 @@ export function registerDesktopIpcHandlers(
     "desktop:app:open-github-url",
     async (_event, url: string): Promise<void> => {
       await openAllowedExternalUrl(url, ["github.com"]);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:app:open-external-url",
+    async (_event, url: string): Promise<void> => {
+      await openExternalWebUrl(url);
     },
   );
   targetIpcMain.handle(

@@ -142,27 +142,14 @@
       </button>
     </div>
 
-    <div
+    <DesktopContextMenu
       v-if="contextMenuOpen"
-      class="room-message-context-menu"
-      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
-      role="menu"
-      data-testid="room-message-context-menu"
-      @keydown.down.prevent="focusContextMenuItem(1)"
-      @keydown.up.prevent="focusContextMenuItem(-1)"
-      @pointerdown.stop
-      @contextmenu.prevent.stop
-    >
-      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
-        <span>Copy message</span>
-      </button>
-      <button type="button" role="menuitem" @click="quoteReplyFromContext">
-        <span>Quote reply</span>
-      </button>
-      <button type="button" role="menuitem" @click="openThreadFromContext">
-        <span>Reply in thread</span>
-      </button>
-    </div>
+      :item-groups="contextMenuGroups"
+      :position="contextMenuPosition"
+      testid="room-message-context-menu"
+      @select="handleContextMenuSelect"
+      @close="closeContextMenu"
+    />
 
     <Teleport to="body">
       <div
@@ -181,10 +168,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from "vue";
-import { Check, Copy, CornerUpLeft, MessageSquare } from "@lucide/vue";
+import { computed, onBeforeUnmount, ref, type Component } from "vue";
+import { Check, Copy, CornerUpLeft, ExternalLink, Link2, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
+import {
+  buildMessageContextMenuGroups,
+  type MessageContextMenuActionId,
+} from "./desktop-chat-message/context-menu";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
 import {
@@ -223,8 +215,22 @@ const emit = defineEmits<{
 
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
-const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
+const contextLinkHref = ref<string | null>(null);
 const { copied, copy: copyToClipboard } = useCopyIndicator(1400);
+
+const menuActionIcons: Record<MessageContextMenuActionId, Component> = {
+  "open-link": ExternalLink,
+  "copy-link": Link2,
+  "copy-message": Copy,
+  "quote-reply": CornerUpLeft,
+  "reply-in-thread": MessageSquare,
+};
+
+const contextMenuGroups = computed<DesktopContextMenuItem[][]>(() =>
+  buildMessageContextMenuGroups(contextLinkHref.value).map((group) =>
+    group.map((item) => ({ ...item, icon: menuActionIcons[item.id] })),
+  ),
+);
 const selectionPopoverOpen = ref(false);
 const selectionPopoverPosition = ref({ x: 0, y: 0 });
 const selectedQuoteText = ref("");
@@ -298,55 +304,52 @@ function openContextMenu(event: MouseEvent): void {
   }
   event.preventDefault();
   closeSelectionPopover();
-  const menuWidth = 180;
-  const menuHeight = 122;
-  contextMenuPosition.value = {
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
-  };
+  contextLinkHref.value = resolveContextLink(event);
+  contextMenuPosition.value = { x: event.clientX, y: event.clientY };
   contextMenuOpen.value = true;
-  void nextTick(() => firstContextMenuButton.value?.focus());
-  window.setTimeout(() => {
-    window.addEventListener("pointerdown", closeContextMenu, { once: true });
-    window.addEventListener("keydown", handleContextMenuKeydown);
-  }, 0);
 }
 
+// Web links get our custom menu (open in browser / copy link); other
+// interactive controls and non-web anchors (attachments, mailto:) keep the
+// native menu so their own affordances still work.
 function shouldUseNativeContextMenu(event: MouseEvent): boolean {
   const target = event.target instanceof Element ? event.target : null;
-  return Boolean(target?.closest("a, button, input, textarea, select, [contenteditable='true']"));
+  if (target?.closest("button, input, textarea, select, [contenteditable='true']")) {
+    return true;
+  }
+  const anchor = target?.closest("a[href]") ?? null;
+  return Boolean(anchor) && !isWebAnchor(anchor);
+}
+
+function resolveContextLink(event: MouseEvent): string | null {
+  const target = event.target instanceof Element ? event.target : null;
+  const anchor = target?.closest("a[href]") ?? null;
+  return isWebAnchor(anchor) ? (anchor as HTMLAnchorElement).href : null;
+}
+
+function isWebAnchor(anchor: Element | null): boolean {
+  return anchor instanceof HTMLAnchorElement && /^https?:$/.test(anchor.protocol);
 }
 
 function closeContextMenu(): void {
   contextMenuOpen.value = false;
-  window.removeEventListener("keydown", handleContextMenuKeydown);
 }
 
-function handleContextMenuKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeContextMenu();
-}
-
-function focusContextMenuItem(direction: 1 | -1): void {
-  const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".room-message-context-menu [role='menuitem']"));
-  if (!items.length) return;
-  const currentIndex = Math.max(0, items.findIndex((item) => item === document.activeElement));
-  const nextIndex = (currentIndex + direction + items.length) % items.length;
-  items[nextIndex]?.focus();
-}
-
-function quoteReplyFromContext(): void {
-  closeContextMenu();
-  emit("quote-reply", props.message.id);
-}
-
-function openThreadFromContext(): void {
-  closeContextMenu();
-  emit("open-thread", props.message.id);
-}
-
-async function copyFromContext(): Promise<void> {
-  closeContextMenu();
-  await copyMessage();
+function handleContextMenuSelect(item: DesktopContextMenuItem): void {
+  const actions: Record<MessageContextMenuActionId, () => void> = {
+    "open-link": () => {
+      if (contextLinkHref.value) {
+        void window.letagentsDesktop.app.openExternalUrl(contextLinkHref.value).catch(() => undefined);
+      }
+    },
+    "copy-link": () => {
+      if (contextLinkHref.value) void navigator.clipboard?.writeText(contextLinkHref.value);
+    },
+    "copy-message": () => void copyMessage(),
+    "quote-reply": () => emit("quote-reply", props.message.id),
+    "reply-in-thread": () => emit("open-thread", props.message.id),
+  };
+  actions[item.id as MessageContextMenuActionId]?.();
 }
 
 async function copyMessage(): Promise<void> {
@@ -454,7 +457,6 @@ function normalizedSelectedText(selection: Selection | null): string {
 }
 
 onBeforeUnmount(() => {
-  window.removeEventListener("keydown", handleContextMenuKeydown);
   removeSelectionOutsidePointerListener();
   window.removeEventListener("keydown", handleSelectionKeydown);
 });
