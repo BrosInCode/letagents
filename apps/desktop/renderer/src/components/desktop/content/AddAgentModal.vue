@@ -380,6 +380,8 @@
               </article>
             </section>
 
+            <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
+
             <div class="desktop-add-agent-actions">
               <button
                 v-if="preflight?.nextAction === 'install_runtime'"
@@ -470,7 +472,6 @@
               </span>
             </div>
 
-            <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
             </section>
           </div>
         </section>

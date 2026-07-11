@@ -921,10 +921,8 @@
   margin-left: -34px;
   padding: 18px 34px 24px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background:
-    linear-gradient(180deg, rgba(14, 14, 15, 0.84), rgba(14, 14, 15, 0.98) 42%),
-    rgba(14, 14, 15, 0.98);
-  backdrop-filter: blur(14px);
+  background: #0e0e0f;
+  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.2);
 }
 
 .desktop-add-agent-primary {
