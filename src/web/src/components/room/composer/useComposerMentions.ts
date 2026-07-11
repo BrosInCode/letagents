@@ -63,7 +63,7 @@ export function useComposerMentions(input: {
 
     const cursor = textarea.selectionStart ?? input.text.value.length
     const beforeCursor = input.text.value.slice(0, cursor)
-    const match = beforeCursor.match(/(^|[\s(])@([A-Za-z0-9._-]*)$/)
+    const match = beforeCursor.match(/(^|[\s(])@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/)
     if (!match) {
       resetMentionContext()
       return

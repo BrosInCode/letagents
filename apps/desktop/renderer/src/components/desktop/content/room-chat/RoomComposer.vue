@@ -82,11 +82,17 @@
         class="desktop-composer-input"
         rows="1"
         :aria-label="composerInputLabel"
+        role="combobox"
+        aria-autocomplete="list"
+        :aria-expanded="mentionOpen"
+        aria-controls="desktop-mention-listbox"
+        :aria-activedescendant="mentionOpen ? `desktop-mention-option-${mentionCandidates[activeMentionIndex]?.participantKey}` : undefined"
         :disabled="roomLoading || !roomIdentifier"
         data-testid="desktop-composer-input"
         @input="handleDraftInput"
-        @keydown.down.prevent="moveMentionSelection(1)"
-        @keydown.up.prevent="moveMentionSelection(-1)"
+        @keydown.down="moveMentionSelection($event, 1)"
+        @keydown.up="moveMentionSelection($event, -1)"
+        @keydown.tab="closeMentionForTab"
         @keydown.enter="handleEnterKey"
         @keydown.escape="mentionOpen = false"
       />
@@ -121,11 +127,21 @@
       :pending-attachments="pendingAttachmentDrafts"
       @remove="$emit('remove-attachment', $event)"
     />
-    <div v-if="mentionOpen" class="desktop-mention-panel" data-testid="desktop-mention-panel">
+    <div
+      v-if="mentionOpen"
+      id="desktop-mention-listbox"
+      class="desktop-mention-panel"
+      role="listbox"
+      data-testid="desktop-mention-panel"
+    >
       <button
         v-for="(candidate, index) in mentionCandidates"
         :key="candidate.participantKey"
         class="desktop-mention-option"
+        :id="`desktop-mention-option-${candidate.participantKey}`"
+        role="option"
+        tabindex="-1"
+        :aria-selected="index === activeMentionIndex"
         :data-active="index === activeMentionIndex"
         :data-testid="`desktop-mention-option-${candidate.participantKey}`"
         type="button"
@@ -314,7 +330,7 @@ function handleEnterKey(event: KeyboardEvent): void {
 }
 
 function syncMentionQuery(): void {
-  const match = /(^|\s)@([A-Za-z0-9._-]*)$/.exec(draft.value);
+  const match = /(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/.exec(draft.value);
   mentionQuery.value = match ? match[2] : null;
   activeMentionIndex.value = 0;
 }
@@ -324,15 +340,20 @@ function handleDraftInput(): void {
   syncMentionQuery();
 }
 
-function moveMentionSelection(delta: number): void {
+function moveMentionSelection(event: KeyboardEvent, delta: number): void {
   if (!mentionOpen.value) return;
+  event.preventDefault();
   const count = mentionCandidates.value.length;
   if (!count) return;
   activeMentionIndex.value = (activeMentionIndex.value + delta + count) % count;
 }
 
+function closeMentionForTab(): void {
+  if (mentionOpen.value) mentionQuery.value = null;
+}
+
 function insertMention(mentionText: string): void {
-  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._-]*)$/, `$1@${mentionText} `);
+  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/, `$1@${mentionText} `);
   mentionQuery.value = null;
   syncDraftToShell();
   void nextTick(() => textareaElement.value?.focus());

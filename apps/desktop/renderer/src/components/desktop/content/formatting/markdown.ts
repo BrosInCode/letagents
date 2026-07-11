@@ -77,7 +77,7 @@ function applyInlineFormatting(escapedValue: string, options: DesktopMarkdownOpt
     });
 
   if (options.mentions !== false) {
-    rendered = rendered.replace(/(^|[\s(])@([A-Za-z0-9._-]+)/g, '$1<span class="mention-token">@$2</span>');
+    rendered = rendered.replace(/(^|[\s(])@([A-Za-z0-9._:-]+(?:\/[A-Za-z0-9._-]+)*)/g, '$1<span class="mention-token">@$2</span>');
   }
 
   return rendered;

@@ -126,7 +126,7 @@ export function decideAgentMessageActivation(
   if (mentions.some(isBroadcastHandle)) {
     return decision("activate", "broadcast");
   }
-  if (mentions.some((mention) => identityAliases(identity).has(normalizeHandle(mention)))) {
+  if (mentions.some((mention) => identityAliases(identity).has(normalizeMentionIdentityHandle(mention)))) {
     return decision("activate", "explicit_mention");
   }
   if (hasBroadcastAddress(message.text)) {
@@ -347,7 +347,7 @@ function identityAliases(identity: ActivationIdentity): Set<string> {
 function extractMentionHandles(text: unknown): string[] {
   const raw = typeof text === "string" ? text : "";
   const mentions: string[] = [];
-  for (const match of raw.matchAll(/(^|[\s([{:;,])@([A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)?)/g)) {
+  for (const match of raw.matchAll(/(^|[\s([{:;,])@([A-Za-z0-9][A-Za-z0-9_.:-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)*)/g)) {
     mentions.push(match[2]);
   }
   return mentions;
@@ -362,8 +362,9 @@ function isLikelyAgentMentionHandle(handle: string): boolean {
   const raw = normalizedString(handle);
   if (!raw) return false;
   const normalized = raw.toLowerCase();
-  if (normalized.includes("/") && normalized === raw) return false;
   const firstSegment = normalized.split("/", 1)[0].replace(/_/g, "-");
+  if (normalized.startsWith("agent:")) return true;
+  if (normalized.includes("/") && normalized === raw) return false;
   return !NON_AGENT_AT_HANDLES.has(firstSegment);
 }
 
@@ -387,5 +388,10 @@ function normalizeSender(value: unknown): string {
 }
 
 function normalizeHandle(value: unknown): string {
-  return normalizedString(value).toLowerCase().replace(/[^a-z0-9_.-]+/g, "");
+  return normalizedString(value).toLowerCase().replace(/[^a-z0-9_.:/-]+/g, "");
+}
+
+function normalizeMentionIdentityHandle(value: unknown): string {
+  const normalized = normalizeHandle(value);
+  return normalized.startsWith("agent:") ? normalized.slice("agent:".length) : normalized;
 }

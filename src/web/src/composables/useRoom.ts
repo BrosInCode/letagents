@@ -16,6 +16,7 @@ import {
   isPromptOnlyRoomMessage,
   normalizeAgentPromptKind,
   parseAgentIdentity,
+  resolveAgentIdentity,
 } from './room/identity'
 import { createRoomLifecycle } from './room/lifecycle'
 import { createRoomMessageActions } from './room/messageActions'
@@ -75,6 +76,7 @@ export {
   isPromptOnlyRoomMessage,
   normalizeAgentPromptKind,
   parseAgentIdentity,
+  resolveAgentIdentity,
 } from './room/identity'
 export { mergeCreatedTask, taskFromCreateTaskResponse } from './room/taskActions'
 

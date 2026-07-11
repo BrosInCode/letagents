@@ -6,13 +6,13 @@ import {
   readNotificationsEnabled,
   readSoundEnabled,
 } from "./preferences";
+import { playRoomInteractionSound } from "./roomSounds";
 
 export function useDesktopRoomPreferences() {
   const soundEnabled = ref(readSoundEnabled());
   const notificationsEnabled = ref(readNotificationsEnabled());
   const liquidGlassEnabled = ref(readLiquidGlassEnabled());
   const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
-  let audioContext: AudioContext | null = null;
 
   function toggleSound(): void {
     soundEnabled.value = !soundEnabled.value;
@@ -42,24 +42,7 @@ export function useDesktopRoomPreferences() {
   function playRoomSound(kind: "send" | "notification"): void {
     if (!soundEnabled.value) return;
     try {
-      const AudioContextCtor =
-        window.AudioContext
-        || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioContextCtor) return;
-      if (!audioContext) audioContext = new AudioContextCtor();
-      const oscillator = audioContext.createOscillator();
-      const gain = audioContext.createGain();
-      oscillator.connect(gain);
-      gain.connect(audioContext.destination);
-      const now = audioContext.currentTime;
-      const startFrequency = kind === "send" ? 740 : 880;
-      const endFrequency = kind === "send" ? 980 : 660;
-      oscillator.frequency.setValueAtTime(startFrequency, now);
-      oscillator.frequency.setValueAtTime(endFrequency, now + 0.07);
-      gain.gain.setValueAtTime(0.09, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-      oscillator.start(now);
-      oscillator.stop(now + 0.2);
+      playRoomInteractionSound(kind);
     } catch {
       // Audio can be unavailable before a user gesture; the toggle will retry later.
     }

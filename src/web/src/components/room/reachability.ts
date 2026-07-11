@@ -23,6 +23,17 @@ export interface AgentReachabilitySource {
   activityState: 'active' | 'away' | 'offline'
 }
 
+export function agentOwnerAttribution(
+  ownerLabel: string | null | undefined,
+  actorLabel?: string | null,
+): string | null {
+  const owner = String(ownerLabel || '').trim()
+  if (owner) {
+    return /['’]s\s+agent$/i.test(owner) ? owner : `${owner}'s agent`
+  }
+  return parseAgentIdentity(actorLabel || '').ownerAttribution
+}
+
 export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined): boolean {
   return entry?.freshness === 'active'
     && entry.session_kind === 'worker'
@@ -85,7 +96,7 @@ export function normalizeMentionToken(value: string): string {
     .trim()
     .replace(/^@+/, '')
     .replace(/\s+/g, '')
-    .replace(/[^A-Za-z0-9._-]/g, '')
+    .replace(/[^A-Za-z0-9._:/-]/g, '')
 }
 
 function pushMentionCandidate(
@@ -128,6 +139,19 @@ export function buildMentionCandidates(input: {
       .map((entry) => [String(entry.actor_label || '').trim(), entry] as const)
       .filter(([actorLabel]) => Boolean(actorLabel))
   )
+  const reachableAgentDisplayNameCounts = new Map<string, number>()
+  for (const participant of input.participants) {
+    if (participant.kind !== 'agent' || participant.hidden_at) continue
+    const actorLabel = String(participant.actor_label || '').trim()
+    const presenceEntry = actorLabel ? (reachablePresenceByActor.get(actorLabel) || null) : null
+    const activityState = resolveAgentActivityState({ participant, presence: presenceEntry })
+    if (!actorLabel || !presenceEntry || (activityState !== 'active' && activityState !== 'away')) continue
+    const label = participant.display_name
+      || presenceEntry.display_name
+      || parseAgentIdentity(participant.actor_label || '').displayName
+    const key = label.toLowerCase()
+    reachableAgentDisplayNameCounts.set(key, (reachableAgentDisplayNameCounts.get(key) || 0) + 1)
+  }
 
   for (const participant of input.participants) {
     if (participant.hidden_at) continue
@@ -141,14 +165,23 @@ export function buildMentionCandidates(input: {
       const label = participant.display_name
         || presenceEntry.display_name
         || parseAgentIdentity(participant.actor_label || '').displayName
+      const agentKey = participant.agent_key || presenceEntry.agent_key
+      if ((reachableAgentDisplayNameCounts.get(label.toLowerCase()) || 0) > 1 && !agentKey) continue
+      const ideLabel = participant.ide_label || presenceEntry.ide_label
       const meta = [
-        participant.owner_label || presenceEntry.owner_label,
-        participant.ide_label || presenceEntry.ide_label,
+        agentOwnerAttribution(
+          participant.owner_label || presenceEntry.owner_label,
+          participant.actor_label || presenceEntry.actor_label,
+        ),
+        ideLabel?.toLowerCase() === 'agent' ? null : ideLabel,
         'Connected',
       ]
         .filter(Boolean)
         .join(' · ')
-      pushMentionCandidate(candidates, seen, label, label, meta, activityState === 'active' ? 0 : 1, [
+      const mention = (reachableAgentDisplayNameCounts.get(label.toLowerCase()) || 0) > 1
+        ? `agent:${agentKey}`
+        : label
+      pushMentionCandidate(candidates, seen, mention, label, meta, activityState === 'active' ? 0 : 1, [
         participant.actor_label,
         participant.owner_label,
         participant.ide_label,

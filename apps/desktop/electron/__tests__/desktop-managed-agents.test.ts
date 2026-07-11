@@ -30,6 +30,7 @@ const {
 } = await import("../main/agents/state.js");
 const {
   canDeliverDesktopEventToSession,
+  desktopManagedAgentMessageActivationDecision,
   isOwnRoomStreamEvent,
   isStopPhraseRoomStreamEvent,
   shouldDeliverRoomStreamEventToManagedAgent,
@@ -2908,6 +2909,47 @@ test("desktop message routing lets explicit mentions override quote targets", ()
 
   assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, mentionedOtherAgent), true);
   assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, mentionedOtherAgent), false);
+});
+
+test("desktop message routing delivers multi-segment canonical mentions only to their target", () => {
+  const target = publicManagedAgentSession({
+    actorLabel: "Oak | Alice's agent | Codex",
+    agentKey: "local/alice/codex/oak",
+    displayName: "Oak",
+  });
+  const other = publicManagedAgentSession({
+    id: "local_bob_oak",
+    agentSessionId: "agent_session_bob_oak",
+    actorLabel: "Oak | Bob's agent | Codex",
+    agentKey: "local/bob/codex/oak",
+    displayName: "Oak",
+  });
+  const event = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_canonical_mention",
+      text: "@agent:local/alice/codex/oak please review",
+    },
+  });
+
+  assert.equal(desktopManagedAgentMessageActivationDecision(target, event.message), "activate");
+  assert.equal(desktopManagedAgentMessageActivationDecision(other, event.message), "silent");
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(target, event), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(other, event), false);
+});
+
+test("desktop message routing leaves arbitrary scoped packages unaddressed", () => {
+  const worker = publicManagedAgentSession();
+  for (const packageName of ["@types/node", "@vue/runtime-core", "@babel/core", "@agent/core"]) {
+    const event = messageEvent({
+      message: {
+        ...messageEvent().message,
+        id: `msg_package_${packageName}`,
+        text: `npm install ${packageName}`,
+      },
+    });
+    assert.equal(desktopManagedAgentMessageActivationDecision(worker, event.message), "unclear");
+  }
 });
 
 test("desktop event routing does not deliver queued events after a worker is stopped", () => {

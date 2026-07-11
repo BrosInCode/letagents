@@ -157,7 +157,7 @@ async function copyText() {
   left: 0;
   height: 56px;
   pointer-events: none;
-  background: linear-gradient(to bottom, transparent, var(--bg-1, #111113) 85%);
+  background: linear-gradient(to bottom, transparent, var(--message-surface, var(--bg-1, #111113)) 85%);
 }
 
 .long-message-actions {
@@ -261,7 +261,7 @@ async function copyText() {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 18px 20px;
+  padding: 28px clamp(20px, 6vw, 72px) 40px;
   color: var(--text, #fafafa);
 }
 
@@ -273,10 +273,21 @@ async function copyText() {
 
 .reader-content,
 .long-message-content :deep(.md-content) {
-  line-height: 1.6;
-  font-size: 0.88rem;
+  line-height: 1.68;
+  font-size: 0.94rem;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  word-break: normal;
+}
+
+.reader-content {
+  width: 100%;
+}
+
+.reader-content :deep(> *),
+.reader-content > * {
+  max-width: 72ch;
+  margin-right: auto;
+  margin-left: auto;
 }
 
 .reader-content :deep(a),

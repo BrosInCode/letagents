@@ -32,6 +32,25 @@ export interface ThreadReadState {
   firstUnreadReplyId: string | null;
 }
 
+export function findThreadMessageElement(
+  root: Pick<ParentNode, "querySelectorAll"> | null,
+  messageId: string,
+): HTMLElement | null {
+  if (!root || !messageId) return null;
+  return [...root.querySelectorAll<HTMLElement>("[data-thread-message-id]")]
+    .find((element) => element.dataset.threadMessageId === messageId) || null;
+}
+
+export function scrollThreadMessageIntoView(
+  root: Pick<ParentNode, "querySelectorAll"> | null,
+  messageId: string,
+  behavior?: ScrollBehavior,
+): HTMLElement | null {
+  const target = findThreadMessageElement(root, messageId);
+  target?.scrollIntoView({ behavior, block: "center" });
+  return target;
+}
+
 export function buildThreadSummaries(messages: readonly DesktopRoomMessage[]): Map<string, ThreadSummary> {
   const summaries = new Map<string, ThreadSummary>();
   for (const message of messages) {

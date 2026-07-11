@@ -19,8 +19,12 @@
       <span v-if="provenanceBadge" class="provenance-badge" :class="provenanceBadge.className">
         {{ provenanceBadge.label }}
       </span>
-      <span v-if="inlinePromptInjection" class="prompt-injection-badge">
-        Prompt injected
+      <span
+        v-if="inlinePromptInjection"
+        class="prompt-injection-badge"
+        title="A room prompt is attached for worker agents"
+      >
+        Worker prompt
       </span>
       <time>{{ formattedTime }}</time>
     </div>
@@ -50,19 +54,19 @@ const emit = defineEmits<{
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 4px;
+  gap: 8px;
+  margin-bottom: 7px;
   line-height: 1;
 }
 
-.message-sender { display: flex; flex-direction: column; gap: 1px; }
+.message-sender { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
 .message-sender-row {
   display: inline-flex;
   align-items: center;
   gap: 5px;
 }
-.message-meta strong { font-size: 0.82rem; font-weight: 700; }
-.message-sender-subtitle { font-size: 0.68rem; color: var(--muted, #71717a); }
+.message-meta strong { font-size: 0.84rem; font-weight: 700; letter-spacing: -0.01em; }
+.message-sender-subtitle { font-size: 0.72rem; color: var(--muted, #71717a); }
 
 .message-meta-tail {
   display: inline-flex;
@@ -115,12 +119,16 @@ const emit = defineEmits<{
 .message-meta time { font-size: 0.68rem; color: var(--muted, #71717a); }
 
 .provenance-badge {
-  padding: 3px 10px;
-  border-radius: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
   font-size: 0.62rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reply-action { transition: none; }
 }
 .provenance-badge.human { background: rgba(251,146,60,0.1); color: #fb923c; }
 .provenance-badge.agent { background: rgba(96,165,250,0.1); color: #60a5fa; }
@@ -130,23 +138,22 @@ const emit = defineEmits<{
 .prompt-injection-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: rgba(56, 189, 248, 0.16);
-  color: #7dd3fc;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted, #71717a);
   font-size: 0.62rem;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.01em;
   white-space: nowrap;
 }
 .prompt-injection-badge::before {
   content: '';
-  width: 6px;
-  height: 6px;
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
   background: currentColor;
-  opacity: 0.85;
+  opacity: 0.7;
 }
 
 @media (max-width: 768px) {
@@ -154,6 +161,6 @@ const emit = defineEmits<{
   .message-meta strong { font-size: 0.78rem; }
   .message-meta time { font-size: 0.62rem; }
   .provenance-badge { padding: 2px 6px; font-size: 0.58rem; }
-  .prompt-injection-badge { font-size: 0.58rem; padding: 2px 8px; }
+  .prompt-injection-badge { font-size: 0.58rem; }
 }
 </style>
