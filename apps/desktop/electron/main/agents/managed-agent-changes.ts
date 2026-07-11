@@ -6,7 +6,9 @@ import type {
 } from "../../ipc-types.js";
 import { runGit } from "../git-exec.js";
 
-const DEFAULT_FILE_LIMIT = 20;
+// Kept generous so the shared artifact / expandable file panel carries the full
+// change set rather than a truncated head; the server clamps at the same ceiling.
+const DEFAULT_FILE_LIMIT = 200;
 const GIT_TIMEOUT_MS = 5_000;
 const GIT_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
 

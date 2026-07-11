@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  DesktopManagedAgentChangeSummary,
   DesktopManagedAgentPublicChangeSummary,
   DesktopRoomStorageState,
 } from "../ipc-types.js";
+import { buildManagedAgentChangeSummaryAttachmentDraft } from "../main/agents/managed-agent-change-attachments.js";
 import { publishManagedAgentChangeSummaryArtifact } from "../main/agents/managed-agent-change-summary-artifacts.js";
 import type { StoredAgentSessionState } from "../main/agents/state.js";
 
@@ -49,6 +51,61 @@ test("cloud rooms publish change summary artifacts through the room artifacts AP
     assert.equal(artifact.ref, "feature/x");
     assert.equal(artifact.state, "updated");
     assert.equal(calls[0].body.task_id, "task_1");
+
+    // The change set (file paths + counts) rides along as structured detail.
+    const detail = artifact.detail as Record<string, unknown>;
+    assert.equal(detail.type, "change_summary");
+    assert.equal(detail.version, 1);
+    assert.equal(detail.changedFileCount, 2);
+    assert.equal(detail.additions, 5);
+    assert.equal(detail.deletions, 1);
+    const files = detail.files as Array<Record<string, unknown>>;
+    assert.equal(files.length, 2);
+    assert.equal(files[0].path, "src/api/db/schema/artifacts.ts");
+    assert.equal(files[0].additions, 4);
+    assert.equal(files[0].deletions, 1);
+    // Detail is a summary only — it must never carry source content.
+    assert.equal(
+      JSON.stringify(detail).includes("content"),
+      false,
+      "change summary detail must not contain code/content",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("clean worktree publishes a change summary artifact without file detail", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ body: Record<string, unknown> }> = [];
+  globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ body: JSON.parse(typeof init?.body === "string" ? init.body : "{}") });
+    return new Response(
+      JSON.stringify({ artifact: { identity_key: "git:change_summary:id:clean" } }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    await publishManagedAgentChangeSummaryArtifact({
+      roomIdentifier: "github.com/example/repo",
+      storage: cloudStorage(),
+      workerSession: workerSession(),
+      summary: {
+        ...publicSummary(),
+        changedFileCount: 0,
+        stagedFileCount: 0,
+        unstagedFileCount: 0,
+        additions: 0,
+        deletions: 1,
+        files: [],
+      },
+      taskId: null,
+    });
+
+    const artifact = calls[0].body.artifact as Record<string, unknown>;
+    assert.equal(artifact.state, "clean");
+    assert.equal(artifact.detail, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -75,6 +132,45 @@ test("cloud publish skips summaries that are not publishable", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("legacy change-summary attachment caps files at 20 while the artifact keeps the full set", () => {
+  const files = Array.from({ length: 25 }, (_value, index) => ({
+    path: `src/f${index}.ts`,
+    previousPath: null,
+    status: "modified" as const,
+    additions: 1,
+    deletions: 0,
+    binary: false,
+    staged: false,
+    unstaged: true,
+    untracked: false,
+  }));
+  const summary: DesktopManagedAgentChangeSummary = {
+    sessionId: "session_1",
+    providerId: "claude-code",
+    repoRootPath: "/tmp/repo",
+    repoBranch: "feature/x",
+    changedFileCount: 25,
+    stagedFileCount: 0,
+    unstagedFileCount: 25,
+    untrackedFileCount: 0,
+    additions: 25,
+    deletions: 0,
+    files,
+    hiddenFileCount: 0,
+    isGitRepo: true,
+    updatedAt: new Date(0).toISOString(),
+    error: null,
+  };
+
+  const draft = buildManagedAgentChangeSummaryAttachmentDraft(summary);
+  assert.ok(draft);
+  const parsed = JSON.parse(draft.buffer.toString("utf8")) as {
+    summary: { files: unknown[]; hiddenFileCount: number };
+  };
+  assert.equal(parsed.summary.files.length, 20);
+  assert.equal(parsed.summary.hiddenFileCount, 5);
 });
 
 function cloudStorage(): DesktopRoomStorageState {
@@ -127,7 +223,30 @@ function publicSummary(): DesktopManagedAgentPublicChangeSummary {
     untrackedFileCount: 0,
     additions: 5,
     deletions: 1,
-    files: [],
+    files: [
+      {
+        path: "src/api/db/schema/artifacts.ts",
+        previousPath: null,
+        status: "modified",
+        additions: 4,
+        deletions: 1,
+        binary: false,
+        staged: true,
+        unstaged: false,
+        untracked: false,
+      },
+      {
+        path: "src/api/db/mappers.ts",
+        previousPath: null,
+        status: "modified",
+        additions: 1,
+        deletions: 0,
+        binary: false,
+        staged: false,
+        unstaged: true,
+        untracked: false,
+      },
+    ],
     hiddenFileCount: 0,
     isGitRepo: true,
     updatedAt: new Date(0).toISOString(),

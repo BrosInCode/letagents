@@ -38,6 +38,34 @@ export function buildManagedAgentChangeSummaryWorkflowArtifact(input: {
       : `${agentLabel} worktree on ${branch} (${fileLabel} changed)`,
     ref: input.summary.repoBranch?.trim() || null,
     state: isClean ? "clean" : "updated",
+    // File paths + counts only (numstat) — never source code. Omitted when the
+    // worktree is clean (nothing to show). The server re-validates and clamps.
+    ...(isClean
+      ? {}
+      : {
+          detail: {
+            type: "change_summary",
+            version: 1,
+            changedFileCount: input.summary.changedFileCount,
+            additions: input.summary.additions,
+            deletions: input.summary.deletions,
+            stagedFileCount: input.summary.stagedFileCount,
+            unstagedFileCount: input.summary.unstagedFileCount,
+            untrackedFileCount: input.summary.untrackedFileCount,
+            hiddenFileCount: input.summary.hiddenFileCount,
+            files: input.summary.files.map((file) => ({
+              path: file.path,
+              previousPath: file.previousPath,
+              status: file.status,
+              additions: file.additions,
+              deletions: file.deletions,
+              binary: file.binary,
+              staged: file.staged,
+              unstaged: file.unstaged,
+              untracked: file.untracked,
+            })),
+          },
+        }),
   };
 }
 

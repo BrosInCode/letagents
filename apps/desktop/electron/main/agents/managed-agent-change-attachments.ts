@@ -15,6 +15,10 @@ export interface ManagedAgentChangeSummaryAttachmentDraft {
   signature: string;
 }
 
+// The legacy inline reply attachment stays small; the full change set (up to the
+// generation ceiling) is carried by the durable room artifact, not this blob.
+const ATTACHMENT_FILE_LIMIT = 20;
+
 export function buildManagedAgentChangeSummaryAttachmentDraft(
   summary: DesktopManagedAgentChangeSummary | null,
 ): ManagedAgentChangeSummaryAttachmentDraft | null {
@@ -23,10 +27,17 @@ export function buildManagedAgentChangeSummaryAttachmentDraft(
   }
 
   const publicSummary = toPublicManagedAgentChangeSummary(summary);
+  const visibleFiles = publicSummary.files.slice(0, ATTACHMENT_FILE_LIMIT);
+  const cappedSummary = {
+    ...publicSummary,
+    files: visibleFiles,
+    hiddenFileCount:
+      publicSummary.hiddenFileCount + (publicSummary.files.length - visibleFiles.length),
+  };
   const json = JSON.stringify({
     kind: "managed_agent_change_summary",
     version: 1,
-    summary: publicSummary,
+    summary: cappedSummary,
   });
   const buffer = Buffer.from(json, "utf8");
   return {
