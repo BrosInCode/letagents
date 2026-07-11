@@ -421,7 +421,7 @@ test("managedAgentRepoStatusForRoom requires verified repo identity for branch r
   );
 });
 
-test("isVisibleManagedAgentSession keeps idle desktop-event workers visible", () => {
+test("isVisibleManagedAgentSession keeps idle and attention-needed workers visible", () => {
   assert.equal(isVisibleManagedAgentSession(session({
     deliveryMode: "desktop_events",
     status: "completed",
@@ -439,7 +439,11 @@ test("isVisibleManagedAgentSession keeps idle desktop-event workers visible", ()
   assert.equal(isVisibleManagedAgentSession(session({
     status: "unknown",
     canStop: true,
-  })), false);
+  })), true);
+  assert.equal(isVisibleManagedAgentSession(session({
+    status: "blocked",
+    canStop: true,
+  })), true);
 });
 
 test("isDeliverableManagedAgentSession requires a registered room worker", () => {
@@ -457,6 +461,10 @@ test("isDeliverableManagedAgentSession requires a registered room worker", () =>
   })), false);
   assert.equal(isDeliverableManagedAgentSession(session({
     status: "unknown",
+    agentSessionId: "agent_1",
+  })), true);
+  assert.equal(isDeliverableManagedAgentSession(session({
+    status: "blocked",
     agentSessionId: "agent_1",
   })), false);
   assert.equal(isDeliverableManagedAgentSession(session({
@@ -1193,7 +1201,7 @@ test("managed desktop agent merges with existing room identities instead of dupl
   assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
 });
 
-test("unregistered or unknown managed desktop agents do not become mentionable or reachable", () => {
+test("unregistered agents stay hidden while unknown agents remain visible but unreachable", () => {
   const unregistered = session({
     status: "starting",
     agentSessionId: null,
@@ -1209,6 +1217,10 @@ test("unregistered or unknown managed desktop agents do not become mentionable o
 
   assert.deepEqual(mergeDesktopManagedAgentParticipants([], [unregistered], "room_1"), []);
   assert.deepEqual(mergeDesktopManagedAgentPresence([], [unregistered], "room_1"), []);
-  assert.deepEqual(mergeDesktopManagedAgentParticipants([], [unknown], "room_1"), []);
-  assert.deepEqual(mergeDesktopManagedAgentPresence([], [unknown], "room_1"), []);
+  const unknownParticipants = mergeDesktopManagedAgentParticipants([], [unknown], "room_1");
+  const unknownPresence = mergeDesktopManagedAgentPresence([], [unknown], "room_1");
+  assert.equal(unknownParticipants.length, 1);
+  assert.equal(unknownPresence.length, 1);
+  assert.equal(unknownPresence[0]?.freshness, "stale");
+  assert.equal(unknownPresence[0]?.activityState, "offline");
 });

@@ -18,6 +18,7 @@ import {
   type DesktopManagedLiveSessionBase,
   type StoredAgentSessionState,
 } from "./state.js";
+import { managedAgentFailure } from "./managed-agent-failures.js";
 
 type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
 
@@ -70,6 +71,12 @@ export interface ManagedAgentEventTurnEngineAdapter<
     storage: DesktopRoomStorageState;
     text: string | null;
     beforeChangeSignature?: string | null;
+  }): Promise<void>;
+  publishFailure?(input: {
+    session: TSession;
+    event: ManagedRoomEvent;
+    storage: DesktopRoomStorageState;
+    failure: NonNullable<TSession["failure"]>;
   }): Promise<void>;
   /**
    * Optional readiness preflight, awaited after the deliverability guard but
@@ -138,6 +145,7 @@ export interface ManagedAgentEventTurnEngineAdapter<
   onSessionParked?(sessionId: string): void;
   /** Extra per-provider cleanup when a delivery finishes (success or not). */
   onDeliverFinally?(sessionId: string): void;
+  onSessionResumed?(session: TSession): void;
 }
 
 export interface ManagedAgentEventTurnEngine<TSession> {
@@ -145,6 +153,7 @@ export interface ManagedAgentEventTurnEngine<TSession> {
   preemptActiveTurn(sessionId: string): void;
   interruptActiveTurnForStop(sessionId: string): void;
   resetTurnErrorBudget(sessionId: string): void;
+  retryBlockedSession(sessionId: string): TSession | null;
   waitForIdle(): Promise<void>;
 }
 
@@ -339,10 +348,20 @@ export function createManagedAgentEventTurnEngine<
         const derived = stored
           ? adapter.resolveErrorTurnStatus?.(stored, result) ?? null
           : null;
-        const exhausted = !derived && !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
+        const failure = !wasPreempted && !aborted
+          ? managedAgentFailure({
+            error: result.error,
+            eventId: event.type === "message" ? event.message.id : event.task.id,
+            occurredAt: adapter.now(),
+          })
+          : null;
+        const blocked = Boolean(failure && !failure.retryable);
+        const exhausted = !derived && !blocked && !wasPreempted && !aborted && recordConsecutiveTurnError(sessionId);
         const updated = clearSessionActiveWork(sessionId, (current) => ({
           ...adapter.applyTurnResult(current, result),
-          status: derived
+          status: blocked
+            ? "blocked"
+            : derived
             ? derived.status
             : wasPreempted
               ? "completed"
@@ -351,7 +370,9 @@ export function createManagedAgentEventTurnEngine<
                 : exhausted
                   ? "failed"
                   : "unknown",
-          last_error: derived
+          last_error: blocked
+            ? result.error ?? failure?.message ?? null
+            : derived
             ? derived.lastError
             : wasPreempted
               ? null
@@ -359,9 +380,17 @@ export function createManagedAgentEventTurnEngine<
                 ? exhaustedTurnError(String(result.error))
                 : result.error ?? null,
           updated_at: adapter.now(),
+          failure,
+          pending_event: blocked ? event : current.pending_event ?? null,
         }));
         adapter.emitSessionUpdate(updated);
-        if (stopAfterTurn && adapter.stopAfterTurnOnError && updated) {
+        if (blocked && updated && failure && adapter.publishFailure) {
+          try {
+            await adapter.publishFailure({ session: updated, event, storage, failure });
+          } catch (error) {
+            console.error("[managed agent] failed to publish a blocked-turn room event", error);
+          }
+        } else if (stopAfterTurn && adapter.stopAfterTurnOnError && updated) {
           await stopAfterRoomStopPhrase(updated);
         } else if (exhausted) {
           await endExhaustedSessionWorker(sessionId);
@@ -373,6 +402,8 @@ export function createManagedAgentEventTurnEngine<
         ...adapter.applyTurnResult(current, result),
         status: "completed",
         last_error: null,
+        failure: null,
+        pending_event: null,
         updated_at: adapter.now(),
       })) ?? latest;
       adapter.emitSessionUpdate(completed);
@@ -420,6 +451,26 @@ export function createManagedAgentEventTurnEngine<
     consecutiveTurnErrors.delete(sessionId);
   }
 
+  function retryBlockedSession(sessionId: string): TSession | null {
+    const stored = adapter.getStoredSession(sessionId);
+    const event = stored?.pending_event;
+    if (!stored || stored.status !== "blocked" || !event) return null;
+    consecutiveTurnErrors.delete(sessionId);
+    const resumed = adapter.updateSession(sessionId, (current) => ({
+      ...current,
+      status: "completed",
+      last_error: null,
+      failure: null,
+      pending_event: null,
+      updated_at: adapter.now(),
+    })) ?? null;
+    if (!resumed) return null;
+    adapter.emitSessionUpdate(resumed);
+    adapter.onSessionResumed?.(resumed);
+    enqueueDesktopEventTurn(resumed, event);
+    return resumed;
+  }
+
   async function waitForIdle(): Promise<void> {
     while (queues.size > 0) {
       await Promise.allSettled([...queues.values()]);
@@ -431,6 +482,7 @@ export function createManagedAgentEventTurnEngine<
     preemptActiveTurn,
     interruptActiveTurnForStop,
     resetTurnErrorBudget,
+    retryBlockedSession,
     waitForIdle,
   };
 }

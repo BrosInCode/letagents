@@ -108,7 +108,7 @@ export function managedAgentRepoStatusForRoom<T extends Pick<RepoStatus, "rootPa
 export function isVisibleManagedAgentSession(
   session: DesktopManagedAgentSession,
 ): boolean {
-  if (session.status === "failed" || session.status === "interrupted" || session.status === "unknown") {
+  if (session.status === "failed" || session.status === "interrupted") {
     return false;
   }
   return session.canStop;
@@ -118,9 +118,11 @@ export function isDeliverableManagedAgentSession(
   session: DesktopManagedAgentSession,
 ): boolean {
   return isVisibleManagedAgentSession(session) &&
+    session.status !== "blocked" &&
     Boolean(session.agentSessionId) &&
     (
       session.status === "running" ||
+      session.status === "unknown" ||
       (session.deliveryMode === "desktop_events" && session.status === "completed")
     );
 }
@@ -529,6 +531,7 @@ export function managedAgentSessionStatusLabel(
   if (session.deliveryMode === "desktop_events" && session.status === "completed") {
     return "Waiting for events";
   }
+  if (session.status === "blocked") return "Needs attention";
   return session.status.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
@@ -740,6 +743,7 @@ function desktopManagedAgentSessionToPresence(
   const actorLabel = managedAgentSessionActorLabel(session);
   const timestamp = managedAgentSessionTimestamp(session);
   const sessionId = session.agentSessionId || session.id;
+  const needsAttention = session.status === "blocked" || session.status === "unknown";
   return {
     roomId: session.roomIdentifier,
     actorLabel,
@@ -753,10 +757,10 @@ function desktopManagedAgentSessionToPresence(
     ideLabel: session.ideLabel || managedAgentSessionIdeLabel(session),
     repoBranch: session.repoBranch || null,
     status: managedAgentPresenceStatus(session),
-    statusText: managedAgentSessionStatusLabel(session),
+    statusText: session.failure?.message || managedAgentSessionStatusLabel(session),
     lastHeartbeatAt: timestamp,
-    freshness: "active",
-    activityState: managedAgentSessionActivityState(session),
+    freshness: needsAttention ? "stale" : "active",
+    activityState: needsAttention ? "offline" : managedAgentSessionActivityState(session),
     sourceFlags: ["delivery", "presence"],
     livenessObservation: {
       roomId: session.roomIdentifier,
@@ -967,7 +971,7 @@ function managedAgentSessionIdeLabel(session: Pick<DesktopManagedAgentSession, "
 function managedAgentPresenceStatus(
   session: Pick<DesktopManagedAgentSession, "deliveryMode" | "status">,
 ): DesktopAgentPresence["status"] {
-  if (session.status === "unknown") return "blocked";
+  if (session.status === "blocked" || session.status === "unknown") return "blocked";
   if (session.status === "completed" && session.deliveryMode === "desktop_events") return "idle";
   if (session.status === "completed") return "idle";
   return "working";

@@ -25,6 +25,7 @@ const getRoomAgentPresence = dbModule?.getRoomAgentPresence;
 const getRoomAgentPresenceSnapshot = dbModule?.getRoomAgentPresenceSnapshot;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconnected;
+const upsertDesktopRoomAgentDeliveryHeartbeat = dbModule?.upsertDesktopRoomAgentDeliveryHeartbeat;
 const setRoomLiveAgentSuppressed = dbModule?.setRoomLiveAgentSuppressed;
 const upsertAccount = dbModule?.upsertAccount;
 const upsertRoomAgentLivenessObservation = dbModule?.upsertRoomAgentLivenessObservation;
@@ -328,6 +329,61 @@ test(
     assert.equal(stalePresence[0]?.activity_state, "offline");
     assert.equal(stalePresence[0]?.status_text, "reviewing task_159 backend lane");
   }
+);
+
+test(
+  "desktop event heartbeats create one idempotent reachable delivery lease",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!createProjectWithName || !createRoomAgentSession || !upsertAccount || !getRoomAgentPresence || !upsertDesktopRoomAgentDeliveryHeartbeat) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const room = await createProjectWithName("github.com/brosincode/desktop-heartbeat");
+    const owner = await upsertAccount({
+      provider: "github",
+      provider_user_id: "desktop-heartbeat-owner",
+      login: "DesktopOwner",
+    });
+    const actorLabel = "DesktopPulse | DesktopOwner's agent | Cursor";
+    const worker = await createRoomAgentSession({
+      room_id: room.id,
+      session_kind: "worker",
+      runtime: "cursor",
+      actor_label: actorLabel,
+      agent_key: "DesktopOwner/desktop-pulse",
+      agent_instance_id: "desktop-instance",
+      display_name: "DesktopPulse",
+      owner_account_id: owner.id,
+      owner_label: "DesktopOwner",
+      ide_label: "Cursor",
+    });
+    const heartbeat = () => upsertDesktopRoomAgentDeliveryHeartbeat({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "DesktopOwner/desktop-pulse",
+      agent_instance_id: "desktop-instance",
+      agent_session_id: worker.session_id,
+      session_kind: "worker",
+      runtime: "cursor",
+      display_name: "DesktopPulse",
+      owner_label: "DesktopOwner",
+      ide_label: "Cursor",
+    });
+    await heartbeat();
+    await heartbeat();
+    const presence = await getRoomAgentPresence(room.id);
+    assert.equal(presence.length, 1);
+    assert.equal(presence[0]?.freshness, "active");
+    assert.equal(presence[0]?.source_flags.includes("delivery"), true);
+    const [row] = await db!.select().from(room_agent_delivery_sessions!).where(
+      sql`${room_agent_delivery_sessions!.room_id} = ${room.id}`,
+    );
+    assert.equal(row?.transport, "desktop_events");
+    assert.equal(row?.active_connection_count, 1);
+  },
 );
 
 test(

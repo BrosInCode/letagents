@@ -3,9 +3,12 @@ import type { Express } from "express";
 import {
   createRoomAgentSession,
   endRoomAgentSession,
+  forceDisconnectRoomAgentDeliverySession,
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getRoomParticipants,
+  upsertDesktopRoomAgentDeliveryHeartbeat,
+  upsertRoomAgentPresence,
 } from "../../../db.js";
 import {
   respondWithInternalError,
@@ -29,6 +32,14 @@ export function registerAgentSessionRoutes(
   app: Express,
   deps: RoomPresenceRouteDeps
 ): void {
+  const failureMessages = {
+    quota_exhausted: "The provider usage limit was reached. Change the model or quota settings, then retry.",
+    authentication_required: "The provider needs authentication. Sign in again, then retry.",
+    model_unavailable: "The selected model is unavailable. Choose another model, then retry.",
+    configuration_error: "The provider configuration needs attention. Update it, then retry.",
+    provider_error: "The provider could not complete this turn. Open the agent controls for details.",
+  } as const;
+
   app.post(/^\/rooms\/(.+)\/agent-sessions$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -246,5 +257,141 @@ export function registerAgentSessionRoutes(
         "Agent session could not be disconnected."
       );
     }
+  });
+
+  app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/failures$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const body = req.body as {
+      agent_session_id?: string;
+      agent_session_token?: string;
+      code?: string;
+      origin_event_id?: string | null;
+    };
+    const agentSessionIdentity = await requireWorkerRequestAgentIdentity({
+      req,
+      body,
+      room_id: project.id,
+    });
+    if (!agentSessionIdentity.ok) {
+      res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+      return;
+    }
+    if (agentSessionIdentity.identity.agent_session_id !== targetSessionId) {
+      res.status(403).json({ error: "Worker sessions can only report their own failures." });
+      return;
+    }
+    const code = String(body.code || "") as keyof typeof failureMessages;
+    if (!(code in failureMessages)) {
+      res.status(400).json({ error: "A supported managed-agent failure code is required." });
+      return;
+    }
+    const originEventId = typeof body.origin_event_id === "string"
+      ? body.origin_event_id.trim().slice(0, 128)
+      : "";
+    const identity = agentSessionIdentity.identity;
+    const message = await deps.emitProjectMessage(
+      project.id,
+      "letagents",
+      `${identity.display_name} could not reply: ${failureMessages[code]}`,
+      {
+        source: "managed_agent_failure",
+        client_message_id: `managed_agent_failure:${targetSessionId}:${originEventId || "turn"}:${code}`,
+      },
+    );
+    res.status(201).json({ ...message, room_id: project.id });
+  });
+
+  app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/desktop-heartbeat$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+    if (!(await deps.requireParticipant(req, res, project))) return;
+    const body = req.body as { agent_session_id?: string; agent_session_token?: string };
+    const worker = await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id });
+    if (!worker.ok) {
+      res.status(worker.status).json({ error: worker.error });
+      return;
+    }
+    if (worker.identity.agent_session_id !== targetSessionId) {
+      res.status(403).json({ error: "Worker sessions can only heartbeat their own delivery lease." });
+      return;
+    }
+    const identity = worker.identity;
+    const [delivery, presence] = await Promise.all([
+      upsertDesktopRoomAgentDeliveryHeartbeat({
+        room_id: project.id,
+        actor_label: identity.actor_label,
+        agent_key: identity.agent_key,
+        agent_instance_id: identity.agent_instance_id,
+        agent_session_id: targetSessionId,
+        session_kind: identity.session_kind,
+        runtime: identity.runtime,
+        display_name: identity.display_name,
+        owner_label: identity.owner_label,
+        ide_label: identity.ide_label,
+        repo_branch: identity.repo_branch,
+      }),
+      upsertRoomAgentPresence({
+        room_id: project.id,
+        actor_label: identity.actor_label,
+        agent_key: identity.agent_key,
+        agent_session_id: targetSessionId,
+        session_kind: identity.session_kind,
+        runtime: identity.runtime,
+        display_name: identity.display_name,
+        owner_label: identity.owner_label,
+        ide_label: identity.ide_label,
+        repo_branch: identity.repo_branch,
+        status: "idle",
+        status_text: "Waiting for room messages",
+      }),
+    ]);
+    res.json({ room_id: project.id, delivery_session: delivery, presence });
+  });
+
+  app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/desktop-pause$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+    if (!(await deps.requireParticipant(req, res, project))) return;
+    const body = req.body as { agent_session_id?: string; agent_session_token?: string; status_text?: string };
+    const worker = await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id });
+    if (!worker.ok) {
+      res.status(worker.status).json({ error: worker.error });
+      return;
+    }
+    if (worker.identity.agent_session_id !== targetSessionId) {
+      res.status(403).json({ error: "Worker sessions can only pause their own delivery lease." });
+      return;
+    }
+    const identity = worker.identity;
+    const [delivery, presence] = await Promise.all([
+      forceDisconnectRoomAgentDeliverySession({ room_id: project.id, agent_session_id: targetSessionId }),
+      upsertRoomAgentPresence({
+        room_id: project.id,
+        actor_label: identity.actor_label,
+        agent_key: identity.agent_key,
+        agent_session_id: targetSessionId,
+        session_kind: identity.session_kind,
+        runtime: identity.runtime,
+        display_name: identity.display_name,
+        owner_label: identity.owner_label,
+        ide_label: identity.ide_label,
+        repo_branch: identity.repo_branch,
+        status: "blocked",
+        status_text: typeof body.status_text === "string" ? body.status_text.slice(0, 240) : "Needs attention",
+      }),
+    ]);
+    res.json({ room_id: project.id, delivery_session: delivery, presence });
   });
 }

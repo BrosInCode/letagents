@@ -172,6 +172,7 @@ function createRuntimeHarness(
   options: { storage?: DesktopRoomStorageState } = {},
 ) {
   const published: Array<{ text: string | null; eventId: string }> = [];
+  const failures: Array<{ code: string; eventId: string | null }> = [];
   const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   const runtime = createDesktopCursorRuntime({
     runner,
@@ -192,11 +193,14 @@ function createRuntimeHarness(
         eventId: input.event.type === "message" ? input.event.message.id : input.event.task.id,
       });
     },
+    publishFailure: async (input) => {
+      failures.push({ code: input.failure.code, eventId: input.failure.eventId });
+    },
     resolveStorage: async (roomIdentifier) => options.storage ?? storageState(roomIdentifier),
     emitSessionUpdate: () => undefined,
     now: () => "2026-06-30T00:00:00.000Z",
   });
-  return { runtime, published, preflightInputs };
+  return { runtime, published, failures, preflightInputs };
 }
 
 test("Cursor runtime starts, lists, and inspects a read-only desktop worker", async () => {
@@ -765,4 +769,60 @@ test("consecutive turn errors park the Cursor session as failed and end the work
   }));
   await runtime.waitForIdle();
   assert.equal(turns, 3, "failed sessions must not receive further room events");
+});
+
+test("Cursor usage-limit errors block immediately and publish one visible failure", async () => {
+  resetState();
+  let turns = 0;
+  let quotaExhausted = true;
+  const { runtime, failures, published } = createRuntimeHarness({
+    async runTurn(): Promise<CursorTurnResult> {
+      turns += 1;
+      if (!quotaExhausted) {
+        return {
+          sessionId: "cursor_after_quota",
+          text: "Reply after quota recovery.",
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      return {
+        sessionId: null,
+        text: null,
+        status: "error",
+        error: "You've hit your usage limit. Switch models or set a Spend Limit to continue.",
+        recentItems: [],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+
+  const blocked = getStoredCursorLiveSession(started.session.id);
+  assert.equal(blocked?.status, "blocked");
+  assert.equal(blocked?.failure?.code, "quota_exhausted");
+  assert.equal(blocked?.failure?.eventId, "msg_1");
+  assert.deepEqual(failures, [{ code: "quota_exhausted", eventId: "msg_1" }]);
+
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: { ...messageEvent().message, id: "msg_after_limit", threadRootId: "msg_after_limit" },
+  }));
+  await runtime.waitForIdle();
+  assert.equal(turns, 1, "blocked sessions must not read subsequent room messages");
+
+  quotaExhausted = false;
+  const resumed = await runtime.retry({ sessionId: started.session.id });
+  assert.equal(resumed?.status, "completed");
+  await runtime.waitForIdle();
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.status, "completed");
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.failure, null);
+  assert.deepEqual(published, [{ text: "Reply after quota recovery.", eventId: "msg_1" }]);
 });

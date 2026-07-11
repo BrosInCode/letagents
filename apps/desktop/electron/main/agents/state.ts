@@ -18,9 +18,11 @@ import type {
   DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentDeliveryMode,
+  DesktopManagedAgentFailure,
   DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopManagedAgentSessionStatus,
+  DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 import { getLetAgentsLocalStatePath } from "../paths.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
@@ -66,6 +68,8 @@ export interface DesktopManagedLiveSessionBase {
   } | null;
   status: DesktopManagedAgentSessionStatus;
   last_error?: string | null;
+  failure?: DesktopManagedAgentFailure | null;
+  pending_event?: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }> | null;
   started_at: string;
   updated_at: string;
 }
@@ -628,6 +632,7 @@ function statusSortWeight(status: DesktopManagedAgentSessionStatus): number {
       return 4;
     case "completed":
       return 3;
+    case "blocked":
     case "unknown":
       return 2;
     case "failed":
@@ -901,6 +906,7 @@ export function toPublicManagedAgentSession(
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "blocked" ||
         session.status === "unknown" ||
         (managedAgentDeliveryMode(session) === "desktop_events" && session.status === "completed")
       ),
@@ -925,6 +931,7 @@ export function toPublicManagedAgentSession(
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
+    failure: session.failure ?? null,
   };
 }
 
@@ -1012,6 +1019,7 @@ export function toPublicClaudeCodeManagedAgentSession(
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "blocked" ||
         session.status === "unknown" ||
         (deliveryMode === "desktop_events" && session.status === "completed")
       ),
@@ -1036,6 +1044,7 @@ export function toPublicClaudeCodeManagedAgentSession(
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
+    failure: session.failure ?? null,
   };
 }
 
@@ -1125,6 +1134,7 @@ export function toPublicCursorManagedAgentSession(
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "blocked" ||
         session.status === "unknown" ||
         (deliveryMode === "desktop_events" && session.status === "completed")
       ),
@@ -1149,5 +1159,6 @@ export function toPublicCursorManagedAgentSession(
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
+    failure: session.failure ?? null,
   };
 }

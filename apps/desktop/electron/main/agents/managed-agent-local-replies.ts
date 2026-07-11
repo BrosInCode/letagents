@@ -33,6 +33,8 @@ export async function persistDesktopManagedAgentLocalReply(input: {
   threadRootId?: string | null;
   text: string;
   attachments?: RoomMessageAttachmentPayload[];
+  source?: string;
+  sender?: string;
 }): Promise<DesktopRoomMessage | null> {
   if (input.storage.effectiveMode !== "local") {
     return null;
@@ -40,11 +42,11 @@ export async function persistDesktopManagedAgentLocalReply(input: {
 
   const localRoomIdentifier = localRoomIdentifierForStorage(input.storage, input.roomIdentifier);
   const localMessage = await addLocalChatMessage(localRoomIdentifier, {
-    sender: desktopManagedAgentReplySender(input.workerSession),
+    sender: input.sender || desktopManagedAgentReplySender(input.workerSession),
     text: input.text,
     reply_to: input.replyTo,
     thread_root_id: input.threadRootId ?? null,
-    source: "agent",
+    source: input.source || "agent",
     attachments: input.attachments ?? [],
   });
 

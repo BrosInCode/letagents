@@ -1495,10 +1495,13 @@ test("desktop room tool requests parse and stay out of public replies", () => {
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_ROOM_TOOL_REQUEST inline."),
     null,
   );
-  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "I will finish with NO_ROOM_REPLY."), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "I will finish with NO_ROOM_REPLY."),
+    "I will finish with NO_ROOM_REPLY.",
+  );
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Stopping with LOCAL_CODEX_ROOM_test_DONE."),
-    null,
+    "Stopping with LOCAL_CODEX_ROOM_test_DONE.",
   );
 });
 

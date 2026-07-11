@@ -256,6 +256,7 @@ export function registerApiRoutes(app: Express): void {
     requireParticipant,
     rememberAgentRoomParticipant,
     maybeEmitStaleWorkPrompt,
+    emitProjectMessage,
   } satisfies RoomPresenceRouteDeps;
 
   const roomReasoningRouteDeps = {

@@ -299,6 +299,7 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
 import {
   isLocalGitRoom,
@@ -394,6 +395,8 @@ const props = defineProps<{
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
 }>();
+const { pushActionToast } = useDesktopActionToasts();
+const notifiedManagedAgentFailures = new Set<string>();
 
 const emit = defineEmits<{
   "cycle-sidebar": [];
@@ -792,6 +795,17 @@ onMounted(() => {
       return;
     }
     upsertManagedAgentSession(session);
+    if (session.failure) {
+      const failureKey = `${session.id}:${session.failure.occurredAt}:${session.failure.code}`;
+      if (!notifiedManagedAgentFailures.has(failureKey)) {
+        notifiedManagedAgentFailures.add(failureKey);
+        pushActionToast(
+          `${managedAgentSessionDisplayName(session)} could not reply: ${session.failure.message}`,
+          "error",
+          8_000,
+        );
+      }
+    }
   }) || null;
 });
 

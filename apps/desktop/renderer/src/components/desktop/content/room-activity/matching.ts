@@ -24,6 +24,7 @@ export function participantMatchesHuman(
 }
 
 export function isHumanMessage(message: DesktopRoomMessage): boolean {
+  if (message.source === "managed_agent_failure") return false;
   return message.source === "browser" || !message.agentIdentity;
 }
 

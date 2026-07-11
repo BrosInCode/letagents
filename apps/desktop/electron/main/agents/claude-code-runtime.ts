@@ -79,8 +79,10 @@ import { createManagedAgentEventTurnEngine } from "./managed-agent-event-turn-en
 import {
   disconnectDesktopManagedWorker,
   normalizeDisplayText,
+  publishDesktopManagedWorkerFailure,
   publishDesktopManagedWorkerReply,
   registerDesktopManagedWorker,
+  startDesktopManagedWorkerDeliveryHeartbeat,
   type ManagedAgentWorkerProvider,
 } from "./managed-agent-worker.js";
 import {
@@ -195,6 +197,7 @@ export function createDesktopClaudeCodeRuntime(
     updateSession: updateClaudeCodeLiveSession,
     emitSessionUpdate: (session) => emitSessionUpdate(session),
     publishReply: (input) => publishReply(input),
+    publishFailure: publishDesktopManagedWorkerFailure,
     runTurn: (input) =>
       runClaudeCodeDesktopEventTurnWithRoomTools({
         active: input.active,
@@ -217,6 +220,10 @@ export function createDesktopClaudeCodeRuntime(
     shouldPreemptOnEnqueue: () => true,
     replyChangeSessionKey: claudeCodeReplyChangeSessionKey,
     disconnectWorker: (session) => disconnectWorker(session),
+    onSessionResumed: (session) => {
+      const worker = getStoredAgentSession(session.agent_session_id);
+      if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker);
+    },
     onSessionParked: (sessionId) =>
       clearPendingPermissionRequestsForSession(
         sessionId,
@@ -532,6 +539,10 @@ export function createDesktopClaudeCodeRuntime(
     start,
     inspect,
     stop,
+    retry: async ({ sessionId }) => {
+      const resumed = engine.retryBlockedSession(sessionId);
+      return resumed ? toPublicClaudeCodeManagedAgentSession(resumed) : null;
+    },
     dispatchRoomStreamEvent,
     waitForIdle: engine.waitForIdle,
     resolvePermissionRequest,

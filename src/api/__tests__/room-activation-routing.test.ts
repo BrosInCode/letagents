@@ -54,6 +54,20 @@ test("activation routing silences a worker's own echoed messages", () => {
   });
 });
 
+test("activation routing silences managed-agent failure system events", () => {
+  const decision = decideAgentMessageActivation({
+    id: "msg_failure",
+    sender: "letagents",
+    source: "managed_agent_failure",
+    text: "Cursor could not reply: The provider usage limit was reached.",
+  }, worker);
+  assert.deepEqual(decision, {
+    decision: "silent",
+    reason: "system_event",
+    addressed: false,
+  });
+});
+
 test("activation routing activates explicit mentions and silences other mentions", () => {
   assert.deepEqual(
     decideAgentMessageActivation({

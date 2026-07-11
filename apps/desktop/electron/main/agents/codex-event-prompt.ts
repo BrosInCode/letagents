@@ -22,13 +22,7 @@ export function desktopEventPublicReplyText(
   if (!trimmed || trimmed === DESKTOP_EVENTS_NO_ROOM_REPLY) {
     return null;
   }
-  if (trimmed.includes(DESKTOP_EVENTS_NO_ROOM_REPLY)) {
-    return null;
-  }
   if (sessionToken && trimmed === `${sessionToken}_DONE`) {
-    return null;
-  }
-  if (sessionToken && trimmed.includes(`${sessionToken}_DONE`)) {
     return null;
   }
   if (

@@ -26,6 +26,7 @@ import type {
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
+  DesktopManagedAgentRetryInput,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -254,6 +255,7 @@ export interface DesktopApi {
     onManagedAgentSessionUpdate: (callback: (session: DesktopManagedAgentSession) => void) => () => void;
     startManagedAgent: (input: DesktopManagedAgentStartInput) => Promise<DesktopManagedAgentStartResult>;
     stopManagedAgent: (input?: DesktopManagedAgentStopInput) => Promise<DesktopManagedAgentSession | null>;
+    retryManagedAgent: (input: DesktopManagedAgentRetryInput) => Promise<DesktopManagedAgentSession | null>;
     inspectManagedAgent: (
       sessionId?: string | null,
       roomIdentifier?: string | null

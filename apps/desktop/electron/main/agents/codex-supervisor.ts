@@ -111,8 +111,10 @@ import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import {
   disconnectDesktopManagedWorker,
   normalizeDisplayText,
+  publishDesktopManagedWorkerFailure,
   publishDesktopManagedWorkerReply,
   registerDesktopManagedWorker,
+  startDesktopManagedWorkerDeliveryHeartbeat,
   type ManagedAgentWorkerProvider,
 } from "./managed-agent-worker.js";
 import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.js";
@@ -173,6 +175,7 @@ desktopManagedAgentRuntimes.register({
   start: startDesktopManagedCodexAgent,
   inspect: inspectDesktopManagedCodexAgentSession,
   stop: stopDesktopManagedCodexAgent,
+  retry: retryDesktopManagedCodexAgent,
   dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
 });
 desktopManagedAgentRuntimes.register({
@@ -184,6 +187,7 @@ desktopManagedAgentRuntimes.register({
   // via provider_id), so this runtime only lists and starts.
   inspect: async () => null,
   stop: async () => null,
+  retry: async () => null,
   dispatchRoomStreamEvent: () => {},
 });
 desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
@@ -1249,6 +1253,7 @@ const codexEventTurnEngine = createManagedAgentEventTurnEngine<
   updateSession: updateCodexLiveSession,
   emitSessionUpdate: emitManagedAgentSessionUpdate,
   publishReply: publishDesktopManagedAgentReply,
+  publishFailure: publishDesktopManagedWorkerFailure,
   beforeTurnReadiness: waitForCodexEventTurnReadiness,
   runTurn: runDesktopEventCodexTurn,
   // Codex persists thread_id/turn_id live inside runTurn (the app-server hands
@@ -1259,6 +1264,10 @@ const codexEventTurnEngine = createManagedAgentEventTurnEngine<
   shouldPreemptOnEnqueue: () => false,
   replyChangeSessionKey: codexReplyChangeSessionKey,
   disconnectWorker: disconnectCodexWorkerForStopPhrase,
+  onSessionResumed: (session) => {
+    const worker = getStoredAgentSession(session.agent_session_id);
+    if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker);
+  },
   maxConsecutiveTurnErrors: Number.POSITIVE_INFINITY,
   // Codex historically honored the stop phrase after a non-throwing timeout
   // or interrupted acknowledgement turn; preserve that explicit stop request.
@@ -1977,6 +1986,19 @@ export function stopDesktopManagedAgent(
   input: DesktopManagedAgentStopInput = {},
 ): Promise<DesktopManagedAgentSession | null> {
   return desktopManagedAgentRuntimes.stop(input);
+}
+
+async function retryDesktopManagedCodexAgent(
+  input: { sessionId: string },
+): Promise<DesktopManagedAgentSession | null> {
+  const resumed = codexEventTurnEngine.retryBlockedSession(input.sessionId);
+  return resumed ? toPublicManagedAgentSession(resumed) : null;
+}
+
+export function retryDesktopManagedAgent(
+  input: { sessionId: string },
+): Promise<DesktopManagedAgentSession | null> {
+  return desktopManagedAgentRuntimes.retry(input);
 }
 
 export function resolveDesktopManagedAgentPermissionRequest(

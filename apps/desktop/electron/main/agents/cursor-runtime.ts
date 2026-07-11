@@ -5,6 +5,7 @@ import type {
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
+  DesktopManagedAgentFailure,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
@@ -49,8 +50,10 @@ import {
 } from "./managed-agent-reply-changes.js";
 import {
   disconnectDesktopManagedWorker,
+  publishDesktopManagedWorkerFailure,
   publishDesktopManagedWorkerReply,
   registerDesktopManagedWorker,
+  startDesktopManagedWorkerDeliveryHeartbeat,
   type ManagedAgentWorkerProvider,
 } from "./managed-agent-worker.js";
 import {
@@ -100,6 +103,13 @@ interface PublishCursorReplyInput {
   beforeChangeSignature?: string | null;
 }
 
+interface PublishCursorFailureInput {
+  session: DesktopCursorLiveSessionState;
+  event: ManagedRoomEvent;
+  storage: DesktopRoomStorageState;
+  failure: DesktopManagedAgentFailure;
+}
+
 interface CursorRuntimeDependencies {
   runner?: CursorRunner;
   preflight?: (
@@ -109,6 +119,7 @@ interface CursorRuntimeDependencies {
   registerWorker?: (input: RegisterCursorWorkerInput) => Promise<StoredAgentSessionState>;
   disconnectWorker?: (session: StoredAgentSessionState | null) => Promise<void>;
   publishReply?: (input: PublishCursorReplyInput) => Promise<void>;
+  publishFailure?: (input: PublishCursorFailureInput) => Promise<void>;
   resolveStorage?: (roomIdentifier: string) => Promise<DesktopRoomStorageState>;
   emitSessionUpdate?: (session: DesktopCursorLiveSessionState | null | undefined) => void;
   now?: () => string;
@@ -140,6 +151,7 @@ export function createDesktopCursorRuntime(
   const registerWorker = dependencies.registerWorker ?? registerDesktopManagedCursorWorker;
   const disconnectWorker = dependencies.disconnectWorker ?? disconnectDesktopManagedCursorWorker;
   const publishReply = dependencies.publishReply ?? publishDesktopManagedCursorReply;
+  const publishFailure = dependencies.publishFailure ?? publishDesktopManagedWorkerFailure;
   const resolveStorage = dependencies.resolveStorage ?? resolveRoomStorageMode;
   const emitSessionUpdate = dependencies.emitSessionUpdate ?? emitCursorManagedAgentSessionUpdate;
   const now = dependencies.now ?? (() => new Date().toISOString());
@@ -151,6 +163,7 @@ export function createDesktopCursorRuntime(
     updateSession: updateCursorLiveSession,
     emitSessionUpdate: (session) => emitSessionUpdate(session),
     publishReply: (input) => publishReply(input),
+    publishFailure: (input) => publishFailure(input),
     runTurn: (input) =>
       runCursorDesktopEventTurnWithRoomTools({
         active: input.active,
@@ -169,6 +182,10 @@ export function createDesktopCursorRuntime(
       !cursorLaunchOptionsForPermissionProfile(session.permission_profile_id).force,
     replyChangeSessionKey: cursorReplyChangeSessionKey,
     disconnectWorker: (session) => disconnectWorker(session),
+    onSessionResumed: (session) => {
+      const worker = getStoredAgentSession(session.agent_session_id);
+      if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker);
+    },
   });
 
   function listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
@@ -408,6 +425,10 @@ export function createDesktopCursorRuntime(
     start,
     inspect,
     stop,
+    retry: async ({ sessionId }) => {
+      const resumed = engine.retryBlockedSession(sessionId);
+      return resumed ? toPublicCursorManagedAgentSession(resumed) : null;
+    },
     dispatchRoomStreamEvent,
     waitForIdle: engine.waitForIdle,
   };

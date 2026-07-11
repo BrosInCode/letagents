@@ -1,4 +1,5 @@
 import type {
+  DesktopManagedAgentFailure,
   DesktopManagedAgentSession,
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
@@ -31,9 +32,12 @@ import {
   saveStoredAgentIdentity,
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
+  type DesktopManagedLiveSessionBase,
 } from "./state.js";
 
 type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
+const DESKTOP_DELIVERY_HEARTBEAT_MS = 30_000;
+const desktopDeliveryHeartbeatTimers = new Map<string, NodeJS.Timeout>();
 
 // The shared worker plumbing deliberately lazy-imports auth.js,
 // room-stream.js, and rooms/local-store.js inside its functions: room-stream
@@ -292,13 +296,68 @@ export async function registerDesktopManagedWorker(
     },
   );
 
-  return saveAgentSession(toStoredManagedAgentSession(provider, created, {
+  const session = saveAgentSession(toStoredManagedAgentSession(provider, created, {
     roomIdentifier: cloudRoomIdentifier,
     runtime,
     identity,
     agentInstanceId,
     displayName: input.displayName,
   }));
+  startDesktopManagedWorkerDeliveryHeartbeat(session);
+  return session;
+}
+
+function stopDesktopManagedWorkerDeliveryHeartbeat(sessionId: string): void {
+  const timer = desktopDeliveryHeartbeatTimers.get(sessionId);
+  if (timer) clearInterval(timer);
+  desktopDeliveryHeartbeatTimers.delete(sessionId);
+}
+
+async function postDesktopManagedWorkerDeliveryHeartbeat(session: StoredAgentSessionState): Promise<void> {
+  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) return;
+  const { apiFetch } = await import("../auth.js");
+  await apiFetch<Record<string, unknown>>(
+    `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-heartbeat`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+      body: JSON.stringify({
+        agent_session_id: session.session_id,
+        agent_session_token: session.session_token,
+      }),
+    },
+  );
+}
+
+export function startDesktopManagedWorkerDeliveryHeartbeat(session: StoredAgentSessionState): void {
+  stopDesktopManagedWorkerDeliveryHeartbeat(session.session_id);
+  void postDesktopManagedWorkerDeliveryHeartbeat(session).catch(() => undefined);
+  const timer = setInterval(() => {
+    void postDesktopManagedWorkerDeliveryHeartbeat(session).catch(() => undefined);
+  }, DESKTOP_DELIVERY_HEARTBEAT_MS);
+  timer.unref?.();
+  desktopDeliveryHeartbeatTimers.set(session.session_id, timer);
+}
+
+export async function pauseDesktopManagedWorkerDelivery(
+  session: StoredAgentSessionState,
+  statusText: string,
+): Promise<void> {
+  stopDesktopManagedWorkerDeliveryHeartbeat(session.session_id);
+  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) return;
+  const { apiFetch } = await import("../auth.js");
+  await apiFetch<Record<string, unknown>>(
+    `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-pause`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+      body: JSON.stringify({
+        agent_session_id: session.session_id,
+        agent_session_token: session.session_token,
+        status_text: statusText,
+      }),
+    },
+  );
 }
 
 export async function disconnectDesktopManagedWorker(
@@ -307,6 +366,7 @@ export async function disconnectDesktopManagedWorker(
   if (!session?.session_id || !session.session_token) {
     return;
   }
+  stopDesktopManagedWorkerDeliveryHeartbeat(session.session_id);
 
   if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) {
     markAgentSessionEnded(session.session_id);
@@ -434,6 +494,54 @@ export async function publishDesktopManagedWorkerReply(input: {
     event: input.event,
     context: changeContext,
   });
+}
+
+export async function publishDesktopManagedWorkerFailure(input: {
+  session: DesktopManagedLiveSessionBase;
+  storage: DesktopRoomStorageState;
+  event: ManagedRoomEvent;
+  failure: DesktopManagedAgentFailure;
+}): Promise<void> {
+  const workerSession = getStoredAgentSession(input.session.agent_session_id);
+  if (!workerSession?.session_id || !workerSession.session_token) return;
+
+  const displayName = workerSession.display_name?.trim() || "The managed agent";
+  const text = `${displayName} could not reply: ${input.failure.message}`;
+  const localMessage = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: input.session.room_identifier,
+    storage: input.storage,
+    workerSession,
+    replyTo: null,
+    text,
+    source: "managed_agent_failure",
+    sender: "letagents",
+  });
+  if (localMessage) {
+    const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
+    emitPersistedLocalRoomMessage(input.session.room_identifier, localMessage);
+    return;
+  }
+
+  const { apiFetch } = await import("../auth.js");
+  const { cloudRoomIdentifierForStorage } = await import("../rooms/local-store.js");
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, input.session.room_identifier);
+  try {
+    await apiFetch<Record<string, unknown>>(
+      `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions/${encodeURIComponent(workerSession.session_id)}/failures`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+        body: JSON.stringify({
+          agent_session_id: workerSession.session_id,
+          agent_session_token: workerSession.session_token,
+          code: input.failure.code,
+          origin_event_id: input.failure.eventId,
+        }),
+      },
+    );
+  } finally {
+    await pauseDesktopManagedWorkerDelivery(workerSession, input.failure.message).catch(() => undefined);
+  }
 }
 
 export function normalizeAgentIdentityName(displayName: string, fallback: string): string {

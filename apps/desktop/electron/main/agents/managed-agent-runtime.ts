@@ -3,6 +3,7 @@ import type {
   DesktopAgentProviderId,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
+  DesktopManagedAgentRetryInput,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -19,6 +20,7 @@ export interface DesktopManagedAgentRuntime {
     roomIdentifier?: string | null,
   ): Promise<DesktopManagedAgentInspectResult | null>;
   stop(input?: DesktopManagedAgentStopInput): Promise<DesktopManagedAgentSession | null>;
+  retry(input: DesktopManagedAgentRetryInput): Promise<DesktopManagedAgentSession | null>;
   dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void;
   resolvePermissionRequest?(
     input: DesktopManagedAgentPermissionDecisionInput,
@@ -74,6 +76,14 @@ export class DesktopManagedAgentRuntimeRegistry {
       if (result) {
         return result;
       }
+    }
+    return null;
+  }
+
+  async retry(input: DesktopManagedAgentRetryInput): Promise<DesktopManagedAgentSession | null> {
+    for (const runtime of this.list()) {
+      const result = await runtime.retry(input);
+      if (result) return result;
     }
     return null;
   }

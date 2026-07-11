@@ -19,6 +19,7 @@ import type {
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
+  DesktopManagedAgentRetryInput,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
   DesktopManagedAgentSession,
@@ -126,6 +127,7 @@ import {
   inspectDesktopManagedAgentSession,
   listDesktopManagedAgentSessions,
   resolveDesktopManagedAgentPermissionRequest,
+  retryDesktopManagedAgent,
   startDesktopManagedAgent,
   stopDesktopManagedAgent,
 } from "./agents/codex-supervisor.js";
@@ -801,6 +803,13 @@ export function registerDesktopIpcHandlers(
       input?: DesktopManagedAgentStopInput,
     ): Promise<DesktopManagedAgentSession | null> =>
       stopDesktopManagedAgent(input ?? {}),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:retry-managed-agent",
+    async (
+      _event,
+      input: DesktopManagedAgentRetryInput,
+    ): Promise<DesktopManagedAgentSession | null> => retryDesktopManagedAgent(input),
   );
   targetIpcMain.handle(
     "desktop:workers:inspect-managed-agent",
