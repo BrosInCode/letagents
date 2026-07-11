@@ -28,8 +28,23 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Test dependency cooldown policy
+        run: npm run test:dependency-age
+
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Verify dependency signatures
+        run: npm audit signatures
+
+      - name: Audit dependency advisories
+        run: npm audit --audit-level=low
+
+      - name: Run verified dependency lifecycle scripts
+        run: npm rebuild
 
       - name: Type check (server)
         run: npx tsc --noEmit
@@ -37,8 +52,17 @@ jobs:
       - name: Test MCP helpers
         run: npm run test:mcp
 
-      - name: Install Vue dependencies
-        run: cd src/web && npm ci
+      - name: Install Vue dependencies without lifecycle scripts
+        run: cd src/web && npm ci --ignore-scripts
+
+      - name: Verify Vue dependency signatures
+        run: cd src/web && npm audit signatures
+
+      - name: Audit Vue dependency advisories
+        run: cd src/web && npm audit --audit-level=low
+
+      - name: Run verified Vue dependency lifecycle scripts
+        run: cd src/web && npm rebuild
 
       - name: Type check (Vue)
         run: cd src/web && npx vue-tsc --noEmit
@@ -49,8 +73,20 @@ jobs:
       - name: Build Vue app
         run: npm run build:web
 
-      - name: Install desktop dependencies
-        run: npm ci --prefix apps/desktop
+      - name: Install desktop dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: npm audit signatures --prefix apps/desktop
+
+      - name: Audit desktop dependency advisories
+        run: npm audit --audit-level=low --prefix apps/desktop
+
+      - name: Run verified desktop dependency lifecycle scripts
+        run: npm rebuild --prefix apps/desktop
+
+      - name: Install verified Electron runtime
+        run: npm exec --prefix apps/desktop -- install-electron
 
       - name: Type check desktop
         run: npm --prefix apps/desktop run typecheck
@@ -93,8 +129,20 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Verify dependency signatures
+        run: npm audit signatures
+
+      - name: Audit dependency advisories
+        run: npm audit --audit-level=low
+
+      - name: Run verified dependency lifecycle scripts
+        run: npm rebuild
 
       - name: Run message attachment tests
         run: >-
@@ -199,9 +247,21 @@ jobs:
             echo "letagents@${LOCAL_VERSION} not on npm — will publish."
           fi
 
-      - name: Install dependencies
+      - name: Install dependencies without lifecycle scripts
         if: steps.version.outputs.publish == 'true'
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: Verify dependency signatures
+        if: steps.version.outputs.publish == 'true'
+        run: npm audit signatures
+
+      - name: Audit dependency advisories
+        if: steps.version.outputs.publish == 'true'
+        run: npm audit --audit-level=low
+
+      - name: Run verified dependency lifecycle scripts
+        if: steps.version.outputs.publish == 'true'
+        run: npm rebuild
 
       - name: Publish to npm
         if: steps.version.outputs.publish == 'true'
