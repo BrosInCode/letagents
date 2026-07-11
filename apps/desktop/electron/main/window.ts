@@ -2,7 +2,10 @@ import electron from "electron";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
+import { classifyLinkNavigation } from "./link-routing.js";
+import { openExternalWebUrl } from "./external-url.js";
 import { devServerUrl, electronMainDir, rendererDistPath } from "./paths.js";
 
 const { app, BrowserWindow } = electron as typeof import("electron");
@@ -43,6 +46,10 @@ export function createWindow(): void {
     },
   });
   installSmokeCheck(mainWindow);
+  installExternalLinkRouting(
+    mainWindow,
+    devServerUrl || pathToFileURL(rendererDistPath).toString(),
+  );
 
   if (devServerUrl) {
     void mainWindow.loadURL(devServerUrl);
@@ -55,6 +62,29 @@ export function createWindow(): void {
   }
 
   void mainWindow.loadFile(rendererDistPath);
+}
+
+// Route every external web link to the system browser and never let content
+// open a second Electron window or navigate the app frame away from itself.
+// Chat-message links render as <a target="_blank">, which arrives here through
+// setWindowOpenHandler; will-navigate is the belt-and-suspenders guard for
+// links without target=_blank and any programmatic navigation.
+function installExternalLinkRouting(window: ElectronBrowserWindow, appBaseUrl: string): void {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (classifyLinkNavigation(url, appBaseUrl) === "external-web") {
+      void openExternalWebUrl(url).catch(() => undefined);
+    }
+    return { action: "deny" };
+  });
+
+  window.webContents.on("will-navigate", (event, url) => {
+    const decision = classifyLinkNavigation(url, appBaseUrl);
+    if (decision === "internal") return;
+    event.preventDefault();
+    if (decision === "external-web") {
+      void openExternalWebUrl(url).catch(() => undefined);
+    }
+  });
 }
 
 function installSmokeCheck(window: ElectronBrowserWindow): void {
