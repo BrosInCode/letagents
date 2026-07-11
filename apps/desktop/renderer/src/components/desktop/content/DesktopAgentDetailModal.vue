@@ -105,6 +105,26 @@
                   <strong>{{ managedAgentSessionStatusLabel(session) }}</strong>
                   <small>{{ managedAgentSessionDisplayName(session) }}</small>
                 </div>
+                <div
+                  v-if="session.failure"
+                  class="desktop-agent-detail-error"
+                  role="alert"
+                  data-testid="desktop-agent-detail-managed-failure"
+                >
+                  <strong>Could not reply</strong>
+                  <p>{{ session.failure.message }}</p>
+                  <small v-if="session.status === 'blocked'">Update the provider settings, then retry the failed message.</small>
+                  <small v-else>LetAgents will try again when the agent receives another room message.</small>
+                  <button
+                    v-if="session.status === 'blocked'"
+                    type="button"
+                    :disabled="retryingSessionId === session.id"
+                    data-testid="desktop-agent-detail-retry-managed-agent"
+                    @click="retryManagedSession(session.id)"
+                  >
+                    {{ retryingSessionId === session.id ? "Retrying..." : "Retry failed message" }}
+                  </button>
+                </div>
                 <p>{{ session.repoRootPath }}</p>
                 <div
                   class="desktop-agent-detail-permission-profile"
@@ -287,6 +307,7 @@ const managedSessions = ref<DesktopManagedAgentSession[]>([]);
 const loadingManagedSessions = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
+const retryingSessionId = ref<string | null>(null);
 const stopStatusMessage = ref<string | null>(null);
 const managedSessionError = ref<string | null>(null);
 const managedSessionInspections = ref<Record<string, DesktopManagedAgentInspectResult>>({});
@@ -419,6 +440,7 @@ function clearTransientState(): void {
   loadingManagedSessions.value = false;
   stoppingSessionId.value = null;
   stoppingSessionMode.value = null;
+  retryingSessionId.value = null;
   stopStatusMessage.value = null;
   managedSessionError.value = null;
   managedSessionInspections.value = {};
@@ -631,6 +653,29 @@ async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"
       stoppingSessionId.value = null;
       stoppingSessionMode.value = null;
     }
+  }
+}
+
+async function retryManagedSession(sessionId: string): Promise<void> {
+  if (retryingSessionId.value) return;
+  retryingSessionId.value = sessionId;
+  managedSessionError.value = null;
+  stopStatusMessage.value = "Retrying the failed room message...";
+  try {
+    const resumed = await desktopIpc.workers.retryManagedAgent({ sessionId });
+    if (!resumed) {
+      throw new Error("This failed message is no longer available to retry.");
+    }
+    managedSessions.value = [
+      resumed,
+      ...managedSessions.value.filter((session) => session.id !== resumed.id),
+    ];
+    stopStatusMessage.value = "Retry started.";
+  } catch (error) {
+    managedSessionError.value = error instanceof Error ? error.message : "Could not retry this message.";
+    stopStatusMessage.value = null;
+  } finally {
+    retryingSessionId.value = null;
   }
 }
 

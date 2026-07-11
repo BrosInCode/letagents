@@ -110,9 +110,13 @@ import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import {
   disconnectDesktopManagedWorker,
+  endDesktopManagedWorkerSession,
   normalizeDisplayText,
+  pauseDesktopManagedWorkerDelivery,
+  publishDesktopManagedWorkerFailure,
   publishDesktopManagedWorkerReply,
   registerDesktopManagedWorker,
+  startDesktopManagedWorkerDeliveryHeartbeat,
   type ManagedAgentWorkerProvider,
 } from "./managed-agent-worker.js";
 import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.js";
@@ -140,7 +144,6 @@ import {
   listDesktopManagedCodexLiveSessions,
   listDesktopManagedCodexLiveSessionsForProvider,
   listStoredCodexLiveSessions,
-  markAgentSessionEnded,
   managedAgentDeliveryMode,
   saveCodexLiveSession,
   toPublicManagedAgentSession,
@@ -173,6 +176,7 @@ desktopManagedAgentRuntimes.register({
   start: startDesktopManagedCodexAgent,
   inspect: inspectDesktopManagedCodexAgentSession,
   stop: stopDesktopManagedCodexAgent,
+  retry: retryDesktopManagedCodexAgent,
   dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
 });
 desktopManagedAgentRuntimes.register({
@@ -184,6 +188,7 @@ desktopManagedAgentRuntimes.register({
   // via provider_id), so this runtime only lists and starts.
   inspect: async () => null,
   stop: async () => null,
+  retry: async () => null,
   dispatchRoomStreamEvent: () => {},
 });
 desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
@@ -421,7 +426,7 @@ function markSpawnedCodexAppServersOffline(reason: string): void {
         updated_at: new Date().toISOString(),
       }));
     }
-    markAgentSessionEnded(session.agent_session_id);
+    endDesktopManagedWorkerSession(session.agent_session_id);
     clearCodexRuntimeReasoningState(session.session_id);
   }
 }
@@ -518,7 +523,7 @@ function smokeManagedCodexInspection(
 
 function killOwnedAppServer(session: DesktopCodexLiveSessionState): void {
   clearCodexRuntimeReasoningState(session.session_id);
-  markAgentSessionEnded(session.agent_session_id);
+  endDesktopManagedWorkerSession(session.agent_session_id);
   if (!session.launched_server || !session.server_pid) {
     return;
   }
@@ -1200,7 +1205,7 @@ export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamE
 async function disconnectCodexWorkerForStopPhrase(
   worker: StoredAgentSessionState | null,
 ): Promise<void> {
-  markAgentSessionEnded(worker?.session_id ?? null);
+  endDesktopManagedWorkerSession(worker?.session_id ?? null);
   const live = worker?.session_id
     ? listStoredCodexLiveSessions().find((session) => session.agent_session_id === worker.session_id) ?? null
     : null;
@@ -1249,6 +1254,7 @@ const codexEventTurnEngine = createManagedAgentEventTurnEngine<
   updateSession: updateCodexLiveSession,
   emitSessionUpdate: emitManagedAgentSessionUpdate,
   publishReply: publishDesktopManagedAgentReply,
+  publishFailure: publishDesktopManagedWorkerFailure,
   beforeTurnReadiness: waitForCodexEventTurnReadiness,
   runTurn: runDesktopEventCodexTurn,
   // Codex persists thread_id/turn_id live inside runTurn (the app-server hands
@@ -1259,6 +1265,14 @@ const codexEventTurnEngine = createManagedAgentEventTurnEngine<
   shouldPreemptOnEnqueue: () => false,
   replyChangeSessionKey: codexReplyChangeSessionKey,
   disconnectWorker: disconnectCodexWorkerForStopPhrase,
+  onSessionUnavailable: (session) => {
+    const worker = getStoredAgentSession(session.agent_session_id);
+    if (worker) void pauseDesktopManagedWorkerDelivery(worker, "Provider turn failed; waiting for recovery").catch(() => undefined);
+  },
+  onSessionResumed: (session) => {
+    const worker = getStoredAgentSession(session.agent_session_id);
+    if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker, session.room_identifier);
+  },
   maxConsecutiveTurnErrors: Number.POSITIVE_INFINITY,
   // Codex historically honored the stop phrase after a non-throwing timeout
   // or interrupted acknowledgement turn; preserve that explicit stop request.
@@ -1977,6 +1991,19 @@ export function stopDesktopManagedAgent(
   input: DesktopManagedAgentStopInput = {},
 ): Promise<DesktopManagedAgentSession | null> {
   return desktopManagedAgentRuntimes.stop(input);
+}
+
+async function retryDesktopManagedCodexAgent(
+  input: { sessionId: string },
+): Promise<DesktopManagedAgentSession | null> {
+  const resumed = codexEventTurnEngine.retryBlockedSession(input.sessionId);
+  return resumed ? toPublicManagedAgentSession(resumed) : null;
+}
+
+export function retryDesktopManagedAgent(
+  input: { sessionId: string },
+): Promise<DesktopManagedAgentSession | null> {
+  return desktopManagedAgentRuntimes.retry(input);
 }
 
 export function resolveDesktopManagedAgentPermissionRequest(

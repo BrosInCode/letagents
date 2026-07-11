@@ -122,6 +122,75 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
   }
 }
 
+/** Idempotent lease heartbeat for a desktop host that owns room delivery. */
+export async function upsertDesktopRoomAgentDeliveryHeartbeat(input: {
+  room_id: string;
+  actor_label: string;
+  agent_key?: string | null;
+  agent_instance_id?: string | null;
+  agent_session_id: string;
+  session_kind?: RoomAgentSessionKind;
+  runtime?: string | null;
+  display_name: string;
+  owner_label?: string | null;
+  ide_label?: string | null;
+  repo_branch?: string | null;
+}): Promise<RoomAgentDeliverySession> {
+  const now = new Date().toISOString();
+  const deliveryKey = buildRoomAgentDeliveryKey(input);
+  const [session] = await db
+    .insert(room_agent_delivery_sessions)
+    .values({
+      room_id: input.room_id,
+      delivery_key: deliveryKey,
+      actor_label: input.actor_label,
+      agent_key: input.agent_key ?? null,
+      agent_instance_id: input.agent_instance_id ?? null,
+      agent_session_id: input.agent_session_id,
+      session_kind: input.session_kind ?? "worker",
+      runtime: input.runtime ?? "unknown",
+      display_name: input.display_name,
+      owner_label: input.owner_label ?? null,
+      ide_label: input.ide_label ?? null,
+      repo_branch: input.repo_branch ?? null,
+      transport: "desktop_events",
+      active_connection_count: 1,
+      last_connected_at: now,
+      last_disconnected_at: null,
+      reconnect_grace_expires_at: null,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [room_agent_delivery_sessions.room_id, room_agent_delivery_sessions.delivery_key],
+      set: {
+        actor_label: input.actor_label,
+        agent_key: input.agent_key ?? null,
+        agent_instance_id: input.agent_instance_id ?? null,
+        agent_session_id: input.agent_session_id,
+        session_kind: input.session_kind ?? "worker",
+        runtime: input.runtime ?? "unknown",
+        display_name: input.display_name,
+        owner_label: input.owner_label ?? null,
+        ide_label: input.ide_label ?? null,
+        repo_branch: input.repo_branch ?? null,
+        transport: "desktop_events",
+        active_connection_count: 1,
+        last_disconnected_at: null,
+        reconnect_grace_expires_at: null,
+        updated_at: now,
+      },
+    })
+    .returning();
+  await touchRoomAgentSession(input.agent_session_id);
+  await setRoomLiveAgentSuppressed({
+    room_id: input.room_id,
+    actor_labels: [input.actor_label],
+    suppressed: false,
+  });
+  return toRoomAgentDeliverySession(session as RoomAgentDeliverySessionRow);
+}
+
 export async function markRoomAgentDeliveryDisconnected(input: {
   room_id: string;
   actor_label: string;

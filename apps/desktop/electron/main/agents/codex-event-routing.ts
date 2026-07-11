@@ -24,6 +24,7 @@ export function canDeliverDesktopEventToManagedAgent(
 ): boolean {
   return worker.deliveryMode === "desktop_events" &&
     Boolean(worker.agentSessionId) &&
+    worker.status !== "blocked" &&
     worker.status !== "interrupted" &&
     worker.status !== "failed";
 }
@@ -111,6 +112,9 @@ export function desktopManagedAgentMessageActivationDecision(
   worker: Pick<DesktopManagedAgentSession, "agentKey" | "actorLabel" | "displayName">,
   message: DesktopRoomMessage,
 ): DesktopManagedAgentMessageActivationDecision {
+  if (normalizeKey(message.source) === "managed_agent_failure") {
+    return "silent";
+  }
   const mentions = extractMentionHandles(message.text);
   if (mentions.some(isBroadcastHandle)) {
     return "activate";

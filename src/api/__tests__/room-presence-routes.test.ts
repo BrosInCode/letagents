@@ -21,6 +21,7 @@ function createDeps() {
     requireParticipant: unused,
     rememberAgentRoomParticipant: unused,
     maybeEmitStaleWorkPrompt: unused,
+    emitProjectMessage: unused,
   };
 }
 
@@ -44,6 +45,9 @@ test("registerRoomPresenceRoutes preserves canonical presence route order", () =
     { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/(?:clear|archive)-disconnected$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/disconnect$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/failures$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/desktop-heartbeat$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/desktop-pause$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/presence$/" },
   ]);
 });

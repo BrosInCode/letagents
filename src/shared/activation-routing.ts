@@ -9,6 +9,7 @@ export type AgentMessageActivationReason =
   | "other_reply_target"
   | "thread_participant"
   | "task_owner"
+  | "system_event"
   | "unaddressed";
 
 export interface AgentMessageActivation {
@@ -114,6 +115,9 @@ export function decideAgentMessageActivation(
   identity: ActivationIdentity,
   context: AgentMessageActivationContext = {},
 ): AgentMessageActivation["for_current_agent"] {
+  if (normalizeSender(message.source) === "managed_agent_failure") {
+    return decision("silent", "system_event");
+  }
   if (senderMatchesIdentity(message.sender, identity)) {
     return decision("silent", "self_message");
   }

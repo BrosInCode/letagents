@@ -91,9 +91,25 @@ export type DesktopManagedAgentSessionStatus =
   | "starting"
   | "running"
   | "completed"
+  | "blocked"
   | "interrupted"
   | "failed"
   | "unknown";
+
+export type DesktopManagedAgentFailureCode =
+  | "quota_exhausted"
+  | "authentication_required"
+  | "model_unavailable"
+  | "configuration_error"
+  | "provider_error";
+
+export interface DesktopManagedAgentFailure {
+  code: DesktopManagedAgentFailureCode;
+  message: string;
+  retryable: boolean;
+  eventId: string | null;
+  occurredAt: string;
+}
 
 export type DesktopManagedAgentDeliveryMode =
   | "mcp_polling"
@@ -288,6 +304,7 @@ export interface DesktopManagedAgentSession {
   startedAt: string;
   updatedAt: string;
   lastError: string | null;
+  failure?: DesktopManagedAgentFailure | null;
 }
 
 export interface DesktopManagedAgentStartInput {
@@ -304,6 +321,10 @@ export interface DesktopManagedAgentStartInput {
   effort?: DesktopManagedAgentEffort | null;
   stopPhrase?: string | null;
   maxMinutes?: number | null;
+}
+
+export interface DesktopManagedAgentRetryInput {
+  sessionId: string;
 }
 
 export interface DesktopManagedAgentStartResult {

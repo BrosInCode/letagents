@@ -91,6 +91,8 @@ function stubRuntime(providerId = "codex"): DesktopManagedAgentRuntime & {
       }
       return session(providerId);
     },
+    retry: async (input: { sessionId: string }): Promise<DesktopManagedAgentSession | null> =>
+      input.sessionId === `session_${providerId}` ? session(providerId) : null,
     dispatchRoomStreamEvent: (event: DesktopRoomStreamEvent) => {
       if (instance.failDispatch) {
         throw new Error(`${providerId} dispatch failed`);

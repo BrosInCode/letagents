@@ -22,6 +22,7 @@ export const ROOM_AGENT_RECONNECT_GRACE_MS = 10_000;
 export const ROOM_AGENT_DELIVERY_TRANSPORTS = [
   "long_poll",
   "sse",
+  "desktop_events",
 ] as const;
 
 export type RoomAgentDeliveryTransport = (typeof ROOM_AGENT_DELIVERY_TRANSPORTS)[number];

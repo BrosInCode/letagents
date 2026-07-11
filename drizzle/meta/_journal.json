@@ -435,6 +435,13 @@
       "when": 1783296000000,
       "tag": "0061_rental_context_requests",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1783382400000,
+      "tag": "0062_desktop_event_delivery",
+      "breakpoints": true
     }
   ]
 }
