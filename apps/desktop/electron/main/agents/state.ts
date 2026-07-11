@@ -70,6 +70,7 @@ export interface DesktopManagedLiveSessionBase {
   last_error?: string | null;
   failure?: DesktopManagedAgentFailure | null;
   pending_event?: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }> | null;
+  queued_events?: Array<Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>>;
   started_at: string;
   updated_at: string;
 }

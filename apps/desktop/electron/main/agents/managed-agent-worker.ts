@@ -336,6 +336,7 @@ async function postDesktopManagedWorkerDeliveryHeartbeat(
           agent_session_id: session.session_id,
           agent_session_token: session.session_token,
           status_text: "Room is not open on the managing desktop",
+          availability: "room_closed",
         }),
       },
     );
@@ -383,6 +384,7 @@ export async function pauseDesktopManagedWorkerDelivery(
         agent_session_id: session.session_id,
         agent_session_token: session.session_token,
         status_text: statusText,
+        availability: "failure",
       }),
     },
   );
@@ -543,6 +545,7 @@ export async function publishDesktopManagedWorkerFailure(input: {
     text,
     source: "managed_agent_failure",
     sender: "letagents",
+    idempotencyKey: `managed_agent_failure:${workerSession.session_id}:${input.failure.eventId || "turn"}:${input.failure.code}`,
   });
   if (localMessage) {
     const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");

@@ -106,6 +106,21 @@ test("desktop local chat store persists messages, replies, and sync metadata", a
   );
 });
 
+test("desktop local chat store deduplicates idempotent managed failure messages", async () => {
+  const input = {
+    sender: "letagents",
+    text: "Agent could not reply: quota exhausted",
+    source: "managed_agent_failure",
+    idempotency_key: "managed_agent_failure:session_1:msg_1:quota_exhausted",
+  };
+  const first = await addLocalChatMessage("room_failure_dedupe", input);
+  const repeated = await addLocalChatMessage("room_failure_dedupe", input);
+  const page = await getLocalChatMessages("room_failure_dedupe");
+
+  assert.equal(repeated.id, first.id);
+  assert.equal(page.messages.length, 1);
+});
+
 test("desktop local chat store rejects thread targets hidden from chat", async () => {
   const hidden = await addLocalChatMessage("room_hidden_thread_target", {
     sender: "Agent",
