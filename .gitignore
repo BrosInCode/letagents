@@ -7,6 +7,9 @@ apps/desktop/dist-renderer/
 SCR-*.png
 data/
 .npmrc
+!/.npmrc
+!/apps/desktop/.npmrc
+!/src/web/.npmrc
 .env
 .review-worktrees/
 mitm_capture.jsonl

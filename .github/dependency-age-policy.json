@@ -1,0 +1,45 @@
+{
+  "minimumAgeDays": 7,
+  "exceptions": [
+    {
+      "name": "cuelume",
+      "version": "0.1.0",
+      "reason": "Intentional early adoption after tarball review and Codex Security scan 13f36e57-0cac-4a6c-8def-50cd6fc036a1. Re-scan before changing this version."
+    },
+    {
+      "name": "@typescript-eslint/parser",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/project-service",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/scope-manager",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/tsconfig-utils",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/types",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/typescript-estree",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/visitor-keys",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    }
+  ]
+}
