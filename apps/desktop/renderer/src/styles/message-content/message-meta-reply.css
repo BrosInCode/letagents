@@ -98,37 +98,6 @@
   font-weight: 760;
 }
 
-.room-message-ide {
-  display: inline-flex;
-  align-items: center;
-  min-height: 17px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.042);
-  font-size: 0.62rem;
-  font-weight: 760;
-}
-
-.room-message-ide[data-ide="codex"] {
-  color: #34d399;
-  background: rgba(52, 211, 153, 0.12);
-}
-
-.room-message-ide[data-ide="antigravity"] {
-  color: #60a5fa;
-  background: rgba(96, 165, 250, 0.12);
-}
-
-.room-message-ide[data-ide="claude"] {
-  color: #fb923c;
-  background: rgba(251, 146, 60, 0.12);
-}
-
-.room-message-ide[data-ide="cursor"] {
-  color: #c084fc;
-  background: rgba(192, 132, 252, 0.12);
-}
-
 .room-message-meta-tail {
   flex: 0 0 auto;
   display: inline-flex;
