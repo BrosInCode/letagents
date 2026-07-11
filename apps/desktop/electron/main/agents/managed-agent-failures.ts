@@ -12,7 +12,7 @@ type FailureRule = {
 const BLOCKING_FAILURES: FailureRule[] = [
   {
     code: "quota_exhausted",
-    pattern: /(?:usage|spend|rate|credit|token)\s+limit|quota\s+(?:exhausted|reached)|too many requests/i,
+    pattern: /(?:usage|spend|credit)\s+limit|quota\s+(?:exhausted|reached)|(?:credits?|balance)\s+(?:exhausted|depleted)/i,
     message: "The provider usage limit was reached. Change the model or quota settings, then retry.",
   },
   {

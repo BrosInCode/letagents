@@ -110,7 +110,9 @@ import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import {
   disconnectDesktopManagedWorker,
+  endDesktopManagedWorkerSession,
   normalizeDisplayText,
+  pauseDesktopManagedWorkerDelivery,
   publishDesktopManagedWorkerFailure,
   publishDesktopManagedWorkerReply,
   registerDesktopManagedWorker,
@@ -142,7 +144,6 @@ import {
   listDesktopManagedCodexLiveSessions,
   listDesktopManagedCodexLiveSessionsForProvider,
   listStoredCodexLiveSessions,
-  markAgentSessionEnded,
   managedAgentDeliveryMode,
   saveCodexLiveSession,
   toPublicManagedAgentSession,
@@ -425,7 +426,7 @@ function markSpawnedCodexAppServersOffline(reason: string): void {
         updated_at: new Date().toISOString(),
       }));
     }
-    markAgentSessionEnded(session.agent_session_id);
+    endDesktopManagedWorkerSession(session.agent_session_id);
     clearCodexRuntimeReasoningState(session.session_id);
   }
 }
@@ -522,7 +523,7 @@ function smokeManagedCodexInspection(
 
 function killOwnedAppServer(session: DesktopCodexLiveSessionState): void {
   clearCodexRuntimeReasoningState(session.session_id);
-  markAgentSessionEnded(session.agent_session_id);
+  endDesktopManagedWorkerSession(session.agent_session_id);
   if (!session.launched_server || !session.server_pid) {
     return;
   }
@@ -1204,7 +1205,7 @@ export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamE
 async function disconnectCodexWorkerForStopPhrase(
   worker: StoredAgentSessionState | null,
 ): Promise<void> {
-  markAgentSessionEnded(worker?.session_id ?? null);
+  endDesktopManagedWorkerSession(worker?.session_id ?? null);
   const live = worker?.session_id
     ? listStoredCodexLiveSessions().find((session) => session.agent_session_id === worker.session_id) ?? null
     : null;
@@ -1264,9 +1265,13 @@ const codexEventTurnEngine = createManagedAgentEventTurnEngine<
   shouldPreemptOnEnqueue: () => false,
   replyChangeSessionKey: codexReplyChangeSessionKey,
   disconnectWorker: disconnectCodexWorkerForStopPhrase,
+  onSessionUnavailable: (session) => {
+    const worker = getStoredAgentSession(session.agent_session_id);
+    if (worker) void pauseDesktopManagedWorkerDelivery(worker, "Provider turn failed; waiting for recovery").catch(() => undefined);
+  },
   onSessionResumed: (session) => {
     const worker = getStoredAgentSession(session.agent_session_id);
-    if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker);
+    if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker, session.room_identifier);
   },
   maxConsecutiveTurnErrors: Number.POSITIVE_INFINITY,
   // Codex historically honored the stop phrase after a non-throwing timeout

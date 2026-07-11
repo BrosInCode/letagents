@@ -79,6 +79,7 @@ import { createManagedAgentEventTurnEngine } from "./managed-agent-event-turn-en
 import {
   disconnectDesktopManagedWorker,
   normalizeDisplayText,
+  pauseDesktopManagedWorkerDelivery,
   publishDesktopManagedWorkerFailure,
   publishDesktopManagedWorkerReply,
   registerDesktopManagedWorker,
@@ -220,9 +221,13 @@ export function createDesktopClaudeCodeRuntime(
     shouldPreemptOnEnqueue: () => true,
     replyChangeSessionKey: claudeCodeReplyChangeSessionKey,
     disconnectWorker: (session) => disconnectWorker(session),
+    onSessionUnavailable: (session) => {
+      const worker = getStoredAgentSession(session.agent_session_id);
+      if (worker) void pauseDesktopManagedWorkerDelivery(worker, "Provider turn failed; waiting for recovery").catch(() => undefined);
+    },
     onSessionResumed: (session) => {
       const worker = getStoredAgentSession(session.agent_session_id);
-      if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker);
+      if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker, session.room_identifier);
     },
     onSessionParked: (sessionId) =>
       clearPendingPermissionRequestsForSession(

@@ -303,19 +303,44 @@ export async function registerDesktopManagedWorker(
     agentInstanceId,
     displayName: input.displayName,
   }));
-  startDesktopManagedWorkerDeliveryHeartbeat(session);
+  startDesktopManagedWorkerDeliveryHeartbeat(session, input.roomIdentifier);
   return session;
 }
 
-function stopDesktopManagedWorkerDeliveryHeartbeat(sessionId: string): void {
+export function stopDesktopManagedWorkerDeliveryHeartbeat(sessionId: string): void {
   const timer = desktopDeliveryHeartbeatTimers.get(sessionId);
   if (timer) clearInterval(timer);
   desktopDeliveryHeartbeatTimers.delete(sessionId);
 }
 
-async function postDesktopManagedWorkerDeliveryHeartbeat(session: StoredAgentSessionState): Promise<void> {
+export function endDesktopManagedWorkerSession(sessionId: string | null | undefined): void {
+  if (!sessionId) return;
+  stopDesktopManagedWorkerDeliveryHeartbeat(sessionId);
+  markAgentSessionEnded(sessionId);
+}
+
+async function postDesktopManagedWorkerDeliveryHeartbeat(
+  session: StoredAgentSessionState,
+  streamRoomIdentifier: string,
+): Promise<void> {
   if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) return;
   const { apiFetch } = await import("../auth.js");
+  const { getActiveRoomIdentifier } = await import("../room-stream.js");
+  if (getActiveRoomIdentifier()?.trim() !== streamRoomIdentifier.trim()) {
+    await apiFetch<Record<string, unknown>>(
+      `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-pause`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+        body: JSON.stringify({
+          agent_session_id: session.session_id,
+          agent_session_token: session.session_token,
+          status_text: "Room is not open on the managing desktop",
+        }),
+      },
+    );
+    return;
+  }
   await apiFetch<Record<string, unknown>>(
     `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-heartbeat`,
     {
@@ -329,11 +354,14 @@ async function postDesktopManagedWorkerDeliveryHeartbeat(session: StoredAgentSes
   );
 }
 
-export function startDesktopManagedWorkerDeliveryHeartbeat(session: StoredAgentSessionState): void {
+export function startDesktopManagedWorkerDeliveryHeartbeat(
+  session: StoredAgentSessionState,
+  streamRoomIdentifier = session.room_id,
+): void {
   stopDesktopManagedWorkerDeliveryHeartbeat(session.session_id);
-  void postDesktopManagedWorkerDeliveryHeartbeat(session).catch(() => undefined);
+  void postDesktopManagedWorkerDeliveryHeartbeat(session, streamRoomIdentifier).catch(() => undefined);
   const timer = setInterval(() => {
-    void postDesktopManagedWorkerDeliveryHeartbeat(session).catch(() => undefined);
+    void postDesktopManagedWorkerDeliveryHeartbeat(session, streamRoomIdentifier).catch(() => undefined);
   }, DESKTOP_DELIVERY_HEARTBEAT_MS);
   timer.unref?.();
   desktopDeliveryHeartbeatTimers.set(session.session_id, timer);

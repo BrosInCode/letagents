@@ -50,6 +50,7 @@ import {
 } from "./managed-agent-reply-changes.js";
 import {
   disconnectDesktopManagedWorker,
+  pauseDesktopManagedWorkerDelivery,
   publishDesktopManagedWorkerFailure,
   publishDesktopManagedWorkerReply,
   registerDesktopManagedWorker,
@@ -182,9 +183,13 @@ export function createDesktopCursorRuntime(
       !cursorLaunchOptionsForPermissionProfile(session.permission_profile_id).force,
     replyChangeSessionKey: cursorReplyChangeSessionKey,
     disconnectWorker: (session) => disconnectWorker(session),
+    onSessionUnavailable: (session) => {
+      const worker = getStoredAgentSession(session.agent_session_id);
+      if (worker) void pauseDesktopManagedWorkerDelivery(worker, "Provider turn failed; waiting for recovery").catch(() => undefined);
+    },
     onSessionResumed: (session) => {
       const worker = getStoredAgentSession(session.agent_session_id);
-      if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker);
+      if (worker) startDesktopManagedWorkerDeliveryHeartbeat(worker, session.room_identifier);
     },
   });
 

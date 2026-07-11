@@ -145,6 +145,7 @@ export interface ManagedAgentEventTurnEngineAdapter<
   onSessionParked?(sessionId: string): void;
   /** Extra per-provider cleanup when a delivery finishes (success or not). */
   onDeliverFinally?(sessionId: string): void;
+  onSessionUnavailable?(session: TSession): void;
   onSessionResumed?(session: TSession): void;
 }
 
@@ -384,6 +385,9 @@ export function createManagedAgentEventTurnEngine<
           pending_event: blocked ? event : current.pending_event ?? null,
         }));
         adapter.emitSessionUpdate(updated);
+        if (!blocked && !wasPreempted && !aborted && updated) {
+          adapter.onSessionUnavailable?.(updated);
+        }
         if (blocked && updated && failure && adapter.publishFailure) {
           try {
             await adapter.publishFailure({ session: updated, event, storage, failure });
@@ -407,6 +411,7 @@ export function createManagedAgentEventTurnEngine<
         updated_at: adapter.now(),
       })) ?? latest;
       adapter.emitSessionUpdate(completed);
+      adapter.onSessionResumed?.(completed);
       await adapter.publishReply({
         session: completed,
         event,

@@ -113,8 +113,10 @@
                 >
                   <strong>Could not reply</strong>
                   <p>{{ session.failure.message }}</p>
-                  <small>Update the provider settings, then retry the failed message.</small>
+                  <small v-if="session.status === 'blocked'">Update the provider settings, then retry the failed message.</small>
+                  <small v-else>LetAgents will try again when the agent receives another room message.</small>
                   <button
+                    v-if="session.status === 'blocked'"
                     type="button"
                     :disabled="retryingSessionId === session.id"
                     data-testid="desktop-agent-detail-retry-managed-agent"
