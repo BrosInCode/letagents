@@ -1,4 +1,5 @@
 import { parseRepoRoomName } from "../repo-workflow.js";
+import { githubRequest } from "./app-client.js";
 
 interface GitHubRepo {
   private?: boolean;
@@ -132,13 +133,11 @@ async function fetchGitHubRepo(
     throw new Error("Room is not a GitHub repo locator");
   }
 
-  return fetchImpl(buildGitHubApiUrl(`/repos/${repo.owner}/${repo.repo}`), {
-    headers: {
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      Accept: "application/vnd.github+json",
-      "User-Agent": "letagents",
-    },
-    signal: AbortSignal.timeout(GITHUB_ACCESS_FETCH_TIMEOUT_MS),
+  return githubRequest({
+    url: buildGitHubApiUrl(`/repos/${repo.owner}/${repo.repo}`),
+    token: accessToken,
+    fetchImpl,
+    timeoutMs: GITHUB_ACCESS_FETCH_TIMEOUT_MS,
   });
 }
 
@@ -210,19 +209,14 @@ export async function isGitHubRepoCollaborator(input: {
     return true;
   }
 
-  const permissionResponse = await doFetch(
-    buildGitHubApiUrl(
+  const permissionResponse = await githubRequest({
+    url: buildGitHubApiUrl(
       `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
     ),
-    {
-      headers: {
-        Authorization: `Bearer ${input.accessToken}`,
-        Accept: "application/vnd.github+json",
-        "User-Agent": "letagents",
-      },
-      signal: AbortSignal.timeout(GITHUB_ACCESS_FETCH_TIMEOUT_MS),
-    }
-  );
+    token: input.accessToken,
+    fetchImpl: doFetch,
+    timeoutMs: GITHUB_ACCESS_FETCH_TIMEOUT_MS,
+  });
 
   if (!permissionResponse.ok) {
     writeCache(false);

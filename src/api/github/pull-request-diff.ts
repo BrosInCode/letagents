@@ -1,11 +1,7 @@
+import { githubRequest, mintInstallationToken } from "./app-client.js";
 import { getGitHubAppConfig, type GitHubAppConfig } from "./config.js";
-import { createGitHubAppJwt } from "./lease-enforcement.js";
 
 const GITHUB_API = "https://api.github.com";
-const GITHUB_HEADERS = {
-  "User-Agent": "letagents",
-  "X-GitHub-Api-Version": "2022-11-28",
-};
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_DIFF_BYTES = 5 * 1024 * 1024; // 5 MiB
 // Exact base content types accepted for a PR diff (parameters like charset stripped).
@@ -43,21 +39,6 @@ function mapStatusToError(status: number, context: string): PullRequestDiffError
   return new PullRequestDiffError("upstream", `${context}: ${status}`);
 }
 
-async function githubFetch(
-  fetchImpl: typeof fetch,
-  url: string,
-  accept: string,
-  token: string,
-  signal: AbortSignal,
-  method: "GET" | "POST" = "GET",
-): Promise<Response> {
-  return fetchImpl(url, {
-    method,
-    headers: { ...GITHUB_HEADERS, Accept: accept, Authorization: `Bearer ${token}` },
-    signal,
-  });
-}
-
 // Read the body with a hard byte cap, aborting before buffering an oversized diff.
 // The stream is bound to the operation's abort signal, so the overall deadline also
 // bounds this read (a slow/stalled body triggers the outer timeout).
@@ -92,31 +73,6 @@ async function readCappedText(response: Response, maxBytes: number): Promise<str
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function mintInstallationToken(
-  config: GitHubAppConfig,
-  installationId: string,
-  fetchImpl: typeof fetch,
-  signal: AbortSignal,
-): Promise<string> {
-  if (!config.appId || !config.privateKey) {
-    throw new PullRequestDiffError("upstream", "GitHub App appId and privateKey are required");
-  }
-  const jwt = createGitHubAppJwt({ appId: config.appId, privateKey: config.privateKey });
-  const response = await githubFetch(
-    fetchImpl,
-    `${GITHUB_API}/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
-    "application/vnd.github+json",
-    jwt,
-    signal,
-    "POST",
-  );
-  if (!response.ok) throw mapStatusToError(response.status, "installation token");
-  const json = (await response.json()) as { token?: unknown };
-  const token = typeof json.token === "string" ? json.token : "";
-  if (!token) throw new PullRequestDiffError("upstream", "installation token response missing token");
-  return token;
-}
-
 async function fetchHeadSha(
   fetchImpl: typeof fetch,
   owner: string,
@@ -125,13 +81,13 @@ async function fetchHeadSha(
   token: string,
   signal: AbortSignal,
 ): Promise<string> {
-  const response = await githubFetch(
-    fetchImpl,
-    `${GITHUB_API}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`,
-    "application/vnd.github+json",
+  const response = await githubRequest({
+    url: `${GITHUB_API}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`,
+    accept: "application/vnd.github+json",
     token,
+    fetchImpl,
     signal,
-  );
+  });
   if (!response.ok) throw mapStatusToError(response.status, "pull request");
   const json = (await response.json()) as { head?: { sha?: unknown } };
   const sha = typeof json.head?.sha === "string" ? json.head.sha : "";
@@ -168,16 +124,21 @@ export async function fetchPullRequestUnifiedDiff(input: {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const token = await mintInstallationToken(config, input.installationId, fetchImpl, controller.signal);
+    const token = await mintInstallationToken({
+      config,
+      installationId: input.installationId,
+      fetchImpl,
+      signal: controller.signal,
+    });
     const shaBefore = await fetchHeadSha(fetchImpl, input.owner, input.repo, input.number, token, controller.signal);
 
-    const diffResponse = await githubFetch(
-      fetchImpl,
-      `${GITHUB_API}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/pulls/${input.number}`,
-      "application/vnd.github.v3.diff",
+    const diffResponse = await githubRequest({
+      url: `${GITHUB_API}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/pulls/${input.number}`,
+      accept: "application/vnd.github.v3.diff",
       token,
-      controller.signal,
-    );
+      fetchImpl,
+      signal: controller.signal,
+    });
     if (!diffResponse.ok) throw mapStatusToError(diffResponse.status, "pull request diff");
     const baseType = (diffResponse.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
     if (!ALLOWED_DIFF_CONTENT_TYPES.has(baseType)) {
