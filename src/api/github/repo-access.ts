@@ -29,6 +29,7 @@ interface RepoRoomAccessDecisionDeps {
     roomName: string;
     login: string;
     accessToken: string;
+    bypassCache?: boolean;
   }) => Promise<boolean>;
 }
 
@@ -119,18 +120,25 @@ function buildGitHubApiUrl(pathname: string): string {
   return new URL(pathname.replace(/^\/+/, ""), `${getGitHubApiBaseUrl()}/`).toString();
 }
 
-async function fetchGitHubRepo(roomName: string, accessToken?: string): Promise<Response> {
+const GITHUB_ACCESS_FETCH_TIMEOUT_MS = 10_000;
+
+async function fetchGitHubRepo(
+  roomName: string,
+  accessToken?: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
   const repo = parseGitHubRepoName(roomName);
   if (!repo) {
     throw new Error("Room is not a GitHub repo locator");
   }
 
-  return fetch(buildGitHubApiUrl(`/repos/${repo.owner}/${repo.repo}`), {
+  return fetchImpl(buildGitHubApiUrl(`/repos/${repo.owner}/${repo.repo}`), {
     headers: {
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       Accept: "application/vnd.github+json",
       "User-Agent": "letagents",
     },
+    signal: AbortSignal.timeout(GITHUB_ACCESS_FETCH_TIMEOUT_MS),
   });
 }
 
@@ -169,28 +177,40 @@ export async function isGitHubRepoCollaborator(input: {
   roomName: string;
   login: string;
   accessToken: string;
+  // When true, skip the positive-access cache entirely (read AND write) so the
+  // decision reflects live GitHub access — used for source-diff requests where a
+  // revoked collaborator must lose access immediately, not up to 30 minutes later.
+  bypassCache?: boolean;
+  // Injectable for tests; production uses the global fetch (bounded by a deadline).
+  fetchImpl?: typeof fetch;
 }): Promise<boolean> {
-  const cached = getCachedRepoAccess(input.roomName, input.login);
-  if (cached !== null) {
-    return cached;
+  if (!input.bypassCache) {
+    const cached = getCachedRepoAccess(input.roomName, input.login);
+    if (cached !== null) {
+      return cached;
+    }
   }
+  const writeCache = (allowed: boolean): void => {
+    if (!input.bypassCache) setCachedRepoAccess(input.roomName, input.login, allowed);
+  };
+  const doFetch = input.fetchImpl ?? fetch;
 
   const repo = parseGitHubRepoName(input.roomName);
   if (!repo) return false;
 
-  const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken);
+  const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
   if (!ownerResponse.ok) {
-    setCachedRepoAccess(input.roomName, input.login, false);
+    writeCache(false);
     return false;
   }
 
   const repoPayload = (await ownerResponse.json()) as GitHubRepo;
   if (repoPayload.owner?.login?.toLowerCase() === input.login.toLowerCase()) {
-    setCachedRepoAccess(input.roomName, input.login, true);
+    writeCache(true);
     return true;
   }
 
-  const permissionResponse = await fetch(
+  const permissionResponse = await doFetch(
     buildGitHubApiUrl(
       `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
     ),
@@ -200,17 +220,18 @@ export async function isGitHubRepoCollaborator(input: {
         Accept: "application/vnd.github+json",
         "User-Agent": "letagents",
       },
+      signal: AbortSignal.timeout(GITHUB_ACCESS_FETCH_TIMEOUT_MS),
     }
   );
 
   if (!permissionResponse.ok) {
-    setCachedRepoAccess(input.roomName, input.login, false);
+    writeCache(false);
     return false;
   }
 
   const permissionPayload = (await permissionResponse.json()) as GitHubPermissionResponse;
   const allowed = Boolean(permissionPayload.permission);
-  setCachedRepoAccess(input.roomName, input.login, allowed);
+  writeCache(allowed);
   return allowed;
 }
 
@@ -257,6 +278,7 @@ export async function isGitHubRepoAdmin(input: {
 export async function resolveGitHubRepoRoomAccessDecision(input: {
   roomName: string;
   sessionAccount: RepoRoomAccessIdentity | null | undefined;
+  freshCollaboratorCheck?: boolean;
 }, deps: RepoRoomAccessDecisionDeps = {
   getVisibility: getGitHubRepoVisibility,
   isCollaborator: isGitHubRepoCollaborator,
@@ -288,6 +310,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
     roomName: input.roomName,
     login: input.sessionAccount.login,
     accessToken: input.sessionAccount.provider_access_token,
+    bypassCache: input.freshCollaboratorCheck,
   });
 
   return allowed ? { kind: "allow" } : { kind: "private_repo_no_access" };

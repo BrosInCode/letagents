@@ -3,6 +3,9 @@ import type { Express } from "express";
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
 import {
   assignProjectAdminIfRoomHasNoAdmins,
+  getGitHubAppInstallationById,
+  getGitHubAppRepositoryByRoomId,
+  getGitHubRoomEvents,
   getGitRoomBindingForRoom,
   getGitRoomBindingsForRooms,
   getProjectById,
@@ -12,6 +15,7 @@ import {
   updateProjectDisplayName,
   upsertRoomSharedArtifact,
 } from "../db.js";
+import { fetchPullRequestUnifiedDiff } from "../github/pull-request-diff.js";
 import { toGitHubWebhookId } from "../github/app-sync.js";
 import {
   getProjectAccessRoomId,
@@ -81,6 +85,10 @@ import {
   registerRoomArtifactRoutes,
   type RoomArtifactRouteDeps,
 } from "../routes/rooms/artifacts.js";
+import {
+  registerRoomPullRequestDiffRoutes,
+  type RoomPullRequestDiffRouteDeps,
+} from "../routes/rooms/pull-request-diff.js";
 import {
   registerRoomBoardRoutes,
   type RoomBoardRouteDeps,
@@ -328,6 +336,16 @@ export function registerApiRoutes(app: Express): void {
     upsertRoomSharedArtifact,
   } satisfies RoomArtifactRouteDeps;
 
+  const roomPullRequestDiffRouteDeps = {
+    resolveCanonicalRoomRequestId,
+    resolveRoomOrReply,
+    requireParticipant,
+    getGitHubAppRepositoryByRoomId,
+    getGitHubAppInstallationById,
+    getGitHubRoomEvents,
+    fetchPullRequestUnifiedDiff,
+  } satisfies RoomPullRequestDiffRouteDeps;
+
   const roomBoardRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
@@ -404,6 +422,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomBoardRoutes(app, roomBoardRouteDeps);
   registerRoomEventRoutes(app, roomEventRouteDeps);
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
+  registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
     createListing,

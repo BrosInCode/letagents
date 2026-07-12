@@ -43,6 +43,7 @@ export interface ProjectRepoAccessDeps {
   resolveRepoRoomAccessDecision(input: {
     roomName: string;
     sessionAccount: RequestAccount;
+    freshCollaboratorCheck?: boolean;
   }): Promise<RepoRoomAccessDecision>;
 }
 
@@ -161,6 +162,7 @@ export function replyRepoRoomAccessDecision(
 export async function resolveRepoRoomAccessDecision(input: {
   roomName: string;
   sessionAccount: RequestAccount;
+  freshCollaboratorCheck?: boolean;
 }): Promise<RepoRoomAccessDecision> {
   if (!isRepoBackedRoomId(input.roomName)) {
     return { kind: "allow" };
@@ -172,6 +174,7 @@ export async function resolveRepoRoomAccessDecision(input: {
 export async function resolveProjectRepoRoomAccessDecision(input: {
   project: Project;
   sessionAccount: RequestAccount;
+  freshCollaboratorCheck?: boolean;
 }, deps: ProjectRepoAccessDeps = {
   getGitRoomBindingForRoom,
   resolveRepoRoomAccessDecision,
@@ -195,6 +198,7 @@ export async function resolveProjectRepoRoomAccessDecision(input: {
     decision: await deps.resolveRepoRoomAccessDecision({
       roomName: target.repoRoomName,
       sessionAccount: input.sessionAccount,
+      freshCollaboratorCheck: input.freshCollaboratorCheck,
     }),
   };
 }
@@ -323,11 +327,13 @@ export async function requireParticipant(
 export async function requireGitRoomParticipant(
   req: AuthenticatedRequest,
   res: Response,
-  project: Project
+  project: Project,
+  options: { freshCollaboratorCheck?: boolean } = {}
 ): Promise<boolean> {
   const accessDecision = await resolveProjectRepoRoomAccessDecision({
     project,
     sessionAccount: req.sessionAccount,
+    freshCollaboratorCheck: options.freshCollaboratorCheck,
   });
 
   if (!accessDecision.isRepoBacked || accessDecision.decision.kind === "allow") {
