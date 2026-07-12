@@ -106,9 +106,12 @@
       :participants="roomParticipants"
       :presence="roomPresence"
       :local-agent-work="localAgentWork"
+      :interaction-prompts="pendingInteractionPrompts"
+      :interaction-error="composerInteractionError"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
       :resolving-permission-ids="resolvingComposerPermissionIds"
+      :resolving-interaction-ids="resolvingComposerInteractionIds"
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
       :search-query="searchQuery"
@@ -122,8 +125,10 @@
       @open-agent-reasoning-fallback="openAgentReasoningFallback"
       @open-agent-detail="openAgentDetail"
       @open-add-agent="openAddAgentModal"
+      @open-interaction-url="openComposerInteractionUrl"
       @open-permission-detail="openComposerPermissionDetail"
       @resolve-permission="resolveComposerPermission"
+      @resolve-interaction="resolveComposerInteraction"
       @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
@@ -284,6 +289,8 @@ import type {
   DesktopBoardSettingsSummary,
   DesktopFocusRoomInfo,
   DesktopGitHubEventsPage,
+  DesktopManagedAgentInteractionAction,
+  DesktopManagedAgentInteractionValue,
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
@@ -315,8 +322,10 @@ import {
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   pendingManagedAgentPermissionApprovals,
+  pendingManagedAgentInteractions,
   preferredManagedAgentRepoRootPath,
   type ManagedAgentPermissionApproval,
+  type ManagedAgentInteractionPrompt,
   managedAgentSessionListsEqual,
   withRoomManagedAgentSessions,
   withUpsertedManagedAgentSession,
@@ -453,6 +462,8 @@ const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const composerPermissionError = ref<string | null>(null);
 const resolvingComposerPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
+const composerInteractionError = ref<string | null>(null);
+const resolvingComposerInteractionIds = ref<Record<string, DesktopManagedAgentInteractionAction>>({});
 let githubEventsRefreshTimer: number | null = null;
 const composerGitHubEventTimers = new Map<string, number>();
 let inboxRefreshTimer: number | null = null;
@@ -611,6 +622,9 @@ const localAgentWork = computed(() =>
 const pendingPermissionApprovals = computed(() =>
   pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)
 );
+const pendingInteractionPrompts = computed(() =>
+  pendingManagedAgentInteractions(roomManagedAgentSessions.value, props.room.identifier)
+);
 const rawInboxItems = computed(() =>
   buildDesktopInboxItems({
     filter: inboxFilter.value,
@@ -651,6 +665,8 @@ watch(() => props.room.identifier, () => {
   managedAgentSessions.value = [];
   composerPermissionError.value = null;
   resolvingComposerPermissionIds.value = {};
+  composerInteractionError.value = null;
+  resolvingComposerInteractionIds.value = {};
   eventsTaskFilterId.value = null;
   eventsSelectedEventId.value = null;
   boardSelectedTaskId.value = null;
@@ -1530,6 +1546,53 @@ async function resolveComposerPermission(
   } finally {
     const { [approval.id]: _ignored, ...remaining } = resolvingComposerPermissionIds.value;
     resolvingComposerPermissionIds.value = remaining;
+  }
+}
+
+async function resolveComposerInteraction(
+  prompt: ManagedAgentInteractionPrompt,
+  action: DesktopManagedAgentInteractionAction,
+  answers: Record<string, DesktopManagedAgentInteractionValue>,
+): Promise<void> {
+  if (resolvingComposerInteractionIds.value[prompt.id]) return;
+  resolvingComposerInteractionIds.value = {
+    ...resolvingComposerInteractionIds.value,
+    [prompt.id]: action,
+  };
+  composerInteractionError.value = null;
+  try {
+    const result = await desktopIpc.workers.resolveManagedAgentInteraction({
+      requestId: prompt.request.id,
+      sessionId: prompt.request.sessionId,
+      action,
+      answers: action === "submit" ? answers : {},
+    });
+    if (!result.accepted) {
+      throw new Error(result.message);
+    }
+    if (result.session) {
+      upsertManagedAgentSession(result.session);
+    } else {
+      await refreshManagedAgentSessions();
+    }
+  } catch (error) {
+    composerInteractionError.value = error instanceof Error
+      ? error.message
+      : "Could not answer this agent request.";
+  } finally {
+    const { [prompt.id]: _ignored, ...remaining } = resolvingComposerInteractionIds.value;
+    resolvingComposerInteractionIds.value = remaining;
+  }
+}
+
+async function openComposerInteractionUrl(prompt: ManagedAgentInteractionPrompt): Promise<void> {
+  composerInteractionError.value = null;
+  try {
+    await desktopIpc.workers.openManagedAgentInteractionUrl(prompt.request.id, prompt.request.sessionId);
+  } catch (error) {
+    composerInteractionError.value = error instanceof Error
+      ? error.message
+      : "Could not open the authentication page.";
   }
 }
 

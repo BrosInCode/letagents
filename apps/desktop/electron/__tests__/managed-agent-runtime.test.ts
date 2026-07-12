@@ -250,6 +250,28 @@ test("registry rejects invalid managed-agent permission behavior", async () => {
   assert.equal(called, false);
 });
 
+test("registry routes managed-agent interaction decisions to the owning runtime", async () => {
+  const registry = new DesktopManagedAgentRuntimeRegistry();
+  const codex = stubRuntime("codex");
+  codex.resolveInteractionRequest = async (input) => ({
+    requestId: input.requestId,
+    accepted: true,
+    message: "answered",
+    session: session("codex"),
+  });
+  registry.register(codex);
+
+  const result = await registry.resolveInteractionRequest({
+    requestId: "interaction_1",
+    sessionId: "session_1",
+    action: "submit",
+    answers: { decision: "continue" },
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.session?.providerId, "codex");
+});
+
 test("registry rejects duplicate runtime providers", () => {
   const registry = new DesktopManagedAgentRuntimeRegistry();
   registry.register(stubRuntime("codex"));

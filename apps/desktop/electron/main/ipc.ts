@@ -17,6 +17,8 @@ import type {
   DesktopAppAgentSettingsStatus,
   DesktopManagedAgentChangeSummary,
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentInteractionDecisionInput,
+  DesktopManagedAgentInteractionDecisionResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
   DesktopManagedAgentRetryInput,
@@ -124,9 +126,11 @@ import {
 import { listDesktopAgentProviderModels } from "./agents/managed-agent-models.js";
 import {
   getDesktopManagedAgentChangeSummary,
+  getDesktopManagedAgentInteractionExternalUrl,
   inspectDesktopManagedAgentSession,
   listDesktopManagedAgentSessions,
   resolveDesktopManagedAgentPermissionRequest,
+  resolveDesktopManagedAgentInteractionRequest,
   retryDesktopManagedAgent,
   startDesktopManagedAgent,
   stopDesktopManagedAgent,
@@ -836,6 +840,21 @@ export function registerDesktopIpcHandlers(
       input: DesktopManagedAgentPermissionDecisionInput,
     ): Promise<DesktopManagedAgentPermissionDecisionResult> =>
       resolveDesktopManagedAgentPermissionRequest(input),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:resolve-managed-agent-interaction",
+    async (
+      _event,
+      input: DesktopManagedAgentInteractionDecisionInput,
+    ): Promise<DesktopManagedAgentInteractionDecisionResult> =>
+      resolveDesktopManagedAgentInteractionRequest(input),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:open-managed-agent-interaction-url",
+    async (_event, requestId: string, sessionId: string): Promise<void> => {
+      const url = getDesktopManagedAgentInteractionExternalUrl(requestId, sessionId);
+      await openAllowedExternalUrl(url, [new URL(url).hostname]);
+    },
   );
   targetIpcMain.handle(
     "desktop:workers:list-agent-providers",

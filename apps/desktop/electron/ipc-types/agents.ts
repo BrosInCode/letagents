@@ -90,6 +90,7 @@ export interface DesktopAgentProviderSetupResult {
 export type DesktopManagedAgentSessionStatus =
   | "starting"
   | "running"
+  | "waiting_for_input"
   | "completed"
   | "blocked"
   | "interrupted"
@@ -216,6 +217,70 @@ export interface DesktopManagedAgentPermissionDecisionResult {
   session: DesktopManagedAgentSession | null;
 }
 
+export type DesktopManagedAgentInteractionKind =
+  | "question"
+  | "form"
+  | "authentication";
+
+export type DesktopManagedAgentInteractionFieldType =
+  | "text"
+  | "secret"
+  | "number"
+  | "boolean"
+  | "select"
+  | "multiselect";
+
+export type DesktopManagedAgentInteractionValue = string | number | boolean | string[] | null;
+
+export interface DesktopManagedAgentInteractionOption {
+  value: string;
+  label: string;
+  description: string | null;
+}
+
+export interface DesktopManagedAgentInteractionField {
+  id: string;
+  label: string;
+  description: string | null;
+  type: DesktopManagedAgentInteractionFieldType;
+  required: boolean;
+  options: DesktopManagedAgentInteractionOption[];
+  defaultValue: DesktopManagedAgentInteractionValue;
+  minimum: number | null;
+  maximum: number | null;
+}
+
+export interface DesktopManagedAgentInteractionRequest {
+  id: string;
+  providerId: DesktopAgentProviderId;
+  sessionId: string;
+  kind: DesktopManagedAgentInteractionKind;
+  title: string;
+  description: string | null;
+  sourceLabel: string | null;
+  fields: DesktopManagedAgentInteractionField[];
+  sensitive: boolean;
+  hasExternalUrl: boolean;
+  requestedAt: string;
+  expiresAt: string;
+}
+
+export type DesktopManagedAgentInteractionAction = "submit" | "decline" | "cancel";
+
+export interface DesktopManagedAgentInteractionDecisionInput {
+  requestId: string;
+  sessionId?: string | null;
+  action: DesktopManagedAgentInteractionAction;
+  answers?: Record<string, DesktopManagedAgentInteractionValue>;
+}
+
+export interface DesktopManagedAgentInteractionDecisionResult {
+  requestId: string;
+  accepted: boolean;
+  message: string;
+  session: DesktopManagedAgentSession | null;
+}
+
 export type DesktopManagedAgentChangeFileStatus =
   | "added"
   | "modified"
@@ -301,6 +366,7 @@ export interface DesktopManagedAgentSession {
   reasoningSessionId: string | null;
   activeWork: DesktopManagedAgentActiveWork | null;
   pendingPermissionRequests: DesktopManagedAgentPermissionRequest[];
+  pendingInteractionRequests?: DesktopManagedAgentInteractionRequest[];
   startedAt: string;
   updatedAt: string;
   lastError: string | null;

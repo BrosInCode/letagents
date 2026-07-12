@@ -9,7 +9,7 @@ function getWebSocketCtor(): typeof WebSocket {
 const DEFAULT_RPC_REQUEST_TIMEOUT_MS = 30_000;
 
 interface RpcResultEnvelope {
-  id?: number;
+  id?: number | string;
   method?: string;
   params?: unknown;
   error?: { message?: string } | unknown;
@@ -20,6 +20,14 @@ export interface RpcNotification {
   method: string;
   params?: unknown;
 }
+
+export interface RpcServerRequest {
+  id: number | string;
+  method: string;
+  params?: unknown;
+}
+
+export type RpcServerRequestHandler = (request: RpcServerRequest) => Promise<unknown>;
 
 export interface ThreadStartResult {
   thread?: { id?: string };
@@ -66,6 +74,7 @@ export class CodexRpcClient {
     private readonly serverUrl: string,
     private readonly onNotification?: (notification: RpcNotification) => void,
     private readonly requestTimeoutMs = DEFAULT_RPC_REQUEST_TIMEOUT_MS,
+    private readonly onServerRequest?: RpcServerRequestHandler,
   ) {}
 
   async connect(): Promise<void> {
@@ -169,6 +178,19 @@ export class CodexRpcClient {
       return;
     }
 
+    if (typeof message.method === "string") {
+      void this.handleServerRequest({
+        id: message.id,
+        method: message.method,
+        params: message.params,
+      });
+      return;
+    }
+
+    if (typeof message.id !== "number") {
+      return;
+    }
+
     const pending = this.pending.get(message.id);
     if (!pending) {
       return;
@@ -187,6 +209,33 @@ export class CodexRpcClient {
     }
 
     pending.resolve(message.result);
+  }
+
+  private async handleServerRequest(request: RpcServerRequest): Promise<void> {
+    if (!this.onServerRequest) {
+      this.send({
+        id: request.id,
+        error: { code: -32601, message: `Unsupported Codex app-server request: ${request.method}` },
+      });
+      return;
+    }
+
+    try {
+      const result = await this.onServerRequest(request);
+      this.send({ id: request.id, result: result ?? {} });
+    } catch (error) {
+      try {
+        this.send({
+          id: request.id,
+          error: {
+            code: -32000,
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+      } catch {
+        // The originating socket may close while a human is answering.
+      }
+    }
   }
 
   private notify(method: string, params?: unknown): void {
