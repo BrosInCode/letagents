@@ -441,7 +441,7 @@
   opacity: 0.62;
 }
 
-.room-chat-message.is-ambient-system-message :is(.room-message-owner, .room-message-ide, .room-message-provenance) {
+.room-chat-message.is-ambient-system-message :is(.room-message-owner, .room-provider-badge, .room-message-provenance) {
   display: none;
 }
 

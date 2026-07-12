@@ -7,13 +7,13 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import antigravityIcon from "../../../assets/harness-icons/antigravity.png";
-import claudeCodeIcon from "../../../assets/harness-icons/claude-code.png";
-import codexIcon from "../../../assets/harness-icons/codex.png";
-import cursorIcon from "../../../assets/harness-icons/cursor.png";
+import antigravityIcon from "../../../../assets/harness-icons/antigravity.png";
+import claudeCodeIcon from "../../../../assets/harness-icons/claude-code.png";
+import codexIcon from "../../../../assets/harness-icons/codex.png";
+import cursorIcon from "../../../../assets/harness-icons/cursor.png";
 
 const props = defineProps<{ label: string }>();
-type ProviderKey = "codex" | "claude" | "antigravity" | "cursor" | "other";
+type ProviderKey = "codex" | "claude" | "antigravity" | "cursor" | "open-model" | "other";
 
 const providerKey = computed<ProviderKey>(() => {
   const normalized = props.label.trim().toLowerCase();
@@ -21,16 +21,19 @@ const providerKey = computed<ProviderKey>(() => {
   if (normalized === "claude" || normalized === "claude code") return "claude";
   if (normalized === "antigravity") return "antigravity";
   if (normalized === "cursor") return "cursor";
+  if (normalized === "open model" || normalized === "open-model") return "open-model";
   return "other";
 });
-const label = computed(() => providerKey.value === "other" ? "Other" : props.label.trim() || "Other");
-const iconSources: Record<Exclude<ProviderKey, "other">, string> = {
+const label = computed(() => props.label.trim() || "Other");
+const iconSources: Record<Exclude<ProviderKey, "open-model" | "other">, string> = {
   codex: codexIcon,
   claude: claudeCodeIcon,
   antigravity: antigravityIcon,
   cursor: cursorIcon,
 };
-const iconSrc = computed(() => providerKey.value === "other" ? null : iconSources[providerKey.value]);
+const iconSrc = computed(() => providerKey.value === "other" || providerKey.value === "open-model"
+  ? null
+  : iconSources[providerKey.value]);
 </script>
 
 <style scoped>
@@ -42,5 +45,6 @@ const iconSrc = computed(() => providerKey.value === "other" ? null : iconSource
 .room-provider-badge--claude { background: rgba(240, 112, 72, 0.16); }
 .room-provider-badge--antigravity { background: rgba(96, 165, 250, 0.12); }
 .room-provider-badge--cursor { background: rgba(255, 255, 255, 0.1); }
+.room-provider-badge--open-model { color: #a78bfa; background: rgba(167, 139, 250, 0.14); }
 .room-provider-badge--other { color: var(--text-tertiary); }
 </style>

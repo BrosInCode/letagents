@@ -66,7 +66,7 @@
 }
 
 .room-chat-message.is-compact-continuation .room-message-owner,
-.room-chat-message.is-compact-continuation .room-message-ide,
+.room-chat-message.is-compact-continuation .room-provider-badge,
 .room-chat-message.is-compact-continuation .room-message-provenance {
   display: none;
 }
@@ -74,7 +74,6 @@
 .room-message-author-block time,
 .room-message-meta time,
 .room-message-owner,
-.room-message-ide,
 .room-message-reply-label {
   color: var(--text-tertiary);
   font-size: 0.72rem;
