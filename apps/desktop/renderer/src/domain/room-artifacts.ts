@@ -1,4 +1,54 @@
-import type { DesktopRoomSharedArtifact } from "../../../electron/ipc-types";
+import type {
+  DesktopRoomSharedArtifact,
+  DesktopRoomSharedArtifactChangedFile,
+  DesktopRoomSharedArtifactChangeSummaryDetail,
+} from "../../../electron/ipc-types";
+
+export const CHANGE_SUMMARY_FILE_COLLAPSED_LIMIT = 3;
+
+// One-line "N files  +A  −D" headline for a change-summary artifact.
+export function changeSummaryHeadline(
+  detail: DesktopRoomSharedArtifactChangeSummaryDetail,
+): string {
+  const parts = [`${detail.changedFileCount} ${detail.changedFileCount === 1 ? "file" : "files"}`];
+  if (detail.additions) parts.push(`+${detail.additions}`);
+  if (detail.deletions) parts.push(`−${detail.deletions}`);
+  return parts.join("  ");
+}
+
+// Split a change-summary file list into the visible slice and the count hidden by
+// the collapsed view (distinct from detail.hiddenFileCount, which is the count the
+// backend truncated beyond the persisted ceiling).
+export function splitChangeSummaryFiles(
+  files: readonly DesktopRoomSharedArtifactChangedFile[],
+  expanded: boolean,
+  limit: number = CHANGE_SUMMARY_FILE_COLLAPSED_LIMIT,
+): { visible: DesktopRoomSharedArtifactChangedFile[]; hiddenCount: number } {
+  if (expanded) return { visible: [...files], hiddenCount: 0 };
+  return { visible: files.slice(0, limit), hiddenCount: Math.max(0, files.length - limit) };
+}
+
+// Keep only expanded identities that still have a collapsible list (present
+// change_summary detail with more files than the collapsed limit). Used to prune
+// stale expansion state as artifacts update (e.g. dirty -> clean -> dirty), so a
+// row never silently reopens expanded.
+export function retainExpandableChangeArtifacts(
+  expanded: ReadonlySet<string>,
+  artifacts: readonly DesktopRoomSharedArtifact[],
+  limit: number = CHANGE_SUMMARY_FILE_COLLAPSED_LIMIT,
+): Set<string> {
+  const next = new Set<string>();
+  for (const artifact of artifacts) {
+    if (
+      expanded.has(artifact.identityKey) &&
+      artifact.kind === "change_summary" &&
+      (artifact.detail?.files.length ?? 0) > limit
+    ) {
+      next.add(artifact.identityKey);
+    }
+  }
+  return next;
+}
 
 export interface RoomArtifactTimelineItem {
   artifact: DesktopRoomSharedArtifact;

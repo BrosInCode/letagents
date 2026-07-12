@@ -227,7 +227,7 @@
               class="desktop-activity-artifact-event"
             >
               <span class="desktop-activity-artifact-marker" :data-kind="item.artifact.kind" aria-hidden="true"></span>
-              <span class="desktop-activity-artifact-content">
+              <div class="desktop-activity-artifact-content">
                 <span class="desktop-activity-artifact-title-line">
                   <span class="desktop-activity-mini-pill">{{ item.kindLabel }}</span>
                   <a
@@ -247,7 +247,15 @@
                     · first seen {{ formatRelativeTime(item.firstSeenAt) }}
                   </template>
                 </small>
-              </span>
+                <ChangeSummaryFilePanel
+                  v-if="item.artifact.kind === 'change_summary' && item.artifact.detail"
+                  :detail="item.artifact.detail"
+                  :expanded="isChangeExpanded(item.artifact)"
+                  :list-id="fileListId(item.artifact)"
+                  :label="item.title"
+                  @toggle="toggleChange(item.artifact)"
+                />
+              </div>
               <span v-if="item.taskCountLabel" class="desktop-activity-row-meta">
                 <span class="desktop-activity-mini-pill">{{ item.taskCountLabel }}</span>
               </span>
@@ -365,7 +373,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
+import { computed, onMounted, ref, useId, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -381,8 +389,10 @@ import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
 import {
+  retainExpandableChangeArtifacts,
   roomArtifactTimelineItems,
 } from "../../../domain/room-artifacts";
+import ChangeSummaryFilePanel from "./room-activity/ChangeSummaryFilePanel.vue";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 
@@ -408,6 +418,44 @@ const emit = defineEmits<{
   "refresh-room": [];
   "clear-artifact-task-filter": [];
 }>();
+
+const expandedChangeArtifacts = ref<Set<string>>(new Set());
+// Globally-unique, collision-safe DOM ids: an SSR-stable per-instance base
+// (useId) plus a per-artifact counter keyed by the full unique identityKey —
+// unique across multiple panels in one document.
+const changePanelIdBase = useId();
+const fileListIds = new Map<string, string>();
+let fileListIdSeq = 0;
+
+function isChangeExpanded(artifact: DesktopRoomSharedArtifact): boolean {
+  return expandedChangeArtifacts.value.has(artifact.identityKey);
+}
+function toggleChange(artifact: DesktopRoomSharedArtifact): void {
+  const next = new Set(expandedChangeArtifacts.value);
+  if (next.has(artifact.identityKey)) next.delete(artifact.identityKey);
+  else next.add(artifact.identityKey);
+  expandedChangeArtifacts.value = next;
+}
+function fileListId(artifact: DesktopRoomSharedArtifact): string {
+  let id = fileListIds.get(artifact.identityKey);
+  if (!id) {
+    id = `${changePanelIdBase}-change-files-${fileListIdSeq++}`;
+    fileListIds.set(artifact.identityKey, id);
+  }
+  return id;
+}
+
+// Prune stale expansion when artifacts update, so a row that went clean (or
+// dropped to <= the collapsed limit) never silently reopens expanded on return.
+watch(
+  () => props.roomArtifacts,
+  (artifacts) => {
+    const pruned = retainExpandableChangeArtifacts(expandedChangeArtifacts.value, artifacts);
+    if (pruned.size !== expandedChangeArtifacts.value.size) {
+      expandedChangeArtifacts.value = pruned;
+    }
+  },
+);
 
 const {
   activeView,
