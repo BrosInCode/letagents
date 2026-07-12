@@ -94,6 +94,7 @@ import {
   isTerminalCodexSessionStatus,
   finalPublicAgentMessageText,
   parseStartupObservationMs,
+  shouldStopCodexSessionMonitor,
   shouldShutdownManagedAgentOnStop,
   sleep,
   STARTUP_POLL_INTERVAL_MS,
@@ -550,7 +551,14 @@ function scheduleOwnedSessionMonitor(session: DesktopCodexLiveSessionState): voi
   const timer = setInterval(() => {
     void inspectDesktopManagedCodexAgentSession(session.session_id)
       .then((status) => {
-        if (!status || !status.serverReachable || isTerminalCodexSessionStatus(status.session.status)) {
+        if (
+          !status ||
+          shouldStopCodexSessionMonitor(
+            status.session.deliveryMode,
+            status.session.status,
+            status.serverReachable,
+          )
+        ) {
           clearSessionMonitor(session.session_id);
         }
       })

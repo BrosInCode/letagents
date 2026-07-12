@@ -64,7 +64,9 @@ const {
   deriveCodexLiveSessionStatus,
   finalPublicAgentMessageText,
   isActiveCodexTurnStatus,
+  isLikelyMaterializingError,
   parseStartupObservationMs,
+  shouldStopCodexSessionMonitor,
   shouldShutdownManagedAgentOnStop,
   summarizeItems,
 } = await import("../main/agents/codex-session-status.js");
@@ -3138,6 +3140,21 @@ test("startup inspection failures keep Codex bootstrap in the starting state", (
       process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS = previous;
     }
   }
+});
+
+test("Codex thread reads treat wake-up materialization errors as retryable", () => {
+  assert.equal(isLikelyMaterializingError(new Error("thread not materialized yet")), true);
+  assert.equal(isLikelyMaterializingError(new Error("thread not found: thread_123")), true);
+  assert.equal(isLikelyMaterializingError(new Error("THREAD NOT FOUND: thread_123")), true);
+  assert.equal(isLikelyMaterializingError(new Error("permission denied")), false);
+});
+
+test("desktop-event session monitors stay active while agents wait for events", () => {
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "completed", true), false);
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "running", true), false);
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "failed", true), true);
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "completed", false), true);
+  assert.equal(shouldStopCodexSessionMonitor("mcp_polling", "completed", true), true);
 });
 
 test("managed Codex stop modes distinguish stopping a turn from shutting down the worker", () => {
