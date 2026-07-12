@@ -89,6 +89,30 @@ test("desktop change-summary panel renders collapsed with an accessible, singula
   );
 });
 
+test("desktop change-summary panel renders a linked pull request", async () => {
+  const html = await render({
+    detail: detail(),
+    expanded: false,
+    listId: "change-files-0",
+    label: "Agent on feature/y",
+    linkedPullRequest: { number: 42, url: "https://github.com/x/y/pull/42", state: "open" },
+  });
+  assert.ok(html.includes("PR #42"), "PR link label rendered");
+  assert.ok(html.includes('href="https://github.com/x/y/pull/42"'), "PR link href rendered");
+  assert.ok(!html.includes("PR #42 ("), "open PR has no state suffix");
+});
+
+test("desktop change-summary panel labels a non-open linked PR with its state", async () => {
+  const html = await render({
+    detail: detail(),
+    expanded: false,
+    listId: "change-files-0",
+    label: "Agent on feature/y",
+    linkedPullRequest: { number: 42, url: "https://github.com/x/y/pull/42", state: "closed" },
+  });
+  assert.ok(html.includes("PR #42 (closed)"), "closed PR shows its state");
+});
+
 test("desktop change-summary panel shows all files and a collapse control when expanded", async () => {
   const html = await render({
     detail: detail(),

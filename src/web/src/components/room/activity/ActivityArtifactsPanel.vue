@@ -37,7 +37,16 @@
           v-if="artifact.kind === 'change_summary' && artifact.detail"
           class="activity-artifact-changes"
         >
-          <p class="activity-artifact-changes-summary">{{ changeSummaryHeadline(artifact.detail) }}</p>
+          <p class="activity-artifact-changes-summary">
+            {{ changeSummaryHeadline(artifact.detail) }}
+            <a
+              v-if="linkedPr(artifact)"
+              class="activity-artifact-changes-pr"
+              :href="linkedPr(artifact)!.url"
+              target="_blank"
+              rel="noreferrer"
+            >· PR #{{ linkedPr(artifact)!.number }}{{ prStateSuffix(linkedPr(artifact)!) }}</a>
+          </p>
           <ul :id="fileListId(artifact)" class="activity-artifact-file-list">
             <li
               v-for="file in visibleChangeFiles(artifact)"
@@ -107,6 +116,7 @@ import type {
 const props = defineProps<{
   artifacts: readonly RoomSharedArtifact[]
   tasks: readonly RoomTask[]
+  prRepo?: { host: string; owner: string; name: string } | null
 }>()
 
 const COLLAPSED_ARTIFACT_LIMIT = 5
@@ -190,6 +200,80 @@ watch(
 function filePathLabel(file: ChangeSummaryDetail['files'][number]): string {
   return file.previousPath ? `${file.previousPath} → ${file.path}` : file.path
 }
+// Associate a change_summary with a PR on the same branch (ref), scoped to the
+// room's known repository since branch names aren't globally unique. Candidates
+// must be same-branch PRs whose URL structurally verifies against the repo and
+// carry a usable number+URL. Selection fails closed on ambiguity: a unique open
+// PR, or (when none are open) a single lone candidate; otherwise no link.
+// Suppressed when the repo is unknown. Computed once, keyed by identity_key.
+interface LinkedPr {
+  number: number
+  url: string
+  state: string | null
+}
+// Structurally verify a PR URL against the room repo + number (not a substring —
+// a deceptive host or a /pull/N that disagrees with the number must fail).
+function pullRequestUrlMatches(
+  url: string,
+  scope: { host: string; owner: string; name: string },
+  n: number,
+): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false
+  if (parsed.host.toLowerCase() !== scope.host.toLowerCase()) return false
+  const segments = parsed.pathname.split('/').filter(Boolean)
+  return (
+    segments.length >= 4 &&
+    segments[0].toLowerCase() === scope.owner.toLowerCase() &&
+    segments[1].toLowerCase() === scope.name.toLowerCase() &&
+    segments[2] === 'pull' &&
+    segments[3] === String(n)
+  )
+}
+const changeSummaryPrLinks = computed(() => {
+  const map = new Map<string, LinkedPr>()
+  const scope = props.prRepo
+  if (!scope?.host || !scope.owner || !scope.name) return map
+  for (const artifact of props.artifacts) {
+    if (artifact.kind !== 'change_summary') continue
+    const ref = artifact.ref?.trim()
+    if (!ref) continue
+    const candidates = props.artifacts.filter(
+      (c): c is RoomSharedArtifact & { url: string; artifact_number: number } =>
+        c.kind === 'pull_request' &&
+        c.ref?.trim() === ref &&
+        c.artifact_number !== null &&
+        typeof c.url === 'string' &&
+        pullRequestUrlMatches(c.url, scope, c.artifact_number),
+    )
+    if (!candidates.length) continue
+    const open = candidates.filter((c) => (c.state ?? '').toLowerCase() === 'open')
+    // Fail closed on ambiguity (fork / differing base branch can share a head ref):
+    // a unique open PR, or a single lone candidate when none are open; else no link.
+    const chosen =
+      open.length === 1
+        ? open[0]
+        : open.length === 0 && candidates.length === 1
+          ? candidates[0]
+          : null
+    if (!chosen) continue
+    map.set(artifact.identity_key, { number: chosen.artifact_number, url: chosen.url, state: chosen.state })
+  }
+  return map
+})
+function linkedPr(artifact: RoomSharedArtifact): LinkedPr | null {
+  return changeSummaryPrLinks.value.get(artifact.identity_key) ?? null
+}
+function prStateSuffix(link: LinkedPr): string {
+  const state = link.state?.trim()
+  return state && state.toLowerCase() !== 'open' ? ` (${state})` : ''
+}
+
 function changeSummaryHeadline(detail: ChangeSummaryDetail): string {
   const parts = [`${detail.changedFileCount} ${detail.changedFileCount === 1 ? 'file' : 'files'}`]
   if (detail.additions) parts.push(`+${detail.additions}`)
@@ -250,6 +334,14 @@ function taskTitle(taskId: string): string {
   font-size: 0.72rem;
   color: var(--activity-text-secondary, #a1a1aa);
   font-variant-numeric: tabular-nums;
+}
+.activity-artifact-changes-pr {
+  color: var(--activity-blue, #60a5fa);
+  text-decoration: none;
+}
+.activity-artifact-changes-pr:hover,
+.activity-artifact-changes-pr:focus-visible {
+  text-decoration: underline;
 }
 .activity-artifact-file-list {
   display: grid;

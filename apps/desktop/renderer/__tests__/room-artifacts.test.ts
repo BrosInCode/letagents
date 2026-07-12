@@ -7,10 +7,113 @@ import type {
 } from "../../electron/ipc-types";
 import {
   changeSummaryHeadline,
+  findLinkedPullRequest,
   retainExpandableChangeArtifacts,
   roomArtifactTimelineItems,
   splitChangeSummaryFiles,
 } from "../src/domain/room-artifacts";
+
+const SCOPE = { host: "github.com", owner: "BrosInCode", name: "letagents" };
+function prUrl(n: number): string {
+  return `https://github.com/BrosInCode/letagents/pull/${n}`;
+}
+function prArtifact(
+  ref: string,
+  artifactNumber: number | null,
+  url: string | null,
+  state = "open",
+): DesktopRoomSharedArtifact {
+  return { kind: "pull_request", ref, artifactNumber, url, state } as unknown as DesktopRoomSharedArtifact;
+}
+function csWithRef(ref: string | null): DesktopRoomSharedArtifact {
+  const cs = changeArtifact("git:change_summary:id:a:branch:x", 2);
+  (cs as { ref?: string | null }).ref = ref;
+  return cs;
+}
+
+test("findLinkedPullRequest matches a same-repo, same-branch PR (latest, open-preferred)", () => {
+  const cs = csWithRef("feature/y");
+  const artifacts = [
+    cs,
+    prArtifact("feature/other", 10, prUrl(10)),
+    prArtifact("feature/y", 11, prUrl(11)),
+    prArtifact("feature/y", 15, prUrl(15), "closed"), // higher number but closed
+  ];
+  // Open #11 wins over closed #15.
+  assert.deepEqual(findLinkedPullRequest(cs, artifacts, SCOPE), {
+    number: 11,
+    url: prUrl(11),
+    state: "open",
+  });
+});
+
+test("findLinkedPullRequest links a lone closed PR but keeps its state", () => {
+  const cs = csWithRef("feature/y");
+  const link = findLinkedPullRequest(cs, [cs, prArtifact("feature/y", 9, prUrl(9), "closed")], SCOPE);
+  assert.deepEqual(link, { number: 9, url: prUrl(9), state: "closed" });
+});
+
+test("findLinkedPullRequest ignores same-branch PRs in other repos", () => {
+  const cs = csWithRef("feature/y");
+  const link = findLinkedPullRequest(
+    cs,
+    [cs, prArtifact("feature/y", 7, "https://github.com/other/repo/pull/7")],
+    SCOPE,
+  );
+  assert.equal(link, null);
+});
+
+test("findLinkedPullRequest rejects a deceptive host and a URL whose number disagrees", () => {
+  const cs = csWithRef("feature/y");
+  // Deceptive host with the right path.
+  assert.equal(
+    findLinkedPullRequest(cs, [cs, prArtifact("feature/y", 42, "https://evil.example/BrosInCode/letagents/pull/42")], SCOPE),
+    null,
+  );
+  // Right repo/host but the URL's /pull/N disagrees with artifact_number.
+  assert.equal(findLinkedPullRequest(cs, [cs, prArtifact("feature/y", 42, prUrl(99))], SCOPE), null);
+});
+
+test("findLinkedPullRequest excludes candidates missing a number or URL", () => {
+  const cs = csWithRef("feature/y");
+  assert.equal(findLinkedPullRequest(cs, [cs, prArtifact("feature/y", null, prUrl(5))], SCOPE), null);
+  assert.equal(findLinkedPullRequest(cs, [cs, prArtifact("feature/y", 5, null)], SCOPE), null);
+});
+
+test("findLinkedPullRequest fails closed when multiple open PRs share the ref", () => {
+  const cs = csWithRef("feature/y");
+  const link = findLinkedPullRequest(
+    cs,
+    [cs, prArtifact("feature/y", 11, prUrl(11)), prArtifact("feature/y", 12, prUrl(12))],
+    SCOPE,
+  );
+  assert.equal(link, null);
+});
+
+test("findLinkedPullRequest fails closed when multiple closed PRs share the ref and none are open", () => {
+  const cs = csWithRef("feature/y");
+  const link = findLinkedPullRequest(
+    cs,
+    [cs, prArtifact("feature/y", 11, prUrl(11), "closed"), prArtifact("feature/y", 12, prUrl(12), "merged")],
+    SCOPE,
+  );
+  assert.equal(link, null);
+});
+
+test("findLinkedPullRequest links the sole complete candidate despite an incomplete higher-number one", () => {
+  const cs = csWithRef("feature/y");
+  const link = findLinkedPullRequest(
+    cs,
+    [cs, prArtifact("feature/y", 5, prUrl(5)), prArtifact("feature/y", 9, null)],
+    SCOPE,
+  );
+  assert.deepEqual(link, { number: 5, url: prUrl(5), state: "open" });
+});
+
+test("findLinkedPullRequest returns null with no ref or no known repo", () => {
+  assert.equal(findLinkedPullRequest(csWithRef(null), [prArtifact("feature/y", 5, prUrl(5))], SCOPE), null);
+  assert.equal(findLinkedPullRequest(csWithRef("feature/y"), [prArtifact("feature/y", 5, prUrl(5))], null), null);
+});
 
 function changeArtifact(identityKey: string, fileCount: number | null): DesktopRoomSharedArtifact {
   const detail =

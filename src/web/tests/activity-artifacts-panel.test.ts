@@ -80,9 +80,81 @@ function changeArtifact(
   };
 }
 
-async function render(artifacts: unknown[]): Promise<string> {
-  return renderToString(createSSRApp(ActivityArtifactsPanel, { artifacts, tasks: [] }));
+function pullRequestArtifact(ref: string, artifactNumber: number | null, url: string | null) {
+  return {
+    room_id: "room_1",
+    identity_key: `github:pull_request:${artifactNumber}:${url ?? "none"}`,
+    provider: "github",
+    kind: "pull_request",
+    artifact_id: null,
+    artifact_number: artifactNumber,
+    title: `PR #${artifactNumber}`,
+    url,
+    ref,
+    state: "open",
+    detail: null,
+    source: "github_event",
+    first_seen_at: "2026-07-02T00:00:00.000Z",
+    updated_at: "2026-07-02T00:00:00.000Z",
+    linked_task_ids: [],
+  };
 }
+
+type PrRepoScope = { host: string; owner: string; name: string } | null
+async function render(artifacts: unknown[], prRepo: PrRepoScope = null): Promise<string> {
+  return renderToString(createSSRApp(ActivityArtifactsPanel, { artifacts, tasks: [], prRepo }));
+}
+
+const REPO = { host: "github.com", owner: "octo", name: "repo" };
+const prIn = (n: number) => `https://github.com/octo/repo/pull/${n}`;
+const hasLink = (html: string) => html.includes("activity-artifact-changes-pr");
+
+test("change_summary panel links a same-repo same-branch PR (open-preferred, latest)", async () => {
+  const html = await render(
+    [
+      changeArtifact(), // ref feature/y
+      pullRequestArtifact("feature/y", 11, prIn(11)),
+      { ...pullRequestArtifact("feature/y", 15, prIn(15)), state: "closed" }, // higher but closed
+    ],
+    REPO,
+  );
+  assert.ok(hasLink(html), "change-summary PR link rendered");
+  assert.ok(html.includes("· PR #11"), "open PR #11 preferred over closed #15");
+  assert.ok(!html.includes("· PR #15"), "closed higher-number PR not chosen");
+});
+
+test("change_summary panel labels a lone non-open linked PR with its state", async () => {
+  const html = await render(
+    [changeArtifact(), { ...pullRequestArtifact("feature/y", 42, prIn(42)), state: "closed" }],
+    REPO,
+  );
+  assert.ok(html.includes("· PR #42 (closed)"), "closed PR labeled with state");
+});
+
+test("change_summary panel shows no PR link when branch or repo differs, or repo unknown", async () => {
+  assert.ok(!hasLink(await render([changeArtifact(), pullRequestArtifact("other", 42, prIn(42))], REPO)), "branch differs");
+  assert.ok(
+    !hasLink(await render([changeArtifact(), pullRequestArtifact("feature/y", 42, "https://github.com/other/repo/pull/42")], REPO)),
+    "repo differs",
+  );
+  assert.ok(!hasLink(await render([changeArtifact(), pullRequestArtifact("feature/y", 42, prIn(42))], null)), "repo unknown");
+});
+
+test("change_summary panel rejects a deceptive host and a URL whose number disagrees", async () => {
+  assert.ok(
+    !hasLink(await render([changeArtifact(), pullRequestArtifact("feature/y", 42, "https://evil.example/octo/repo/pull/42")], REPO)),
+    "deceptive host",
+  );
+  assert.ok(
+    !hasLink(await render([changeArtifact(), pullRequestArtifact("feature/y", 42, prIn(99))], REPO)),
+    "URL number disagrees with artifact number",
+  );
+});
+
+test("change_summary panel excludes candidates missing a number or URL", async () => {
+  assert.ok(!hasLink(await render([changeArtifact(), pullRequestArtifact("feature/y", null, prIn(5))], REPO)), "number-only missing");
+  assert.ok(!hasLink(await render([changeArtifact(), pullRequestArtifact("feature/y", 5, null)], REPO)), "url missing");
+});
 
 test("change_summary panel: collapsed to 3 files with an accessible disclosure", async () => {
   const html = await render([changeArtifact()]);
