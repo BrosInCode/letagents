@@ -164,6 +164,22 @@ export function isTerminalCodexSessionStatus(status: DesktopManagedAgentSessionS
   return status === "completed" || status === "interrupted" || status === "failed";
 }
 
+export function shouldStopCodexSessionMonitor(
+  deliveryMode: DesktopManagedAgentDeliveryMode,
+  status: DesktopManagedAgentSessionStatus,
+  serverReachable: boolean,
+): boolean {
+  if (!serverReachable) {
+    return true;
+  }
+
+  if (!isTerminalCodexSessionStatus(status)) {
+    return false;
+  }
+
+  return deliveryMode !== "desktop_events" || status !== "completed";
+}
+
 export function codexSessionStatusAfterInspectFailure(
   currentStatus: DesktopManagedAgentSessionStatus,
 ): DesktopManagedAgentSessionStatus {
@@ -228,6 +244,8 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export function isLikelyMaterializingError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("not materialized yet");
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  // After system wake, app-server may answer "thread not found" briefly while
+  // its persisted thread catalog becomes readable again.
+  return message.includes("not materialized yet") || message.includes("thread not found");
 }

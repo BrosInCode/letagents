@@ -66,6 +66,8 @@ type FakeCodexServerOptions = {
    * last entry sticks. Defaults to `["completed"]` (idle immediately).
    */
   bootTurnStatuses?: string[];
+  /** Error sequence returned by `thread/read` before normal reads resume. */
+  threadReadErrors?: Array<string | null>;
   /** Fired when a `thread/read` reports the boot turn (1-based read count). */
   onBootTurnRead?: (readCount: number) => void;
   /** Fired when a `turn/start` arrives (1-based event-turn count). */
@@ -86,6 +88,7 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
   const originalFetch = globalThis.fetch;
   const replies = [...(options.turnReplies ?? [])];
   const bootTurnStatuses = options.bootTurnStatuses ?? ["completed"];
+  const threadReadErrors = [...(options.threadReadErrors ?? [])];
   const eventTurns = new Map<string, string>();
   const sentMessages: SentMessage[] = [];
   const prompts: string[] = [];
@@ -133,19 +136,22 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
           result = { turn: { id: turnId } };
         }
       } else if (message.method === "thread/read") {
-        result = {
-          thread: {
-            status: { type: "idle" },
-            turns: [
-              { id: "turn_boot", status: bootTurnStatus(), items: [] },
-              ...[...eventTurns.entries()].map(([id, text]) => ({
-                id,
-                status: options.eventTurnStatus ?? "completed",
-                items: [{ type: "agentMessage", phase: "final", text }],
-              })),
-            ],
-          },
-        };
+        error = threadReadErrors.shift() ?? null;
+        if (!error) {
+          result = {
+            thread: {
+              status: { type: "idle" },
+              turns: [
+                { id: "turn_boot", status: bootTurnStatus(), items: [] },
+                ...[...eventTurns.entries()].map(([id, text]) => ({
+                  id,
+                  status: options.eventTurnStatus ?? "completed",
+                  items: [{ type: "agentMessage", phase: "final", text }],
+                })),
+              ],
+            },
+          };
+        }
       } else if (message.method === "turn/interrupt") {
         result = {};
       } else {
@@ -433,6 +439,35 @@ test("codex delivery waits for the in-flight turn to go idle and never interrupt
       threadReadsBeforeTurnStart >= 2,
       `expected at least two idle polls before turn/start, saw ${threadReadsBeforeTurnStart}`,
     );
+  } finally {
+    server.restore();
+  }
+});
+
+test("codex delivery retries a transient thread-not-found response after wake", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_wake_recovery";
+  await seedDeliverableSession({ roomIdentifier, sessionId: "codex_wake_recovery" });
+  const server = installFakeCodexServer({
+    threadReadErrors: ["thread not found: thread_boot", null],
+    turnReplies: ["Reply after the thread became available."],
+  });
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+      id: "msg_after_wake",
+      text: "are you still there?",
+      threadRootId: "msg_after_wake",
+    }));
+
+    const reply = await waitFor(async () => {
+      const page = await getLocalChatMessages(roomIdentifier);
+      return page.messages.find((message) => message.text === "Reply after the thread became available.") ?? null;
+    }, "codex reply after transient thread-not-found response");
+
+    assert.ok(reply);
+    assert.equal(server.turnStartCount(), 1);
+    assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.status, "completed");
+    assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.last_error, null);
   } finally {
     server.restore();
   }
