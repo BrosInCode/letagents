@@ -1,6 +1,15 @@
 <template>
   <div class="desktop-activity-changes">
-    <span class="desktop-activity-changes-summary">{{ headline }}</span>
+    <span class="desktop-activity-changes-summary">
+      {{ headline }}
+      <a
+        v-if="linkedPullRequest"
+        class="desktop-activity-changes-pr"
+        :href="linkedPullRequest.url"
+        target="_blank"
+        rel="noopener noreferrer"
+      >· PR #{{ linkedPullRequest.number }}{{ prStateSuffix }}</a>
+    </span>
     <ul :id="listId" class="desktop-activity-file-list">
       <li v-for="file in visibleFiles" :key="file.path" class="desktop-activity-file">
         <span class="desktop-activity-file-path" :title="filePathLabel(file)">{{ filePathLabel(file) }}</span>
@@ -40,14 +49,19 @@ import {
   CHANGE_SUMMARY_FILE_COLLAPSED_LIMIT,
   changeSummaryHeadline,
   splitChangeSummaryFiles,
+  type LinkedPullRequest,
 } from "../../../../domain/room-artifacts";
 
-const props = defineProps<{
-  detail: DesktopRoomSharedArtifactChangeSummaryDetail;
-  expanded: boolean;
-  listId: string;
-  label: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    detail: DesktopRoomSharedArtifactChangeSummaryDetail;
+    expanded: boolean;
+    listId: string;
+    label: string;
+    linkedPullRequest?: LinkedPullRequest | null;
+  }>(),
+  { linkedPullRequest: null },
+);
 
 const emit = defineEmits<{ toggle: [] }>();
 
@@ -73,4 +87,10 @@ const toggleLabel = computed(() =>
 function filePathLabel(file: DesktopRoomSharedArtifactChangedFile): string {
   return file.previousPath ? `${file.previousPath} → ${file.path}` : file.path;
 }
+
+// Surface a non-open PR's state so a historical PR isn't mistaken for the active one.
+const prStateSuffix = computed(() => {
+  const state = props.linkedPullRequest?.state?.trim();
+  return state && state.toLowerCase() !== "open" ? ` (${state})` : "";
+});
 </script>

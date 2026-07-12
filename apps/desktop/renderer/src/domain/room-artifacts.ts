@@ -50,6 +50,84 @@ export function retainExpandableChangeArtifacts(
   return next;
 }
 
+export interface LinkedPullRequest {
+  number: number;
+  url: string;
+  state: string | null;
+}
+
+export interface PullRequestRepoScope {
+  host: string;
+  owner: string;
+  name: string;
+}
+
+// Structurally verify a PR URL against the room repo and its number — not a substring
+// match (which a deceptive host like https://evil.example/owner/repo/pull/1 would pass,
+// and which can't tie the URL to artifact_number). Requires http(s), exact host, exact
+// owner/repo path segments, a `pull` segment, and `/pull/<number>` === the artifact
+// number. Fails closed on parse errors.
+function pullRequestUrlMatches(
+  url: string,
+  scope: PullRequestRepoScope,
+  number: number,
+): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+  if (parsed.host.toLowerCase() !== scope.host.toLowerCase()) return false;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  return (
+    segments.length >= 4 &&
+    segments[0].toLowerCase() === scope.owner.toLowerCase() &&
+    segments[1].toLowerCase() === scope.name.toLowerCase() &&
+    segments[2] === "pull" &&
+    segments[3] === String(number)
+  );
+}
+
+// Find the pull_request artifact associated with a change_summary by shared branch
+// (ref). Branch names aren't globally unique, so matching is scoped to the room's
+// known repository: a candidate must be a same-branch PR with a usable number and a
+// URL that structurally verifies against the repo scope (see above). Selection fails
+// closed on ambiguity — a unique open PR, or (when none are open) a single lone
+// candidate; multiple open, or multiple closed with none open, link nothing. Returns
+// null when the repo scope is unknown or nothing verifies.
+export function findLinkedPullRequest(
+  artifact: DesktopRoomSharedArtifact,
+  artifacts: readonly DesktopRoomSharedArtifact[],
+  scope: PullRequestRepoScope | null,
+): LinkedPullRequest | null {
+  if (artifact.kind !== "change_summary") return null;
+  const ref = artifact.ref?.trim();
+  if (!ref || !scope?.host || !scope.owner || !scope.name) return null;
+  const candidates = artifacts.filter(
+    (c): c is DesktopRoomSharedArtifact & { url: string; artifactNumber: number } =>
+      c.kind === "pull_request" &&
+      c.ref?.trim() === ref &&
+      c.artifactNumber !== null &&
+      typeof c.url === "string" &&
+      pullRequestUrlMatches(c.url, scope, c.artifactNumber),
+  );
+  if (!candidates.length) return null;
+  const open = candidates.filter((c) => (c.state ?? "").toLowerCase() === "open");
+  // Fail closed on ambiguity: a PR URL identifies the base repo, so forks / differing
+  // base branches can share a head ref. Link only a unique open PR, or — when none are
+  // open — a single lone candidate. Multiple open (or multiple closed) → no link.
+  const chosen =
+    open.length === 1
+      ? open[0]
+      : open.length === 0 && candidates.length === 1
+        ? candidates[0]
+        : null;
+  if (!chosen) return null;
+  return { number: chosen.artifactNumber, url: chosen.url, state: chosen.state };
+}
+
 export interface RoomArtifactTimelineItem {
   artifact: DesktopRoomSharedArtifact;
   title: string;

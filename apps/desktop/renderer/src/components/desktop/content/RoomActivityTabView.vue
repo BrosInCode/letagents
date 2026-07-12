@@ -253,6 +253,7 @@
                   :expanded="isChangeExpanded(item.artifact)"
                   :list-id="fileListId(item.artifact)"
                   :label="item.title"
+                  :linked-pull-request="findLinkedPullRequest(item.artifact, roomArtifacts, changePrRepoScope)"
                   @toggle="toggleChange(item.artifact)"
                 />
               </div>
@@ -389,6 +390,7 @@ import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
 import {
+  findLinkedPullRequest,
   retainExpandableChangeArtifacts,
   roomArtifactTimelineItems,
 } from "../../../domain/room-artifacts";
@@ -444,6 +446,18 @@ function fileListId(artifact: DesktopRoomSharedArtifact): string {
   }
   return id;
 }
+
+// Repository scope for PR linking — the room's known Git repo, or null (which
+// suppresses linking) when the room isn't a single known repo.
+const changePrRepoScope = computed(() =>
+  props.roomGitRoom
+    ? {
+        host: props.roomGitRoom.host,
+        owner: props.roomGitRoom.repository.owner,
+        name: props.roomGitRoom.repository.name,
+      }
+    : null,
+);
 
 // Prune stale expansion when artifacts update, so a row that went clean (or
 // dropped to <= the collapsed limit) never silently reopens expanded on return.
