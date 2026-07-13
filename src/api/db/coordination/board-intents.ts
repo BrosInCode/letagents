@@ -796,14 +796,18 @@ export async function claimBoardIntentEscalationTx(
   return rows.length > 0;
 }
 
-/** Mark an escalated intent as approved by the sweep itself (feeds the rate cap). */
+/**
+ * Mark an escalated intent as approved by the sweep itself. Also stamps
+ * decided_at when the caller has not (the rate-cap window counts on it), so
+ * an auto-approved intent always lands inside the cap accounting.
+ */
 export async function markBoardIntentAutoApprovedTx(
   executor: Pick<typeof db, "update">,
   input: { room_id: string; intent_id: string }
 ): Promise<void> {
   await executor
     .update(board_intents)
-    .set({ auto_approved: true })
+    .set({ auto_approved: true, decided_at: sql`COALESCE(${board_intents.decided_at}, now())` })
     .where(
       and(
         eq(board_intents.room_id, input.room_id),

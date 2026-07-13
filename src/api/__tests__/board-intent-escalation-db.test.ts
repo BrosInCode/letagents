@@ -388,11 +388,9 @@ test(
             cap_window_ms: 60 * 60_000,
             cap_max: 5,
           });
+          // decided_at must be stamped through tx (markBoardIntentAutoApprovedTx
+          // does it) — a pool.query here would deadlock against tx's row lock.
           await markBoardIntentAutoApprovedTx!(tx, { room_id: roomId, intent_id: intentId });
-          await pool!.query(
-            "UPDATE board_intents SET decided_at = now() WHERE room_id = $1 AND id = $2",
-            [roomId, intentId]
-          );
         },
       }).then(
         () => "approved" as const,
