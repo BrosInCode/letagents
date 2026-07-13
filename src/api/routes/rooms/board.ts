@@ -23,6 +23,7 @@ import {
   type Project,
   getBoardGovernanceSnapshot,
 } from "../../db.js";
+import { isBoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
 import { type AuthenticatedRequest } from "../../http/helpers.js";
 import {
   requireWorkerRequestAgentIdentity,
@@ -279,9 +280,15 @@ export function registerRoomBoardRoutes(
       res.status(400).json({ error: "manager_mode is invalid" });
       return;
     }
+    const failover = deps.normalizeOptionalString(body.manager_failover);
+    if (failover !== null && !isBoardManagerFailoverMode(failover)) {
+      res.status(400).json({ error: "manager_failover is invalid" });
+      return;
+    }
     const settings = await setRoomBoardManagerMode({
       room_id: project.id,
       manager_mode: normalizeBoardManagerMode(mode),
+      manager_failover: failover !== null && isBoardManagerFailoverMode(failover) ? failover : null,
       updated_by: req.sessionAccount?.login ?? "admin",
     });
     res.json({ room_id: project.id, settings });

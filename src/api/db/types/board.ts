@@ -26,9 +26,13 @@ export type BoardIntentStatus =
   | "expired"
   | "used";
 
+export type { BoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
+import type { BoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
+
 export interface RoomBoardSettings {
   room_id: string;
   manager_mode: BoardManagerMode;
+  manager_failover: BoardManagerFailoverMode;
   updated_by: string | null;
   created_at: string;
   updated_at: string;
@@ -84,6 +88,7 @@ export interface BoardIntentConsumptionInput {
 export interface RoomBoardSettingsRow {
   room_id: string;
   manager_mode: BoardManagerMode;
+  manager_failover: string;
   updated_by: string | null;
   created_at: string;
   updated_at: string;

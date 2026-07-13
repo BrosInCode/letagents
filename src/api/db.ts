@@ -2,7 +2,9 @@
 // Domain implementations live under ./db/.
 
 export type { RoomKind, FocusRoomStatus, Project, RoomAlias, GitRoomBinding, GitRoomSummary, RoomSharedArtifact, RoomSharedArtifactSource, GitHubRepositoryLink, GitHubAppInstallation, GitHubAppRepository, GitHubWebhookDeliveryStatus } from "./db/types.js";
-export type { BoardIntent, BoardIntentActionType, BoardIntentConsumptionInput, BoardIntentPayload, BoardIntentStatus, BoardManagerAssignment, BoardManagerCandidate, BoardManagerMode, BoardManagerRuntimeSource, BoardGovernanceAuditEntry, BoardGovernanceCapabilities, BoardGovernanceSnapshot, BoardGovernanceWarning, RoomBoardSettings } from "./db/types.js";
+export type { BoardIntent, BoardIntentActionType, BoardIntentConsumptionInput, BoardIntentPayload, BoardIntentStatus, BoardManagerAssignment, BoardManagerCandidate, BoardManagerFailoverMode, BoardManagerMode, BoardManagerRuntimeSource, BoardGovernanceAuditEntry, BoardGovernanceCapabilities, BoardGovernanceSnapshot, BoardGovernanceWarning, RoomBoardSettings } from "./db/types.js";
+export { listActiveBoardManagerAssignments, promoteBoardManagerTx, releaseBoardManagerAssignmentTx, listActiveBoardManagerCandidates, recordBoardManagerAssignedEvent, recordBoardManagerReleasedEvent } from "./db/coordination.js";
+export type { ActiveBoardManagerAssignmentCandidate } from "./db/coordination.js";
 export type { GitHubWebhookDelivery, Account, Session, SessionAccount, OwnerToken, OwnerTokenAccount, AuthState, AgentIdentity } from "./db/types.js";
 export type { RoomAgentPresence, RoomAgentRegistrationLiveness, RoomAgentLivenessObservation, RoomAgentDeliverySession, RoomAgentSession, CreatedRoomAgentSession, RoomParticipant, RoomActivityActorCount } from "./db/types.js";
 export type { ReasoningSession, ReasoningSessionUpdate, Message, MessageReplyReference, MessageThreadParticipant, MessageThreadSummary, MessageAttachment, MessageAttachmentData, MessageAttachmentUpload, TaskStatus } from "./db/types.js";

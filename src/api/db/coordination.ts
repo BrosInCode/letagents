@@ -49,4 +49,12 @@ export {
   listBoardGovernanceAudit,
   buildBoardGovernanceCapabilities,
   buildBoardGovernanceWarnings,
+  recordBoardManagerAssignedEvent,
+  recordBoardManagerReleasedEvent,
 } from "./coordination/board-governance.js";
+export {
+  listActiveBoardManagerAssignments,
+  promoteBoardManagerTx,
+  releaseBoardManagerAssignmentTx,
+} from "./coordination/board-manager-failover.js";
+export type { ActiveBoardManagerAssignmentCandidate } from "./coordination/board-manager-failover.js";
