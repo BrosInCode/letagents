@@ -233,3 +233,86 @@ test(
     assert.equal(replay.message.id, first.message.id);
   }
 );
+
+test(
+  "announcement message and marker commit atomically — a marker failure rolls the message back",
+  skipOptions,
+  async () => {
+    const roomId = await seedConnectedWorker();
+    const { addMessageWithCreateStatus } = dbModule!;
+    const disconnected = await markRoomAgentDeliveryDisconnected!({
+      room_id: roomId,
+      actor_label: ACTOR_LABEL,
+    });
+    const deliveryKey = disconnected!.delivery_key;
+    await backdateDelivery(roomId, deliveryKey, {
+      updated_at: 30,
+      last_disconnected_at: 30,
+      reconnect_grace_expires_at: 30,
+    });
+    const clientMessageId = `agent_liveness:offline:${deliveryKey}:epoch-1`;
+
+    // Reviewer scenario: message persisted, marker write fails. With the
+    // marker inside the message transaction this partial state cannot
+    // exist — the failure rolls the message back too.
+    await assert.rejects(
+      addMessageWithCreateStatus!(roomId, "letagents", "[status] FieldSignal appears to be offline", {
+        client_message_id: clientMessageId,
+        with_created_message_in_transaction: async () => {
+          throw new Error("marker write failed");
+        },
+      })
+    );
+    const { rows: orphanRows } = await pool!.query(
+      "SELECT number FROM messages WHERE room_id = $1 AND client_message_id = $2",
+      [roomId, clientMessageId]
+    );
+    assert.equal(orphanRows.length, 0, "a failed marker write must roll back the message");
+    let candidate = await fetchCandidate(roomId, deliveryKey);
+    assert.equal(candidate.session.offline_announced_at, null);
+
+    // Worker reconnects before the retry: nothing was announced, so the
+    // selector correctly proposes neither offline nor recovered.
+    await markRoomAgentDeliveryConnected!({
+      room_id: roomId,
+      actor_label: ACTOR_LABEL,
+      session_kind: "worker",
+      display_name: "FieldSignal",
+      transport: "long_poll",
+    });
+    assert.deepEqual(
+      selectLivenessTransitions({ candidates: [await fetchCandidate(roomId, deliveryKey)] }),
+      []
+    );
+
+    // The success path commits both together, and a replay of the same
+    // client_message_id does not rerun the marker side effect.
+    await markRoomAgentDeliveryDisconnected!({ room_id: roomId, actor_label: ACTOR_LABEL });
+    await backdateDelivery(roomId, deliveryKey, {
+      updated_at: 5,
+      last_disconnected_at: 5,
+      reconnect_grace_expires_at: 5,
+    });
+    let hookRuns = 0;
+    const announce = () =>
+      addMessageWithCreateStatus!(roomId, "letagents", "[status] FieldSignal appears to be offline", {
+        client_message_id: `agent_liveness:offline:${deliveryKey}:epoch-2`,
+        with_created_message_in_transaction: async (tx) => {
+          hookRuns += 1;
+          await markAgentOfflineAnnounced!(
+            { room_id: roomId, delivery_key: deliveryKey, announced_at: isoMinutesAgo(4) },
+            tx
+          );
+        },
+      });
+
+    const created = await announce();
+    assert.equal(created.created, true);
+    candidate = await fetchCandidate(roomId, deliveryKey);
+    assert.ok(candidate.session.offline_announced_at, "marker must be set with the message");
+
+    const replay = await announce();
+    assert.equal(replay.created, false);
+    assert.equal(hookRuns, 1, "the replay path must not rerun the atomic side effect");
+  }
+);

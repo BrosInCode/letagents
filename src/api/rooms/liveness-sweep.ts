@@ -139,6 +139,14 @@ export function buildRecoveryAnnouncementText(input: {
   return `[status] ${label} is back online and reachable again.`;
 }
 
+export interface LivenessAnnouncementInput {
+  room_id: string;
+  delivery_key: string;
+  text: string;
+  client_message_id: string;
+  announced_at: string;
+}
+
 export interface LivenessSweeperDeps {
   listCandidates(options: { withinMs: number }): Promise<LivenessAnnouncementCandidate[]>;
   /** Fresh single-row re-read; transitions are revalidated on it just before emitting. */
@@ -148,26 +156,13 @@ export interface LivenessSweeperDeps {
   }): Promise<LivenessAnnouncementCandidate | null>;
   getSuppressedActorLabels(roomId: string): Promise<ReadonlySet<string>>;
   getActiveBoardManagerSessionId(roomId: string): Promise<string | null>;
-  markAgentOfflineAnnounced(input: {
-    room_id: string;
-    delivery_key: string;
-    announced_at: string;
-  }): Promise<boolean>;
-  markAgentRecoveryAnnounced(input: {
-    room_id: string;
-    delivery_key: string;
-    announced_at: string;
-  }): Promise<boolean>;
-  emitProjectMessage(
-    projectId: string,
-    sender: string,
-    text: string,
-    options?: {
-      source?: string;
-      agent_prompt_kind?: "auto";
-      client_message_id?: string | null;
-    }
-  ): Promise<unknown>;
+  /**
+   * Post the announcement AND persist its marker atomically (one DB
+   * transaction), deduped on client_message_id. Implementations must
+   * guarantee that after any failure ordering either both exist or neither.
+   */
+  announceOffline(input: LivenessAnnouncementInput): Promise<void>;
+  announceRecovery(input: LivenessAnnouncementInput): Promise<void>;
   now?(): number;
   onError?(roomId: string, error: unknown): void;
 }
@@ -180,13 +175,14 @@ export interface LivenessSweepSummary {
 }
 
 /**
- * Announcement flow is emit-first: the room message is created with a
- * deterministic client_message_id (idempotent — replays dedupe at the
- * messages table), and the marker is persisted only afterwards. Any failure
- * or crash between the two leaves the marker unset, so the next sweep simply
- * retries into the dedupe. The transition is revalidated on a fresh row read
- * right before emitting, so a worker that reconnected (or dropped) since
- * selection is skipped rather than announced with stale state.
+ * Each announcement commits its room message and its marker in ONE database
+ * transaction (deps.announceOffline/announceRecovery), with a deterministic
+ * client_message_id deduping replays at the messages table. Any failure or
+ * crash therefore leaves either both or neither — never an orphaned message
+ * without a marker, and never a silent marker without a message. The
+ * transition is revalidated on a fresh row read right before announcing, so
+ * a worker that reconnected (or dropped) since selection is skipped rather
+ * than announced with stale state.
  */
 export function createLivenessSweeper(deps: LivenessSweeperDeps) {
   async function processTransition(
@@ -219,43 +215,28 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
 
     if (transition.kind === "offline") {
       const epoch = session.last_disconnected_at ?? session.updated_at;
-      await deps.emitProjectMessage(
-        roomId,
-        "letagents",
-        buildOfflineAnnouncementText({
+      await deps.announceOffline({
+        room_id: roomId,
+        delivery_key: session.delivery_key,
+        text: buildOfflineAnnouncementText({
           session,
           offline_for_ms: transition.offline_for_ms,
           is_board_manager: Boolean(
             managerSessionId && session.agent_session_id === managerSessionId
           ),
         }),
-        {
-          source: "agent_liveness",
-          agent_prompt_kind: "auto",
-          client_message_id: `agent_liveness:offline:${session.delivery_key}:${epoch}`,
-        }
-      );
-      await deps.markAgentOfflineAnnounced({
-        room_id: roomId,
-        delivery_key: session.delivery_key,
+        client_message_id: `agent_liveness:offline:${session.delivery_key}:${epoch}`,
         announced_at: announcedAt,
       });
       summary.announced_offline += 1;
       return;
     }
 
-    await deps.emitProjectMessage(
-      roomId,
-      "letagents",
-      buildRecoveryAnnouncementText({ session }),
-      {
-        source: "agent_liveness",
-        client_message_id: `agent_liveness:recovered:${session.delivery_key}:${session.offline_announced_at ?? ""}`,
-      }
-    );
-    await deps.markAgentRecoveryAnnounced({
+    await deps.announceRecovery({
       room_id: roomId,
       delivery_key: session.delivery_key,
+      text: buildRecoveryAnnouncementText({ session }),
+      client_message_id: `agent_liveness:recovered:${session.delivery_key}:${session.offline_announced_at ?? ""}`,
       announced_at: announcedAt,
     });
     summary.announced_recovered += 1;

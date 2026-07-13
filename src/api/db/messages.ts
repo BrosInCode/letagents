@@ -1,4 +1,5 @@
 export { addMessage, addMessageWithCreateStatus } from "./messages/create.js";
+export type { MessageCreateTransaction } from "./messages/create.js";
 export {
   getLatestMessages,
   getMessageById,

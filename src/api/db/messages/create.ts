@@ -31,6 +31,9 @@ function normalizeClientMessageId(value?: string | null): string | null {
   return trimmed ? trimmed.slice(0, 240) : null;
 }
 
+/** The transaction handle message creation runs in, for atomic side effects. */
+export type MessageCreateTransaction = Parameters<Parameters<(typeof db)["transaction"]>[0]>[0];
+
 export interface AddMessageOptions {
   source?: string;
   agent_prompt_kind?: AgentPromptKind | null;
@@ -39,6 +42,15 @@ export interface AddMessageOptions {
   attachments?: NormalizedMessageAttachmentReference[];
   client_message_id?: string | null;
   account_id?: string | null;
+  /**
+   * Runs inside the message-insert transaction after the row is created, so
+   * callers can persist state that must be atomic with message creation
+   * (e.g. liveness announcement markers). A throw rolls the message back too.
+   * Not invoked on the idempotent-replay path: a deduped message means a
+   * prior transaction already committed both the message and this side
+   * effect together.
+   */
+  with_created_message_in_transaction?: (tx: MessageCreateTransaction) => Promise<void>;
 }
 
 export interface AddMessageResult {
@@ -228,6 +240,10 @@ export async function addMessageWithCreateStatus(
             sql`${messages.number} < ${createdMessage.number}`,
           ),
         );
+    }
+
+    if (options?.with_created_message_in_transaction) {
+      await options.with_created_message_in_transaction(tx);
     }
 
     return {

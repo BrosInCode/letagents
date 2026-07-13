@@ -83,19 +83,26 @@ export async function getLivenessAnnouncementCandidate(input: {
   return row ? toCandidate(row) : null;
 }
 
+/** db or the message-create transaction — markers must commit atomically with their message. */
+export type OfflineAnnouncementExecutor = Pick<typeof db, "update">;
+
 /**
  * Record that the offline announcement for the current outage was posted.
- * Called only after the (client_message_id-idempotent) room message landed,
- * so a crash or failure before this point simply retries on the next sweep
- * and the message-level dedupe absorbs the replay.
+ * Pass the message-create transaction as the executor so the marker commits
+ * atomically with the room message: neither an orphaned message (announced
+ * but never marked) nor a silent marker (marked but never announced) can
+ * exist after any crash or failure ordering.
  */
-export async function markAgentOfflineAnnounced(input: {
-  room_id: string;
-  delivery_key: string;
-  announced_at?: string;
-}): Promise<boolean> {
+export async function markAgentOfflineAnnounced(
+  input: {
+    room_id: string;
+    delivery_key: string;
+    announced_at?: string;
+  },
+  executor: OfflineAnnouncementExecutor = db
+): Promise<boolean> {
   const announcedAt = input.announced_at ?? new Date().toISOString();
-  const rows = await db
+  const rows = await executor
     .update(room_agent_delivery_sessions)
     .set({ offline_announced_at: announcedAt })
     .where(
@@ -110,13 +117,16 @@ export async function markAgentOfflineAnnounced(input: {
 }
 
 /** Record that the recovery announcement matching a prior outage was posted. */
-export async function markAgentRecoveryAnnounced(input: {
-  room_id: string;
-  delivery_key: string;
-  announced_at?: string;
-}): Promise<boolean> {
+export async function markAgentRecoveryAnnounced(
+  input: {
+    room_id: string;
+    delivery_key: string;
+    announced_at?: string;
+  },
+  executor: OfflineAnnouncementExecutor = db
+): Promise<boolean> {
   const announcedAt = input.announced_at ?? new Date().toISOString();
-  const rows = await db
+  const rows = await executor
     .update(room_agent_delivery_sessions)
     .set({ recovery_announced_at: announcedAt })
     .where(
