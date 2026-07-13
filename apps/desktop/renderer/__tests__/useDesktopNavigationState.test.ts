@@ -276,6 +276,61 @@ describe("useDesktopNavigationState", () => {
     assert.equal(resolveAccountRoomAliasIdentifier("shared-name", rooms), null);
   });
 
+  it("keeps exact room identifiers ahead of another room's display alias", () => {
+    const rooms: DesktopAccountRoomEntry[] = [
+      accountRoom("room_one", "First room"),
+      accountRoom("room_two", "room_one"),
+    ];
+
+    assert.equal(resolveAccountRoomAliasIdentifier("room_one", rooms), null);
+  });
+
+  it("deduplicates a restored room alias before its snapshot loads", () => {
+    withLocalStorage(() => {
+      const canonicalIdentifier = "github.com/BrosInCode/letagents";
+      const defaultGitRoom = gitRoom({
+        refType: "default_branch",
+        refName: "main",
+        isDefault: true,
+      });
+      const state = useDesktopNavigationState({
+        accountRooms: ref<DesktopAccountRoomEntry[]>([
+          accountRoom(canonicalIdentifier, "sky-lake", { gitRoom: defaultGitRoom }),
+        ]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([{
+          identifier: "sky-lake",
+          kind: "project",
+          rootPath: "/Users/emmy/Projects/letagents",
+          displayName: "sky-lake",
+          meta: "staging",
+          updatedAt: "2026-07-13T00:00:00.000Z",
+        }]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(null),
+        selectedRootRoomIdentifier: ref<string | null>("sky-lake"),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      const matchingGroups = state.projectEntries.value.filter(
+        (project) => project.parent.title === "sky-lake",
+      );
+
+      assert.equal(matchingGroups.length, 1);
+      assert.equal(matchingGroups[0]?.parent.roomIdentifier, canonicalIdentifier);
+      assert.equal(matchingGroups[0]?.parent.gitRoom?.repository.fullName, "BrosInCode/letagents");
+      assert.equal(matchingGroups[0]?.parent.currentWorkspace, true);
+    });
+  });
+
   it("marks pinned account rooms and orders them above unpinned sidebar rooms", () => {
     withLocalStorage(() => {
       const accountRooms = ref<DesktopAccountRoomEntry[]>([
