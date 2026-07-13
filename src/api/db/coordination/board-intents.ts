@@ -135,6 +135,7 @@ export async function getRoomBoardSettings(roomId: string): Promise<RoomBoardSet
     room_id: roomId,
     manager_mode: DEFAULT_BOARD_MANAGER_MODE,
     manager_failover: DEFAULT_BOARD_MANAGER_FAILOVER,
+    stall_nudged_at: null,
     updated_by: null,
     created_at: now,
     updated_at: now,

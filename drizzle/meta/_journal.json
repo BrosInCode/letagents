@@ -470,6 +470,13 @@
       "when": 1784073600000,
       "tag": "0066_board_intent_escalation",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1784160000000,
+      "tag": "0067_room_stall_watchdog",
+      "breakpoints": true
     }
   ]
 }

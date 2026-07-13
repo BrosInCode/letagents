@@ -33,6 +33,7 @@ export interface RoomBoardSettings {
   room_id: string;
   manager_mode: BoardManagerMode;
   manager_failover: BoardManagerFailoverMode;
+  stall_nudged_at: string | null;
   updated_by: string | null;
   created_at: string;
   updated_at: string;
@@ -91,6 +92,7 @@ export interface RoomBoardSettingsRow {
   room_id: string;
   manager_mode: BoardManagerMode;
   manager_failover: string;
+  stall_nudged_at: string | null;
   updated_by: string | null;
   created_at: string;
   updated_at: string;
