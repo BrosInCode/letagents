@@ -118,9 +118,11 @@ export function resolveAccountRoomAliasIdentifier(
 ): string | null {
   const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
   if (!normalizedIdentifier) return null;
+  if (accountRooms.some(
+    (room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier,
+  )) return null;
 
   const matches = accountRooms.filter((room) => {
-    if (normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier) return false;
     return [
       room.displayName,
       room.name,

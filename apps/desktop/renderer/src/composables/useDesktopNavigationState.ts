@@ -14,6 +14,7 @@ import {
   buildSidebarProjectGroups,
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
+  resolveAccountRoomAliasIdentifier,
   rootPathLabel,
   rootRoomEntryId,
   type RecentRootRoom,
@@ -54,9 +55,26 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     ) || null;
   });
 
+  const currentRootRoomIdentifier = computed(() => {
+    const identifier = options.rootRoomSnapshot.value?.roomIdentifier
+      || options.selectedRootRoomIdentifier.value
+      || null;
+    return resolveAccountRoomAliasIdentifier(identifier, options.accountRooms.value)
+      || identifier;
+  });
+
+  const currentAccountRoom = computed(() => {
+    const identifier = normalizeRoomIdentifier(currentRootRoomIdentifier.value);
+    if (!identifier) return null;
+    return options.accountRooms.value.find(
+      (room) => normalizeRoomIdentifier(room.roomIdentifier) === identifier,
+    ) || null;
+  });
+
   const repoName = computed(() => {
     return currentRecentRootRoom.value?.displayName
       || options.rootRoomSnapshot.value?.room?.displayName
+      || currentAccountRoom.value?.displayName
       || options.rootRoomSnapshot.value?.roomIdentifier
       || options.repoStatus.value?.rootPath?.split("/").filter(Boolean).pop()
       || options.appInfo.value?.workspaceRoot?.split("/").filter(Boolean).pop()
@@ -191,17 +209,17 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   });
 
   const currentParentRoom = computed<RoomEntry>(() => ({
-    id: rootRoomEntryId(options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value || repoName.value),
+    id: rootRoomEntryId(currentRootRoomIdentifier.value || repoName.value),
     type: "room",
     kind: "parent",
-    roomIdentifier: options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value || null,
+    roomIdentifier: currentRootRoomIdentifier.value,
     title: repoName.value,
     meta: currentParentRoomMeta.value,
     sectionLabel: "Parent room",
     headline: "Start here, then branch work into focused rooms when it needs space.",
     description:
       "The main room should feel like home base: familiar, recent, and connected to the focused work happening around it.",
-    gitRoom: options.rootRoomSnapshot.value?.room?.gitRoom ?? null,
+    gitRoom: options.rootRoomSnapshot.value?.room?.gitRoom ?? currentAccountRoom.value?.gitRoom ?? null,
     currentWorkspace: true,
     latestMessageId: options.rootRoomSnapshot.value?.messages.at(-1)?.id || null,
     latestMessageAt: options.rootRoomSnapshot.value?.messages.at(-1)?.timestamp || null,
