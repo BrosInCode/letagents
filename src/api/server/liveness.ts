@@ -126,8 +126,16 @@ async function announceFailover(input: {
   }
 
   // A deduped replay skips the hook: a prior transaction already performed
-  // this exact failover, so there is nothing further to do here.
-  return released && promoted ? { released, promoted } : null;
+  // this exact failover. Log it — if the prior run crashed before its
+  // post-commit follow-ups, this is the only trace that coordination events
+  // or the pending-intents nudge may be missing.
+  if (!released || !promoted) {
+    console.warn(
+      `Board Manager failover replay deduped for ${input.client_message_id}; post-commit follow-ups from the original run are not retried.`
+    );
+    return null;
+  }
+  return { released, promoted };
 }
 
 const boardManagerFailoverSweeper = createBoardManagerFailoverSweeper({
@@ -135,13 +143,16 @@ const boardManagerFailoverSweeper = createBoardManagerFailoverSweeper({
   getManagerFailoverMode: async (roomId) => (await getRoomBoardSettings(roomId)).manager_failover,
   getDeliveryCandidate: getLivenessAnnouncementCandidate,
   listManagerCandidates: listActiveBoardManagerCandidates,
-  isCandidateReachable: async (roomId, agentSessionId) =>
-    Boolean(
-      await getReachableWorkerDeliverySessionForAgentSession({
-        room_id: roomId,
-        agent_session_id: agentSessionId,
-      })
-    ),
+  getCandidateConnectionState: async (roomId, agentSessionId) => {
+    const session = await getReachableWorkerDeliverySessionForAgentSession({
+      room_id: roomId,
+      agent_session_id: agentSessionId,
+    });
+    if (!session) {
+      return "none";
+    }
+    return session.active_connection_count > 0 ? "live" : "grace";
+  },
   announceManagerOffline: async (input) => {
     await emitProjectMessage(input.room_id, "letagents", input.text, {
       source: "agent_liveness",

@@ -218,7 +218,7 @@ interface FakeDepsOptions {
   mode?: "off" | "announce" | "auto";
   deliveries?: Map<string, LivenessAnnouncementCandidate | null>;
   candidates?: BoardManagerCandidate[];
-  reachableSessions?: Set<string>;
+  connectionStates?: Map<string, "live" | "grace" | "none">;
   failoverResult?: BoardManagerFailoverResult | null;
   pendingIntents?: number;
   failForRoom?: string;
@@ -250,8 +250,8 @@ function buildFakeDeps(options: FakeDepsOptions) {
     getDeliveryCandidate: async ({ delivery_key }) =>
       options.deliveries?.get(delivery_key) ?? null,
     listManagerCandidates: async () => options.candidates ?? [],
-    isCandidateReachable: async (_roomId, agentSessionId) =>
-      options.reachableSessions?.has(agentSessionId) ?? false,
+    getCandidateConnectionState: async (_roomId, agentSessionId) =>
+      options.connectionStates?.get(agentSessionId) ?? "none",
     announceManagerOffline: async (input) => {
       offlineAnnouncements.push({
         roomId: input.room_id,
@@ -307,7 +307,7 @@ test("announce mode posts once per outage and respects the cooldown", async () =
     mode: "announce",
     deliveries: deadDeliveries(),
     candidates: [buildCandidate()],
-    reachableSessions: new Set(["agent_session_400"]),
+    connectionStates: new Map([["agent_session_400", "live"]]),
   });
   const sweeper = createBoardManagerFailoverSweeper(fake.deps);
 
@@ -332,7 +332,7 @@ test("auto mode promotes the best reachable successor and hands over pending int
     mode: "auto",
     deliveries: deadDeliveries(),
     candidates: [unreachable, reachable],
-    reachableSessions: new Set(["agent_session_400"]),
+    connectionStates: new Map([["agent_session_400", "live"]]),
     pendingIntents: 2,
   });
   const summary = await createBoardManagerFailoverSweeper(fake.deps).sweepOnce();
@@ -346,6 +346,75 @@ test("auto mode promotes the best reachable successor and hands over pending int
   assert.ok(fake.intentAnnouncements[0]!.includes("2 pending board intents await"));
 });
 
+test("a freshly assigned manager gets the full threshold despite stale delivery evidence", () => {
+  // The delivery session died 10 minutes ago, but the assignment is only
+  // 1 minute old — outage evidence predating the assignment must not count.
+  const staleDelivery = delivery(
+    buildDeliverySession({
+      last_disconnected_at: isoMinutesAgo(10),
+      reconnect_grace_expires_at: isoMinutesAgo(10),
+      updated_at: isoMinutesAgo(10),
+    })
+  );
+
+  assert.equal(
+    evaluateBoardManagerDeath({
+      assignment_created_at: isoMinutesAgo(1),
+      agent_session_ended_at: null,
+      delivery: staleDelivery,
+      now: NOW,
+    }).dead,
+    false,
+    "a 1-minute-old assignment must not be deposed on pre-assignment evidence"
+  );
+
+  assert.equal(
+    evaluateBoardManagerDeath({
+      assignment_created_at: isoMinutesAgo(6),
+      agent_session_ended_at: null,
+      delivery: staleDelivery,
+      now: NOW,
+    }).dead,
+    true,
+    "once the assignment itself is older than the threshold the death counts"
+  );
+});
+
+test("auto mode prefers a live-connection successor over a grace-window one", async () => {
+  const graceButNewer = buildCandidate({
+    agent_session_id: "agent_session_350",
+    actor_label: "StoneVale | EmmyMay's agent | Codex",
+    last_seen_at: isoMinutesAgo(0),
+  });
+  const liveButOlder = buildCandidate({ last_seen_at: isoMinutesAgo(2) });
+  const fake = buildFakeDeps({
+    assignments: [deadManagerEntry()],
+    mode: "auto",
+    deliveries: deadDeliveries(),
+    candidates: [graceButNewer, liveButOlder],
+    connectionStates: new Map([
+      ["agent_session_350", "grace"],
+      ["agent_session_400", "live"],
+    ]),
+  });
+  const summary = await createBoardManagerFailoverSweeper(fake.deps).sweepOnce();
+
+  assert.equal(summary.failovers, 1);
+  assert.equal(fake.failoverCalls[0]?.successorSessionId, "agent_session_400");
+
+  // With only grace-window candidates available, the fallback still promotes.
+  const graceOnly = buildFakeDeps({
+    assignments: [deadManagerEntry()],
+    mode: "auto",
+    deliveries: deadDeliveries(),
+    candidates: [graceButNewer],
+    connectionStates: new Map([["agent_session_350", "grace"]]),
+  });
+  const graceSummary = await createBoardManagerFailoverSweeper(graceOnly.deps).sweepOnce();
+  assert.equal(graceSummary.failovers, 1);
+  assert.equal(graceOnly.failoverCalls[0]?.successorSessionId, "agent_session_350");
+});
+
 test("auto mode skips the dead manager's own session and degrades to announce with no successor", async () => {
   const onlySelf = buildCandidate({ agent_session_id: "agent_session_331" });
   const fake = buildFakeDeps({
@@ -353,7 +422,7 @@ test("auto mode skips the dead manager's own session and degrades to announce wi
     mode: "auto",
     deliveries: deadDeliveries(),
     candidates: [onlySelf],
-    reachableSessions: new Set(["agent_session_331"]),
+    connectionStates: new Map([["agent_session_331", "live"]]),
   });
   const summary = await createBoardManagerFailoverSweeper(fake.deps).sweepOnce();
 
@@ -368,7 +437,7 @@ test("a lost failover fence records nothing and posts no intent handoff", async 
     mode: "auto",
     deliveries: deadDeliveries(),
     candidates: [buildCandidate()],
-    reachableSessions: new Set(["agent_session_400"]),
+    connectionStates: new Map([["agent_session_400", "live"]]),
     failoverResult: null,
     pendingIntents: 5,
   });
@@ -407,7 +476,7 @@ test("per-assignment failures are isolated", async () => {
     mode: "auto",
     deliveries: deadDeliveries(),
     candidates: [buildCandidate()],
-    reachableSessions: new Set(["agent_session_400"]),
+    connectionStates: new Map([["agent_session_400", "live"]]),
     failForRoom: "focus_broken",
   });
   const summary = await createBoardManagerFailoverSweeper(fake.deps).sweepOnce();

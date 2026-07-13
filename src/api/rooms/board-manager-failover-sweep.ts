@@ -19,8 +19,13 @@ import {
  */
 export const MANAGER_FAILOVER_AFTER_MS = 5 * 60 * 1000;
 
-/** In announce mode, remind the room about a still-dead manager at most this often. */
-export const MANAGER_OFFLINE_REANNOUNCE_COOLDOWN_MS = 30 * 60 * 1000;
+/**
+ * Announce mode posts ONE message per outage epoch — the client_message_id
+ * dedupes any replay at the messages table. This in-memory cooldown exists
+ * only to space out the redundant deduped re-attempts (a SELECT per sweep),
+ * not to re-announce: after a restart the message key still wins.
+ */
+export const MANAGER_OFFLINE_REATTEMPT_COOLDOWN_MS = 30 * 60 * 1000;
 
 export interface BoardManagerDeathVerdict {
   dead: boolean;
@@ -55,8 +60,15 @@ export function evaluateBoardManagerDeath(input: {
     return { dead: false, epoch: null };
   }
 
+  // Anchor the outage to the assignment: delivery evidence predating the
+  // assignment must not count against it, so a freshly assigned manager
+  // always gets the full threshold before being deposed.
   const lastSeenAt = Date.parse(getRoomAgentDeliverySessionLastSeenAt(session));
-  if (!Number.isFinite(lastSeenAt) || now - lastSeenAt < MANAGER_FAILOVER_AFTER_MS) {
+  const assignedAt = Date.parse(input.assignment_created_at);
+  const outageAnchor = Number.isFinite(assignedAt)
+    ? Math.max(lastSeenAt, assignedAt)
+    : lastSeenAt;
+  if (!Number.isFinite(outageAnchor) || now - outageAnchor < MANAGER_FAILOVER_AFTER_MS) {
     return { dead: false, epoch: null };
   }
 
@@ -112,7 +124,14 @@ export interface BoardManagerFailoverSweeperDeps {
     roomId: string,
     activeManager: BoardManagerAssignment
   ): Promise<BoardManagerCandidate[]>;
-  isCandidateReachable(roomId: string, agentSessionId: string): Promise<boolean>;
+  /**
+   * "live" = an open connection with a fresh heartbeat; "grace" = reachable
+   * only through the reconnect grace window; "none" = unreachable.
+   */
+  getCandidateConnectionState(
+    roomId: string,
+    agentSessionId: string
+  ): Promise<"live" | "grace" | "none">;
   /** Plain idempotent announcement (announce mode). */
   announceManagerOffline(input: {
     room_id: string;
@@ -157,7 +176,7 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
 
   function pruneAnnouncementTimestamps(now: number): void {
     for (const [key, timestamp] of offlineAnnouncementTimestamps) {
-      if (now - timestamp > MANAGER_OFFLINE_REANNOUNCE_COOLDOWN_MS) {
+      if (now - timestamp > MANAGER_OFFLINE_REATTEMPT_COOLDOWN_MS) {
         offlineAnnouncementTimestamps.delete(key);
       }
     }
@@ -167,16 +186,25 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
     roomId: string,
     assignment: BoardManagerAssignment
   ): Promise<BoardManagerCandidate | null> {
+    // Prefer candidates with a live connection; fall back to grace-window
+    // ones only when nobody is solidly online, so a worker that dropped
+    // seconds ago does not outrank a stably connected peer and cause an
+    // immediate second failover.
     const candidates = await deps.listManagerCandidates(roomId, assignment);
+    let graceFallback: BoardManagerCandidate | null = null;
     for (const candidate of candidates) {
       if (candidate.agent_session_id === assignment.agent_session_id) {
         continue;
       }
-      if (await deps.isCandidateReachable(roomId, candidate.agent_session_id)) {
+      const state = await deps.getCandidateConnectionState(roomId, candidate.agent_session_id);
+      if (state === "live") {
         return candidate;
       }
+      if (state === "grace" && !graceFallback) {
+        graceFallback = candidate;
+      }
     }
-    return null;
+    return graceFallback;
   }
 
   async function announceOfflineOnly(
@@ -190,7 +218,7 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
     pruneAnnouncementTimestamps(now);
     const cooldownKey = `${roomId}:${assignment.id}:${epoch ?? ""}`;
     const lastAnnouncedAt = offlineAnnouncementTimestamps.get(cooldownKey);
-    if (lastAnnouncedAt && now - lastAnnouncedAt < MANAGER_OFFLINE_REANNOUNCE_COOLDOWN_MS) {
+    if (lastAnnouncedAt && now - lastAnnouncedAt < MANAGER_OFFLINE_REATTEMPT_COOLDOWN_MS) {
       return;
     }
 
