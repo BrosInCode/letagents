@@ -312,6 +312,27 @@ const renderedContent = computed(() => renderMessageContent(
 }
 .message-bubble :deep(.md-content) p { margin: 0 0 0.64em; }
 .message-bubble :deep(.md-content) p:last-child { margin-bottom: 0; }
+.message-bubble :deep(.md-content) h1,
+.message-bubble :deep(.md-content) h2,
+.message-bubble :deep(.md-content) h3,
+.message-bubble :deep(.md-content) h4,
+.message-bubble :deep(.md-content) h5,
+.message-bubble :deep(.md-content) h6 {
+  margin: 1em 0 0.48em;
+  color: var(--text, #fafafa);
+  font-size: 1em;
+  font-weight: 780;
+  line-height: 1.3;
+  letter-spacing: -0.012em;
+}
+.message-bubble :deep(.md-content) h1:first-child,
+.message-bubble :deep(.md-content) h2:first-child,
+.message-bubble :deep(.md-content) h3:first-child,
+.message-bubble :deep(.md-content) h4:first-child,
+.message-bubble :deep(.md-content) h5:first-child,
+.message-bubble :deep(.md-content) h6:first-child { margin-top: 0; }
+.message-bubble :deep(.md-content) h1 { font-size: 1.18em; }
+.message-bubble :deep(.md-content) h2 { font-size: 1.1em; }
 .message-bubble :deep(.md-content) ul,
 .message-bubble :deep(.md-content) ol { margin: 0.35em 0 0.8em; padding-left: 1.35em; }
 .message-bubble :deep(.md-content) li + li { margin-top: 0.28em; }
@@ -342,6 +363,18 @@ const renderedContent = computed(() => renderMessageContent(
   padding: 0;
   background: transparent;
   font-size: 0.82rem;
+}
+.message-bubble :deep(.md-content) hr {
+  height: 1px;
+  margin: 1em 0;
+  border: 0;
+  background: var(--line, #27272a);
+}
+.message-bubble :deep(.md-content) del { color: var(--text-tertiary, #71717a); }
+.message-bubble :deep(.md-content) .markdown-task-checkbox {
+  margin: 0 0.48em 0 -1.18em;
+  accent-color: var(--green, #22c55e);
+  vertical-align: -0.08em;
 }
 .message-bubble :deep(.md-content) a {
   color: #60a5fa;

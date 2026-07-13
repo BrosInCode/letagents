@@ -31,7 +31,7 @@ export function renderMessageText(
   highlightQuery: string,
   messageReferenceIds?: ReadonlySet<string>,
 ): string {
-  const rendered = renderDesktopMarkdown(value, { highlightQuery });
+  const rendered = renderDesktopMarkdown(value, { block: true, highlightQuery });
   return linkMessageReferences(rendered, messageReferenceIds);
 }
 
