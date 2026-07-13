@@ -72,6 +72,7 @@ test(
     const drained = candidates.find((entry) => entry.room_id === drainedRoom);
     assert.ok(drained?.last_closed_at, "the drain epoch is reported");
     assert.equal(drained?.stall_nudged_at, null);
+    assert.equal(drained?.manager_mode, "manager_optional");
   }
 );
 
@@ -111,6 +112,15 @@ test(
     assert.equal(created.created, true);
     assert.ok((await getRoomBoardSettings!(roomId)).stall_nudged_at);
     assert.equal(await markRoomStallNudgedTx!(db!, { room_id: roomId, epoch }), false);
+
+    // A fenced drain drops out of the candidate list entirely.
+    assert.equal(
+      (await listStalledRoomCandidates!({ stalledForMs: 30 * 60_000 })).some(
+        (entry) => entry.room_id === roomId
+      ),
+      false,
+      "already-nudged drains must not re-enter the pipeline"
+    );
 
     // A NEWER drain epoch re-arms the fence.
     const newerEpoch = new Date(Date.parse(epoch) + 60 * 60_000).toISOString();

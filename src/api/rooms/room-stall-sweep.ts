@@ -1,4 +1,5 @@
 import { getAgentPrimaryLabel } from "../../shared/agent-identity.js";
+import type { BoardManagerMode } from "../db.js";
 import type { StalledRoomCandidate } from "../db/coordination/room-stall.js";
 
 /**
@@ -57,6 +58,7 @@ export function evaluateRoomStall(input: {
 export function buildRoomStallNudgeText(input: {
   stalled_for_ms: number;
   live_worker_labels: readonly string[];
+  manager_mode: BoardManagerMode;
 }): string {
   const minutes = Math.max(1, Math.floor(input.stalled_for_ms / 60_000));
   const names = input.live_worker_labels
@@ -64,7 +66,14 @@ export function buildRoomStallNudgeText(input: {
     .map((label) => getAgentPrimaryLabel(label) || label)
     .join(" and ");
   const audience = names || "any available agent";
-  return `[status] The board has been empty for ${minutes}m after active work, and no Board Manager is reachable. ${audience}: if the plan has remaining phases, create the next tasks with register_task_create_intent (they auto-approve when no manager responds within 10m). If the work is genuinely finished, a human should confirm and close the room out.`;
+  // Only manager_optional rooms get Phase C's auto-approval; promising it in
+  // an intent_required room would send agents chasing an approval that only
+  // a human can grant.
+  const intentPath =
+    input.manager_mode === "manager_optional"
+      ? "create the next tasks with register_task_create_intent (they auto-approve when no manager responds within 10m)"
+      : "create the next tasks with register_task_create_intent (this room requires human approval, so a room admin will need to decide them)";
+  return `[status] The board has been empty for ${minutes}m after active work, and no Board Manager is reachable. ${audience}: if the plan has remaining phases, ${intentPath}. If the work is genuinely finished, a human should confirm and close the room out.`;
 }
 
 export interface RoomStallSweeperDeps {
@@ -96,6 +105,19 @@ export function createRoomStallSweeper(deps: RoomStallSweeperDeps) {
     summary: RoomStallSweepSummary
   ): Promise<void> {
     const roomId = candidate.room_id;
+
+    // Threshold + fence are pure — settle them before paying for the
+    // manager and presence lookups.
+    const precheck = evaluateRoomStall({
+      candidate,
+      manager_reachable: false,
+      live_worker_count: 1,
+      now,
+    });
+    if (!precheck.stalled || !precheck.epoch) {
+      return;
+    }
+
     const managerReachable = await deps.hasReachableManager(roomId);
     if (managerReachable) {
       return;
@@ -118,6 +140,7 @@ export function createRoomStallSweeper(deps: RoomStallSweeperDeps) {
       text: buildRoomStallNudgeText({
         stalled_for_ms: now - Date.parse(verdict.epoch),
         live_worker_labels: liveWorkers,
+        manager_mode: candidate.manager_mode,
       }),
       client_message_id: `room_stall:${roomId}:${verdict.epoch}`,
     });

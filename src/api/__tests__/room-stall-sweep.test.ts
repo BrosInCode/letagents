@@ -21,6 +21,7 @@ function candidate(overrides: Partial<StalledRoomCandidate> = {}): StalledRoomCa
     room_id: overrides.room_id ?? "focus_34",
     last_closed_at: overrides.last_closed_at ?? isoMinutesAgo(45),
     stall_nudged_at: overrides.stall_nudged_at ?? null,
+    manager_mode: overrides.manager_mode ?? "manager_optional",
   };
 }
 
@@ -73,14 +74,28 @@ test("nudge text names live workers and falls back gracefully", () => {
       "RiverRidge | EmmyMay's agent | Codex",
       "Third | X | Y",
     ],
+    manager_mode: "manager_optional",
   });
   assert.ok(named.includes("empty for 45m"));
   assert.ok(named.includes("RiverGrove and RiverRidge"));
   assert.ok(!named.includes("Third"));
-  assert.ok(named.includes("register_task_create_intent"));
+  assert.ok(named.includes("auto-approve when no manager responds"));
 
-  const anonymous = buildRoomStallNudgeText({ stalled_for_ms: 31 * 60_000, live_worker_labels: [] });
+  const anonymous = buildRoomStallNudgeText({
+    stalled_for_ms: 31 * 60_000,
+    live_worker_labels: [],
+    manager_mode: "manager_optional",
+  });
   assert.ok(anonymous.includes("any available agent"));
+
+  // intent_required rooms must not be promised auto-approval.
+  const humanGated = buildRoomStallNudgeText({
+    stalled_for_ms: 31 * 60_000,
+    live_worker_labels: [],
+    manager_mode: "intent_required",
+  });
+  assert.ok(!humanGated.includes("auto-approve"));
+  assert.ok(humanGated.includes("room admin will need to decide"));
 });
 
 interface FakeDepsOptions {
@@ -124,6 +139,22 @@ test("sweepOnce nudges a stalled room with an epoch-stable client message id", a
   assert.equal(fake.nudges.length, 1);
   assert.equal(fake.nudges[0]?.clientMessageId, `room_stall:focus_34:${isoMinutesAgo(45)}`);
   assert.ok(fake.nudges[0]!.text.includes("RiverGrove"));
+});
+
+test("sweepOnce settles the fence and threshold before any per-room lookups", async () => {
+  let lookups = 0;
+  const fake = buildFakeDeps({ candidates: [candidate({ stall_nudged_at: isoMinutesAgo(20) })] });
+  const deps: RoomStallSweeperDeps = {
+    ...fake.deps,
+    hasReachableManager: async (roomId) => {
+      lookups += 1;
+      return fake.deps.hasReachableManager(roomId);
+    },
+  };
+  const summary = await createRoomStallSweeper(deps).sweepOnce();
+
+  assert.equal(summary.nudged, 0);
+  assert.equal(lookups, 0, "an already-nudged epoch must skip the manager lookup entirely");
 });
 
 test("sweepOnce leaves managed, staffed-by-nobody, and lost-fence rooms alone", async () => {

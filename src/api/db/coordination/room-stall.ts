@@ -1,13 +1,16 @@
 import { and, eq, sql } from "drizzle-orm";
 
+import { normalizeBoardManagerMode } from "./board-intents.js";
 import { db } from "../client.js";
 import { room_board_settings, tasks } from "../schema.js";
+import type { BoardManagerMode } from "../types.js";
 
 export interface StalledRoomCandidate {
   room_id: string;
   /** When the last task closed — the drain epoch the nudge is fenced on. */
   last_closed_at: string;
   stall_nudged_at: string | null;
+  manager_mode: BoardManagerMode;
 }
 
 /**
@@ -28,14 +31,18 @@ export async function listStalledRoomCandidates(input: {
       room_id: tasks.room_id,
       last_closed_at: sql<string>`max(${tasks.updated_at})`,
       stall_nudged_at: room_board_settings.stall_nudged_at,
+      manager_mode: room_board_settings.manager_mode,
     })
     .from(tasks)
     .leftJoin(room_board_settings, eq(room_board_settings.room_id, tasks.room_id))
-    .groupBy(tasks.room_id, room_board_settings.stall_nudged_at)
+    .groupBy(tasks.room_id, room_board_settings.stall_nudged_at, room_board_settings.manager_mode)
     .having(
       and(
         sql`count(*) FILTER (WHERE ${tasks.status} NOT IN ('done', 'cancelled')) = 0`,
-        sql`max(${tasks.updated_at}) <= ${cutoff}::timestamptz`
+        sql`max(${tasks.updated_at}) <= ${cutoff}::timestamptz`,
+        // Already-fenced drains never re-enter the pipeline, so permanently
+        // drained rooms stop paying per-tick manager/presence lookups.
+        sql`(${room_board_settings.stall_nudged_at} IS NULL OR ${room_board_settings.stall_nudged_at} < max(${tasks.updated_at}))`
       )
     );
 
@@ -43,6 +50,7 @@ export async function listStalledRoomCandidates(input: {
     room_id: row.room_id,
     last_closed_at: row.last_closed_at,
     stall_nudged_at: row.stall_nudged_at ?? null,
+    manager_mode: normalizeBoardManagerMode(row.manager_mode ?? null),
   }));
 }
 
