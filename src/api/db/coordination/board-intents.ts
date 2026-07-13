@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { and, asc, count, eq, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
-import { board_intents, board_manager_assignments, room_agent_sessions, room_board_settings } from "../schema.js";
+import { board_intents, board_manager_assignments, room_agent_delivery_sessions, room_agent_sessions, room_board_settings } from "../schema.js";
 import { toBoardIntent, toBoardManagerAssignment, toRoomBoardSettings } from "../mappers.js";
 import { coordinationId, hashToken } from "../utils.js";
 import {
@@ -11,7 +11,7 @@ import {
   boardIntentPayloadForTaskMutation,
   type BoardIntentPayload,
 } from "../../board-intent-payloads.js";
-import type { RoomAgentSessionKind } from "../../../shared/agent-presence.js";
+import { isAgentDeliverySessionReachable, type RoomAgentSessionKind } from "../../../shared/agent-presence.js";
 import { DEFAULT_BOARD_MANAGER_FAILOVER } from "../../../shared/board-manager-failover.js";
 import type {
   BoardIntent,
@@ -834,4 +834,119 @@ export async function countRecentAutoApprovedIntents(input: {
       )
     );
   return Number(row?.value ?? 0);
+}
+
+export type BoardIntentAutoApprovalIneligibleReason =
+  | "manager_reachable"
+  | "mode_changed"
+  | "rate_capped";
+
+export class BoardIntentAutoApprovalIneligibleError extends Error {
+  readonly reason: BoardIntentAutoApprovalIneligibleReason;
+
+  constructor(reason: BoardIntentAutoApprovalIneligibleReason) {
+    super(`board intent auto-approval is not eligible: ${reason}`);
+    this.name = "BoardIntentAutoApprovalIneligibleError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Time-of-use revalidation for an auto-approval, run INSIDE the escalation
+ * transaction. The sweep's earlier checks are only a cheap pre-filter — a
+ * manager can reconnect or be assigned, the room can flip to
+ * intent_required, or a concurrent sweeper can spend the proposer's rate
+ * budget between selection and commit. A per-(room, proposer) advisory
+ * transaction lock serializes the cap check across sweepers and replicas.
+ * Throws BoardIntentAutoApprovalIneligibleError, rolling the caller's
+ * transaction (and its announcement) back.
+ */
+export async function assertBoardIntentAutoApprovalEligibilityTx(
+  executor: Pick<typeof db, "select" | "execute">,
+  input: {
+    room_id: string;
+    proposer_actor_key: string;
+    cap_window_ms: number;
+    cap_max: number;
+    now?: number;
+  }
+): Promise<void> {
+  const now = input.now ?? Date.now();
+  const lockKey = `board_intent_auto_approve:${input.room_id}:${input.proposer_actor_key}`;
+  await executor.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+
+  const [settingsRow] = (await executor
+    .select()
+    .from(room_board_settings)
+    .where(eq(room_board_settings.room_id, input.room_id))
+    .limit(1)) as RoomBoardSettingsRow[];
+  if (normalizeBoardManagerMode(settingsRow?.manager_mode ?? null) !== "manager_optional") {
+    throw new BoardIntentAutoApprovalIneligibleError("mode_changed");
+  }
+
+  const [managerRow] = await executor
+    .select({ assignment: board_manager_assignments })
+    .from(board_manager_assignments)
+    .innerJoin(
+      room_agent_sessions,
+      and(
+        eq(room_agent_sessions.room_id, board_manager_assignments.room_id),
+        eq(room_agent_sessions.session_id, board_manager_assignments.agent_session_id),
+        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+        sql`${room_agent_sessions.ended_at} IS NULL`
+      )
+    )
+    .where(
+      and(
+        eq(board_manager_assignments.room_id, input.room_id),
+        eq(board_manager_assignments.status, "active")
+      )
+    )
+    .limit(1);
+  if (managerRow?.assignment) {
+    const assignment = managerRow.assignment as BoardManagerAssignmentRow;
+    const [deliveryRow] = await executor
+      .select()
+      .from(room_agent_delivery_sessions)
+      .where(
+        and(
+          eq(room_agent_delivery_sessions.room_id, input.room_id),
+          eq(
+            room_agent_delivery_sessions.delivery_key,
+            `agent_session:${assignment.agent_session_id}`
+          )
+        )
+      )
+      .limit(1);
+    if (
+      deliveryRow
+      && isAgentDeliverySessionReachable(
+        {
+          activeConnectionCount: deliveryRow.active_connection_count,
+          updatedAt: deliveryRow.updated_at,
+          reconnectGraceExpiresAt: deliveryRow.reconnect_grace_expires_at,
+        },
+        now
+      )
+    ) {
+      throw new BoardIntentAutoApprovalIneligibleError("manager_reachable");
+    }
+  }
+
+  const since = new Date(now - input.cap_window_ms).toISOString();
+  const [capRow] = await executor
+    .select({ value: count() })
+    .from(board_intents)
+    .where(
+      and(
+        eq(board_intents.room_id, input.room_id),
+        eq(board_intents.proposer_actor_key, input.proposer_actor_key),
+        eq(board_intents.auto_approved, true),
+        sql`${board_intents.decided_at} IS NOT NULL`,
+        sql`${board_intents.decided_at} > ${since}::timestamptz`
+      )
+    );
+  if (Number(capRow?.value ?? 0) >= input.cap_max) {
+    throw new BoardIntentAutoApprovalIneligibleError("rate_capped");
+  }
 }

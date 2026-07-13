@@ -58,6 +58,8 @@ export {
   releaseBoardManagerAssignmentTx,
 } from "./coordination/board-manager-failover.js";
 export {
+  assertBoardIntentAutoApprovalEligibilityTx,
+  BoardIntentAutoApprovalIneligibleError,
   claimBoardIntentEscalationTx,
   countRecentAutoApprovedIntents,
   listEscalationCandidateBoardIntents,

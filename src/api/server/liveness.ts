@@ -1,5 +1,8 @@
 import {
+  acceptProposedTaskTx,
   approveTaskCreateBoardIntent,
+  assertBoardIntentAutoApprovalEligibilityTx,
+  BoardIntentAutoApprovalIneligibleError,
   claimBoardIntentEscalationTx,
   countBoardIntents,
   countRecentAutoApprovedIntents,
@@ -26,7 +29,11 @@ import {
   createBoardManagerFailoverSweeper,
   type BoardManagerFailoverResult,
 } from "../rooms/board-manager-failover-sweep.js";
-import { createIntentEscalationSweeper } from "../rooms/board-intent-escalation-sweep.js";
+import {
+  createIntentEscalationSweeper,
+  INTENT_AUTO_APPROVE_MAX_PER_WINDOW,
+  INTENT_AUTO_APPROVE_WINDOW_MS,
+} from "../rooms/board-intent-escalation-sweep.js";
 import {
   createLivenessSweeper,
   LIVENESS_SWEEP_INTERVAL_MS,
@@ -234,6 +241,16 @@ const intentEscalationSweeper = createIntentEscalationSweeper({
           if (!claimed) {
             throw new IntentEscalationLostRace();
           }
+          // Time-of-use revalidation: the sweep's checks are a pre-filter
+          // only. This re-verifies mode + manager unreachability and takes
+          // the per-proposer advisory lock that makes the rate cap atomic
+          // across sweepers and replicas.
+          await assertBoardIntentAutoApprovalEligibilityTx(tx, {
+            room_id: input.room_id,
+            proposer_actor_key: input.proposer_actor_key,
+            cap_window_ms: INTENT_AUTO_APPROVE_WINDOW_MS,
+            cap_max: INTENT_AUTO_APPROVE_MAX_PER_WINDOW,
+          });
           const result = await approveTaskCreateBoardIntent(
             {
               room_id: input.room_id,
@@ -246,15 +263,33 @@ const intentEscalationSweeper = createIntentEscalationSweeper({
           if (!result) {
             throw new IntentEscalationLostRace();
           }
+          // Proposed tasks are unclaimable; escalation exists to unblock
+          // claims, so the created task must land accepted.
+          const accepted = await acceptProposedTaskTx(tx, {
+            room_id: input.room_id,
+            task_id: result.task.id,
+          });
+          if (!accepted) {
+            throw new Error(`escalated task ${result.task.id} could not be accepted`);
+          }
           await markBoardIntentAutoApprovedTx(tx, {
             room_id: input.room_id,
             intent_id: input.intent_id,
           });
-          approvedTask = result.task;
+          approvedTask = { ...result.task, status: "accepted" };
         },
       });
     } catch (error) {
       if (error instanceof IntentEscalationLostRace) {
+        return null;
+      }
+      if (error instanceof BoardIntentAutoApprovalIneligibleError) {
+        // State changed between selection and commit (manager reconnected,
+        // mode flipped, or the cap filled). The announcement rolled back;
+        // the next sweep re-evaluates and picks the right path.
+        console.warn(
+          `Intent escalation for ${input.client_message_id} aborted at commit time: ${error.reason}`
+        );
         return null;
       }
       throw error;

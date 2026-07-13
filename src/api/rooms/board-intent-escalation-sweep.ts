@@ -92,6 +92,7 @@ export interface IntentEscalationSweeperDeps {
   autoApproveIntent(input: {
     room_id: string;
     intent_id: string;
+    proposer_actor_key: string;
     text: string;
     client_message_id: string;
   }): Promise<Task | null>;
@@ -153,6 +154,8 @@ export function createIntentEscalationSweeper(deps: IntentEscalationSweeperDeps)
       const task = await deps.autoApproveIntent({
         room_id: roomId,
         intent_id: intent.id,
+        // The anonymous-proposer gate above guarantees this is set.
+        proposer_actor_key: intent.proposer_actor_key ?? "",
         text: buildAutoApproveAnnouncementText({ intent, waited_for_ms: waitedForMs }),
         client_message_id: `board_intent_escalation:${intent.id}`,
       });

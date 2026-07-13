@@ -61,8 +61,10 @@ test(
   skipOptions,
   async () => {
     const {
+      acceptProposedTaskTx,
       addMessageWithCreateStatus,
       approveTaskCreateBoardIntent,
+      assertBoardIntentAutoApprovalEligibilityTx,
       claimBoardIntentEscalationTx,
       countRecentAutoApprovedIntents,
       getBoardIntent,
@@ -90,6 +92,12 @@ test(
             await claimBoardIntentEscalationTx!(tx, { room_id: roomId, intent_id: intentId }),
             true
           );
+          await assertBoardIntentAutoApprovalEligibilityTx!(tx, {
+            room_id: roomId,
+            proposer_actor_key: "EmmyMay/river-grove",
+            cap_window_ms: 60 * 60_000,
+            cap_max: 5,
+          });
           const result = await approveTaskCreateBoardIntent!(
             {
               room_id: roomId,
@@ -100,6 +108,10 @@ test(
             tx
           );
           assert.ok(result, "approval inside the escalation transaction must succeed");
+          assert.equal(
+            await acceptProposedTaskTx!(tx, { room_id: roomId, task_id: result!.task.id }),
+            true
+          );
           await markBoardIntentAutoApprovedTx!(tx, { room_id: roomId, intent_id: intentId });
         },
       }
@@ -113,6 +125,11 @@ test(
     const { tasks } = await getTasks!(roomId);
     assert.equal(tasks.length, 1);
     assert.equal(tasks[0]?.title, "Ship Phase D");
+    assert.equal(
+      tasks[0]?.status,
+      "accepted",
+      "the escalated task must be claimable without an admin"
+    );
     assert.equal(intent?.task_id, tasks[0]?.id);
 
     // The fence is exactly-once and the escalated intent leaves the candidate list.
@@ -212,5 +229,184 @@ test(
     assert.ok(ids.includes(oldPendingId));
     assert.ok(!ids.includes(young.id), "young intents wait out the threshold");
     assert.ok(!ids.includes(expired.id), "expired intents never escalate");
+  }
+);
+
+test(
+  "eligibility revalidation aborts when a manager reconnects or the mode changes mid-flight",
+  skipOptions,
+  async () => {
+    const {
+      addMessageWithCreateStatus,
+      assertBoardIntentAutoApprovalEligibilityTx,
+      assignBoardManager,
+      claimBoardIntentEscalationTx,
+      createRoomAgentSession,
+      getBoardIntent,
+      markRoomAgentDeliveryConnected,
+      setRoomBoardManagerMode,
+      upsertAccount,
+    } = dbModule!;
+    const { roomId, intentId } = await seedStuckTaskCreateIntent();
+
+    // Simulate the race: after the sweep selected this intent, a manager
+    // registered, connected, and took the role before the transaction ran.
+    const account = await upsertAccount!({
+      provider: "github",
+      provider_user_id: "escalation-race-test",
+      login: "EmmyMay",
+      display_name: "EmmyMay",
+    });
+    const manager = await createRoomAgentSession!({
+      room_id: roomId,
+      session_kind: "worker",
+      runtime: "codex",
+      actor_label: "CedarFern | EmmyMay's agent | Codex",
+      agent_key: "EmmyMay/cedar-fern",
+      display_name: "CedarFern",
+      owner_account_id: account.id,
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+    });
+    await markRoomAgentDeliveryConnected!({
+      room_id: roomId,
+      actor_label: "CedarFern | EmmyMay's agent | Codex",
+      agent_session_id: manager.session_id,
+      session_kind: "worker",
+      display_name: "CedarFern",
+      transport: "long_poll",
+    });
+    await assignBoardManager!({
+      room_id: roomId,
+      agent_session_id: manager.session_id,
+      assigned_by: "EmmyMay",
+    });
+
+    const clientMessageId = `board_intent_escalation:${intentId}`;
+    await assert.rejects(
+      addMessageWithCreateStatus!(roomId, "letagents", "[status] escalation attempt", {
+        client_message_id: clientMessageId,
+        with_created_message_in_transaction: async (tx) => {
+          assert.equal(
+            await claimBoardIntentEscalationTx!(tx, { room_id: roomId, intent_id: intentId }),
+            true
+          );
+          await assertBoardIntentAutoApprovalEligibilityTx!(tx, {
+            room_id: roomId,
+            proposer_actor_key: "EmmyMay/river-grove",
+            cap_window_ms: 60 * 60_000,
+            cap_max: 5,
+          });
+        },
+      }),
+      (error: Error) => error.name === "BoardIntentAutoApprovalIneligibleError"
+    );
+
+    const { rows } = await pool!.query(
+      "SELECT number FROM messages WHERE room_id = $1 AND client_message_id = $2",
+      [roomId, clientMessageId]
+    );
+    assert.equal(rows.length, 0, "the announcement must roll back");
+    const intent = await getBoardIntent!({ room_id: roomId, intent_id: intentId });
+    assert.equal(intent?.status, "pending");
+    assert.equal(intent?.escalated_at, null, "the fence must roll back for re-evaluation");
+
+    // Mode change is caught the same way even with the manager gone again.
+    await pool!.query("UPDATE board_manager_assignments SET status = 'released', released_at = now() WHERE room_id = $1", [roomId]);
+    await setRoomBoardManagerMode!({
+      room_id: roomId,
+      manager_mode: "intent_required",
+      updated_by: "EmmyMay",
+    });
+    await assert.rejects(
+      addMessageWithCreateStatus!(roomId, "letagents", "[status] escalation attempt 2", {
+        client_message_id: clientMessageId,
+        with_created_message_in_transaction: async (tx) => {
+          await assertBoardIntentAutoApprovalEligibilityTx!(tx, {
+            room_id: roomId,
+            proposer_actor_key: "EmmyMay/river-grove",
+            cap_window_ms: 60 * 60_000,
+            cap_max: 5,
+          });
+        },
+      }),
+      (error: Error) => error.name === "BoardIntentAutoApprovalIneligibleError"
+    );
+  }
+);
+
+test(
+  "the rate cap holds under concurrent escalations",
+  skipOptions,
+  async () => {
+    const {
+      addMessageWithCreateStatus,
+      assertBoardIntentAutoApprovalEligibilityTx,
+      boardIntentPayloadForTaskCreate,
+      claimBoardIntentEscalationTx,
+      createBoardIntent,
+      markBoardIntentAutoApprovedTx,
+    } = dbModule!;
+    const { roomId, intentId: firstId } = await seedStuckTaskCreateIntent();
+    const second = await createBoardIntent!({
+      room_id: roomId,
+      action_type: "task_create",
+      payload: boardIntentPayloadForTaskCreate!({ title: "Second stuck task" }),
+      proposer_actor_key: "EmmyMay/river-grove",
+    });
+    await pool!.query(
+      "UPDATE board_intents SET created_at = $3 WHERE room_id = $1 AND id = $2",
+      [roomId, second.id, new Date(Date.now() - 15 * 60_000)]
+    );
+
+    // Spend 4 of the 5-per-hour budget directly.
+    for (let i = 0; i < 4; i += 1) {
+      const spent = await createBoardIntent!({
+        room_id: roomId,
+        action_type: "task_create",
+        payload: boardIntentPayloadForTaskCreate!({ title: `Prior auto approval ${i}` }),
+        proposer_actor_key: "EmmyMay/river-grove",
+      });
+      await pool!.query(
+        "UPDATE board_intents SET status = 'used', auto_approved = true, decided_at = now() WHERE room_id = $1 AND id = $2",
+        [roomId, spent.id]
+      );
+    }
+
+    // Two concurrent escalations race for the single remaining budget slot.
+    const escalate = (intentId: string) =>
+      addMessageWithCreateStatus!(roomId, "letagents", `[status] escalating ${intentId}`, {
+        client_message_id: `board_intent_escalation:${intentId}`,
+        with_created_message_in_transaction: async (tx) => {
+          assert.equal(
+            await claimBoardIntentEscalationTx!(tx, { room_id: roomId, intent_id: intentId }),
+            true
+          );
+          await assertBoardIntentAutoApprovalEligibilityTx!(tx, {
+            room_id: roomId,
+            proposer_actor_key: "EmmyMay/river-grove",
+            cap_window_ms: 60 * 60_000,
+            cap_max: 5,
+          });
+          await markBoardIntentAutoApprovedTx!(tx, { room_id: roomId, intent_id: intentId });
+          await pool!.query(
+            "UPDATE board_intents SET decided_at = now() WHERE room_id = $1 AND id = $2",
+            [roomId, intentId]
+          );
+        },
+      }).then(
+        () => "approved" as const,
+        (error: Error) =>
+          error.name === "BoardIntentAutoApprovalIneligibleError"
+            ? ("capped" as const)
+            : Promise.reject(error)
+      );
+
+    const outcomes = await Promise.all([escalate(firstId), escalate(second.id)]);
+    assert.deepEqual(
+      [...outcomes].sort(),
+      ["approved", "capped"],
+      "exactly one concurrent escalation may take the last budget slot"
+    );
   }
 );
