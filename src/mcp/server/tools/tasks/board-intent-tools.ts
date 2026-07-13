@@ -26,6 +26,7 @@ import {
 } from "../../../../api/board-intent-payloads.js";
 
 const boardManagerModeSchema = z.enum(["off", "manager_optional", "intent_required"]);
+const boardManagerFailoverSchema = z.enum(["off", "announce", "auto"]);
 const boardManagerRuntimeSourceSchema = z.enum(["desktop_managed", "open_model", "external", "unknown"]);
 const boardIntentActionTypeSchema = z.enum([
   "task_create",
@@ -110,13 +111,17 @@ export function registerBoardIntentTools(server: McpServer): void {
     "Set room Board Manager mode. Requires room admin authority. Use manager_optional unless the human explicitly requires all high-impact agent board actions to register intent.",
     {
       manager_mode: boardManagerModeSchema.describe("off disables intent checks; manager_optional requires approval only while a manager is assigned; intent_required always requires approval."),
+      manager_failover: boardManagerFailoverSchema.optional().describe("What the liveness sweep does when the active Board Manager goes offline: off ignores it, announce posts a room warning, auto (default) promotes the best reachable worker."),
       room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     },
-    async ({ manager_mode, room_id }) => {
+    async ({ manager_mode, manager_failover, room_id }) => {
       const targetRoomId = resolveCanonicalRoomId(room_id);
       if (!targetRoomId) return taskToolError("Not in a canonical room.");
       try {
-        const result = await patchBoardSettings(targetRoomId, { manager_mode });
+        const result = await patchBoardSettings(targetRoomId, {
+          manager_mode,
+          ...(manager_failover ? { manager_failover } : {}),
+        });
         return jsonToolResponse(
           { success: true, ...responseObject(result) },
           2

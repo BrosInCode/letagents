@@ -12,6 +12,7 @@ export const room_board_settings = pgTable(
       .primaryKey()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     manager_mode: text("manager_mode").notNull().default("manager_optional"),
+    manager_failover: text("manager_failover").notNull().default("auto"),
     updated_by: text("updated_by"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
@@ -20,6 +21,10 @@ export const room_board_settings = pgTable(
     manager_mode_check: check(
       "room_board_settings_manager_mode_check",
       sql`${table.manager_mode} IN ('off', 'manager_optional', 'intent_required')`
+    ),
+    manager_failover_check: check(
+      "room_board_settings_manager_failover_check",
+      sql`${table.manager_failover} IN ('off', 'announce', 'auto')`
     ),
   })
 );

@@ -12,11 +12,13 @@ import {
   type BoardIntentPayload,
 } from "../../board-intent-payloads.js";
 import type { RoomAgentSessionKind } from "../../../shared/agent-presence.js";
+import { DEFAULT_BOARD_MANAGER_FAILOVER } from "../../../shared/board-manager-failover.js";
 import type {
   BoardIntent,
   BoardIntentActionType,
   BoardIntentRow,
   BoardManagerAssignment,
+  BoardManagerFailoverMode,
   BoardManagerRuntimeSource,
   BoardManagerAssignmentRow,
   BoardManagerMode,
@@ -132,6 +134,7 @@ export async function getRoomBoardSettings(roomId: string): Promise<RoomBoardSet
   return {
     room_id: roomId,
     manager_mode: DEFAULT_BOARD_MANAGER_MODE,
+    manager_failover: DEFAULT_BOARD_MANAGER_FAILOVER,
     updated_by: null,
     created_at: now,
     updated_at: now,
@@ -141,14 +144,17 @@ export async function getRoomBoardSettings(roomId: string): Promise<RoomBoardSet
 export async function setRoomBoardManagerMode(input: {
   room_id: string;
   manager_mode: BoardManagerMode;
+  manager_failover?: BoardManagerFailoverMode | null;
   updated_by: string;
 }): Promise<RoomBoardSettings> {
   const now = new Date().toISOString();
+  const failoverUpdate = input.manager_failover ? { manager_failover: input.manager_failover } : {};
   const [row] = (await db
     .insert(room_board_settings)
     .values({
       room_id: input.room_id,
       manager_mode: input.manager_mode,
+      manager_failover: input.manager_failover ?? DEFAULT_BOARD_MANAGER_FAILOVER,
       updated_by: input.updated_by,
       created_at: now,
       updated_at: now,
@@ -157,6 +163,7 @@ export async function setRoomBoardManagerMode(input: {
       target: room_board_settings.room_id,
       set: {
         manager_mode: input.manager_mode,
+        ...failoverUpdate,
         updated_by: input.updated_by,
         updated_at: now,
       },

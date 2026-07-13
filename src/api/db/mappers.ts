@@ -1,3 +1,4 @@
+import { normalizeBoardManagerFailoverMode } from "../../shared/board-manager-failover.js";
 import { normalizeAgentPromptKind } from "../../shared/room-agent-prompts.js";
 import { buildRoomActivitySourceFlags, deriveRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
@@ -355,6 +356,7 @@ export function toRoomBoardSettings(row: typeof room_board_settings.$inferSelect
   return {
     room_id: row.room_id,
     manager_mode: row.manager_mode as RoomBoardSettings["manager_mode"],
+    manager_failover: normalizeBoardManagerFailoverMode(row.manager_failover),
     updated_by: row.updated_by,
     created_at: row.created_at,
     updated_at: row.updated_at,

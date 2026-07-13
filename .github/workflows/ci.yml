@@ -196,6 +196,14 @@ jobs:
           src/api/__tests__/liveness-sweep.test.ts
           src/api/__tests__/liveness-announcements-db.test.ts
 
+      - name: Run board manager failover tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/board-manager-failover-sweep.test.ts
+          src/api/__tests__/board-manager-failover-db.test.ts
+
       - name: Run worker session auth tests
         run: >-
           node
