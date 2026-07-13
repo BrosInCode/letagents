@@ -10,6 +10,7 @@ import { getLocalRoomArtifacts } from "../artifacts/local-store.js";
 import { getLatestLocalChatMessages } from "../messages/local-store.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import { resolveLocalThreadReaderKey } from "../messages/thread-reader.js";
+import { drainPaginatedTaskPages, type PaginatedTaskPage } from "./task-pagination.js";
 import type {
   ActivityHistoryResponse,
   FocusRoomsResponse,
@@ -19,6 +20,12 @@ import type {
   ReasoningResponse,
   RoomSnapshotData,
 } from "./payloads.js";
+
+const taskPageSize = 200;
+
+type TaskPageResponse = PaginatedTaskPage<
+  NonNullable<RoomSnapshotData["tasksData"]["tasks"]>[number]
+>;
 
 type ThreadPageResponse = {
   root?: RoomMessagePayload | null;
@@ -48,9 +55,7 @@ export async function fetchRoomSnapshotData(
     apiFetch<FocusRoomsResponse>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/focus-rooms`,
     ).catch(() => ({ focus_rooms: [] })),
-    apiFetch<RoomSnapshotData["tasksData"]>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/tasks`,
-    ).catch(() => ({ tasks: [] })),
+    fetchAllCloudTasks(apiRoomIdentifier).catch(() => ({ tasks: [] })),
     apiFetch<ParticipantsResponse>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/participants`,
     ).catch(() => ({ participants: [], hidden_count: 0 })),
@@ -99,6 +104,19 @@ export async function fetchRoomSnapshotData(
     messagesData,
     githubEventsData,
   };
+}
+
+async function fetchAllCloudTasks(
+  roomIdentifier: string,
+): Promise<RoomSnapshotData["tasksData"]> {
+  const tasks = await drainPaginatedTaskPages(async (after) => {
+    const params = new URLSearchParams({ limit: String(taskPageSize) });
+    if (after) params.set("after", after);
+    return apiFetch<TaskPageResponse>(
+      `/rooms/${encodeURIComponent(roomIdentifier)}/tasks?${params.toString()}`,
+    );
+  });
+  return { tasks };
 }
 
 async function expandMessagesWithThreadAncestors(
