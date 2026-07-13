@@ -9,8 +9,10 @@
     @drop.prevent="handleAttachmentDrop"
   >
     <div
+      ref="threadLayoutElement"
       class="room-chat-layout"
       :data-thread-open="Boolean(activeThreadParent)"
+      :data-thread-overlay="threadPaneOverlay"
       :data-thread-resizing="isResizingThreadPane"
       :style="threadLayoutStyle"
     >
@@ -189,6 +191,13 @@ import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vu
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
 import {
+  maxThreadPaneWidthForContainer,
+  shouldOverlayThreadPane,
+  threadPaneDefaultWidth,
+  threadPaneHardMaxWidth,
+  threadPaneMinWidth,
+} from "./room-chat/thread-layout";
+import {
   resolveThreadParent,
   threadParentId,
   threadReplies,
@@ -254,14 +263,12 @@ interface RoomReplyTarget extends DesktopRoomMessage {
 }
 
 const threadLayoutAnimationMs = 250;
-const threadPaneMinWidth = 320;
-const threadPaneDefaultWidth = 420;
-const threadPaneHardMaxWidth = 560;
-const threadPaneMinRoomWidth = 560;
 const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
 const replyTarget = ref<RoomReplyTarget | null>(null);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
+const threadLayoutElement = ref<HTMLElement | null>(null);
+const threadLayoutWidth = ref(0);
 const threadReturnFocusElement = ref<HTMLElement | null>(null);
 const transientHighlightMessageId = ref<string | null>(null);
 const threadPaneWidth = ref(threadPaneDefaultWidth);
@@ -276,11 +283,13 @@ const openedThreadSummaries = ref(new Map<string, DesktopRoomMessageThreadSummar
 const lastMarkedThreadReadKey = ref<string | null>(null);
 let transientHighlightTimeout: number | null = null;
 let threadPaneResizeState: { startX: number; startWidth: number; cursor: string; userSelect: string } | null = null;
+let threadLayoutResizeObserver: ResizeObserver | null = null;
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
 const threadLayoutStyle = computed<CSSProperties>(() => ({
   "--room-thread-pane-width": `${threadPaneWidth.value}px`,
 }));
+const threadPaneOverlay = computed(() => shouldOverlayThreadPane(threadLayoutWidth.value));
 const activeThreadParent = computed(() =>
   fetchedThreadRootId.value === activeThreadParentId.value && fetchedThreadRoot.value
     ? applyThreadSummaryOverride(fetchedThreadRoot.value)
@@ -477,13 +486,21 @@ function clampThreadPaneWidth(width: number): number {
 }
 
 function maxThreadPaneWidth(): number {
-  if (typeof window === "undefined") return threadPaneHardMaxWidth;
-  const viewportLimitedMax = window.innerWidth - threadPaneMinRoomWidth;
-  return Math.max(threadPaneMinWidth, Math.min(threadPaneHardMaxWidth, viewportLimitedMax));
+  const containerWidth = threadLayoutWidth.value || threadLayoutElement.value?.clientWidth || 0;
+  return containerWidth
+    ? maxThreadPaneWidthForContainer(containerWidth)
+    : threadPaneHardMaxWidth;
 }
 
 function clampThreadPaneToViewport(): void {
+  if (threadPaneOverlay.value) return;
   threadPaneWidth.value = clampThreadPaneWidth(threadPaneWidth.value);
+}
+
+function syncThreadLayoutWidth(): void {
+  const width = threadLayoutElement.value?.clientWidth || 0;
+  threadLayoutWidth.value = width;
+  if (!shouldOverlayThreadPane(width)) clampThreadPaneToViewport();
 }
 
 function sendThreadMessage(
@@ -703,14 +720,20 @@ watch(
 );
 
 onMounted(() => {
-  clampThreadPaneToViewport();
-  window.addEventListener("resize", clampThreadPaneToViewport);
+  syncThreadLayoutWidth();
+  if (typeof ResizeObserver !== "undefined" && threadLayoutElement.value) {
+    threadLayoutResizeObserver = new ResizeObserver(syncThreadLayoutWidth);
+    threadLayoutResizeObserver.observe(threadLayoutElement.value);
+  }
+  window.addEventListener("resize", syncThreadLayoutWidth);
 });
 
 defineExpose({ openThread });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("resize", clampThreadPaneToViewport);
+  window.removeEventListener("resize", syncThreadLayoutWidth);
+  threadLayoutResizeObserver?.disconnect();
+  threadLayoutResizeObserver = null;
   stopThreadPaneResize();
   if (transientHighlightTimeout !== null) {
     window.clearTimeout(transientHighlightTimeout);
