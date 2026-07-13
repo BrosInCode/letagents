@@ -1,5 +1,6 @@
 import {
   getActiveBoardManager,
+  getLivenessAnnouncementCandidate,
   getRoomLiveAgentSuppressionActorLabels,
   listLivenessAnnouncementCandidates,
   markAgentOfflineAnnounced,
@@ -13,6 +14,7 @@ import { emitProjectMessage } from "./events.js";
 
 const livenessSweeper = createLivenessSweeper({
   listCandidates: (options) => listLivenessAnnouncementCandidates(options),
+  getCandidate: getLivenessAnnouncementCandidate,
   getSuppressedActorLabels: getRoomLiveAgentSuppressionActorLabels,
   getActiveBoardManagerSessionId: async (roomId) =>
     (await getActiveBoardManager(roomId))?.agent_session_id ?? null,

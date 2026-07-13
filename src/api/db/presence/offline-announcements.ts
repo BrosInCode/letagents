@@ -1,4 +1,4 @@
-import { and, eq, gte, isNull, or, sql } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 
 import { db } from "../client.js";
 import { toRoomAgentDeliverySession } from "../mappers.js";
@@ -11,12 +11,30 @@ export interface LivenessAnnouncementCandidate {
   agent_session_ended_at: string | null;
 }
 
+const candidateSelection = {
+  session: room_agent_delivery_sessions,
+  agent_session_ended_at: room_agent_sessions.ended_at,
+};
+
+function toCandidate(row: {
+  session: typeof room_agent_delivery_sessions.$inferSelect;
+  agent_session_ended_at: string | null;
+}): LivenessAnnouncementCandidate {
+  return {
+    session: toRoomAgentDeliverySession(row.session as RoomAgentDeliverySessionRow),
+    agent_session_ended_at: row.agent_session_ended_at ?? null,
+  };
+}
+
 /**
  * Worker delivery sessions that may need an offline or recovery announcement.
- * The coarse cut is recency: any row touched (connected, heartbeated, or
- * disconnected) within `withinMs` is a candidate; long-dead rows never
- * re-enter the announcement pipeline. Fine-grained reachability and epoch
- * checks happen in the liveness sweeper.
+ * The only cut here is recency: any worker row touched (connected,
+ * heartbeated, or disconnected) within `withinMs` is a candidate, so
+ * long-dead rows never re-enter the announcement pipeline. All transition
+ * logic — reachability, announcement epochs, recovery matching — lives in the
+ * liveness sweeper, deliberately NOT in this query: filtering on announcement
+ * markers here has already hidden a real case once (a dead-socket death after
+ * a recovery, where last_disconnected_at is NULL).
  */
 export async function listLivenessAnnouncementCandidates(options?: {
   withinMs?: number;
@@ -26,10 +44,7 @@ export async function listLivenessAnnouncementCandidates(options?: {
   const cutoff = new Date(now - (options?.withinMs ?? 60 * 60 * 1000)).toISOString();
 
   const rows = await db
-    .select({
-      session: room_agent_delivery_sessions,
-      agent_session_ended_at: room_agent_sessions.ended_at,
-    })
+    .select(candidateSelection)
     .from(room_agent_delivery_sessions)
     .leftJoin(
       room_agent_sessions,
@@ -38,33 +53,45 @@ export async function listLivenessAnnouncementCandidates(options?: {
     .where(
       and(
         eq(room_agent_delivery_sessions.session_kind, "worker"),
-        gte(room_agent_delivery_sessions.updated_at, cutoff),
-        or(
-          // Not yet announced for the current disconnect epoch.
-          isNull(room_agent_delivery_sessions.offline_announced_at),
-          sql`${room_agent_delivery_sessions.offline_announced_at} < ${room_agent_delivery_sessions.last_disconnected_at}`,
-          // Announced offline without a matching recovery announcement yet.
-          isNull(room_agent_delivery_sessions.recovery_announced_at),
-          sql`${room_agent_delivery_sessions.recovery_announced_at} < ${room_agent_delivery_sessions.offline_announced_at}`
-        )
+        gte(room_agent_delivery_sessions.updated_at, cutoff)
       )
     );
 
-  return rows.map((row) => ({
-    session: toRoomAgentDeliverySession(row.session as RoomAgentDeliverySessionRow),
-    agent_session_ended_at: row.agent_session_ended_at ?? null,
-  }));
+  return rows.map(toCandidate);
+}
+
+/** Fresh single-row re-read used to revalidate a transition just before emitting. */
+export async function getLivenessAnnouncementCandidate(input: {
+  room_id: string;
+  delivery_key: string;
+}): Promise<LivenessAnnouncementCandidate | null> {
+  const [row] = await db
+    .select(candidateSelection)
+    .from(room_agent_delivery_sessions)
+    .leftJoin(
+      room_agent_sessions,
+      eq(room_agent_sessions.session_id, room_agent_delivery_sessions.agent_session_id)
+    )
+    .where(
+      and(
+        eq(room_agent_delivery_sessions.room_id, input.room_id),
+        eq(room_agent_delivery_sessions.delivery_key, input.delivery_key)
+      )
+    )
+    .limit(1);
+
+  return row ? toCandidate(row) : null;
 }
 
 /**
- * Claim the offline announcement for one disconnect epoch. Optimistic guard on
- * the previously read marker value makes this exactly-once across concurrent
- * sweepers and server restarts.
+ * Record that the offline announcement for the current outage was posted.
+ * Called only after the (client_message_id-idempotent) room message landed,
+ * so a crash or failure before this point simply retries on the next sweep
+ * and the message-level dedupe absorbs the replay.
  */
 export async function markAgentOfflineAnnounced(input: {
   room_id: string;
   delivery_key: string;
-  expected_offline_announced_at: string | null;
   announced_at?: string;
 }): Promise<boolean> {
   const announcedAt = input.announced_at ?? new Date().toISOString();
@@ -74,8 +101,7 @@ export async function markAgentOfflineAnnounced(input: {
     .where(
       and(
         eq(room_agent_delivery_sessions.room_id, input.room_id),
-        eq(room_agent_delivery_sessions.delivery_key, input.delivery_key),
-        sql`${room_agent_delivery_sessions.offline_announced_at} IS NOT DISTINCT FROM ${input.expected_offline_announced_at}::timestamptz`
+        eq(room_agent_delivery_sessions.delivery_key, input.delivery_key)
       )
     )
     .returning({ delivery_key: room_agent_delivery_sessions.delivery_key });
@@ -83,11 +109,10 @@ export async function markAgentOfflineAnnounced(input: {
   return rows.length > 0;
 }
 
-/** Claim the recovery announcement matching a prior offline announcement. */
+/** Record that the recovery announcement matching a prior outage was posted. */
 export async function markAgentRecoveryAnnounced(input: {
   room_id: string;
   delivery_key: string;
-  expected_recovery_announced_at: string | null;
   announced_at?: string;
 }): Promise<boolean> {
   const announcedAt = input.announced_at ?? new Date().toISOString();
@@ -97,8 +122,7 @@ export async function markAgentRecoveryAnnounced(input: {
     .where(
       and(
         eq(room_agent_delivery_sessions.room_id, input.room_id),
-        eq(room_agent_delivery_sessions.delivery_key, input.delivery_key),
-        sql`${room_agent_delivery_sessions.recovery_announced_at} IS NOT DISTINCT FROM ${input.expected_recovery_announced_at}::timestamptz`
+        eq(room_agent_delivery_sessions.delivery_key, input.delivery_key)
       )
     )
     .returning({ delivery_key: room_agent_delivery_sessions.delivery_key });

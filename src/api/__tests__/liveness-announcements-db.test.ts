@@ -4,6 +4,8 @@ import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
+import { selectLivenessTransitions } from "../rooms/liveness-sweep.js";
+
 const testDatabaseUrl = process.env.TEST_DB_URL;
 const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) {
@@ -19,6 +21,7 @@ const createProjectWithName = dbModule?.createProjectWithName;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconnected;
 const listLivenessAnnouncementCandidates = dbModule?.listLivenessAnnouncementCandidates;
+const getLivenessAnnouncementCandidate = dbModule?.getLivenessAnnouncementCandidate;
 const markAgentOfflineAnnounced = dbModule?.markAgentOfflineAnnounced;
 const markAgentRecoveryAnnounced = dbModule?.markAgentRecoveryAnnounced;
 
@@ -44,8 +47,9 @@ test.after(async () => {
 });
 
 const ACTOR_LABEL = "FieldSignal | EmmyMay's agent | Codex";
+const skipOptions = { skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed liveness tests" : false };
 
-async function seedDisconnectedWorker(): Promise<{ roomId: string; deliveryKey: string }> {
+async function seedConnectedWorker(): Promise<string> {
   const project = await createProjectWithName!("liveness-announcements-test");
   await markRoomAgentDeliveryConnected!({
     room_id: project.id,
@@ -54,84 +58,158 @@ async function seedDisconnectedWorker(): Promise<{ roomId: string; deliveryKey: 
     display_name: "FieldSignal",
     transport: "long_poll",
   });
-  const session = await markRoomAgentDeliveryDisconnected!({
-    room_id: project.id,
-    actor_label: ACTOR_LABEL,
+  return project.id;
+}
+
+/** Rewind delivery timestamps so freshness windows treat the row as aged. */
+async function backdateDelivery(
+  roomId: string,
+  deliveryKey: string,
+  fields: Partial<Record<"updated_at" | "last_disconnected_at" | "reconnect_grace_expires_at", number>>
+): Promise<void> {
+  const assignments = Object.entries(fields)
+    .map(([column], index) => `${column} = $${index + 3}`)
+    .join(", ");
+  await pool!.query(
+    `UPDATE room_agent_delivery_sessions SET ${assignments} WHERE room_id = $1 AND delivery_key = $2`,
+    [roomId, deliveryKey, ...Object.values(fields).map((minutesAgo) => new Date(Date.now() - minutesAgo! * 60_000))]
+  );
+}
+
+async function fetchCandidate(roomId: string, deliveryKey: string) {
+  const candidate = await getLivenessAnnouncementCandidate!({
+    room_id: roomId,
+    delivery_key: deliveryKey,
   });
-  assert.ok(session);
-  return { roomId: project.id, deliveryKey: session!.delivery_key };
+  assert.ok(candidate, "expected the delivery session to exist");
+  return candidate!;
 }
 
 test(
-  "disconnected workers surface as liveness candidates",
-  { skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed liveness tests" : false },
+  "journey: offline announce, recovery, then a second clean disconnect re-announces",
+  skipOptions,
   async () => {
-    const { roomId, deliveryKey } = await seedDisconnectedWorker();
+    const roomId = await seedConnectedWorker();
 
-    const candidates = await listLivenessAnnouncementCandidates!();
-    const match = candidates.find(
-      (candidate) =>
-        candidate.session.room_id === roomId && candidate.session.delivery_key === deliveryKey
+    // First death: clean disconnect, aged past the announce threshold.
+    const disconnected = await markRoomAgentDeliveryDisconnected!({
+      room_id: roomId,
+      actor_label: ACTOR_LABEL,
+    });
+    const deliveryKey = disconnected!.delivery_key;
+    await backdateDelivery(roomId, deliveryKey, {
+      updated_at: 3,
+      last_disconnected_at: 3,
+      reconnect_grace_expires_at: 3,
+    });
+
+    const listed = (await listLivenessAnnouncementCandidates!()).find(
+      (entry) => entry.session.room_id === roomId && entry.session.delivery_key === deliveryKey
     );
-    assert.ok(match, "expected the disconnected worker to be listed");
-    assert.equal(match!.agent_session_ended_at, null);
-    assert.equal(match!.session.offline_announced_at, null);
-    assert.equal(match!.session.active_connection_count, 0);
+    assert.ok(listed, "expected the disconnected worker to be listed");
+    assert.equal(listed!.agent_session_ended_at, null);
+
+    let [transition] = selectLivenessTransitions({ candidates: [listed!] });
+    assert.equal(transition?.kind, "offline");
+    assert.equal(await markAgentOfflineAnnounced!({ room_id: roomId, delivery_key: deliveryKey }), true);
+
+    // Announced outage stays quiet while still dead.
+    assert.deepEqual(
+      selectLivenessTransitions({ candidates: [await fetchCandidate(roomId, deliveryKey)] }),
+      []
+    );
+
+    // Recovery: reconnect flips the transition to "recovered"; mark it.
+    await markRoomAgentDeliveryConnected!({
+      room_id: roomId,
+      actor_label: ACTOR_LABEL,
+      session_kind: "worker",
+      display_name: "FieldSignal",
+      transport: "long_poll",
+    });
+    [transition] = selectLivenessTransitions({ candidates: [await fetchCandidate(roomId, deliveryKey)] });
+    assert.equal(transition?.kind, "recovered");
+    assert.equal(await markAgentRecoveryAnnounced!({ room_id: roomId, delivery_key: deliveryKey }), true);
+    assert.deepEqual(
+      selectLivenessTransitions({ candidates: [await fetchCandidate(roomId, deliveryKey)] }),
+      []
+    );
+
+    // Second death: another clean disconnect starts a new epoch and re-announces.
+    await markRoomAgentDeliveryDisconnected!({ room_id: roomId, actor_label: ACTOR_LABEL });
+    await backdateDelivery(roomId, deliveryKey, {
+      updated_at: 3,
+      last_disconnected_at: 3,
+      reconnect_grace_expires_at: 3,
+    });
+    const relisted = (await listLivenessAnnouncementCandidates!()).find(
+      (entry) => entry.session.room_id === roomId && entry.session.delivery_key === deliveryKey
+    );
+    assert.ok(relisted, "expected the re-disconnected worker to be listed again");
+    [transition] = selectLivenessTransitions({ candidates: [relisted!] });
+    assert.equal(transition?.kind, "offline");
   }
 );
 
 test(
-  "offline and recovery announcement claims are exactly-once per marker value",
-  { skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed liveness tests" : false },
+  "journey: offline announce, recovery, then a stale-heartbeat death re-announces",
+  skipOptions,
   async () => {
-    const { roomId, deliveryKey } = await seedDisconnectedWorker();
+    const roomId = await seedConnectedWorker();
+    const disconnected = await markRoomAgentDeliveryDisconnected!({
+      room_id: roomId,
+      actor_label: ACTOR_LABEL,
+    });
+    const deliveryKey = disconnected!.delivery_key;
+    await backdateDelivery(roomId, deliveryKey, {
+      updated_at: 3,
+      last_disconnected_at: 3,
+      reconnect_grace_expires_at: 3,
+    });
+    assert.equal(await markAgentOfflineAnnounced!({ room_id: roomId, delivery_key: deliveryKey }), true);
 
-    const firstClaim = await markAgentOfflineAnnounced!({
+    // Recovery clears last_disconnected_at (reconnect) and gets announced.
+    await markRoomAgentDeliveryConnected!({
       room_id: roomId,
-      delivery_key: deliveryKey,
-      expected_offline_announced_at: null,
+      actor_label: ACTOR_LABEL,
+      session_kind: "worker",
+      display_name: "FieldSignal",
+      transport: "long_poll",
     });
-    const duplicateClaim = await markAgentOfflineAnnounced!({
-      room_id: roomId,
-      delivery_key: deliveryKey,
-      expected_offline_announced_at: null,
-    });
-    assert.equal(firstClaim, true);
-    assert.equal(duplicateClaim, false);
+    assert.equal(await markAgentRecoveryAnnounced!({ room_id: roomId, delivery_key: deliveryKey }), true);
 
-    const recoveryClaim = await markAgentRecoveryAnnounced!({
-      room_id: roomId,
-      delivery_key: deliveryKey,
-      expected_recovery_announced_at: null,
-    });
-    const duplicateRecoveryClaim = await markAgentRecoveryAnnounced!({
-      room_id: roomId,
-      delivery_key: deliveryKey,
-      expected_recovery_announced_at: null,
-    });
-    assert.equal(recoveryClaim, true);
-    assert.equal(duplicateRecoveryClaim, false);
+    // Second death: the process freezes — the socket never closes, so
+    // last_disconnected_at stays NULL and only the heartbeat goes stale.
+    await backdateDelivery(roomId, deliveryKey, { updated_at: 5 });
 
-    // A fully announced row has nothing left to announce and drops out of the
-    // candidate list entirely.
-    const remaining = (await listLivenessAnnouncementCandidates!()).filter(
+    const relisted = (await listLivenessAnnouncementCandidates!()).find(
       (entry) => entry.session.room_id === roomId && entry.session.delivery_key === deliveryKey
     );
-    assert.equal(remaining.length, 0);
+    assert.ok(relisted, "dead-socket death after a recovery must re-enter the candidate list");
+    assert.equal(relisted!.session.last_disconnected_at, null);
 
-    // Claiming with the current marker value still succeeds (a later outage
-    // epoch re-reads the row and claims against what it saw).
-    const { rows } = await pool!.query<{ offline_announced_at: Date | null }>(
-      "SELECT offline_announced_at FROM room_agent_delivery_sessions WHERE room_id = $1 AND delivery_key = $2",
-      [roomId, deliveryKey]
-    );
-    const currentMarker = rows[0]?.offline_announced_at;
-    assert.ok(currentMarker);
-    const reclaim = await markAgentOfflineAnnounced!({
-      room_id: roomId,
-      delivery_key: deliveryKey,
-      expected_offline_announced_at: currentMarker!.toISOString(),
+    const [transition] = selectLivenessTransitions({ candidates: [relisted!] });
+    assert.equal(transition?.kind, "offline");
+  }
+);
+
+test(
+  "message-level idempotency: replaying an announcement client_message_id creates no duplicate",
+  skipOptions,
+  async () => {
+    const roomId = await seedConnectedWorker();
+    const { addMessageWithCreateStatus } = dbModule!;
+    const clientMessageId = "agent_liveness:offline:agent_session:test:epoch";
+
+    const first = await addMessageWithCreateStatus!(roomId, "letagents", "[status] X appears to be offline", {
+      client_message_id: clientMessageId,
     });
-    assert.equal(reclaim, true);
+    const replay = await addMessageWithCreateStatus!(roomId, "letagents", "[status] X appears to be offline", {
+      client_message_id: clientMessageId,
+    });
+
+    assert.equal(first.created, true);
+    assert.equal(replay.created, false);
+    assert.equal(replay.message.id, first.message.id);
   }
 );

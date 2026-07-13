@@ -50,6 +50,16 @@ function buildSession(overrides: Partial<RoomAgentDeliverySession> = {}): RoomAg
   };
 }
 
+function reachableSession(overrides: Partial<RoomAgentDeliverySession> = {}): RoomAgentDeliverySession {
+  return buildSession({
+    active_connection_count: 1,
+    updated_at: new Date(NOW - 10_000).toISOString(),
+    last_disconnected_at: null,
+    reconnect_grace_expires_at: null,
+    ...overrides,
+  });
+}
+
 function candidate(
   session: RoomAgentDeliverySession,
   endedAt: string | null = null
@@ -65,7 +75,6 @@ test("announces a worker offline past the threshold", () => {
 
   assert.equal(transitions.length, 1);
   assert.equal(transitions[0]?.kind, "offline");
-  assert.equal(transitions[0]?.expected_marker, null);
   assert.ok(transitions[0]!.offline_for_ms >= OFFLINE_ANNOUNCE_AFTER_MS);
 });
 
@@ -88,12 +97,6 @@ test("stays quiet inside the announce threshold and reconnect grace", () => {
 });
 
 test("skips reachable, controller, suppressed, cleanly ended, and ancient sessions", () => {
-  const reachable = buildSession({
-    active_connection_count: 1,
-    updated_at: new Date(NOW - 10_000).toISOString(),
-    last_disconnected_at: null,
-    reconnect_grace_expires_at: null,
-  });
   const controller = buildSession({ session_kind: "controller" });
   const suppressed = buildSession({ actor_label: "HiddenAgent | EmmyMay's agent | Codex" });
   const cleanExit = buildSession();
@@ -104,7 +107,7 @@ test("skips reachable, controller, suppressed, cleanly ended, and ancient sessio
 
   const transitions = selectLivenessTransitions({
     candidates: [
-      candidate(reachable),
+      candidate(reachableSession()),
       candidate(controller),
       candidate(suppressed),
       candidate(cleanExit, isoMinutesAgo(2)),
@@ -117,7 +120,7 @@ test("skips reachable, controller, suppressed, cleanly ended, and ancient sessio
   assert.deepEqual(transitions, []);
 });
 
-test("announces once per disconnect epoch and re-announces after a later death", () => {
+test("announces once per outage epoch and re-announces after a later clean disconnect", () => {
   const alreadyAnnounced = buildSession({
     offline_announced_at: isoMinutesAgo(2),
   });
@@ -133,7 +136,6 @@ test("announces once per disconnect epoch and re-announces after a later death",
   const transitions = selectLivenessTransitions({ candidates: [candidate(diedAgain)], now: NOW });
   assert.equal(transitions.length, 1);
   assert.equal(transitions[0]?.kind, "offline");
-  assert.equal(transitions[0]?.expected_marker, isoMinutesAgo(20));
 });
 
 test("detects a dead socket that never closed via stale heartbeat", () => {
@@ -152,12 +154,30 @@ test("detects a dead socket that never closed via stale heartbeat", () => {
   assert.equal(transitions[0]?.kind, "offline");
 });
 
-test("emits a recovery transition only after an announced outage", () => {
-  const recovered = buildSession({
+test("re-announces a dead-socket death after a full offline/recovery cycle", () => {
+  // Journey: announced offline at -20m, recovered and announced at -15m,
+  // reconnected (last_disconnected_at cleared), then the process froze —
+  // heartbeats stopped at -5m with the socket still counted as connected.
+  const secondDeath = buildSession({
     active_connection_count: 1,
-    updated_at: new Date(NOW - 10_000).toISOString(),
-    last_disconnected_at: isoMinutesAgo(10),
+    last_disconnected_at: null,
     reconnect_grace_expires_at: null,
+    updated_at: isoMinutesAgo(5),
+    offline_announced_at: isoMinutesAgo(20),
+    recovery_announced_at: isoMinutesAgo(15),
+  });
+
+  const transitions = selectLivenessTransitions({
+    candidates: [candidate(secondDeath)],
+    now: NOW,
+  });
+  assert.equal(transitions.length, 1);
+  assert.equal(transitions[0]?.kind, "offline");
+});
+
+test("emits a recovery transition only after an announced outage", () => {
+  const recovered = reachableSession({
+    last_disconnected_at: isoMinutesAgo(10),
     offline_announced_at: isoMinutesAgo(8),
   });
   const transitions = selectLivenessTransitions({ candidates: [candidate(recovered)], now: NOW });
@@ -173,14 +193,8 @@ test("emits a recovery transition only after an announced outage", () => {
     []
   );
 
-  const neverAnnounced = buildSession({
-    active_connection_count: 1,
-    updated_at: new Date(NOW - 10_000).toISOString(),
-    last_disconnected_at: null,
-    reconnect_grace_expires_at: null,
-  });
   assert.deepEqual(
-    selectLivenessTransitions({ candidates: [candidate(neverAnnounced)], now: NOW }),
+    selectLivenessTransitions({ candidates: [candidate(reachableSession())], now: NOW }),
     []
   );
 });
@@ -211,15 +225,29 @@ test("announcement text names the agent and flags the Board Manager role", () =>
 
 interface FakeDepsOptions {
   candidates: LivenessAnnouncementCandidate[];
+  /** Per-delivery-key fresh rows returned by getCandidate; defaults to the listed candidate. */
+  freshCandidates?: Map<string, LivenessAnnouncementCandidate | null>;
   managerSessionId?: string | null;
-  claimOffline?: boolean;
   suppressedFailsForRoom?: string;
+  emitFails?: boolean;
 }
 
 function buildFakeDeps(options: FakeDepsOptions) {
   const emitted: Array<{ roomId: string; text: string; clientMessageId: string | null | undefined }> = [];
+  const markedOffline: string[] = [];
+  const markedRecovered: string[] = [];
+  let emitFails = options.emitFails ?? false;
+
   const deps: LivenessSweeperDeps = {
     listCandidates: async () => options.candidates,
+    getCandidate: async ({ delivery_key }) => {
+      if (options.freshCandidates?.has(delivery_key)) {
+        return options.freshCandidates.get(delivery_key) ?? null;
+      }
+      return (
+        options.candidates.find((entry) => entry.session.delivery_key === delivery_key) ?? null
+      );
+    },
     getSuppressedActorLabels: async (roomId) => {
       if (options.suppressedFailsForRoom === roomId) {
         throw new Error("suppression lookup failed");
@@ -227,20 +255,37 @@ function buildFakeDeps(options: FakeDepsOptions) {
       return new Set<string>();
     },
     getActiveBoardManagerSessionId: async () => options.managerSessionId ?? null,
-    markAgentOfflineAnnounced: async () => options.claimOffline ?? true,
-    markAgentRecoveryAnnounced: async () => true,
+    markAgentOfflineAnnounced: async ({ delivery_key }) => {
+      markedOffline.push(delivery_key);
+      return true;
+    },
+    markAgentRecoveryAnnounced: async ({ delivery_key }) => {
+      markedRecovered.push(delivery_key);
+      return true;
+    },
     emitProjectMessage: async (roomId, _sender, text, messageOptions) => {
+      if (emitFails) {
+        throw new Error("message creation failed");
+      }
       emitted.push({ roomId, text, clientMessageId: messageOptions?.client_message_id });
       return null;
     },
     now: () => NOW,
   };
-  return { deps, emitted };
+  return {
+    deps,
+    emitted,
+    markedOffline,
+    markedRecovered,
+    setEmitFails(value: boolean) {
+      emitFails = value;
+    },
+  };
 }
 
-test("sweepOnce announces offline workers with a dedupe client message id", async () => {
+test("sweepOnce emits the announcement first, then persists the marker", async () => {
   const session = buildSession();
-  const { deps, emitted } = buildFakeDeps({ candidates: [candidate(session)] });
+  const { deps, emitted, markedOffline } = buildFakeDeps({ candidates: [candidate(session)] });
   const sweeper = createLivenessSweeper(deps);
 
   const summary = await sweeper.sweepOnce();
@@ -253,17 +298,57 @@ test("sweepOnce announces offline workers with a dedupe client message id", asyn
     emitted[0]?.clientMessageId,
     `agent_liveness:offline:${session.delivery_key}:${session.last_disconnected_at}`
   );
+  assert.deepEqual(markedOffline, [session.delivery_key]);
 });
 
-test("sweepOnce stays silent when another instance already claimed the announcement", async () => {
-  const { deps, emitted } = buildFakeDeps({
-    candidates: [candidate(buildSession())],
-    claimOffline: false,
-  });
-  const summary = await createLivenessSweeper(deps).sweepOnce();
+test("sweepOnce leaves the marker unset when the emit fails, so the next sweep retries", async () => {
+  const session = buildSession();
+  const fake = buildFakeDeps({ candidates: [candidate(session)], emitFails: true });
+  const sweeper = createLivenessSweeper(fake.deps);
 
+  const failedSummary = await sweeper.sweepOnce();
+  assert.equal(failedSummary.announced_offline, 0);
+  assert.equal(failedSummary.failed_transitions, 1);
+  assert.deepEqual(fake.markedOffline, []);
+
+  fake.setEmitFails(false);
+  const retrySummary = await sweeper.sweepOnce();
+  assert.equal(retrySummary.announced_offline, 1);
+  assert.equal(retrySummary.failed_transitions, 0);
+  assert.deepEqual(fake.markedOffline, [session.delivery_key]);
+});
+
+test("sweepOnce skips a worker that reconnected between selection and emit", async () => {
+  const dead = buildSession();
+  const nowAlive = candidate(reachableSession());
+  const { deps, emitted, markedOffline } = buildFakeDeps({
+    candidates: [candidate(dead)],
+    freshCandidates: new Map([[dead.delivery_key, nowAlive]]),
+  });
+
+  const summary = await createLivenessSweeper(deps).sweepOnce();
   assert.equal(summary.announced_offline, 0);
   assert.deepEqual(emitted, []);
+  assert.deepEqual(markedOffline, []);
+});
+
+test("sweepOnce skips a worker that dropped between recovery selection and emit", async () => {
+  const recovered = reachableSession({
+    last_disconnected_at: isoMinutesAgo(10),
+    offline_announced_at: isoMinutesAgo(8),
+  });
+  const deadAgain = candidate(
+    buildSession({ offline_announced_at: isoMinutesAgo(8), last_disconnected_at: isoMinutesAgo(1), updated_at: isoMinutesAgo(1), reconnect_grace_expires_at: isoMinutesAgo(1) })
+  );
+  const { deps, emitted, markedRecovered } = buildFakeDeps({
+    candidates: [candidate(recovered)],
+    freshCandidates: new Map([[recovered.delivery_key, deadAgain]]),
+  });
+
+  const summary = await createLivenessSweeper(deps).sweepOnce();
+  assert.equal(summary.announced_recovered, 0);
+  assert.deepEqual(emitted, []);
+  assert.deepEqual(markedRecovered, []);
 });
 
 test("sweepOnce marks the dead Board Manager in the announcement", async () => {
@@ -292,17 +377,19 @@ test("sweepOnce isolates per-room failures and keeps sweeping other rooms", asyn
   assert.equal(emitted[0]?.roomId, "focus_34");
 });
 
-test("sweepOnce announces recoveries for previously announced outages", async () => {
-  const recovered = buildSession({
-    active_connection_count: 1,
-    updated_at: new Date(NOW - 10_000).toISOString(),
+test("sweepOnce announces recoveries with a marker-stable client message id", async () => {
+  const recovered = reachableSession({
     last_disconnected_at: isoMinutesAgo(10),
-    reconnect_grace_expires_at: null,
     offline_announced_at: isoMinutesAgo(8),
   });
-  const { deps, emitted } = buildFakeDeps({ candidates: [candidate(recovered)] });
+  const { deps, emitted, markedRecovered } = buildFakeDeps({ candidates: [candidate(recovered)] });
   const summary = await createLivenessSweeper(deps).sweepOnce();
 
   assert.equal(summary.announced_recovered, 1);
   assert.ok(emitted[0]!.text.includes("back online"));
+  assert.equal(
+    emitted[0]?.clientMessageId,
+    `agent_liveness:recovered:${recovered.delivery_key}:${recovered.offline_announced_at}`
+  );
+  assert.deepEqual(markedRecovered, [recovered.delivery_key]);
 });
