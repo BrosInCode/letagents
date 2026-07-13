@@ -342,6 +342,43 @@ test("MCP local chat reads desktop-stored local attachments", async () => {
   assert.equal(hydrated?.attachments[0]?.content_base64, "aGVsbG8=");
 });
 
+test("MCP local chat keeps attachment-only messages visible when prompt kind is NULL", async () => {
+  const message = await addLocalChatMessage("attachment_only_room", {
+    sender: "Human",
+    text: "",
+    source: "browser",
+  });
+  await addLocalChatMessage("attachment_only_room", {
+    sender: "Agent",
+    text: "",
+    agent_prompt_kind: "auto",
+    source: "agent",
+  });
+  const db = openSqliteDb();
+  db.prepare(`
+    INSERT INTO local_chat_attachments (
+      room_id, message_number, attachment_id, file_name, mime_type, size_bytes,
+      url, download_url, data_url, content_base64, created_at
+    )
+    VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "attachment_only_room",
+    "att_only",
+    "notes.txt",
+    "text/plain",
+    5,
+    null,
+    null,
+    null,
+    "aGVsbG8=",
+    new Date().toISOString(),
+  );
+
+  const page = await getLocalChatMessages("attachment_only_room");
+  assert.deepEqual(page.messages.map((entry) => entry.id), [message.id]);
+  assert.equal(page.messages[0]?.attachments[0]?.id, "att_only");
+});
+
 test("MCP room_messages resource reads local storage for local rooms", async () => {
   writeFileSync(settingsPath, JSON.stringify({
     mode: "cloud",

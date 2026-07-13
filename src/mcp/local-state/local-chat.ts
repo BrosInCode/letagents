@@ -203,7 +203,7 @@ function mapAttachmentRow(row: Record<string, unknown>): LocalAttachmentRow {
 function visibleMessageClause(includePromptOnly?: boolean): string {
   return includePromptOnly
     ? "1 = 1"
-    : "NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')";
+    : "(agent_prompt_kind IS NULL OR agent_prompt_kind <> 'auto' OR TRIM(text) <> '')";
 }
 
 function toMessage(
