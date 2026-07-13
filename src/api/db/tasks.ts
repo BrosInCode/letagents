@@ -114,6 +114,34 @@ async function insertTaskRow(
   return toTask(task);
 }
 
+/**
+ * Move a freshly created (proposed) task straight to accepted so agents can
+ * claim it — the escalation path's whole point is unblocking claims without
+ * an admin. Runs on the caller's executor so it commits with the escalation.
+ */
+export async function acceptProposedTaskTx(
+  executor: Pick<typeof db, "update">,
+  input: { room_id: string; task_id: string }
+): Promise<boolean> {
+  const taskNumber = parseScopedId(input.task_id, "task");
+  if (!taskNumber) return false;
+
+  const now = new Date().toISOString();
+  const rows = await executor
+    .update(tasks)
+    .set({ status: "accepted", updated_at: now })
+    .where(
+      and(
+        eq(tasks.room_id, input.room_id),
+        eq(tasks.number, taskNumber),
+        eq(tasks.status, "proposed")
+      )
+    )
+    .returning({ number: tasks.number });
+
+  return rows.length > 0;
+}
+
 export async function createTask(
   roomId: string,
   title: string,
@@ -137,8 +165,10 @@ export async function approveTaskCreateBoardIntent(input: {
   decision_by: string;
   reason?: string | null;
   now?: Date;
-}): Promise<{ intent: BoardIntent; approval_token: string; task: Task } | null> {
-  return db.transaction(async (tx) => {
+}, executor?: Parameters<Parameters<(typeof db)["transaction"]>[0]>[0]): Promise<{ intent: BoardIntent; approval_token: string; task: Task } | null> {
+  // Callers already inside a transaction (e.g. an announcement's message
+  // hook) pass their executor so approval + task creation join it.
+  const run = async (tx: NonNullable<typeof executor>) => {
     const existing = await getBoardIntent({
       room_id: input.room_id,
       intent_id: input.intent_id,
@@ -183,7 +213,9 @@ export async function approveTaskCreateBoardIntent(input: {
       approval_token: approved.approval_token,
       task,
     };
-  });
+  };
+
+  return executor ? run(executor) : db.transaction(run);
 }
 
 export async function getTasks(

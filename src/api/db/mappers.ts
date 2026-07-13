@@ -402,6 +402,8 @@ export function toBoardIntent(row: typeof board_intents.$inferSelect | BoardInte
     approval_token_hash: row.approval_token_hash,
     decided_at: row.decided_at,
     expires_at: row.expires_at,
+    escalated_at: row.escalated_at,
+    auto_approved: row.auto_approved,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
