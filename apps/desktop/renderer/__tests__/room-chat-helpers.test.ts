@@ -677,21 +677,21 @@ describe("room chat helpers", () => {
   it("renders desktop message text with escaped markup and search highlights", () => {
     assert.equal(
       renderMessageText("Hello <script> @Noether **ship** https://example.com", "ship"),
-      'Hello &lt;script&gt; <span class="mention-token">@Noether</span> <strong><mark class="message-search-hit">ship</mark></strong> <a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>',
+      '<p>Hello &lt;script&gt; <span class="mention-token">@Noether</span> <strong><mark class="message-search-hit">ship</mark></strong> <a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a></p>',
     );
   });
 
   it("links loaded message id references in desktop message text", () => {
     assert.equal(
       renderMessageText("See msg_6's note, not msg_99.", "", new Set(["msg_6"])),
-      'See <button class="message-reference-link" type="button" data-message-reference-id="msg_6" title="Jump to msg_6">msg_6</button>\'s note, not msg_99.',
+      '<p>See <button class="message-reference-link" type="button" data-message-reference-id="msg_6" title="Jump to msg_6">msg_6</button>\'s note, not msg_99.</p>',
     );
   });
 
   it("does not link message id references inside code or URLs", () => {
     assert.equal(
       renderMessageText("Use `msg_6` or https://example.com/msg_6 before msg_7", "", new Set(["msg_6", "msg_7"])),
-      'Use <code>msg_6</code> or <a href="https://example.com/msg_6" target="_blank" rel="noopener noreferrer">https://example.com/msg_6</a> before <button class="message-reference-link" type="button" data-message-reference-id="msg_7" title="Jump to msg_7">msg_7</button>',
+      '<p>Use <code>msg_6</code> or <a href="https://example.com/msg_6" target="_blank" rel="noopener noreferrer">https://example.com/msg_6</a> before <button class="message-reference-link" type="button" data-message-reference-id="msg_7" title="Jump to msg_7">msg_7</button></p>',
     );
   });
 
@@ -714,6 +714,33 @@ describe("room chat helpers", () => {
       }),
       '<h2>Summary</h2><ul><li><strong>Ship</strong> <code>events</code></li><li>See <a href="https://example.com/?q=a&amp;b=c" target="_blank" rel="noopener noreferrer">https://example.com/?q=a&amp;b=c</a></li></ul><p>&lt;script&gt;</p>',
     );
+  });
+
+  it("renders safe block markdown in desktop message bubbles", () => {
+    assert.equal(
+      renderMessageText([
+        "## Review",
+        "",
+        "- **Approved**",
+        "- [x] Tests pass",
+        "",
+        "> Use `npm test`",
+        "",
+        "1. Ship",
+        "2. Monitor",
+        "",
+        "```ts",
+        'const safe = "<ok>"',
+        "```",
+      ].join("\n"), ""),
+      '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><pre><code class="language-ts">const safe = &quot;&lt;ok&gt;&quot;</code></pre>',
+    );
+  });
+
+  it("bounds adversarial blockquote nesting in desktop messages", () => {
+    const html = renderMessageText(`${">".repeat(5_000)} safe`, "");
+    assert.match(html, /safe/);
+    assert.ok((html.match(/<blockquote>/g) || []).length <= 9);
   });
 });
 

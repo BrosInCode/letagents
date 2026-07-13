@@ -21,25 +21,52 @@ function message(overrides: Partial<RoomMessage>): RoomMessage {
   } as RoomMessage
 }
 
-test('renderMessageContent escapes HTML before applying lightweight formatting', () => {
+test('renderMessageContent escapes HTML before applying markdown formatting', () => {
   assert.equal(
     renderMessageContent('**hi** <script>alert("x")</script> `code`'),
-    '<strong>hi</strong> &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; <code>code</code>',
+    '<p><strong>hi</strong> &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; <code>code</code></p>',
   )
 })
 
 test('renderMessageContent linkifies URLs and keeps href attributes escaped', () => {
   assert.equal(
     renderMessageContent('see https://example.com/?q=a&b=c and @codex'),
-    'see <a href="https://example.com/?q=a&amp;b=c" target="_blank" rel="noopener noreferrer">https://example.com/?q=a&amp;b=c</a> and <span class="mention-token">@codex</span>',
+    '<p>see <a href="https://example.com/?q=a&amp;b=c" target="_blank" rel="noopener noreferrer">https://example.com/?q=a&amp;b=c</a> and <span class="mention-token">@codex</span></p>',
   )
 })
 
 test('renderMessageContent preserves collision-safe owner/agent mention handles', () => {
   assert.equal(
     renderMessageContent('@agent:local/EmmyMay/codex/oak please review'),
-    '<span class="mention-token">@agent:local/EmmyMay/codex/oak</span> please review',
+    '<p><span class="mention-token">@agent:local/EmmyMay/codex/oak</span> please review</p>',
   )
+})
+
+test('renderMessageContent renders safe block markdown', () => {
+  assert.equal(
+    renderMessageContent([
+      '## Review',
+      '',
+      '- **Approved**',
+      '- [x] Tests pass',
+      '',
+      '> Use `npm test`',
+      '',
+      '1. Ship',
+      '2. Monitor',
+      '',
+      '```ts',
+      'const safe = "<ok>"',
+      '```',
+    ].join('\n')),
+    '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><pre><code class="language-ts">const safe = &quot;&lt;ok&gt;&quot;</code></pre>',
+  )
+})
+
+test('renderMessageContent bounds adversarial blockquote nesting', () => {
+  const html = renderMessageContent(`${'>'.repeat(5_000)} safe`)
+  assert.match(html, /safe/)
+  assert.ok((html.match(/<blockquote>/g) || []).length <= 9)
 })
 
 test('structured message identity recovers owner attribution from owner label and actor label', () => {
