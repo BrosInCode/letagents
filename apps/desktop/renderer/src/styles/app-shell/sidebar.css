@@ -44,6 +44,7 @@
 
 .sidebar-topbar {
   display: flex;
+  grid-row: 1;
   align-items: center;
   justify-content: space-between;
   min-height: 34px;
@@ -512,6 +513,7 @@
 }
 
 .sidebar-footer {
+  grid-row: 3;
   align-self: end;
   padding-top: 6px;
   border-top: 1px solid rgba(255, 255, 255, 0.055);

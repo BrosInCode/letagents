@@ -80,6 +80,10 @@ test("thread-context messages expose their DOM contract through the shared compo
   assert.match(html, /aria-label="Copy message"/);
   assert.match(html, /aria-label="Jump to root"/);
   assert.match(html, /EmmyMay&#39;s agent/);
+  assert.match(html, /room-provider-badge--codex/);
+  assert.match(html, /aria-label="Codex provider"/);
+  assert.match(html, /<img/);
+  assert.doesNotMatch(html, /room-message-ide/);
   assert.doesNotMatch(html, /room-message-provenance[^>]*data-kind="agent"/);
 });
 

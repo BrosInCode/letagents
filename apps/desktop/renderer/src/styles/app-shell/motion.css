@@ -39,30 +39,19 @@
 
 .sidebar-navigation-swap-enter-active.sidebar-room-search {
   z-index: 1;
-  transform-origin: 100% 0;
-  will-change: opacity, transform;
-  transition:
-    opacity 220ms var(--ease-out),
-    transform 220ms var(--ease-out);
+  will-change: opacity;
+  transition: opacity 160ms var(--ease-out);
 }
 
 .sidebar-navigation-swap-leave-active.sidebar-room-search {
   z-index: 1;
-  transform-origin: 100% 0;
-  will-change: opacity, transform;
-  transition:
-    opacity 130ms var(--ease-out),
-    transform 130ms var(--ease-out);
+  will-change: opacity;
+  transition: opacity 100ms var(--ease-out);
 }
 
-.sidebar-navigation-swap-enter-from.sidebar-room-search {
-  opacity: 0;
-  transform: translateY(-7px) scale(0.985);
-}
-
+.sidebar-navigation-swap-enter-from.sidebar-room-search,
 .sidebar-navigation-swap-leave-to.sidebar-room-search {
   opacity: 0;
-  transform: translateY(-4px) scale(0.992);
 }
 
 .sidebar-navigation-swap-enter-active.sidebar-navigation {
@@ -116,9 +105,7 @@
 .sidebar-search-button[data-reduced-motion="true"] :is(
   .sidebar-search-icon-enter-from,
   .sidebar-search-icon-leave-to
-),
-.sidebar-navigation-swap-enter-from.sidebar-room-search[data-reduced-motion="true"],
-.sidebar-navigation-swap-leave-to.sidebar-room-search[data-reduced-motion="true"] {
+) {
   transform: none;
 }
 
