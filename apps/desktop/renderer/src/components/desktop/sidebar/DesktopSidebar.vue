@@ -15,13 +15,100 @@
           <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
         </svg>
       </button>
+      <button
+        v-if="sidebarMode === 'expanded'"
+        ref="searchButton"
+        class="sidebar-search-button"
+        type="button"
+        :data-active="searchOpen"
+        :data-reduced-motion="searchMotionReduced"
+        :aria-expanded="searchOpen"
+        aria-controls="sidebar-room-search"
+        :aria-label="searchOpen ? 'Close room search' : 'Search rooms'"
+        :title="searchOpen ? 'Close room search' : 'Search rooms'"
+        data-testid="sidebar-search-button"
+        @click="toggleSearch"
+      >
+        <Transition name="sidebar-search-icon" mode="out-in">
+          <X v-if="searchOpen" key="close" aria-hidden="true" />
+          <Search v-else key="search" aria-hidden="true" />
+        </Transition>
+      </button>
     </div>
 
-    <div
-      v-if="sidebarMode === 'expanded'"
-      class="sidebar-actions"
-      @contextmenu.prevent="openBackgroundContextMenu"
-    >
+    <Transition name="sidebar-navigation-swap">
+      <section
+        v-if="sidebarMode === 'expanded' && searchOpen"
+        id="sidebar-room-search"
+        class="sidebar-room-search"
+        :data-reduced-motion="searchMotionReduced"
+        data-testid="sidebar-room-search"
+      >
+        <label class="sidebar-search-field">
+          <Search aria-hidden="true" />
+          <input
+            ref="searchInput"
+            v-model="searchQuery"
+            type="search"
+            placeholder="Search rooms"
+            autocomplete="off"
+            spellcheck="false"
+            role="combobox"
+            aria-label="Search rooms"
+            aria-autocomplete="list"
+            :aria-controls="searchResults.length ? 'sidebar-room-search-results' : undefined"
+            :aria-expanded="Boolean(searchResults.length)"
+            :aria-activedescendant="activeSearchResultId"
+            data-testid="sidebar-room-search-input"
+            @keydown="handleSearchKeydown"
+          />
+        </label>
+
+        <div class="sidebar-search-summary" aria-live="polite">
+          <span>Rooms</span>
+          <span v-if="searchQuery.trim()">{{ searchResults.length }}</span>
+        </div>
+
+        <div
+          v-if="searchQuery.trim() && searchResults.length"
+          id="sidebar-room-search-results"
+          class="sidebar-search-results"
+          role="listbox"
+        >
+          <button
+            v-for="(result, index) in searchResults"
+            :id="searchResultId(result.entry.id)"
+            :key="result.entry.id"
+            class="sidebar-search-result"
+            type="button"
+            role="option"
+            tabindex="-1"
+            :aria-selected="index === activeSearchIndex"
+            :data-active="index === activeSearchIndex"
+            :data-testid="`sidebar-search-result-${result.entry.id}`"
+            @pointerenter="activeSearchIndex = index"
+            @click="selectSearchResult(result.entry)"
+          >
+            <span class="sidebar-search-result-icon" aria-hidden="true">
+              <GitBranch v-if="result.entry.kind === 'branch'" />
+              <MessageSquare v-else-if="result.entry.kind === 'focus'" />
+              <House v-else />
+            </span>
+            <span class="sidebar-search-result-copy">
+              <strong>{{ result.entry.title }}</strong>
+              <small>{{ result.context }}</small>
+            </span>
+            <span v-if="result.entry.hasUnread" class="room-unread-dot" aria-label="Unread messages"></span>
+          </button>
+        </div>
+        <p v-else-if="searchQuery.trim()" class="sidebar-search-empty">
+          No rooms match “{{ searchQuery.trim() }}”
+        </p>
+        <p v-else class="sidebar-search-empty">Search by room, branch, or task.</p>
+      </section>
+
+      <div v-else-if="sidebarMode === 'expanded'" class="sidebar-navigation">
+        <div class="sidebar-actions" @contextmenu.prevent="openBackgroundContextMenu">
       <button
         class="sidebar-cta"
         type="button"
@@ -35,8 +122,25 @@
       </button>
 
       <section v-if="pinnedProjectEntries.length" class="sidebar-pinned-section" data-testid="sidebar-section-pinned">
-        <p class="pinned-section-label">Pinned</p>
-        <div class="pinned-list">
+        <button
+          class="sidebar-section-header pinned-section-header"
+          type="button"
+          :aria-expanded="!pinnedCollapsed"
+          aria-controls="sidebar-pinned-rooms"
+          :data-collapsed="pinnedCollapsed"
+          data-testid="sidebar-pinned-heading"
+          @click="$emit('toggle-pinned-collapsed')"
+        >
+          <span class="sidebar-heading">Pinned</span>
+          <span class="sidebar-section-meta">
+            <span class="section-count">{{ pinnedProjectEntries.length }}</span>
+            <span class="sidebar-section-arrow" :data-collapsed="pinnedCollapsed" aria-hidden="true">
+              <ChevronRight />
+            </span>
+          </span>
+        </button>
+        <Transition name="sidebar-pinned-reveal">
+          <div v-if="!pinnedCollapsed" id="sidebar-pinned-rooms" class="pinned-list">
           <article
             v-for="project in pinnedProjectEntries"
             :key="project.id"
@@ -126,16 +230,16 @@
               </div>
             </Transition>
           </article>
-        </div>
+          </div>
+        </Transition>
       </section>
-    </div>
+        </div>
 
-    <section
-      v-if="sidebarMode === 'expanded'"
-      class="sidebar-section"
-      data-testid="sidebar-section-rooms"
-      @contextmenu.prevent="openBackgroundContextMenu"
-    >
+        <section
+          class="sidebar-section"
+          data-testid="sidebar-section-rooms"
+          @contextmenu.prevent="openBackgroundContextMenu"
+        >
       <button
         class="sidebar-section-header"
         type="button"
@@ -250,7 +354,9 @@
           <p v-if="!roomProjectEntries.length" class="room-empty">No other rooms</p>
         </div>
       </Transition>
-    </section>
+        </section>
+      </div>
+    </Transition>
 
     <div v-if="sidebarMode === 'expanded'" class="sidebar-footer">
       <button
@@ -325,15 +431,19 @@ import {
   ExternalLink,
   GitBranch,
   House,
+  MessageSquare,
   Pencil,
   Pin,
   PinOff,
   Plus,
+  Search,
   Settings,
+  X,
 } from "@lucide/vue";
-import { computed, ref, watch, type Component } from "vue";
+import { computed, nextTick, ref, watch, type Component } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import { searchSidebarRooms } from "../../../domain/sidebar-room-search";
 import {
   buildGitRoomWebUrl,
   buildSidebarBackgroundMenuItems,
@@ -351,6 +461,7 @@ const props = defineProps<{
   primaryRoom: RoomEntry;
   projectEntries: ProjectGroup[];
   settingsEntry: SystemEntry;
+  pinnedCollapsed: boolean;
   roomsCollapsed: boolean;
   collapsedProjects: Record<string, boolean>;
 }>();
@@ -367,6 +478,7 @@ const emit = defineEmits<{
   "select-entry": [entry: SidebarEntry];
   "set-projects-collapsed": [collapsed: boolean];
   "toggle-project": [projectId: string];
+  "toggle-pinned-collapsed": [];
   "toggle-rooms-collapsed": [];
 }>();
 
@@ -379,6 +491,12 @@ type RoomContextMenu = {
 
 const roomContextMenu = ref<RoomContextMenu | null>(null);
 const backgroundContextMenu = ref<{ x: number; y: number } | null>(null);
+const searchButton = ref<HTMLButtonElement | null>(null);
+const searchInput = ref<HTMLInputElement | null>(null);
+const searchOpen = ref(false);
+const searchQuery = ref("");
+const activeSearchIndex = ref(0);
+const searchMotionReduced = ref(false);
 
 // The sidebar peek panel closes on pointerleave; it needs to know a menu is
 // active (teleported outside the panel) so it can stay open underneath it.
@@ -389,6 +507,23 @@ watch(
 
 const pinnedProjectEntries = computed(() => props.projectEntries.filter((project) => project.parent.pinned));
 const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
+const searchResults = computed(() => searchSidebarRooms(props.projectEntries, searchQuery.value));
+const activeSearchResultId = computed(() => {
+  const entry = searchResults.value[activeSearchIndex.value]?.entry;
+  return entry ? searchResultId(entry.id) : undefined;
+});
+
+watch(searchResults, (results) => {
+  activeSearchIndex.value = Math.min(activeSearchIndex.value, Math.max(0, results.length - 1));
+});
+
+watch(searchQuery, () => {
+  activeSearchIndex.value = 0;
+});
+
+watch(() => props.sidebarMode, (mode) => {
+  if (mode !== "expanded") resetSearch();
+});
 
 const totalRoomCount = computed(() =>
   roomProjectEntries.value.reduce((total, project) => total + 1 + projectChildRooms(project).length, 0)
@@ -539,6 +674,66 @@ function selectOrToggleProject(project: ProjectGroup): void {
   if (projectChildRooms(project).length) {
     emit("toggle-project", project.id);
   }
+}
+
+function toggleSearch(event: MouseEvent): void {
+  searchMotionReduced.value = event.detail === 0;
+  if (searchOpen.value) closeSearch();
+  else openSearch();
+}
+
+function openSearch(): void {
+  searchOpen.value = true;
+  activeSearchIndex.value = 0;
+  void nextTick(() => searchInput.value?.focus());
+}
+
+function closeSearch(): void {
+  resetSearch();
+  void nextTick(() => searchButton.value?.focus());
+}
+
+function resetSearch(): void {
+  searchOpen.value = false;
+  searchQuery.value = "";
+  activeSearchIndex.value = 0;
+}
+
+function handleSearchKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    searchMotionReduced.value = true;
+    closeSearch();
+    return;
+  }
+  if (!searchResults.value.length) return;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const offset = event.key === "ArrowDown" ? 1 : -1;
+    activeSearchIndex.value = (
+      activeSearchIndex.value + offset + searchResults.value.length
+    ) % searchResults.value.length;
+    void nextTick(() => {
+      const resultId = activeSearchResultId.value;
+      if (resultId) document.getElementById(resultId)?.scrollIntoView({ block: "nearest" });
+    });
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    searchMotionReduced.value = true;
+    const result = searchResults.value[activeSearchIndex.value];
+    if (result) selectSearchResult(result.entry);
+  }
+}
+
+function selectSearchResult(entry: RoomEntry): void {
+  emit("select-entry", entry);
+  closeSearch();
+}
+
+function searchResultId(entryId: string): string {
+  return `sidebar-room-search-result-${encodeURIComponent(entryId)}`;
 }
 
 </script>

@@ -256,6 +256,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
   const activeEntry = ref<SidebarEntry>(pinnedRoom.value);
   const sidebarMode = ref<SidebarMode>("expanded");
+  const pinnedCollapsed = ref(false);
   const roomsCollapsed = ref(false);
   const collapsedProjects = ref<Record<string, boolean>>({});
 
@@ -303,6 +304,10 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
   function toggleRoomsCollapsed(): void {
     roomsCollapsed.value = !roomsCollapsed.value;
+  }
+
+  function togglePinnedCollapsed(): void {
+    pinnedCollapsed.value = !pinnedCollapsed.value;
   }
 
   function openRoomSnapshot(
@@ -359,6 +364,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     focusRooms,
     getAuthRoomIdentifier,
     openRoomSnapshot,
+    pinnedCollapsed,
     pinnedRoom,
     projectEntries,
     reconcileActiveEntry,
@@ -374,6 +380,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     selectedRoomInfo,
     sidebarMode,
     toggleProject,
+    togglePinnedCollapsed,
     toggleRoomsCollapsed,
   };
 }

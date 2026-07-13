@@ -160,15 +160,8 @@
   gap: 6px;
 }
 
-.pinned-section-label {
-  margin: 0;
-  padding: 0 10px;
-  color: var(--text-tertiary);
-  font-size: 0.67rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  line-height: 1.4;
-  text-transform: uppercase;
+.pinned-section-header {
+  min-height: 30px;
 }
 
 .pinned-list {

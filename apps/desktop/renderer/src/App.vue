@@ -52,6 +52,7 @@
       :primary-room="currentParentRoom"
       :project-entries="sidebarProjectEntries"
       :settings-entry="settingsEntry"
+      :pinned-collapsed="pinnedCollapsed"
       :rooms-collapsed="roomsCollapsed"
       :collapsed-projects="collapsedProjects"
       @cycle-sidebar="cycleSidebar"
@@ -64,6 +65,7 @@
       @select-entry="handleSidebarEntrySelected"
       @set-projects-collapsed="setAllProjectsCollapsed"
       @toggle-project="toggleProject"
+      @toggle-pinned-collapsed="togglePinnedCollapsed"
       @toggle-rooms-collapsed="toggleRoomsCollapsed"
     />
     <div
@@ -99,6 +101,7 @@
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
           :settings-entry="settingsEntry"
+          :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
           @context-menu-open="handleSidebarPeekMenuOpen"
@@ -112,6 +115,7 @@
           @select-entry="handleSidebarEntrySelected"
           @set-projects-collapsed="setAllProjectsCollapsed"
           @toggle-project="toggleProject"
+          @toggle-pinned-collapsed="togglePinnedCollapsed"
           @toggle-rooms-collapsed="toggleRoomsCollapsed"
         />
       </div>
@@ -412,6 +416,7 @@ const {
   focusRooms,
   getAuthRoomIdentifier,
   openRoomSnapshot,
+  pinnedCollapsed,
   pinnedRoom,
   projectEntries,
   reconcileActiveEntry,
@@ -427,6 +432,7 @@ const {
   selectedRoomInfo,
   sidebarMode,
   toggleProject,
+  togglePinnedCollapsed,
   toggleRoomsCollapsed,
 } = useDesktopNavigationState({
   accountRooms,
