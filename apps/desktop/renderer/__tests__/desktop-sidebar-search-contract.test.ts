@@ -24,5 +24,6 @@ describe("desktop sidebar search contract", () => {
     assert.match(sidebarSource, /v-else-if="sidebarMode === 'expanded'" class="sidebar-navigation"/);
     assert.match(sidebarStyles, /\.sidebar-room-search\s*\{[\s\S]*?grid-row: 2;/);
     assert.match(sidebarStyles, /\.sidebar-navigation\s*\{[\s\S]*?grid-row: 2;/);
+    assert.match(sidebarStyles, /\.sidebar-footer\s*\{[\s\S]*?grid-row: 3;/);
   });
 });
