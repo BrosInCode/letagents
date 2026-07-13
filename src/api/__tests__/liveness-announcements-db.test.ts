@@ -112,15 +112,25 @@ test(
     assert.equal(recoveryClaim, true);
     assert.equal(duplicateRecoveryClaim, false);
 
-    // A fresh outage epoch (new marker value read back) can be claimed again.
-    const [candidate] = (await listLivenessAnnouncementCandidates!()).filter(
+    // A fully announced row has nothing left to announce and drops out of the
+    // candidate list entirely.
+    const remaining = (await listLivenessAnnouncementCandidates!()).filter(
       (entry) => entry.session.room_id === roomId && entry.session.delivery_key === deliveryKey
     );
-    assert.ok(candidate?.session.offline_announced_at);
+    assert.equal(remaining.length, 0);
+
+    // Claiming with the current marker value still succeeds (a later outage
+    // epoch re-reads the row and claims against what it saw).
+    const { rows } = await pool!.query<{ offline_announced_at: Date | null }>(
+      "SELECT offline_announced_at FROM room_agent_delivery_sessions WHERE room_id = $1 AND delivery_key = $2",
+      [roomId, deliveryKey]
+    );
+    const currentMarker = rows[0]?.offline_announced_at;
+    assert.ok(currentMarker);
     const reclaim = await markAgentOfflineAnnounced!({
       room_id: roomId,
       delivery_key: deliveryKey,
-      expected_offline_announced_at: candidate!.session.offline_announced_at,
+      expected_offline_announced_at: currentMarker!.toISOString(),
     });
     assert.equal(reclaim, true);
   }
