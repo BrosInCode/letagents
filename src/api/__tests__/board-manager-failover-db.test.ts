@@ -178,7 +178,7 @@ test(
     // The successor dies between selection and the transaction: promotion
     // returns null, the transaction aborts, and neither the message nor the
     // release survives.
-    await endRoomAgentSession!(sessionB.session_id);
+    await endRoomAgentSession!({ session_id: sessionB.session_id });
     const clientMessageId = `board_manager_failover:${manager!.id}`;
     await assert.rejects(
       addMessageWithCreateStatus!(roomId, "letagents", "[status] failover attempt", {
