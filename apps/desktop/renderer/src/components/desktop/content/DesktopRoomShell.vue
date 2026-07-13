@@ -609,6 +609,7 @@ const rawInboxItems = computed(() =>
     tasks: props.tasks,
     githubEvents: eventsPage.value?.events || [],
     reasoningSessions: props.reasoningSessions,
+    presence: roomPresence.value,
     fallbackRepository: githubRepository.value,
   })
 );

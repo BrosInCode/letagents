@@ -2,6 +2,7 @@ import {
   addMessageWithCreateStatus,
   hydrateMessageReplies,
   type Message,
+  type MessageCreateTransaction,
 } from "../db.js";
 import { parseScopedId } from "../db/utils.js";
 import { createBridgedEmitter } from "./event-bridge.js";
@@ -31,6 +32,7 @@ export async function emitProjectMessage(
     attachments?: NormalizedMessageAttachmentReference[];
     client_message_id?: string | null;
     account_id?: string | null;
+    with_created_message_in_transaction?: (tx: MessageCreateTransaction) => Promise<void>;
   }
 ): Promise<Message> {
   const { message, created } = await addMessageWithCreateStatus(projectId, sender, text, {
@@ -41,6 +43,7 @@ export async function emitProjectMessage(
     attachments: options?.attachments,
     client_message_id: options?.client_message_id ?? null,
     account_id: options?.account_id ?? null,
+    with_created_message_in_transaction: options?.with_created_message_in_transaction,
   });
   if (created) {
     messageEvents.emit("message:created", {

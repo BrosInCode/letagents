@@ -159,6 +159,8 @@ export const room_agent_delivery_sessions = pgTable(
       mode: "string",
       withTimezone: true,
     }),
+    offline_announced_at: timestamp("offline_announced_at", { mode: "string", withTimezone: true }),
+    recovery_announced_at: timestamp("recovery_announced_at", { mode: "string", withTimezone: true }),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },

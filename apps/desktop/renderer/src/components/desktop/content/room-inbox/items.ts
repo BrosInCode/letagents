@@ -1,4 +1,5 @@
 import type {
+  DesktopAgentPresence,
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -15,7 +16,8 @@ export type DesktopInboxItemKind =
   | "task_review"
   | "task_blocked"
   | "github_failure"
-  | "agent_blocked";
+  | "agent_blocked"
+  | "agent_offline";
 
 export type DesktopInboxActivityTone = "new" | "neutral" | "danger" | "success" | "warning";
 
@@ -59,6 +61,10 @@ export type DesktopInboxItem =
   | (DesktopInboxItemBase & {
       kind: "agent_blocked";
       session: DesktopReasoningSession;
+    })
+  | (DesktopInboxItemBase & {
+      kind: "agent_offline";
+      presence: DesktopAgentPresence;
     });
 
 export interface BuildDesktopInboxItemsInput {
@@ -67,6 +73,7 @@ export interface BuildDesktopInboxItemsInput {
   tasks: readonly DesktopTaskSummary[];
   githubEvents: readonly DesktopGitHubRoomEvent[];
   reasoningSessions: readonly DesktopReasoningSession[];
+  presence?: readonly DesktopAgentPresence[];
   fallbackRepository?: string | null;
 }
 
@@ -76,6 +83,7 @@ export function buildDesktopInboxItems(input: BuildDesktopInboxItemsInput): Desk
     ...taskInboxItems(input.tasks),
     ...githubFailureInboxItems(input.githubEvents, input.fallbackRepository ?? null),
     ...agentBlockedInboxItems(input.reasoningSessions),
+    ...agentOfflineInboxItems(input.presence || []),
   ];
 
   return items
@@ -201,6 +209,34 @@ function agentBlockedInboxItems(
       actionable: true,
       activity: reasoningActivity(session),
       session,
+    }));
+}
+
+function agentOfflineInboxItems(
+  presence: readonly DesktopAgentPresence[],
+): DesktopInboxItem[] {
+  return presence
+    .filter((entry) => entry.sessionKind === "worker" && entry.activityState === "offline")
+    .map((entry) => ({
+      id: `agent-offline:${entry.actorLabel}`,
+      kind: "agent_offline" as const,
+      title: entry.displayName || entry.actorLabel,
+      preview: entry.statusText?.trim() || "Agent is unreachable and may have crashed",
+      context: entry.ownerLabel ? `${entry.ownerLabel}'s agent` : null,
+      timestamp: entry.lastHeartbeatAt || null,
+      firstSeenTimestamp: entry.lastHeartbeatAt || null,
+      occurrenceCount: 1,
+      actionable: true,
+      activity: [
+        {
+          id: `agent-offline:${entry.actorLabel}`,
+          label: "Agent went offline",
+          description: entry.statusText?.trim() || null,
+          timestamp: entry.lastHeartbeatAt || null,
+          tone: "danger" as const,
+        },
+      ],
+      presence: entry,
     }));
 }
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type {
+  DesktopAgentPresence,
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -88,7 +89,58 @@ describe("desktop room inbox items", () => {
     });
     assert.deepEqual(all.map((item) => item.id).sort(), ["thread:msg_1", "thread:msg_4"]);
   });
+
+  it("surfaces offline worker agents and ignores reachable or controller presence", () => {
+    const items = buildDesktopInboxItems({
+      filter: "actionable",
+      threadPage: null,
+      tasks: [],
+      githubEvents: [],
+      reasoningSessions: [],
+      presence: [
+        presence("FieldSignal | EmmyMay's agent | Codex", "worker", "offline"),
+        presence("RiverGrove | EmmyMay's agent | Claude Code", "worker", "active"),
+        presence("MistyMorrow | EmmyMay's agent | Agent", "controller", "offline"),
+      ],
+    });
+
+    assert.deepEqual(items.map((item) => item.kind), ["agent_offline"]);
+    const item = items[0];
+    assert.ok(item && item.kind === "agent_offline");
+    assert.equal(item.id, "agent-offline:FieldSignal | EmmyMay's agent | Codex");
+    assert.equal(item.title, "FieldSignal");
+    assert.equal(item.actionable, true);
+    assert.equal(item.context, "EmmyMay's agent");
+    assert.equal(item.activity[0]?.tone, "danger");
+  });
 });
+
+function presence(
+  actorLabel: string,
+  sessionKind: "controller" | "worker",
+  activityState: "active" | "away" | "offline",
+): DesktopAgentPresence {
+  return {
+    roomId: "room_1",
+    actorLabel,
+    agentKey: null,
+    agentInstanceId: null,
+    agentSessionId: null,
+    sessionKind,
+    runtime: "codex",
+    displayName: actorLabel.split(" | ")[0] || actorLabel,
+    ownerLabel: "EmmyMay",
+    ideLabel: "Codex",
+    repoBranch: null,
+    status: "idle",
+    statusText: null,
+    lastHeartbeatAt: "2026-06-01T08:30:00.000Z",
+    freshness: activityState === "offline" ? "stale" : "active",
+    activityState,
+    sourceFlags: ["delivery"],
+    livenessObservation: null,
+  };
+}
 
 function roomMessage(id: string, text: string, timestamp: string): DesktopRoomMessage {
   return {

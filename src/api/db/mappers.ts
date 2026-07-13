@@ -474,6 +474,8 @@ export function toRoomAgentDeliverySession(row: RoomAgentDeliverySessionRow): Ro
     last_connected_at: row.last_connected_at,
     last_disconnected_at: row.last_disconnected_at,
     reconnect_grace_expires_at: row.reconnect_grace_expires_at,
+    offline_announced_at: row.offline_announced_at,
+    recovery_announced_at: row.recovery_announced_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

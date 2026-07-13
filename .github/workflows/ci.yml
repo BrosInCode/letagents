@@ -188,6 +188,14 @@ jobs:
           --test
           src/api/__tests__/coordination-db.test.ts
 
+      - name: Run liveness announcement tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/liveness-sweep.test.ts
+          src/api/__tests__/liveness-announcements-db.test.ts
+
       - name: Run worker session auth tests
         run: >-
           node
