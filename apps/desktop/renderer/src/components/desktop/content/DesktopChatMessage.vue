@@ -43,7 +43,9 @@
           </button>
           <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <ProviderBadge v-if="ideLabel" :label="ideLabel" />
+          <span v-if="ideLabel" class="room-message-ide" :data-ide="ideLabel.toLowerCase()">
+            {{ ideLabel }}
+          </span>
         </div>
         <div class="room-message-meta-tail">
           <button
@@ -161,15 +163,25 @@
         @pointerdown.stop
         @contextmenu.prevent.stop
       >
-        <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
-          <span>Copy message</span>
-        </button>
-        <button type="button" role="menuitem" @click="quoteReplyFromContext">
-          <span>Quote reply</span>
-        </button>
-        <button type="button" role="menuitem" @click="tertiaryActionFromContext">
-          <span>{{ tertiaryActionLabel }}</span>
-        </button>
+        <template v-if="contextLinkHref">
+          <button ref="firstContextMenuButton" type="button" role="menuitem" @click="openLinkFromContext">
+            <span>Open link in browser</span>
+          </button>
+          <button type="button" role="menuitem" @click="copyLinkFromContext">
+            <span>Copy link</span>
+          </button>
+        </template>
+        <template v-else>
+          <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
+            <span>Copy message</span>
+          </button>
+          <button type="button" role="menuitem" @click="quoteReplyFromContext">
+            <span>Quote reply</span>
+          </button>
+          <button type="button" role="menuitem" @click="tertiaryActionFromContext">
+            <span>{{ tertiaryActionLabel }}</span>
+          </button>
+        </template>
       </div>
 
       <div
@@ -191,10 +203,11 @@
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { Check, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
+import { desktopIpc } from "../../../ipc/index.js";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
-import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
 import {
   getSenderColor,
   parseSenderIdentity,
@@ -248,6 +261,9 @@ const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
 const contextMenuInvoker = ref<HTMLElement | null>(null);
+// When the right-click landed on an external web link, the menu shows link
+// actions ("Open link in browser" / "Copy link") instead of message actions.
+const contextLinkHref = ref<string | null>(null);
 const { copied, copy: copyToClipboard } = useCopyIndicator(1400);
 const selectionPopoverOpen = ref(false);
 const selectionPopoverPosition = ref({ x: 0, y: 0 });
@@ -335,12 +351,20 @@ function participantInitials(value: string): string {
 }
 
 function openContextMenu(event: MouseEvent): void {
-  if (shouldUseNativeContextMenu(event)) {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  const linkHref = resolveExternalWebHref(
+    target?.closest("a[href]")?.getAttribute("href"),
+    window.location.href,
+  );
+  // External web links get the app menu with link actions. Everything else on
+  // an interactive/editable element (inputs, buttons, non-web anchors) keeps
+  // the platform's native menu.
+  if (!linkHref && shouldUseNativeContextMenu(event)) {
     return;
   }
   event.preventDefault();
   const article = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-  const target = event.target instanceof HTMLElement ? event.target : null;
+  contextLinkHref.value = linkHref;
   contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
   closeSelectionPopover();
   const menuWidth = 180;
@@ -371,6 +395,7 @@ function closeContextMenu(reason: ContextMenuCloseReason): void {
     void nextTick(() => restoreContextMenuFocus(invoker));
   }
   contextMenuInvoker.value = null;
+  contextLinkHref.value = null;
 }
 
 function closeContextMenuFromOutside(): void {
@@ -410,6 +435,24 @@ function handleTertiaryAction(): void {
 async function copyFromContext(): Promise<void> {
   closeContextMenu("copy");
   await copyMessage();
+}
+
+async function openLinkFromContext(): Promise<void> {
+  const href = contextLinkHref.value;
+  closeContextMenu("action");
+  if (!href) return;
+  try {
+    await desktopIpc.app?.openExternalUrl?.(href);
+  } catch {
+    // Opening the system browser is best-effort; a stale bridge or a rejected
+    // shell.openExternal shouldn't surface as an unhandled rejection.
+  }
+}
+
+async function copyLinkFromContext(): Promise<void> {
+  const href = contextLinkHref.value;
+  closeContextMenu("copy");
+  if (href) await copyToClipboard(href);
 }
 
 async function copyMessage(): Promise<void> {

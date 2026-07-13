@@ -94,6 +94,7 @@ export interface DesktopApi {
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
     openGitHubUrl: (url: string) => Promise<void>;
+    openExternalUrl: (url: string) => Promise<void>;
     getGitHubPullRequestStats: (url: string) => Promise<DesktopGitHubPullRequestStats | null>;
   };
   appAgent: {
