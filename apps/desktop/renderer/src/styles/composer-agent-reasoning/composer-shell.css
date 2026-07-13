@@ -10,7 +10,7 @@
   padding: 7px;
   border: 1px solid rgba(255, 255, 255, 0.105);
   border-radius: 16px;
-  background: #141416;
+  background: var(--bg-card);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.045),
     0 12px 30px rgba(0, 0, 0, 0.24);
@@ -28,7 +28,7 @@
 }
 
 .desktop-room-shell[data-liquid-glass="false"] .desktop-composer {
-  background: #141416;
+  background: var(--bg-card);
 }
 
 .desktop-composer-skeleton {

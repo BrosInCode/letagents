@@ -75,7 +75,7 @@ const emit = defineEmits<{
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
+  gap: 18px;
   min-height: 38px;
   width: 100%;
   padding: 0;
@@ -88,7 +88,15 @@ const emit = defineEmits<{
 }
 
 button.desktop-environment-row {
+  margin: -7px -9px;
+  width: calc(100% + 18px);
+  padding: 7px 9px;
+  border-radius: 10px;
   cursor: pointer;
+  transition:
+    background-color 140ms var(--ease-out),
+    color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
 }
 
 button.desktop-environment-row:disabled {
@@ -180,5 +188,35 @@ button.desktop-environment-row:disabled {
 button.desktop-environment-row:hover:not(:disabled) .desktop-environment-row-label,
 button.desktop-environment-row:focus-visible:not(:disabled) .desktop-environment-row-label {
   color: rgba(255, 255, 255, 0.9);
+}
+
+button.desktop-environment-row:hover:not(:disabled),
+button.desktop-environment-row:focus-visible:not(:disabled) {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+button.desktop-environment-row:focus-visible {
+  outline: 2px solid rgba(119, 197, 232, 0.55);
+  outline-offset: 2px;
+}
+
+button.desktop-environment-row:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+@media (hover: none), (pointer: coarse) {
+  button.desktop-environment-row:hover:not(:disabled) {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button.desktop-environment-row {
+    transition-property: background-color, color;
+  }
+
+  button.desktop-environment-row:active:not(:disabled) {
+    transform: none;
+  }
 }
 </style>

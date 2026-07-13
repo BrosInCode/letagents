@@ -66,8 +66,7 @@
     >
       <DesktopFloatingWidget
         :open="environmentPanelOpen"
-        label="Environment"
-        :tone="environmentWidgetTone"
+        label="Work"
         test-id="desktop-room-environment-widget"
         @update:open="setEnvironmentPanelOpen"
       >
@@ -305,7 +304,6 @@ import {
   isLocalGitRoom,
   roomSupportsGitHubIntegration,
 } from "../../../domain/git-rooms";
-import { repoEnvironmentCurrentBranchMatchesRoom } from "../../../domain/repo-environment";
 import {
   activeManagedAgentWorkIndicators,
   managedAgentSessionDisplayName,
@@ -572,13 +570,6 @@ const showEventsTab = computed(() => githubEventsAvailable.value);
 const showEnvironmentPanelWidget = computed(() =>
   activeTab.value === "chat" && Boolean(props.room.gitRoom) && !actionPanelOpen.value && !searchOpen.value
 );
-const environmentWidgetTone = computed<"neutral" | "attention">(() => {
-  if (!props.room.gitRoom || !props.repoStatus.isGitRepo || !props.gitRoomMatchesActiveRepo) return "neutral";
-  if (props.repoStatus.detached) return "attention";
-  return repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
-    ? "neutral"
-    : "attention";
-});
 const effectiveEnvironmentRepoStatus = computed(() => {
   const refreshed = refreshedEnvironmentRepoStatus.value;
   if (!refreshed || refreshed.rootPath !== props.repoStatus.rootPath) return props.repoStatus;

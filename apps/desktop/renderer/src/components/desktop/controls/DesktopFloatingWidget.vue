@@ -4,7 +4,6 @@
     class="desktop-floating-widget"
     :data-open="open"
     :data-anchor="anchor"
-    :data-tone="tone"
     :data-testid="testId"
     @keydown.escape.stop="closeWidget"
   >
@@ -40,12 +39,10 @@ const props = withDefaults(defineProps<{
   label: string;
   summary?: string | null;
   anchor?: "right" | "left";
-  tone?: "neutral" | "attention";
   testId?: string;
 }>(), {
   summary: null,
   anchor: "right",
-  tone: "neutral",
   testId: "desktop-floating-widget",
 });
 
@@ -96,11 +93,11 @@ function handleDocumentPointerDown(event: PointerEvent): void {
   max-width: min(260px, calc(100vw - 44px));
   min-height: 38px;
   padding: 7px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border-strong);
   border-radius: 12px;
   appearance: none;
-  background: rgba(18, 18, 18, 0.94);
-  color: rgba(255, 255, 255, 0.8);
+  background: var(--bg-card);
+  color: var(--text);
   box-shadow:
     0 16px 38px rgba(0, 0, 0, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
@@ -117,33 +114,20 @@ function handleDocumentPointerDown(event: PointerEvent): void {
   width: auto;
   min-width: 142px;
   justify-content: flex-start;
-  border-color: rgba(125, 211, 252, 0.36);
-  background:
-    linear-gradient(135deg, rgba(56, 189, 248, 0.14), rgba(255, 255, 255, 0.04)),
-    rgba(26, 26, 26, 0.97);
+  border-color: var(--border-strong);
+  background: var(--bg-card);
   box-shadow:
     0 18px 42px rgba(0, 0, 0, 0.38),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.94);
-}
-
-.desktop-floating-widget[data-tone="attention"][data-open="false"] .desktop-floating-widget-trigger {
-  border-color: rgba(245, 158, 11, 0.34);
-  background:
-    linear-gradient(135deg, rgba(245, 158, 11, 0.13), rgba(255, 255, 255, 0.035)),
-    rgba(22, 18, 12, 0.96);
-}
-
-.desktop-floating-widget[data-tone="attention"][data-open="false"] .desktop-floating-widget-trigger-icon {
-  color: rgba(251, 191, 36, 0.86);
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  color: var(--text);
 }
 
 .desktop-floating-widget-trigger:hover,
 .desktop-floating-widget-trigger:focus-visible {
   transform: translateY(-1px);
-  border-color: rgba(255, 255, 255, 0.18);
-  background: rgba(26, 26, 26, 0.96);
-  color: rgba(255, 255, 255, 0.9);
+  border-color: var(--border-accent);
+  background: var(--bg-elevated);
+  color: var(--text);
 }
 
 .desktop-floating-widget-trigger:focus-visible {
@@ -161,7 +145,7 @@ function handleDocumentPointerDown(event: PointerEvent): void {
   width: 20px;
   height: 20px;
   flex: 0 0 auto;
-  color: rgba(255, 255, 255, 0.64);
+  color: var(--text-secondary);
 }
 
 .desktop-floating-widget-trigger-copy {
@@ -186,7 +170,7 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 }
 
 .desktop-floating-widget-trigger-copy small {
-  color: rgba(255, 255, 255, 0.44);
+  color: var(--text-tertiary);
   font-size: 0.62rem;
   font-weight: 720;
 }
@@ -212,5 +196,34 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 .desktop-floating-widget-panel-leave-from {
   opacity: 1;
   transform: translateY(0) scale(1);
+}
+
+@media (hover: none), (pointer: coarse) {
+  .desktop-floating-widget-trigger:hover {
+    transform: none;
+    border-color: var(--border-strong);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-floating-widget-trigger,
+  .desktop-floating-widget-panel-enter-active,
+  .desktop-floating-widget-panel-leave-active {
+    transition-property: opacity, border-color, background-color, color;
+  }
+
+  .desktop-floating-widget-panel-enter-from,
+  .desktop-floating-widget-panel-leave-to,
+  .desktop-floating-widget-panel-enter-to,
+  .desktop-floating-widget-panel-leave-from {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .desktop-floating-widget-trigger {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
+  }
 }
 </style>
