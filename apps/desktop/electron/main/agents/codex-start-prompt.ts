@@ -6,6 +6,13 @@ import { LETAGENTS_CODENAME_EXAMPLES } from "./codenames.js";
 import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
 
 export const DEFAULT_CODEX_STOP_PHRASE = "/stop-codex-room";
+export const CODEX_MANAGED_HOST_DEVELOPER_INSTRUCTIONS = [
+  "You are running as a non-interactive LetAgents desktop-managed worker.",
+  "Although the runtime uses Codex app-server, this host cannot render Codex MCP Apps, plugin workspaces, or provider-owned setup screens.",
+  "For skills with app and terminal/chat paths, always use the terminal/chat or headless path.",
+  "Never open an MCP App workspace or wait for a user to press a button in provider UI that LetAgents cannot display.",
+  "Structured user-input and MCP elicitation requests are supported through the LetAgents composer.",
+].join("\n");
 
 export function makeCodexStopToken(): string {
   return `LOCAL_CODEX_ROOM_${randomUUID()}`;
@@ -68,6 +75,7 @@ export function buildCodexStartPrompt(input: {
       `4. Finish this bootstrap turn with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
       "",
       "Future event turns:",
+      "- This is a non-interactive managed host. Use terminal/chat fallbacks instead of MCP App setup workspaces.",
       "- When the desktop sends a room event, decide whether action is needed.",
       "- If action is useful, do the local work and make your final answer the public room reply the desktop should publish as you.",
       `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,

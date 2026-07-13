@@ -113,6 +113,92 @@
   font-size: 0.68rem;
 }
 
+.desktop-composer-interaction-tray {
+  align-items: start;
+}
+
+.desktop-composer-interaction-tray > p,
+.desktop-composer-interaction-link,
+.desktop-composer-interaction-fields {
+  grid-column: 1;
+}
+
+.desktop-composer-interaction-link {
+  width: fit-content;
+  margin-left: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #93c5fd;
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-decoration: underline;
+}
+
+.desktop-composer-interaction-fields {
+  display: grid;
+  gap: 8px;
+  margin-left: 18px;
+}
+
+.desktop-composer-interaction-fields label {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.4fr) minmax(160px, 1fr);
+  gap: 3px 10px;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.desktop-composer-interaction-fields label > small {
+  grid-column: 1;
+  color: var(--text-tertiary);
+  line-height: 1.25;
+}
+
+.desktop-composer-interaction-fields input:not([type="checkbox"]),
+.desktop-composer-interaction-fields select {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--text);
+  font: inherit;
+}
+
+.desktop-composer-interaction-fields input[type="checkbox"] {
+  grid-column: 2;
+  width: 16px;
+  height: 16px;
+}
+
+.desktop-composer-interaction-options {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.desktop-composer-interaction-options label {
+  display: inline-flex;
+  grid-template-columns: none;
+  gap: 5px;
+  align-items: center;
+}
+
+.desktop-composer-interaction-options input[type="checkbox"] {
+  grid-column: auto;
+}
+
+.desktop-composer-interaction-tray .desktop-composer-permission-actions {
+  grid-row: 1 / span 4;
+}
+
 @media (max-width: 760px) {
   .desktop-composer-permission-tray {
     grid-template-columns: 1fr;
@@ -122,5 +208,16 @@
     grid-row: auto;
     grid-column: 1;
     justify-content: flex-end;
+  }
+
+  .desktop-composer-interaction-fields label {
+    grid-template-columns: 1fr;
+  }
+
+  .desktop-composer-interaction-fields input:not([type="checkbox"]),
+  .desktop-composer-interaction-fields select,
+  .desktop-composer-interaction-fields input[type="checkbox"] {
+    grid-row: auto;
+    grid-column: 1;
   }
 }

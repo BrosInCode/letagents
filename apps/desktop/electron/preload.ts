@@ -220,6 +220,10 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:workers:get-managed-agent-change-summary", sessionId, roomIdentifier),
     resolveManagedAgentPermission: (input) =>
       ipcRenderer.invoke("desktop:workers:resolve-managed-agent-permission", input),
+    resolveManagedAgentInteraction: (input) =>
+      ipcRenderer.invoke("desktop:workers:resolve-managed-agent-interaction", input),
+    openManagedAgentInteractionUrl: (requestId, sessionId) =>
+      ipcRenderer.invoke("desktop:workers:open-managed-agent-interaction-url", requestId, sessionId),
     listAgentProviders: () => ipcRenderer.invoke("desktop:workers:list-agent-providers"),
     listAgentProviderModels: (providerId, input = {}) =>
       ipcRenderer.invoke("desktop:workers:list-agent-provider-models", providerId, input),

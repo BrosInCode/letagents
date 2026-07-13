@@ -1,5 +1,7 @@
 import type {
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentInteractionDecisionInput,
+  DesktopManagedAgentInteractionDecisionResult,
   DesktopAgentProviderId,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
@@ -25,6 +27,9 @@ export interface DesktopManagedAgentRuntime {
   resolvePermissionRequest?(
     input: DesktopManagedAgentPermissionDecisionInput,
   ): Promise<DesktopManagedAgentPermissionDecisionResult>;
+  resolveInteractionRequest?(
+    input: DesktopManagedAgentInteractionDecisionInput,
+  ): Promise<DesktopManagedAgentInteractionDecisionResult>;
 }
 
 export class DesktopManagedAgentRuntimeRegistry {
@@ -115,6 +120,21 @@ export class DesktopManagedAgentRuntimeRegistry {
       message: "Permission request is no longer pending.",
       session: null,
     };
+  }
+
+  async resolveInteractionRequest(
+    input: DesktopManagedAgentInteractionDecisionInput,
+  ): Promise<DesktopManagedAgentInteractionDecisionResult> {
+    const requestId = typeof input?.requestId === "string" ? input.requestId : "";
+    if (input?.action !== "submit" && input?.action !== "decline" && input?.action !== "cancel") {
+      return { requestId, accepted: false, message: "Interaction action must be submit, decline, or cancel.", session: null };
+    }
+    for (const runtime of this.list()) {
+      if (!runtime.resolveInteractionRequest) continue;
+      const result = await runtime.resolveInteractionRequest(input);
+      if (result.accepted || result.session) return result;
+    }
+    return { requestId, accepted: false, message: "Interaction request is no longer pending.", session: null };
   }
 
   dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void {

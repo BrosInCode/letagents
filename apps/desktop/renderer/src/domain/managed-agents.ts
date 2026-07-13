@@ -9,6 +9,7 @@ import type {
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentPermissionRequest,
+  DesktopManagedAgentInteractionRequest,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopReasoningSession,
@@ -132,7 +133,7 @@ export function canStopManagedAgentTurn(
 ): boolean {
   return Boolean(
     session?.canStop &&
-    (session.status === "starting" || session.status === "running")
+    (session.status === "starting" || session.status === "running" || session.status === "waiting_for_input")
   );
 }
 
@@ -235,6 +236,27 @@ export function pendingManagedAgentPermissionApprovals(
     );
 }
 
+export function pendingManagedAgentInteractions(
+  sessions: readonly DesktopManagedAgentSession[],
+  roomIdentifier: string | null | undefined,
+): ManagedAgentInteractionPrompt[] {
+  return sessions
+    .filter((session) => managedAgentSessionMatchesRoom(session, roomIdentifier))
+    .flatMap((session) => (session.pendingInteractionRequests ?? []).map((request) => ({
+      id: request.id,
+      session,
+      request,
+      displayName: managedAgentSessionDisplayName(session),
+      providerLabel: session.ideLabel || String(request.providerId || "Agent"),
+      requestedAt: request.requestedAt || session.updatedAt,
+    })))
+    .sort((left, right) =>
+      left.requestedAt.localeCompare(right.requestedAt) ||
+      left.displayName.localeCompare(right.displayName) ||
+      left.id.localeCompare(right.id)
+    );
+}
+
 export interface ManagedAgentTargetKeys {
   agentSessionId?: string | null;
   agentKey?: string | null;
@@ -260,6 +282,15 @@ export interface ManagedAgentPermissionApproval {
   title: string;
   toolName: string;
   targetLabel: string | null;
+  requestedAt: string;
+}
+
+export interface ManagedAgentInteractionPrompt {
+  id: string;
+  session: DesktopManagedAgentSession;
+  request: DesktopManagedAgentInteractionRequest;
+  displayName: string;
+  providerLabel: string;
   requestedAt: string;
 }
 

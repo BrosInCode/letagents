@@ -24,6 +24,8 @@ import type {
   DesktopAgentProviderSetupResult,
   DesktopManagedAgentChangeSummary,
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentInteractionDecisionInput,
+  DesktopManagedAgentInteractionDecisionResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
   DesktopManagedAgentRetryInput,
@@ -268,6 +270,10 @@ export interface DesktopApi {
     resolveManagedAgentPermission: (
       input: DesktopManagedAgentPermissionDecisionInput
     ) => Promise<DesktopManagedAgentPermissionDecisionResult>;
+    resolveManagedAgentInteraction: (
+      input: DesktopManagedAgentInteractionDecisionInput
+    ) => Promise<DesktopManagedAgentInteractionDecisionResult>;
+    openManagedAgentInteractionUrl: (requestId: string, sessionId: string) => Promise<void>;
     listAgentProviders: () => Promise<DesktopAgentProvider[]>;
     listAgentProviderModels: (
       providerId: DesktopAgentProviderId,

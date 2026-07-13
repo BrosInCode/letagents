@@ -20,6 +20,7 @@ import type {
   DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentFailure,
   DesktopManagedAgentPermissionRequest,
+  DesktopManagedAgentInteractionRequest,
   DesktopManagedAgentSession,
   DesktopManagedAgentSessionStatus,
   DesktopRoomStreamEvent,
@@ -71,6 +72,7 @@ export interface DesktopManagedLiveSessionBase {
   failure?: DesktopManagedAgentFailure | null;
   pending_event?: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }> | null;
   queued_events?: Array<Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>>;
+  pending_interaction_requests?: DesktopManagedAgentInteractionRequest[];
   started_at: string;
   updated_at: string;
 }
@@ -629,6 +631,8 @@ function statusSortWeight(status: DesktopManagedAgentSessionStatus): number {
   switch (status) {
     case "running":
       return 5;
+    case "waiting_for_input":
+      return 5;
     case "starting":
       return 4;
     case "completed":
@@ -907,6 +911,7 @@ export function toPublicManagedAgentSession(
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "waiting_for_input" ||
         session.status === "blocked" ||
         session.status === "unknown" ||
         (managedAgentDeliveryMode(session) === "desktop_events" && session.status === "completed")
@@ -929,6 +934,7 @@ export function toPublicManagedAgentSession(
       }
       : null,
     pendingPermissionRequests: [],
+    pendingInteractionRequests: session.pending_interaction_requests ?? [],
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
@@ -1020,6 +1026,7 @@ export function toPublicClaudeCodeManagedAgentSession(
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "waiting_for_input" ||
         session.status === "blocked" ||
         session.status === "unknown" ||
         (deliveryMode === "desktop_events" && session.status === "completed")
@@ -1042,6 +1049,7 @@ export function toPublicClaudeCodeManagedAgentSession(
       }
       : null,
     pendingPermissionRequests: session.pending_permission_requests ?? [],
+    pendingInteractionRequests: [],
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
@@ -1135,6 +1143,7 @@ export function toPublicCursorManagedAgentSession(
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "waiting_for_input" ||
         session.status === "blocked" ||
         session.status === "unknown" ||
         (deliveryMode === "desktop_events" && session.status === "completed")
@@ -1157,6 +1166,7 @@ export function toPublicCursorManagedAgentSession(
       }
       : null,
     pendingPermissionRequests: session.pending_permission_requests ?? [],
+    pendingInteractionRequests: [],
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,

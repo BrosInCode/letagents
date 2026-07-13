@@ -51,6 +51,7 @@ import {
   matchingManagedAgentWorktreesForBranch,
   normalizeManagedAgentRoomIdentifier,
   pendingManagedAgentPermissionApprovals,
+  pendingManagedAgentInteractions,
   preferredManagedAgentRepoRootPath,
   shouldShowCursorMcpPolicySelector,
   shouldShowDeliveryModeSelector,
@@ -536,6 +537,53 @@ test("pendingManagedAgentPermissionApprovals derives composer approval items", (
   assert.equal(approvals[0]?.displayName, "CedarVista");
   assert.equal(approvals[0]?.targetLabel, "npm test");
   assert.equal(approvals[1]?.targetLabel, "apps/desktop/electron/main/agents/providers.ts");
+});
+
+test("pendingManagedAgentInteractions derives room-scoped composer prompts", () => {
+  const prompts = pendingManagedAgentInteractions([
+    session({
+      id: "managed_input",
+      displayName: "DawnGrove",
+      ideLabel: "Codex",
+      status: "waiting_for_input",
+      pendingInteractionRequests: [{
+        id: "interaction_1",
+        providerId: "codex",
+        sessionId: "managed_input",
+        kind: "question",
+        title: "Start scan?",
+        description: "Choose how to continue.",
+        sourceLabel: "Codex Security",
+        fields: [],
+        sensitive: false,
+        hasExternalUrl: false,
+        requestedAt: "2026-07-12T00:00:00.000Z",
+        expiresAt: "2026-07-12T00:10:00.000Z",
+      }],
+    }),
+    session({
+      id: "other_room",
+      roomIdentifier: "room_2",
+      pendingInteractionRequests: [{
+        id: "interaction_other",
+        providerId: "codex",
+        sessionId: "other_room",
+        kind: "question",
+        title: "Other",
+        description: null,
+        sourceLabel: null,
+        fields: [],
+        sensitive: false,
+        hasExternalUrl: false,
+        requestedAt: "2026-07-12T00:00:00.000Z",
+        expiresAt: "2026-07-12T00:10:00.000Z",
+      }],
+    }),
+  ], "room_1");
+
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0]?.displayName, "DawnGrove");
+  assert.equal(prompts[0]?.request.title, "Start scan?");
 });
 
 test("managedAgentPermissionRequestTargetLabel keeps external targets intact", () => {

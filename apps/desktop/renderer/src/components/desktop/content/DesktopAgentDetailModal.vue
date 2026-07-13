@@ -356,7 +356,9 @@ const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
 );
 const isPrimaryAgentRunning = computed(() =>
-  matchingManagedSessions.value.some((session) => session.status === "running" || session.status === "starting")
+  matchingManagedSessions.value.some((session) =>
+    session.status === "running" || session.status === "starting" || session.status === "waiting_for_input"
+  )
 );
 const latestReasoningIsIdle = computed(() => isIdleReasoningSession(latestReasoning.value));
 const canStopPrimaryManagedSessionTurn = computed(() =>

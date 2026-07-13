@@ -144,7 +144,7 @@ export function deriveCodexLiveSessionStatus(
   }
 
   if (isActiveCodexTurnStatus(turnStatus) || threadStatus === "active") {
-    return "running";
+    return currentStatus === "waiting_for_input" ? currentStatus : "running";
   }
 
   if (!serverReachable) {

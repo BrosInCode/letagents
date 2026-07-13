@@ -6,6 +6,8 @@ import type {
   DesktopManagedAgentChangeSummary,
   DesktopManagedAgentEffort,
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentInteractionDecisionInput,
+  DesktopManagedAgentInteractionDecisionResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
   DesktopManagedAgentSession,
@@ -33,6 +35,7 @@ import {
 } from "./codex-app-server.js";
 import {
   buildCodexStartPrompt,
+  CODEX_MANAGED_HOST_DEVELOPER_INSTRUCTIONS,
   DEFAULT_CODEX_STOP_PHRASE,
   formatCodexDeadline,
   looksLikeInviteCode,
@@ -71,10 +74,16 @@ import type {
 import {
   CodexRpcClient,
   type RpcNotification,
+  type RpcServerRequest,
   type ThreadReadResult,
   type ThreadStartResult,
   type TurnStartResult,
 } from "./codex-rpc-client.js";
+import {
+  normalizeCodexInteractionRequest,
+  validateManagedAgentInteractionDecision,
+  type NormalizedCodexInteraction,
+} from "./managed-agent-interactions.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -166,6 +175,12 @@ const spawnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const codexRuntimeReasoningLastPost = new Map<string, { signature: string; postedAt: number }>();
 const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
+const pendingCodexInteractions = new Map<string, {
+  sessionId: string;
+  interaction: NormalizedCodexInteraction;
+  resolve: (value: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
 const desktopManagedAgentRuntimes = new DesktopManagedAgentRuntimeRegistry();
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
@@ -178,6 +193,7 @@ desktopManagedAgentRuntimes.register({
   inspect: inspectDesktopManagedCodexAgentSession,
   stop: stopDesktopManagedCodexAgent,
   retry: retryDesktopManagedCodexAgent,
+  resolveInteractionRequest: resolveDesktopManagedCodexInteraction,
   dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
 });
 desktopManagedAgentRuntimes.register({
@@ -194,10 +210,26 @@ desktopManagedAgentRuntimes.register({
 });
 desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
 desktopManagedAgentRuntimes.register(createDesktopCursorRuntime());
+clearStaleCodexInteractionState();
 
 type ReasoningSessionCreateResponse = {
   session?: { id?: string };
 };
+
+function clearStaleCodexInteractionState(): void {
+  for (const session of listStoredCodexLiveSessions()) {
+    if (!(session.pending_interaction_requests ?? []).length) continue;
+    updateCodexLiveSession(session.session_id, (current) => ({
+      ...current,
+      status: current.status === "waiting_for_input" ? "unknown" : current.status,
+      pending_interaction_requests: [],
+      last_error: current.status === "waiting_for_input"
+        ? "The pending input request expired when LetAgents Desktop restarted. Retry the room event."
+        : current.last_error,
+      updated_at: new Date().toISOString(),
+    }));
+  }
+}
 
 function codexReplyChangeSessionKey(sessionId: string): string {
   return `codex:${sessionId}`;
@@ -413,6 +445,122 @@ function emitManagedAgentSessionUpdate(session: DesktopCodexLiveSessionState | n
   );
 }
 
+async function handleCodexServerRequest(
+  sessionId: string | null,
+  rpcRequest: RpcServerRequest,
+): Promise<unknown> {
+  if (!sessionId) {
+    throw new Error("Codex requested user input before the managed session was ready.");
+  }
+  const session = getStoredCodexLiveSession(sessionId);
+  if (!session) {
+    throw new Error("The managed Codex session is no longer available.");
+  }
+  const providerId: DesktopAgentProviderId = session.provider_id === "open-model" ? "open-model" : "codex";
+  const interaction = normalizeCodexInteractionRequest({
+    providerId,
+    sessionId,
+    rpcRequest,
+  });
+
+  const updated = updateCodexLiveSession(sessionId, (current) => ({
+    ...current,
+    status: "waiting_for_input",
+    pending_interaction_requests: [
+      ...(current.pending_interaction_requests ?? []).filter((request) => request.id !== interaction.request.id),
+      interaction.request,
+    ],
+    last_error: null,
+    updated_at: new Date().toISOString(),
+  }));
+  emitManagedAgentSessionUpdate(updated);
+  if (updated) {
+    queueCodexRuntimeReasoningSummary(updated, {
+      summary: "Waiting for owner input.",
+      status: "blocked",
+      checking: interaction.request.title,
+      next_action: "Use the request above the room composer to continue.",
+    });
+  }
+
+  return await new Promise<unknown>((resolve) => {
+    const timeoutMs = Math.max(0, new Date(interaction.request.expiresAt).getTime() - Date.now());
+    const timer = setTimeout(() => {
+      settleCodexInteraction(interaction.request.id, { action: "cancel", answers: {} });
+    }, timeoutMs);
+    timer.unref?.();
+    pendingCodexInteractions.set(interaction.request.id, { sessionId, interaction, resolve, timer });
+  });
+}
+
+function settleCodexInteraction(
+  requestId: string,
+  decision: ReturnType<typeof validateManagedAgentInteractionDecision>,
+): DesktopCodexLiveSessionState | null {
+  const pending = pendingCodexInteractions.get(requestId);
+  if (!pending) return null;
+  pendingCodexInteractions.delete(requestId);
+  clearTimeout(pending.timer);
+
+  const response = pending.interaction.response(decision);
+  const updated = updateCodexLiveSession(pending.sessionId, (current) => {
+    const remaining = (current.pending_interaction_requests ?? []).filter((request) => request.id !== requestId);
+    return {
+      ...current,
+      status: remaining.length ? "waiting_for_input" : "running",
+      pending_interaction_requests: remaining,
+      updated_at: new Date().toISOString(),
+    };
+  });
+  emitManagedAgentSessionUpdate(updated);
+  pending.resolve(response);
+  return updated;
+}
+
+function cancelCodexInteractionsForSession(sessionId: string): void {
+  for (const [requestId, pending] of pendingCodexInteractions) {
+    if (pending.sessionId === sessionId) {
+      settleCodexInteraction(requestId, { action: "cancel", answers: {} });
+    }
+  }
+}
+
+async function resolveDesktopManagedCodexInteraction(
+  input: DesktopManagedAgentInteractionDecisionInput,
+): Promise<DesktopManagedAgentInteractionDecisionResult> {
+  const pending = pendingCodexInteractions.get(input.requestId);
+  if (!pending || (input.sessionId && input.sessionId !== pending.sessionId)) {
+    return {
+      requestId: input.requestId,
+      accepted: false,
+      message: "Interaction request is no longer pending.",
+      session: null,
+    };
+  }
+  try {
+    const decision = validateManagedAgentInteractionDecision(
+      pending.interaction.request,
+      input.action,
+      input.answers,
+    );
+    const updated = settleCodexInteraction(input.requestId, decision);
+    return {
+      requestId: input.requestId,
+      accepted: true,
+      message: input.action === "submit" ? "Answer sent to the agent." : "Request dismissed.",
+      session: updated ? toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated)) : null,
+    };
+  } catch (error) {
+    const session = getStoredCodexLiveSession(pending.sessionId);
+    return {
+      requestId: input.requestId,
+      accepted: false,
+      message: error instanceof Error ? error.message : String(error),
+      session: session ? toPublicManagedAgentSession(bindCodexLiveSessionToWorker(session)) : null,
+    };
+  }
+}
+
 function markSpawnedCodexAppServersOffline(reason: string): void {
   const pids = new Set(spawnedServerPids);
   for (const session of listStoredCodexLiveSessions()) {
@@ -450,6 +598,9 @@ function registerProcessCleanup(): void {
     spawnedServerPids.clear();
     codexRuntimeReasoningLastPost.clear();
     codexRuntimeReasoningPostQueues.clear();
+    for (const session of listStoredCodexLiveSessions()) {
+      cancelCodexInteractionsForSession(session.session_id);
+    }
     clearAllDesktopManagedAgentReplyChangeState();
   };
 
@@ -958,10 +1109,12 @@ async function startDesktopManagedCodexEngineAgent(
 
     client = new CodexRpcClient(serverUrl, (notification) => {
       publishCodexRuntimeNotification(runtimeNotificationSessionId, notification);
-    });
+    }, undefined, (request) => handleCodexServerRequest(runtimeNotificationSessionId, request));
     await client.connect();
 
-    const threadStart = await client.request<ThreadStartResult>("thread/start", {});
+    const threadStart = await client.request<ThreadStartResult>("thread/start", {
+      developerInstructions: CODEX_MANAGED_HOST_DEVELOPER_INSTRUCTIONS,
+    });
     const threadId = threadStart.thread?.id;
     if (!threadId) {
       throw new Error("Codex app-server did not return a thread id.");
@@ -1078,7 +1231,6 @@ async function inspectDesktopManagedCodexAgentSession(
   if (!session) {
     return null;
   }
-
   if (isSmokeManagedCodexSession(session)) {
     return smokeManagedCodexInspection(session);
   }
@@ -1672,7 +1824,7 @@ async function runDesktopEventCodexTurn(input: {
 
   const client = new CodexRpcClient(session.server_url, (notification) => {
     publishCodexRuntimeNotification(session.session_id, notification);
-  });
+  }, undefined, (request) => handleCodexServerRequest(session.session_id, request));
   // Bridge an engine-driven abort (preempt/stop) onto a Codex turn interrupt.
   // Codex never preempts on enqueue and drives its own stop path, so this only
   // fires if a future caller aborts the engine turn directly.
@@ -1869,6 +2021,7 @@ async function stopDesktopManagedCodexAgent(
   if (!session) {
     return null;
   }
+  cancelCodexInteractionsForSession(session.session_id);
 
   if (isSmokeManagedCodexSession(session)) {
     if (shouldShutdownManagedAgentOnStop(input)) {
@@ -2018,4 +2171,20 @@ export function resolveDesktopManagedAgentPermissionRequest(
   input: DesktopManagedAgentPermissionDecisionInput,
 ): Promise<DesktopManagedAgentPermissionDecisionResult> {
   return desktopManagedAgentRuntimes.resolvePermissionRequest(input);
+}
+
+export function resolveDesktopManagedAgentInteractionRequest(
+  input: DesktopManagedAgentInteractionDecisionInput,
+): Promise<DesktopManagedAgentInteractionDecisionResult> {
+  return desktopManagedAgentRuntimes.resolveInteractionRequest(input);
+}
+
+export function getDesktopManagedAgentInteractionExternalUrl(
+  requestId: string,
+  sessionId: string,
+): string {
+  const pending = pendingCodexInteractions.get(requestId);
+  const url = pending?.sessionId === sessionId ? pending.interaction.externalUrl : null;
+  if (!url) throw new Error("Authentication link is no longer available.");
+  return url;
 }

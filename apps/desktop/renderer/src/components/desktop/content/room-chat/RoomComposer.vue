@@ -1,7 +1,84 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
     <div
-      v-if="primaryPermissionApproval"
+      v-if="primaryInteraction"
+      class="desktop-composer-permission-tray desktop-composer-interaction-tray"
+      data-testid="desktop-composer-interaction-tray"
+      aria-live="polite"
+    >
+      <div class="desktop-composer-permission-main">
+        <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
+        <div class="desktop-composer-permission-copy">
+          <strong>{{ primaryInteraction.displayName }} needs your input</strong>
+          <span>
+            {{ primaryInteraction.request.title }}
+            <template v-if="interactionOverflowCount > 0"> / {{ interactionOverflowCount }} more waiting</template>
+          </span>
+        </div>
+      </div>
+      <p v-if="primaryInteraction.request.description">{{ primaryInteraction.request.description }}</p>
+      <button
+        v-if="primaryInteraction.request.hasExternalUrl"
+        type="button"
+        class="desktop-composer-interaction-link"
+        @click="$emit('open-interaction-url', primaryInteraction)"
+      >Open authentication page</button>
+      <div class="desktop-composer-interaction-fields">
+        <label v-for="field in primaryInteraction.request.fields" :key="field.id">
+          <span>{{ field.label }}<template v-if="field.required"> *</template></span>
+          <small v-if="field.description">{{ field.description }}</small>
+          <select
+            v-if="field.type === 'select'"
+            :value="interactionAnswers[field.id] ?? ''"
+            @change="setInteractionAnswer(field.id, ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="" disabled>Choose an option</option>
+            <option v-for="option in field.options" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+          <input
+            v-else-if="field.type === 'boolean'"
+            type="checkbox"
+            :checked="interactionAnswers[field.id] === true"
+            @change="setInteractionAnswer(field.id, ($event.target as HTMLInputElement).checked)"
+          />
+          <div v-else-if="field.type === 'multiselect'" class="desktop-composer-interaction-options">
+            <label v-for="option in field.options" :key="option.value">
+              <input
+                type="checkbox"
+                :checked="interactionArrayAnswer(field.id).includes(option.value)"
+                @change="toggleInteractionOption(field.id, option.value, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>{{ option.label }}</span>
+            </label>
+          </div>
+          <input
+            v-else
+            :type="field.type === 'secret' ? 'password' : field.type === 'number' ? 'number' : 'text'"
+            :min="field.minimum ?? undefined"
+            :max="field.maximum ?? undefined"
+            :value="interactionAnswers[field.id] ?? ''"
+            autocomplete="off"
+            @input="setInteractionAnswer(field.id, interactionInputValue(field.type, $event))"
+          />
+        </label>
+      </div>
+      <div class="desktop-composer-permission-actions">
+        <button
+          type="button"
+          class="desktop-composer-permission-deny"
+          :disabled="Boolean(resolvingInteractionIds[primaryInteraction.id])"
+          @click="$emit('resolve-interaction', primaryInteraction, 'decline', {})"
+        >Decline</button>
+        <button
+          type="button"
+          class="desktop-composer-permission-allow"
+          :disabled="Boolean(resolvingInteractionIds[primaryInteraction.id])"
+          @click="submitInteraction"
+        >{{ resolvingInteractionIds[primaryInteraction.id] ? "Sending..." : "Continue" }}</button>
+      </div>
+    </div>
+    <div
+      v-else-if="primaryPermissionApproval"
       class="desktop-composer-permission-tray"
       data-testid="desktop-composer-permission-tray"
       aria-live="polite"
@@ -49,8 +126,8 @@
         </button>
       </div>
     </div>
-    <div v-if="permissionError" class="desktop-composer-permission-error" role="alert">
-      {{ permissionError }}
+    <div v-if="interactionError || permissionError" class="desktop-composer-permission-error" role="alert">
+      {{ interactionError || permissionError }}
     </div>
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
@@ -163,11 +240,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowUp, LoaderCircle, Plus } from "@lucide/vue";
 import type {
+  DesktopManagedAgentInteractionAction,
+  DesktopManagedAgentInteractionFieldType,
+  DesktopManagedAgentInteractionValue,
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
-import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
+import type { ManagedAgentInteractionPrompt, ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
@@ -188,11 +268,14 @@ const props = defineProps<{
   eventPreviews: ComposerEventPreview[];
   initialDraft?: string;
   participants: DesktopParticipantSummary[];
+  interactionPrompts: ManagedAgentInteractionPrompt[];
+  interactionError: string | null;
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
   replyTo: RoomComposerReplyTarget | null;
   resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
+  resolvingInteractionIds: Record<string, DesktopManagedAgentInteractionAction>;
   roomIdentifier: string | null;
   roomLoading: boolean;
   sendError: string | null;
@@ -204,11 +287,17 @@ const emit = defineEmits<{
   "draft-change": [text: string];
   "pick-attachments": [];
   "open-add-agent": [];
+  "open-interaction-url": [prompt: ManagedAgentInteractionPrompt];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "remove-attachment": [uploadId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
+  ];
+  "resolve-interaction": [
+    prompt: ManagedAgentInteractionPrompt,
+    action: DesktopManagedAgentInteractionAction,
+    answers: Record<string, DesktopManagedAgentInteractionValue>,
   ];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
   "open-event-preview": [event: ComposerEventPreview];
@@ -226,6 +315,45 @@ const canSend = computed(() =>
 );
 const primaryPermissionApproval = computed(() => props.permissionApprovals[0] ?? null);
 const permissionOverflowCount = computed(() => Math.max(0, props.permissionApprovals.length - 1));
+const primaryInteraction = computed(() => props.interactionPrompts[0] ?? null);
+const interactionOverflowCount = computed(() => Math.max(0, props.interactionPrompts.length - 1));
+const interactionAnswers = ref<Record<string, DesktopManagedAgentInteractionValue>>({});
+
+watch(
+  () => primaryInteraction.value?.id,
+  () => {
+    interactionAnswers.value = Object.fromEntries(
+      (primaryInteraction.value?.request.fields ?? []).map((field) => [field.id, field.defaultValue]),
+    );
+  },
+  { immediate: true },
+);
+
+function setInteractionAnswer(id: string, value: DesktopManagedAgentInteractionValue): void {
+  interactionAnswers.value = { ...interactionAnswers.value, [id]: value };
+}
+
+function interactionInputValue(type: DesktopManagedAgentInteractionFieldType, event: Event): DesktopManagedAgentInteractionValue {
+  const value = (event.target as HTMLInputElement).value;
+  return type === "number" ? (value === "" ? null : Number(value)) : value;
+}
+
+function interactionArrayAnswer(id: string): string[] {
+  const value = interactionAnswers.value[id];
+  return Array.isArray(value) ? value : [];
+}
+
+function toggleInteractionOption(id: string, option: string, checked: boolean): void {
+  const current = interactionArrayAnswer(id);
+  setInteractionAnswer(id, checked
+    ? [...new Set([...current, option])]
+    : current.filter((value) => value !== option));
+}
+
+function submitInteraction(): void {
+  if (!primaryInteraction.value) return;
+  emit("resolve-interaction", primaryInteraction.value, "submit", interactionAnswers.value);
+}
 const composerInputLabel = computed(() => {
   if (props.roomLoading) return "Room messages are loading";
   return props.roomIdentifier ? "Message room" : "Choose a room before writing";

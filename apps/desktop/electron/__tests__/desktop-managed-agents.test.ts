@@ -36,7 +36,7 @@ const {
   shouldDeliverRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToSession,
 } = await import("../main/agents/codex-event-routing.js");
-const { buildCodexStartPrompt } = await import("../main/agents/codex-start-prompt.js");
+const { buildCodexStartPrompt, CODEX_MANAGED_HOST_DEVELOPER_INSTRUCTIONS } = await import("../main/agents/codex-start-prompt.js");
 const {
   buildDesktopEventPrompt,
   desktopEventPublicReplyText,
@@ -1322,6 +1322,9 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.doesNotMatch(eventPrompt, /register_agent_session/);
   assert.doesNotMatch(eventPrompt, /get_onboarding_status/);
   assert.match(eventPrompt, /desktop app will send room events/);
+  assert.match(eventPrompt, /non-interactive managed host/);
+  assert.match(CODEX_MANAGED_HOST_DEVELOPER_INSTRUCTIONS, /always use the terminal\/chat or headless path/);
+  assert.match(CODEX_MANAGED_HOST_DEVELOPER_INSTRUCTIONS, /Never open an MCP App workspace/);
 });
 
 test("Codex start prompts JSON-escape unusual room names", () => {
@@ -3179,6 +3182,7 @@ test("active Codex turn statuses keep desktop event delivery from overlapping tu
   for (const status of ["completed", "interrupted", "failed", null]) {
     assert.equal(isActiveCodexTurnStatus(status), false);
   }
+  assert.equal(deriveCodexLiveSessionStatus("waiting_for_input", true, "active", "inProgress"), "waiting_for_input");
 });
 
 test("Codex inspection summaries expose only public transcript items", () => {
@@ -3277,6 +3281,63 @@ test("CodexRpcClient initializes app-server using the documented wire shape", as
   assert.equal(sentMessages[1]?.jsonrpc, undefined);
   assert.equal(sentMessages[2]?.method, "thread/start");
   assert.equal(sentMessages[2]?.jsonrpc, undefined);
+});
+
+test("CodexRpcClient answers inbound app-server requests without confusing them for responses", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  const sentMessages: Array<Record<string, unknown>> = [];
+  let socket: FakeWebSocket | null = null;
+
+  class FakeWebSocket {
+    static readonly OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+
+    constructor(readonly url: string) {
+      socket = this;
+      queueMicrotask(() => this.onopen?.());
+    }
+
+    send(raw: string): void {
+      const message = JSON.parse(raw) as Record<string, unknown>;
+      sentMessages.push(message);
+      if (typeof message.id === "number" && typeof message.method === "string") {
+        queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {} }) }));
+      }
+    }
+
+    close(): void {
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+    FakeWebSocket as unknown as typeof WebSocket;
+  try {
+    const client = new CodexRpcClient(
+      "ws://127.0.0.1:4500",
+      undefined,
+      undefined,
+      async (request) => ({ answer: request.method }),
+    );
+    await client.connect();
+    socket!.onmessage?.({
+      data: JSON.stringify({ id: "server_request_1", method: "item/tool/requestUserInput", params: {} }),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    client.close();
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+
+  assert.deepEqual(sentMessages.find((message) => message.id === "server_request_1"), {
+    id: "server_request_1",
+    result: { answer: "item/tool/requestUserInput" },
+  });
 });
 
 test("CodexRpcClient rejects requests when the app-server socket is not open", async () => {

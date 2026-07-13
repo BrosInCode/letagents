@@ -71,11 +71,14 @@
           :event-previews="composerEventPreviews"
           :initial-draft="initialDraft"
           :participants="participants"
+          :interaction-prompts="interactionPrompts"
+          :interaction-error="interactionError"
           :permission-approvals="permissionApprovals"
           :permission-error="permissionError"
           :pending-attachment-drafts="pendingAttachmentDrafts"
           :reply-to="replyTarget"
           :resolving-permission-ids="resolvingPermissionIds"
+          :resolving-interaction-ids="resolvingInteractionIds"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :send-error="sendError"
@@ -83,12 +86,14 @@
           @clear-reply="clearReplyTarget"
           @draft-change="emit('draft-change', $event)"
           @open-add-agent="emit('open-add-agent')"
+          @open-interaction-url="emit('open-interaction-url', $event)"
           @open-permission-detail="emit('open-permission-detail', $event)"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
           @open-event-preview="openEventPreview"
           @dismiss-event-preview="emit('dismiss-event-preview', $event)"
           @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
+          @resolve-interaction="(prompt, action, answers) => emit('resolve-interaction', prompt, action, answers)"
           @send-message="handleComposerSend"
         />
 
@@ -167,6 +172,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } fro
 import type { CSSProperties } from "vue";
 import type {
   DesktopAgentPresence,
+  DesktopManagedAgentInteractionAction,
+  DesktopManagedAgentInteractionValue,
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopReasoningSession,
@@ -176,6 +183,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
 import type {
+  ManagedAgentInteractionPrompt,
   ManagedAgentPermissionApproval,
   ManagedAgentWorkIndicator,
 } from "../../../domain/managed-agents";
@@ -204,6 +212,8 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  interactionPrompts: ManagedAgentInteractionPrompt[];
+  interactionError: string | null;
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
   composerEventPreviews: ComposerEventPreview[];
@@ -219,6 +229,7 @@ const props = defineProps<{
   participants: DesktopParticipantSummary[];
   presence: DesktopAgentPresence[];
   resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
+  resolvingInteractionIds: Record<string, DesktopManagedAgentInteractionAction>;
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];
   searchQuery: string;
@@ -235,6 +246,7 @@ const emit = defineEmits<{
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
   "open-agent-detail": [target: AgentModalTarget];
   "open-add-agent": [];
+  "open-interaction-url": [prompt: ManagedAgentInteractionPrompt];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
@@ -244,6 +256,11 @@ const emit = defineEmits<{
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
+  ];
+  "resolve-interaction": [
+    prompt: ManagedAgentInteractionPrompt,
+    action: DesktopManagedAgentInteractionAction,
+    answers: Record<string, DesktopManagedAgentInteractionValue>,
   ];
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
 }>();
