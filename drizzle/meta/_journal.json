@@ -463,6 +463,13 @@
       "when": 1783987200000,
       "tag": "0065_board_manager_failover",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1784073600000,
+      "tag": "0066_board_intent_escalation",
+      "breakpoints": true
     }
   ]
 }

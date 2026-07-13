@@ -72,6 +72,8 @@ export interface BoardIntent {
   approval_token_hash: string | null;
   decided_at: string | null;
   expires_at: string | null;
+  escalated_at: string | null;
+  auto_approved: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -128,6 +130,8 @@ export interface BoardIntentRow {
   approval_token_hash: string | null;
   decided_at: string | null;
   expires_at: string | null;
+  escalated_at: string | null;
+  auto_approved: boolean;
   created_at: string;
   updated_at: string;
 }

@@ -377,6 +377,8 @@ export async function createBoardIntent(input: {
     approval_token_hash: null,
     decided_at: null,
     expires_at: input.expires_at ?? defaultPendingIntentExpiresAt(nowDate),
+    escalated_at: null,
+    auto_approved: false,
     created_at: now,
     updated_at: now,
   };
@@ -725,4 +727,111 @@ export async function shouldRequireBoardIntent(input: {
   if (settings.manager_mode === "off") return false;
   if (settings.manager_mode === "intent_required") return true;
   return Boolean(await getActiveBoardManager(input.room_id));
+}
+
+export interface EscalationCandidateBoardIntent {
+  intent: BoardIntent;
+  manager_mode: BoardManagerMode;
+}
+
+/**
+ * Pending intents older than the threshold that have not been escalated yet,
+ * across all rooms, joined with the room's manager mode. Expiry runs first so
+ * intents past their pending TTL never escalate.
+ */
+export async function listEscalationCandidateBoardIntents(input: {
+  olderThanMs: number;
+  now?: number;
+}): Promise<EscalationCandidateBoardIntent[]> {
+  const now = input.now ?? Date.now();
+  await expireBoardIntents({ now: new Date(now) });
+
+  const cutoff = new Date(now - input.olderThanMs).toISOString();
+  const rows = await db
+    .select({ intent: board_intents, manager_mode: room_board_settings.manager_mode })
+    .from(board_intents)
+    .leftJoin(room_board_settings, eq(room_board_settings.room_id, board_intents.room_id))
+    .where(
+      and(
+        eq(board_intents.status, "pending"),
+        sql`${board_intents.escalated_at} IS NULL`,
+        sql`${board_intents.created_at} <= ${cutoff}::timestamptz`
+      )
+    )
+    .orderBy(asc(board_intents.created_at));
+
+  return rows.map((row) => ({
+    intent: toBoardIntent(row.intent as BoardIntentRow),
+    manager_mode: normalizeBoardManagerMode(row.manager_mode),
+  }));
+}
+
+/**
+ * Fence the one escalation action an intent ever gets. Succeeds at most once
+ * per intent (escalated_at IS NULL AND still pending), so concurrent sweepers
+ * cannot double-escalate or double-approve.
+ */
+export async function claimBoardIntentEscalationTx(
+  executor: Pick<typeof db, "update">,
+  input: {
+    room_id: string;
+    intent_id: string;
+    escalated_at?: string;
+  }
+): Promise<boolean> {
+  const escalatedAt = input.escalated_at ?? new Date().toISOString();
+  const rows = await executor
+    .update(board_intents)
+    .set({ escalated_at: escalatedAt, updated_at: escalatedAt })
+    .where(
+      and(
+        eq(board_intents.room_id, input.room_id),
+        eq(board_intents.id, input.intent_id),
+        eq(board_intents.status, "pending"),
+        sql`${board_intents.escalated_at} IS NULL`
+      )
+    )
+    .returning({ id: board_intents.id });
+
+  return rows.length > 0;
+}
+
+/** Mark an escalated intent as approved by the sweep itself (feeds the rate cap). */
+export async function markBoardIntentAutoApprovedTx(
+  executor: Pick<typeof db, "update">,
+  input: { room_id: string; intent_id: string }
+): Promise<void> {
+  await executor
+    .update(board_intents)
+    .set({ auto_approved: true })
+    .where(
+      and(
+        eq(board_intents.room_id, input.room_id),
+        eq(board_intents.id, input.intent_id)
+      )
+    );
+}
+
+/** Auto-approvals granted to one proposer in the trailing window (rate-cap input). */
+export async function countRecentAutoApprovedIntents(input: {
+  room_id: string;
+  proposer_actor_key: string;
+  windowMs: number;
+  now?: number;
+}): Promise<number> {
+  const now = input.now ?? Date.now();
+  const since = new Date(now - input.windowMs).toISOString();
+  const [row] = await db
+    .select({ value: count() })
+    .from(board_intents)
+    .where(
+      and(
+        eq(board_intents.room_id, input.room_id),
+        eq(board_intents.proposer_actor_key, input.proposer_actor_key),
+        eq(board_intents.auto_approved, true),
+        sql`${board_intents.decided_at} IS NOT NULL`,
+        sql`${board_intents.decided_at} > ${since}::timestamptz`
+      )
+    );
+  return Number(row?.value ?? 0);
 }

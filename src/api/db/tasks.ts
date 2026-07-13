@@ -137,8 +137,10 @@ export async function approveTaskCreateBoardIntent(input: {
   decision_by: string;
   reason?: string | null;
   now?: Date;
-}): Promise<{ intent: BoardIntent; approval_token: string; task: Task } | null> {
-  return db.transaction(async (tx) => {
+}, executor?: Parameters<Parameters<(typeof db)["transaction"]>[0]>[0]): Promise<{ intent: BoardIntent; approval_token: string; task: Task } | null> {
+  // Callers already inside a transaction (e.g. an announcement's message
+  // hook) pass their executor so approval + task creation join it.
+  const run = async (tx: NonNullable<typeof executor>) => {
     const existing = await getBoardIntent({
       room_id: input.room_id,
       intent_id: input.intent_id,
@@ -183,7 +185,9 @@ export async function approveTaskCreateBoardIntent(input: {
       approval_token: approved.approval_token,
       task,
     };
-  });
+  };
+
+  return executor ? run(executor) : db.transaction(run);
 }
 
 export async function getTasks(

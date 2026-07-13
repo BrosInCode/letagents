@@ -57,4 +57,11 @@ export {
   promoteBoardManagerTx,
   releaseBoardManagerAssignmentTx,
 } from "./coordination/board-manager-failover.js";
+export {
+  claimBoardIntentEscalationTx,
+  countRecentAutoApprovedIntents,
+  listEscalationCandidateBoardIntents,
+  markBoardIntentAutoApprovedTx,
+} from "./coordination/board-intents.js";
+export type { EscalationCandidateBoardIntent } from "./coordination/board-intents.js";
 export type { ActiveBoardManagerAssignmentCandidate } from "./coordination/board-manager-failover.js";

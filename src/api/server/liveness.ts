@@ -1,5 +1,8 @@
 import {
+  approveTaskCreateBoardIntent,
+  claimBoardIntentEscalationTx,
   countBoardIntents,
+  countRecentAutoApprovedIntents,
   getActiveBoardManager,
   getLivenessAnnouncementCandidate,
   getReachableWorkerDeliverySessionForAgentSession,
@@ -7,19 +10,23 @@ import {
   getRoomLiveAgentSuppressionActorLabels,
   listActiveBoardManagerAssignments,
   listActiveBoardManagerCandidates,
+  listEscalationCandidateBoardIntents,
   listLivenessAnnouncementCandidates,
   markAgentOfflineAnnounced,
   markAgentRecoveryAnnounced,
+  markBoardIntentAutoApprovedTx,
   promoteBoardManagerTx,
   recordBoardManagerAssignedEvent,
   recordBoardManagerReleasedEvent,
   releaseBoardManagerAssignmentTx,
   type BoardManagerAssignment,
+  type Task,
 } from "../db.js";
 import {
   createBoardManagerFailoverSweeper,
   type BoardManagerFailoverResult,
 } from "../rooms/board-manager-failover-sweep.js";
+import { createIntentEscalationSweeper } from "../rooms/board-intent-escalation-sweep.js";
 import {
   createLivenessSweeper,
   LIVENESS_SWEEP_INTERVAL_MS,
@@ -187,6 +194,110 @@ const boardManagerFailoverSweeper = createBoardManagerFailoverSweeper({
   },
 });
 
+/** Fence lost inside the escalation transaction: roll the announcement back quietly. */
+class IntentEscalationLostRace extends Error {
+  constructor() {
+    super("board intent escalation lost the fence");
+    this.name = "IntentEscalationLostRace";
+  }
+}
+
+const ESCALATION_ACTOR = "letagents:intent_escalation";
+
+const intentEscalationSweeper = createIntentEscalationSweeper({
+  listCandidates: (options) => listEscalationCandidateBoardIntents(options),
+  hasReachableManager: async (roomId) => {
+    const manager = await getActiveBoardManager(roomId);
+    if (!manager) {
+      return false;
+    }
+    return Boolean(
+      await getReachableWorkerDeliverySessionForAgentSession({
+        room_id: roomId,
+        agent_session_id: manager.agent_session_id,
+      })
+    );
+  },
+  countRecentAutoApprovals: countRecentAutoApprovedIntents,
+  autoApproveIntent: async (input) => {
+    let approvedTask: Task | null = null;
+    try {
+      await emitProjectMessage(input.room_id, "letagents", input.text, {
+        source: "agent_liveness",
+        agent_prompt_kind: "auto",
+        client_message_id: input.client_message_id,
+        with_created_message_in_transaction: async (tx) => {
+          const claimed = await claimBoardIntentEscalationTx(tx, {
+            room_id: input.room_id,
+            intent_id: input.intent_id,
+          });
+          if (!claimed) {
+            throw new IntentEscalationLostRace();
+          }
+          const result = await approveTaskCreateBoardIntent(
+            {
+              room_id: input.room_id,
+              intent_id: input.intent_id,
+              decision_by: ESCALATION_ACTOR,
+              reason: "Auto-approved: no Board Manager responded within the escalation window.",
+            },
+            tx
+          );
+          if (!result) {
+            throw new IntentEscalationLostRace();
+          }
+          await markBoardIntentAutoApprovedTx(tx, {
+            room_id: input.room_id,
+            intent_id: input.intent_id,
+          });
+          approvedTask = result.task;
+        },
+      });
+    } catch (error) {
+      if (error instanceof IntentEscalationLostRace) {
+        return null;
+      }
+      throw error;
+    }
+
+    if (!approvedTask) {
+      console.warn(
+        `Intent escalation replay deduped for ${input.client_message_id}; the intent was already escalated by a prior run.`
+      );
+      return null;
+    }
+    return approvedTask;
+  },
+  notifyHumans: async (input) => {
+    let claimed = false;
+    try {
+      await emitProjectMessage(input.room_id, "letagents", input.text, {
+        source: "agent_liveness",
+        agent_prompt_kind: "auto",
+        client_message_id: input.client_message_id,
+        with_created_message_in_transaction: async (tx) => {
+          claimed = await claimBoardIntentEscalationTx(tx, {
+            room_id: input.room_id,
+            intent_id: input.intent_id,
+          });
+          if (!claimed) {
+            throw new IntentEscalationLostRace();
+          }
+        },
+      });
+    } catch (error) {
+      if (error instanceof IntentEscalationLostRace) {
+        return false;
+      }
+      throw error;
+    }
+    return claimed;
+  },
+  onError: (roomId, error) => {
+    console.error(`Intent escalation sweep failed for room ${roomId}:`, error);
+  },
+});
+
 let sweepTimer: NodeJS.Timeout | null = null;
 let sweepInFlight = false;
 
@@ -209,6 +320,11 @@ export function startLivenessSweep(): void {
       await boardManagerFailoverSweeper.sweepOnce();
     } catch (error) {
       console.error("Board Manager failover sweep failed:", error);
+    }
+    try {
+      await intentEscalationSweeper.sweepOnce();
+    } catch (error) {
+      console.error("Intent escalation sweep failed:", error);
     } finally {
       sweepInFlight = false;
     }

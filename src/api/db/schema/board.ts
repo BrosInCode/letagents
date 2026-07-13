@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, check, index, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { room_agent_sessions } from "./agents.js";
 import { rooms } from "./core.js";
@@ -98,6 +98,8 @@ export const board_intents = pgTable(
     approval_token_hash: text("approval_token_hash"),
     decided_at: timestamp("decided_at", { mode: "string", withTimezone: true }),
     expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }),
+    escalated_at: timestamp("escalated_at", { mode: "string", withTimezone: true }),
+    auto_approved: boolean("auto_approved").notNull().default(false),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
