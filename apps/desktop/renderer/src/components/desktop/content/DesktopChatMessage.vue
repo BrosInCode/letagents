@@ -43,9 +43,7 @@
           </button>
           <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <span v-if="ideLabel" class="room-message-ide" :data-ide="ideLabel.toLowerCase()">
-            {{ ideLabel }}
-          </span>
+          <ProviderBadge v-if="ideLabel" :label="ideLabel" />
         </div>
         <div class="room-message-meta-tail">
           <button
@@ -196,6 +194,7 @@ import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
+import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
 import {
   getSenderColor,
   parseSenderIdentity,
