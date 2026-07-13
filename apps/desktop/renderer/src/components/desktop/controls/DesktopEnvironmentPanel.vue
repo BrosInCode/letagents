@@ -1,7 +1,10 @@
 <template>
   <aside class="desktop-environment-panel" :aria-label="title" data-testid="desktop-environment-panel">
     <header class="desktop-environment-panel-header">
-      <h2>{{ title }}</h2>
+      <div class="desktop-environment-panel-heading">
+        <h2 v-if="showTitle">{{ title }}</h2>
+        <span v-if="subtitle">{{ subtitle }}</span>
+      </div>
       <button
         v-if="showAdd"
         class="desktop-environment-panel-icon-button"
@@ -23,10 +26,14 @@ import { Plus } from "@lucide/vue";
 
 withDefaults(defineProps<{
   title?: string;
+  subtitle?: string | null;
+  showTitle?: boolean;
   showAdd?: boolean;
   addLabel?: string;
 }>(), {
   title: "Environment",
+  subtitle: null,
+  showTitle: true,
   showAdd: false,
   addLabel: "Add environment item",
 });
@@ -39,10 +46,10 @@ const emit = defineEmits<{
 <style scoped>
 .desktop-environment-panel {
   display: grid;
-  gap: 22px;
-  width: min(360px, calc(100vw - 32px));
+  gap: 26px;
+  width: min(320px, calc(100vw - 32px));
   max-height: min(620px, calc(100% - 20px));
-  padding: 24px 28px 32px;
+  padding: 27px 30px 44px;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 16px;
   background: rgba(18, 18, 18, 0.98);
@@ -60,12 +67,38 @@ const emit = defineEmits<{
   gap: 12px;
 }
 
+.desktop-environment-panel-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
 .desktop-environment-panel-header h2 {
   margin: 0;
-  color: rgba(255, 255, 255, 0.34);
-  font-size: 0.82rem;
-  font-weight: 500;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.84rem;
+  font-weight: 720;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-environment-panel-heading > span {
+  flex: 0 1 auto;
+  overflow: hidden;
+  padding: 4px 7px;
+  border: 1px solid rgba(119, 197, 232, 0.18);
+  border-radius: 999px;
+  background: rgba(119, 197, 232, 0.075);
+  color: rgba(181, 222, 241, 0.72);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.64rem;
+  font-weight: 650;
   line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-environment-panel-icon-button {
@@ -91,7 +124,6 @@ const emit = defineEmits<{
 
 .desktop-environment-panel-body {
   display: grid;
-  gap: 22px;
-  padding-bottom: 20px;
+  gap: 24px;
 }
 </style>

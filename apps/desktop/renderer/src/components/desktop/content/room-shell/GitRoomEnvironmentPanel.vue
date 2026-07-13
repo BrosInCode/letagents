@@ -1,30 +1,72 @@
 <template>
-  <DesktopEnvironmentPanel title="Environment" data-testid="git-room-environment-panel">
+  <DesktopEnvironmentPanel
+    title="Work"
+    :subtitle="roomBranchLabel"
+    :show-title="false"
+    data-testid="git-room-environment-panel"
+  >
     <DesktopEnvironmentSection>
-      <div
-        class="git-room-environment-change-card"
+      <section
+        class="git-room-work-receipt"
         :data-tone="branchChangesTone"
+        :data-available="changesAvailable"
         data-testid="git-room-environment-changes"
       >
-        <span class="git-room-environment-change-icon" aria-hidden="true">
-          <FileDiff :size="18" />
-        </span>
-        <div class="git-room-environment-change-copy">
-          <strong>Changes</strong>
-          <small>{{ branchChangesDescription }}</small>
-        </div>
-        <div class="git-room-environment-change-stats">
-          <span>
-            <strong>{{ changeStats.files }}</strong>
-            <small>{{ changeStats.filesLabel }}</small>
+        <header class="git-room-work-receipt-header">
+          <span class="git-room-work-receipt-icon" aria-hidden="true">
+            <FileDiff :size="18" />
           </span>
-          <span class="git-room-environment-change-added">+{{ changeStats.additions }}</span>
-          <span class="git-room-environment-change-deleted">-{{ changeStats.deletions }}</span>
-        </div>
-      </div>
+          <div>
+            <small>Changes</small>
+            <strong>{{ changeReceiptTitle }}</strong>
+          </div>
+          <span v-if="isClean" class="git-room-work-receipt-clean">Clean</span>
+        </header>
 
+        <template v-if="changesAvailable">
+          <div v-if="!isClean" class="git-room-work-receipt-stats" aria-live="polite">
+            <strong>{{ changeStats.files }} {{ changeStats.filesLabel }}</strong>
+            <span class="git-room-environment-change-added">+{{ changeStats.additions }}</span>
+            <span class="git-room-environment-change-deleted">−{{ changeStats.deletions }}</span>
+          </div>
+          <div
+            v-if="!isClean"
+            class="git-room-work-diff-rail"
+            :data-empty="diffRail.empty"
+            aria-hidden="true"
+          >
+            <span class="is-added" :style="{ flexGrow: diffRail.additions }"></span>
+            <span class="is-deleted" :style="{ flexGrow: diffRail.deletions }"></span>
+          </div>
+          <ul v-if="latestChangedFiles.length" class="git-room-work-file-list">
+            <li v-for="file in latestChangedFiles" :key="file.path">
+              <span class="git-room-work-file-status" :data-status="fileStatusLabel(file.status)">{{ fileStatusLabel(file.status) }}</span>
+              <span class="git-room-work-file-path" :title="filePathLabel(file)">{{ filePathLabel(file) }}</span>
+              <span class="git-room-work-file-counts">
+                <small v-if="file.binary">bin</small>
+                <template v-else>
+                  <small v-if="file.additions" class="git-room-environment-change-added">+{{ file.additions }}</small>
+                  <small v-if="file.deletions" class="git-room-environment-change-deleted">−{{ file.deletions }}</small>
+                </template>
+              </span>
+            </li>
+          </ul>
+          <p>{{ branchChangesDescription }}</p>
+        </template>
+
+        <div v-else class="git-room-work-receipt-empty">
+          <p>{{ branchChangesDescription }}</p>
+          <button v-if="canOpenRoomBranch" type="button" @click="openRoomBranch">
+            Open worktree
+            <ChevronRight :size="15" aria-hidden="true" />
+          </button>
+        </div>
+      </section>
+    </DesktopEnvironmentSection>
+
+    <DesktopEnvironmentSection title="Context">
       <DesktopEnvironmentRow
-        label="Linked room"
+        label="Room"
         :description="linkedRoomLabel"
         wrap-label
         test-id="git-room-environment-linked-room"
@@ -84,10 +126,12 @@ import type {
   DesktopGitHubPullRequestStats,
   DesktopRoomInfo,
   DesktopRoomSharedArtifact,
+  DesktopRoomSharedArtifactChangedFile,
   RepoBranchDelta,
   RepoStatus,
 } from "../../../../../../electron/ipc-types";
 import { repoChangedFileCount } from "../../../../domain/repo-status";
+import { splitChangeSummaryFiles } from "../../../../domain/room-artifacts";
 import {
   repoEnvironmentInspectableBranchDeltaForRoom,
   repoEnvironmentBranchDeltaLabel,
@@ -147,13 +191,67 @@ const livePullRequestDelta = computed<RepoBranchDelta | null>(() => {
     baseBranch: stats.baseRefName,
   };
 });
+const latestChangeSummary = computed(() => [...props.roomArtifacts]
+  .filter((artifact) =>
+    artifact.kind === "change_summary" &&
+    (!artifact.ref || artifact.ref === roomBranchLabel.value)
+  )
+  .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0] || null
+);
+const artifactDelta = computed<RepoBranchDelta | null>(() => {
+  const artifact = latestChangeSummary.value;
+  if (!artifact) return null;
+  if (artifact.state === "clean") {
+    return {
+      branch: artifact.ref || roomBranchLabel.value,
+      filesChanged: 0,
+      additions: 0,
+      deletions: 0,
+      baseBranch: null,
+    };
+  }
+  const detail = artifact.detail;
+  if (detail?.type !== "change_summary") return null;
+  return {
+    branch: artifact.ref || roomBranchLabel.value,
+    filesChanged: detail.changedFileCount,
+    additions: detail.additions,
+    deletions: detail.deletions,
+    baseBranch: null,
+  };
+});
 const primaryDelta = computed(() => {
+  if (artifactDelta.value) return artifactDelta.value;
   const pullRequestDelta = livePullRequestDelta.value || pullRequestSummary.value?.delta || null;
   if (pullRequestDelta) return pullRequestDelta;
   const delta = roomBranchDelta.value;
   if (!delta) return null;
   if (changedCount.value > 0 && isEmptyDelta(delta)) return null;
   return delta;
+});
+const latestChangedFiles = computed(() => {
+  const detail = latestChangeSummary.value?.detail;
+  return detail?.type === "change_summary" ? splitChangeSummaryFiles(detail.files, false).visible : [];
+});
+const changesAvailable = computed(() => Boolean(primaryDelta.value) || currentBranchMatchesRoom.value);
+const isClean = computed(() => changesAvailable.value
+  && changeStats.value.files === "0"
+  && changeStats.value.additions === "0"
+  && changeStats.value.deletions === "0"
+);
+const changeReceiptTitle = computed(() => {
+  if (!changesAvailable.value) return `No checkout for ${roomBranchLabel.value}`;
+  if (isClean.value) return "Working tree clean";
+  return latestChangeSummary.value ? "Latest reported work" : "Branch changes";
+});
+const diffRail = computed(() => {
+  const additions = Number(primaryDelta.value?.additions || 0);
+  const deletions = Number(primaryDelta.value?.deletions || 0);
+  return {
+    additions: Math.max(0, additions),
+    deletions: Math.max(0, deletions),
+    empty: additions + deletions === 0,
+  };
 });
 const pullRequestLabel = computed(() =>
   livePullRequestStats.value
@@ -199,12 +297,13 @@ const changeStats = computed(() => {
   };
 });
 const branchChangesDescription = computed(() => {
+  if (latestChangeSummary.value) return "Reported from the latest room work artifact.";
   const delta = primaryDelta.value;
   if (delta?.baseBranch) return `Compared with ${delta.baseBranch}`;
   if (!currentBranchMatchesRoom.value) {
     return matchingRoomWorktree.value
       ? `Open ${roomBranchLabel.value} to inspect local changes`
-      : "Open a local worktree to inspect changes";
+      : `Create or open the ${roomBranchLabel.value} worktree to inspect changes.`;
   }
   const localState = changedCount.value > 0
     ? repoEnvironmentChangeLabel(props.repoStatus)
@@ -264,91 +363,243 @@ function pullRequestStatsTone(
 function isEmptyDelta(delta: RepoBranchDelta): boolean {
   return delta.filesChanged === 0 && delta.additions === 0 && delta.deletions === 0;
 }
+
+function fileStatusLabel(status: string): string {
+  const normalized = status.trim().toUpperCase();
+  if (normalized.startsWith("A")) return "A";
+  if (normalized.startsWith("D")) return "D";
+  if (normalized.startsWith("R")) return "R";
+  return "M";
+}
+
+function filePathLabel(file: DesktopRoomSharedArtifactChangedFile): string {
+  return file.previousPath ? `${file.previousPath} → ${file.path}` : file.path;
+}
 </script>
 
 <style scoped>
-.git-room-environment-change-card {
+.git-room-work-receipt {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
-  gap: 14px;
-  padding: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.035);
+  gap: 16px;
+  padding: 2px 0 4px;
 }
 
-.git-room-environment-change-card[data-tone="positive"] {
-  border-color: rgba(118, 245, 111, 0.16);
-  background: rgba(118, 245, 111, 0.055);
+.git-room-work-receipt-header {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 15px;
 }
 
-.git-room-environment-change-icon {
+.git-room-work-receipt-icon {
   display: inline-grid;
   place-items: center;
-  width: 26px;
-  color: rgba(255, 255, 255, 0.72);
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(119, 197, 232, 0.09);
+  color: rgba(174, 219, 240, 0.8);
 }
 
-.git-room-environment-change-card[data-tone="positive"] .git-room-environment-change-icon {
-  color: #76f56f;
+.git-room-work-receipt[data-tone="positive"] .git-room-work-receipt-icon {
+  background: rgba(126, 231, 135, 0.1);
+  color: #7ee787;
 }
 
-.git-room-environment-change-copy {
+.git-room-work-receipt[data-tone="danger"] .git-room-work-receipt-icon {
+  background: rgba(255, 123, 134, 0.1);
+  color: #ff7b86;
+}
+
+.git-room-work-receipt-header > div {
   display: grid;
+  gap: 3px;
   min-width: 0;
-  gap: 5px;
 }
 
-.git-room-environment-change-copy strong {
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 0.94rem;
-  font-weight: 680;
+.git-room-work-receipt-header small {
+  color: rgba(255, 255, 255, 0.36);
+  font-size: 0.62rem;
+  font-weight: 760;
+  letter-spacing: 0.07em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
-.git-room-environment-change-copy small {
-  min-width: 0;
+.git-room-work-receipt-header strong {
   overflow: hidden;
-  color: rgba(255, 255, 255, 0.42);
-  font-size: 0.72rem;
-  font-weight: 620;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 0.96rem;
+  font-weight: 720;
+  line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.git-room-environment-change-stats {
-  grid-column: 2;
+.git-room-work-receipt-clean {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(126, 231, 135, 0.1);
+  color: #7ee787;
+  font-size: 0.64rem;
+  font-weight: 750;
+}
+
+.git-room-work-receipt-stats {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  gap: 12px;
-  min-width: 0;
+  align-items: baseline;
+  gap: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
-.git-room-environment-change-stats span {
-  min-width: 0;
-  font-size: 0.88rem;
-  font-weight: 780;
-  line-height: 1.1;
+.git-room-work-receipt-stats > strong {
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 0.78rem;
+  font-weight: 660;
 }
 
-.git-room-environment-change-stats span:first-child {
-  display: grid;
+.git-room-work-receipt-stats > span {
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.git-room-work-diff-rail {
+  display: flex;
   gap: 2px;
-  color: rgba(255, 255, 255, 0.72);
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
 }
 
-.git-room-environment-change-stats span:first-child small {
-  color: rgba(255, 255, 255, 0.38);
-  font-size: 0.62rem;
-  font-weight: 680;
+.git-room-work-diff-rail > span {
+  min-width: 3px;
+}
+
+.git-room-work-diff-rail .is-added {
+  background: #7ee787;
+}
+
+.git-room-work-diff-rail .is-deleted {
+  background: #ff7b86;
+}
+
+.git-room-work-diff-rail[data-empty="true"] > span {
+  display: none;
+}
+
+.git-room-work-file-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.git-room-work-file-list li {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.git-room-work-file-status {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.055);
+  color: rgba(255, 255, 255, 0.5);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.6rem;
+  font-weight: 760;
+}
+
+.git-room-work-file-status[data-status^="A"] { color: #7ee787; }
+.git-room-work-file-status[data-status^="D"] { color: #ff7b86; }
+.git-room-work-file-status[data-status^="R"] { color: #77c5e8; }
+
+.git-room-work-file-path {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.68);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-room-work-file-counts {
+  display: inline-flex;
+  gap: 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.git-room-work-file-counts small {
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.git-room-work-receipt p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.7rem;
+  font-weight: 560;
+  line-height: 1.45;
+}
+
+.git-room-work-receipt-empty {
+  display: grid;
+  gap: 14px;
+  padding-left: 43px;
+}
+
+.git-room-work-receipt-empty button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  justify-self: start;
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid rgba(119, 197, 232, 0.22);
+  border-radius: 8px;
+  background: rgba(119, 197, 232, 0.09);
+  color: rgba(205, 235, 248, 0.86);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.git-room-work-receipt-empty button:hover,
+.git-room-work-receipt-empty button:focus-visible {
+  border-color: rgba(119, 197, 232, 0.4);
+  background: rgba(119, 197, 232, 0.14);
+}
+
+.git-room-work-receipt-empty button:focus-visible {
+  outline: 2px solid rgba(119, 197, 232, 0.55);
+  outline-offset: 2px;
+}
+
+.git-room-work-receipt-empty button:active {
+  transform: scale(0.975);
 }
 
 .git-room-environment-change-added {
-  color: #76f56f;
+  color: #7ee787;
 }
 
 .git-room-environment-change-deleted {
-  color: #ff6b82;
+  color: #ff7b86;
 }
 
 .git-room-environment-pr-state {
@@ -357,5 +608,22 @@ function isEmptyDelta(delta: RepoBranchDelta): boolean {
 
 .git-room-environment-pr-icon {
   color: inherit;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .git-room-work-receipt-empty button:hover {
+    border-color: rgba(119, 197, 232, 0.22);
+    background: rgba(119, 197, 232, 0.09);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .git-room-work-receipt-empty button {
+    transition-property: background-color, border-color;
+  }
+
+  .git-room-work-receipt-empty button:active {
+    transform: none;
+  }
 }
 </style>
