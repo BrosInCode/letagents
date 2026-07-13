@@ -13,6 +13,7 @@ export const room_board_settings = pgTable(
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     manager_mode: text("manager_mode").notNull().default("manager_optional"),
     manager_failover: text("manager_failover").notNull().default("auto"),
+    stall_nudged_at: timestamp("stall_nudged_at", { mode: "string", withTimezone: true }),
     updated_by: text("updated_by"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),

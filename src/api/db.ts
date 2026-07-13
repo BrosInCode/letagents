@@ -6,6 +6,8 @@ export type { BoardIntent, BoardIntentActionType, BoardIntentConsumptionInput, B
 export { listActiveBoardManagerAssignments, promoteBoardManagerTx, releaseBoardManagerAssignmentTx, listActiveBoardManagerCandidates, recordBoardManagerAssignedEvent, recordBoardManagerReleasedEvent } from "./db/coordination.js";
 export { assertBoardIntentAutoApprovalEligibilityTx, BoardIntentAutoApprovalIneligibleError, claimBoardIntentEscalationTx, countRecentAutoApprovedIntents, listEscalationCandidateBoardIntents, markBoardIntentAutoApprovedTx } from "./db/coordination.js";
 export type { EscalationCandidateBoardIntent } from "./db/coordination.js";
+export { listStalledRoomCandidates, markRoomStallNudgedTx } from "./db/coordination.js";
+export type { StalledRoomCandidate } from "./db/coordination.js";
 export type { ActiveBoardManagerAssignmentCandidate } from "./db/coordination.js";
 export type { GitHubWebhookDelivery, Account, Session, SessionAccount, OwnerToken, OwnerTokenAccount, AuthState, AgentIdentity } from "./db/types.js";
 export type { RoomAgentPresence, RoomAgentRegistrationLiveness, RoomAgentLivenessObservation, RoomAgentDeliverySession, RoomAgentSession, CreatedRoomAgentSession, RoomParticipant, RoomActivityActorCount } from "./db/types.js";

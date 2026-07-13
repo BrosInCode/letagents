@@ -6,6 +6,9 @@ import {
   claimBoardIntentEscalationTx,
   countBoardIntents,
   countRecentAutoApprovedIntents,
+  getRoomAgentPresence,
+  listStalledRoomCandidates,
+  markRoomStallNudgedTx,
   getActiveBoardManager,
   getLivenessAnnouncementCandidate,
   getReachableWorkerDeliverySessionForAgentSession,
@@ -34,11 +37,13 @@ import {
   INTENT_AUTO_APPROVE_MAX_PER_WINDOW,
   INTENT_AUTO_APPROVE_WINDOW_MS,
 } from "../rooms/board-intent-escalation-sweep.js";
+import { createRoomStallSweeper } from "../rooms/room-stall-sweep.js";
 import {
   createLivenessSweeper,
   LIVENESS_SWEEP_INTERVAL_MS,
   type LivenessAnnouncementInput,
 } from "../rooms/liveness-sweep.js";
+import { isReachableRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { emitProjectMessage } from "./events.js";
 
 async function announceOffline(input: LivenessAnnouncementInput): Promise<void> {
@@ -211,20 +216,22 @@ class IntentEscalationLostRace extends Error {
 
 const ESCALATION_ACTOR = "letagents:intent_escalation";
 
+async function hasReachableManager(roomId: string): Promise<boolean> {
+  const manager = await getActiveBoardManager(roomId);
+  if (!manager) {
+    return false;
+  }
+  return Boolean(
+    await getReachableWorkerDeliverySessionForAgentSession({
+      room_id: roomId,
+      agent_session_id: manager.agent_session_id,
+    })
+  );
+}
+
 const intentEscalationSweeper = createIntentEscalationSweeper({
   listCandidates: (options) => listEscalationCandidateBoardIntents(options),
-  hasReachableManager: async (roomId) => {
-    const manager = await getActiveBoardManager(roomId);
-    if (!manager) {
-      return false;
-    }
-    return Boolean(
-      await getReachableWorkerDeliverySessionForAgentSession({
-        room_id: roomId,
-        agent_session_id: manager.agent_session_id,
-      })
-    );
-  },
+  hasReachableManager,
   countRecentAutoApprovals: countRecentAutoApprovedIntents,
   autoApproveIntent: async (input) => {
     let approvedTask: Task | null = null;
@@ -333,6 +340,55 @@ const intentEscalationSweeper = createIntentEscalationSweeper({
   },
 });
 
+/** Fence lost inside the stall-nudge transaction: roll the announcement back quietly. */
+class RoomStallNudgeLostRace extends Error {
+  constructor() {
+    super("room stall nudge lost the fence");
+    this.name = "RoomStallNudgeLostRace";
+  }
+}
+
+const roomStallSweeper = createRoomStallSweeper({
+  listStalledRooms: (options) => listStalledRoomCandidates(options),
+  hasReachableManager,
+  listLiveWorkerLabels: async (roomId) =>
+    (await getRoomAgentPresence(roomId, { limit: 20 }))
+      .filter(
+        (entry) =>
+          entry.session_kind === "worker"
+          && isReachableRoomAgentActivityState(entry.activity_state)
+      )
+      .map((entry) => entry.actor_label),
+  announceStall: async (input) => {
+    let nudged = false;
+    try {
+      await emitProjectMessage(input.room_id, "letagents", input.text, {
+        source: "agent_liveness",
+        agent_prompt_kind: "auto",
+        client_message_id: input.client_message_id,
+        with_created_message_in_transaction: async (tx) => {
+          nudged = await markRoomStallNudgedTx(tx, {
+            room_id: input.room_id,
+            epoch: input.epoch,
+          });
+          if (!nudged) {
+            throw new RoomStallNudgeLostRace();
+          }
+        },
+      });
+    } catch (error) {
+      if (error instanceof RoomStallNudgeLostRace) {
+        return false;
+      }
+      throw error;
+    }
+    return nudged;
+  },
+  onError: (roomId, error) => {
+    console.error(`Room stall sweep failed for room ${roomId}:`, error);
+  },
+});
+
 let sweepTimer: NodeJS.Timeout | null = null;
 let sweepInFlight = false;
 
@@ -360,6 +416,11 @@ export function startLivenessSweep(): void {
       await intentEscalationSweeper.sweepOnce();
     } catch (error) {
       console.error("Intent escalation sweep failed:", error);
+    }
+    try {
+      await roomStallSweeper.sweepOnce();
+    } catch (error) {
+      console.error("Room stall sweep failed:", error);
     } finally {
       sweepInFlight = false;
     }

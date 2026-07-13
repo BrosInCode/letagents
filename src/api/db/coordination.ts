@@ -66,4 +66,6 @@ export {
   markBoardIntentAutoApprovedTx,
 } from "./coordination/board-intents.js";
 export type { EscalationCandidateBoardIntent } from "./coordination/board-intents.js";
+export { listStalledRoomCandidates, markRoomStallNudgedTx } from "./coordination/room-stall.js";
+export type { StalledRoomCandidate } from "./coordination/room-stall.js";
 export type { ActiveBoardManagerAssignmentCandidate } from "./coordination/board-manager-failover.js";

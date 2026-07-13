@@ -357,6 +357,7 @@ export function toRoomBoardSettings(row: typeof room_board_settings.$inferSelect
     room_id: row.room_id,
     manager_mode: row.manager_mode as RoomBoardSettings["manager_mode"],
     manager_failover: normalizeBoardManagerFailoverMode(row.manager_failover),
+    stall_nudged_at: row.stall_nudged_at,
     updated_by: row.updated_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
