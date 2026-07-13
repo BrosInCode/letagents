@@ -78,6 +78,8 @@ export interface RoomAgentDeliverySession {
   last_connected_at: string;
   last_disconnected_at: string | null;
   reconnect_grace_expires_at: string | null;
+  offline_announced_at: string | null;
+  recovery_announced_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -188,6 +190,8 @@ export interface RoomAgentDeliverySessionRow {
   last_connected_at: string;
   last_disconnected_at: string | null;
   reconnect_grace_expires_at: string | null;
+  offline_announced_at: string | null;
+  recovery_announced_at: string | null;
   created_at: string;
   updated_at: string;
 }

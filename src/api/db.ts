@@ -21,6 +21,8 @@ export type { MessageThreadInboxFilter, MessageThreadInboxItem, MessageThreadInb
 export { getMessageAttachmentUpload, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
 export { upsertRoomAgentPresence, upsertRoomAgentLivenessObservation, markRoomAgentDeliveryConnected, markRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryHeartbeat, markRoomAgentDeliveryDisconnected, forceDisconnectRoomAgentDeliverySession, getRoomAgentDeliverySessions, getReachableWorkerDeliverySessionForAgentSession } from "./db/presence.js";
 export { setRoomLiveAgentSuppressed, getRoomAgentPresence, getRoomAgentPresenceSnapshot } from "./db/presence.js";
+export { listLivenessAnnouncementCandidates, markAgentOfflineAnnounced, markAgentRecoveryAnnounced, getRoomLiveAgentSuppressionActorLabels } from "./db/presence.js";
+export type { LivenessAnnouncementCandidate } from "./db/presence.js";
 export { upsertRoomParticipant, getRoomParticipants, getRoomParticipantsForRooms, setRoomParticipantsHidden } from "./db/participants.js";
 export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession } from "./db/reasoning.js";
 export { createAuthState, consumeAuthState, upsertAccount, createSession, refreshProviderAccessTokenForAccount, getSessionAccountByToken, deleteSessionByToken, createOwnerToken } from "./db/auth.js";

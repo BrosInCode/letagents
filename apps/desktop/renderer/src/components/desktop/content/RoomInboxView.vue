@@ -163,7 +163,12 @@
           </div>
 
           <div class="desktop-inbox-detail-actions">
-            <button class="desktop-inbox-primary-action" type="button" @click="openItem(selectedItem)">
+            <button
+              v-if="selectedItem.kind !== 'agent_offline'"
+              class="desktop-inbox-primary-action"
+              type="button"
+              @click="openItem(selectedItem)"
+            >
               <ExternalLink :size="15" />
               <span>{{ openActionLabel(selectedItem) }}</span>
             </button>
@@ -328,7 +333,7 @@ function initials(value: string): string {
 function itemIcon(item: DesktopInboxItem) {
   if (item.kind === "thread") return MessageSquare;
   if (item.kind === "task_review") return CheckCircle2;
-  if (item.kind === "task_blocked" || item.kind === "github_failure") return AlertTriangle;
+  if (item.kind === "task_blocked" || item.kind === "github_failure" || item.kind === "agent_offline") return AlertTriangle;
   return Bot;
 }
 
@@ -337,6 +342,7 @@ function itemKindLabel(item: DesktopInboxItem): string {
   if (item.kind === "task_review") return "Review needed";
   if (item.kind === "task_blocked") return "Blocked task";
   if (item.kind === "github_failure") return "Failed check";
+  if (item.kind === "agent_offline") return "Agent offline";
   return "Blocked agent";
 }
 
@@ -397,6 +403,11 @@ function itemDetailRows(item: DesktopInboxItem): DetailRow[] {
       { label: "Agent", value: item.session.actorLabel || item.session.agentKey || "Unknown" },
       { label: "Task", value: item.session.taskId || "None" },
     );
+  } else if (item.kind === "agent_offline") {
+    rows.push(
+      { label: "Agent", value: item.presence.actorLabel || item.presence.agentKey || "Unknown" },
+      { label: "Last seen", value: formatTimestamp(item.presence.lastHeartbeatAt) },
+    );
   }
 
   return rows;
@@ -420,6 +431,9 @@ function whyText(item: DesktopInboxItem): string {
   }
   if (item.kind === "task_blocked") {
     return "A task is blocked and needs a decision or additional information.";
+  }
+  if (item.kind === "agent_offline") {
+    return "A worker agent stopped responding and its in-flight work may be stalled until it recovers or someone takes over.";
   }
   return "An agent session is blocked and needs human attention.";
 }
