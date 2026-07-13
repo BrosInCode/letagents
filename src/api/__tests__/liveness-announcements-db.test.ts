@@ -49,6 +49,10 @@ test.after(async () => {
 const ACTOR_LABEL = "FieldSignal | EmmyMay's agent | Codex";
 const skipOptions = { skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed liveness tests" : false };
 
+function isoMinutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
 async function seedConnectedWorker(): Promise<string> {
   const project = await createProjectWithName!("liveness-announcements-test");
   await markRoomAgentDeliveryConnected!({
@@ -91,16 +95,18 @@ test(
   async () => {
     const roomId = await seedConnectedWorker();
 
-    // First death: clean disconnect, aged past the announce threshold.
+    // First death: clean disconnect 30 minutes ago, announced 28 minutes ago —
+    // explicit stamps keep the marker causally after its outage epoch, the way
+    // real sweeps behave.
     const disconnected = await markRoomAgentDeliveryDisconnected!({
       room_id: roomId,
       actor_label: ACTOR_LABEL,
     });
     const deliveryKey = disconnected!.delivery_key;
     await backdateDelivery(roomId, deliveryKey, {
-      updated_at: 3,
-      last_disconnected_at: 3,
-      reconnect_grace_expires_at: 3,
+      updated_at: 30,
+      last_disconnected_at: 30,
+      reconnect_grace_expires_at: 30,
     });
 
     const listed = (await listLivenessAnnouncementCandidates!()).find(
@@ -111,7 +117,14 @@ test(
 
     let [transition] = selectLivenessTransitions({ candidates: [listed!] });
     assert.equal(transition?.kind, "offline");
-    assert.equal(await markAgentOfflineAnnounced!({ room_id: roomId, delivery_key: deliveryKey }), true);
+    assert.equal(
+      await markAgentOfflineAnnounced!({
+        room_id: roomId,
+        delivery_key: deliveryKey,
+        announced_at: isoMinutesAgo(28),
+      }),
+      true
+    );
 
     // Announced outage stays quiet while still dead.
     assert.deepEqual(
@@ -162,11 +175,18 @@ test(
     });
     const deliveryKey = disconnected!.delivery_key;
     await backdateDelivery(roomId, deliveryKey, {
-      updated_at: 3,
-      last_disconnected_at: 3,
-      reconnect_grace_expires_at: 3,
+      updated_at: 30,
+      last_disconnected_at: 30,
+      reconnect_grace_expires_at: 30,
     });
-    assert.equal(await markAgentOfflineAnnounced!({ room_id: roomId, delivery_key: deliveryKey }), true);
+    assert.equal(
+      await markAgentOfflineAnnounced!({
+        room_id: roomId,
+        delivery_key: deliveryKey,
+        announced_at: isoMinutesAgo(28),
+      }),
+      true
+    );
 
     // Recovery clears last_disconnected_at (reconnect) and gets announced.
     await markRoomAgentDeliveryConnected!({
