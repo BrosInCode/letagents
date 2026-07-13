@@ -8,7 +8,7 @@ import {
   HANDOFF_PRESENCE_PAGE_SIZE,
   MESSAGE_HISTORY_PAGE_SIZE,
 } from './constants'
-import { isPromptOnlyRoomMessage } from './identity'
+import { isVisibleRoomMessage } from './identity'
 import type {
   FocusRoomInfo,
   MessagePage,
@@ -86,7 +86,7 @@ export function mergeMessages(
   const byId = new Map<string, RoomMessage>()
   for (const msg of current) byId.set(msg.id, msg)
   for (const msg of incoming) {
-    if (!isPromptOnlyRoomMessage(msg)) {
+    if (isVisibleRoomMessage(msg)) {
       byId.set(msg.id, msg)
     }
   }

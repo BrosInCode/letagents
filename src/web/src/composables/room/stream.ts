@@ -1,5 +1,5 @@
 import { roomPath } from './api'
-import { isPromptOnlyRoomMessage } from './identity'
+import { isVisibleRoomMessage } from './identity'
 import { playNotificationSound } from './sound'
 import type {
   RoomMessage,
@@ -105,7 +105,7 @@ export function createRoomStream(
     eventSource.addEventListener('message', (event) => {
       try {
         const message = JSON.parse(event.data) as RoomMessage
-        if (isPromptOnlyRoomMessage(message)) return
+        if (!isVisibleRoomMessage(message)) return
         if (!handlers.appendMessage(message)) return
 
         playNotificationSound()

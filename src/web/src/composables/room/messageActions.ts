@@ -1,7 +1,7 @@
 import { prepareMessageAttachments } from './attachments'
 import { apiFetch, roomPath } from './api'
 import { fetchMessages, mergeMessages } from './data'
-import { isPromptOnlyRoomMessage } from './identity'
+import { isVisibleRoomMessage } from './identity'
 import {
   isLoadingOlderMessages,
   lastSendError,
@@ -51,7 +51,7 @@ export function createRoomMessageActions() {
       })
       if (
         msg?.id &&
-        !isPromptOnlyRoomMessage(msg) &&
+        isVisibleRoomMessage(msg) &&
         !messages.value.some((m) => m.id === msg.id)
       ) {
         messages.value = [...messages.value, msg]

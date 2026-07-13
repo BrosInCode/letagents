@@ -201,6 +201,12 @@ export function isPromptOnlyRoomMessage(
   )
 }
 
+export function isVisibleRoomMessage(
+  message: Pick<RoomMessage, 'text' | 'agent_prompt_kind'> | null | undefined,
+): boolean {
+  return !isPromptOnlyRoomMessage(message)
+}
+
 export function hasInlinePromptInjection(
   message: Pick<RoomMessage, 'agent_prompt_kind'> | null | undefined,
 ): boolean {

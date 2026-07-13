@@ -307,7 +307,7 @@ function visibleMessageClause(includePromptOnly?: boolean, alias?: string): stri
   const prefix = alias ? `${alias}.` : "";
   return includePromptOnly
     ? "1 = 1"
-    : `NOT (${prefix}agent_prompt_kind = 'auto' AND TRIM(${prefix}text) = '')`;
+    : `(${prefix}agent_prompt_kind IS NULL OR ${prefix}agent_prompt_kind <> 'auto' OR TRIM(${prefix}text) <> '')`;
 }
 
 async function hydrateMessageRows(
@@ -1102,7 +1102,7 @@ export async function claimUnsyncedLocalChatMessages(
         FROM local_chat_messages
         WHERE room_id = ?
           AND synced_cloud_id IS NULL
-          AND NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')
+          AND ${visibleMessageClause(false)}
           AND (sync_started_at IS NULL OR sync_started_at < ?)
         ORDER BY number ASC
       `)
@@ -1134,7 +1134,7 @@ export async function claimUnsyncedLocalChatMessages(
         AND synced_cloud_id IS NULL
         AND sync_started_at = ?
         AND sync_key IS NOT NULL
-        AND NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')
+        AND ${visibleMessageClause(false)}
       ORDER BY number ASC
     `)
     .all(roomId, syncStartedAt)

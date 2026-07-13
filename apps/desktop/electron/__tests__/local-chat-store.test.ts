@@ -326,6 +326,57 @@ test("desktop local chat store claims unsynced messages with stable sync keys", 
   assert.deepEqual(await claimUnsyncedLocalChatMessages("room_sync"), []);
 });
 
+test("desktop local chat keeps attachment-only messages visible in history, sync, and thread summaries", async () => {
+  const attachmentOnly = await addLocalChatMessage("room_visibility_null", {
+    sender: "Human",
+    text: "",
+    source: "browser",
+    attachments: [{
+      id: "att_only",
+      file_name: "notes.txt",
+      mime_type: "text/plain",
+      size_bytes: 5,
+      content_base64: "aGVsbG8=",
+    }],
+  });
+  const hiddenPrompt = await addLocalChatMessage("room_visibility_null", {
+    sender: "Agent",
+    text: "",
+    agent_prompt_kind: "auto",
+    source: "agent",
+  });
+  const attachmentReply = await addLocalChatMessage("room_visibility_null", {
+    sender: "Agent",
+    text: "",
+    reply_to: attachmentOnly.id,
+    thread_root_id: attachmentOnly.id,
+    source: "agent",
+  });
+
+  const history = await getLocalChatMessages("room_visibility_null");
+  assert.deepEqual(history.messages.map((message) => message.id), [
+    attachmentOnly.id,
+    attachmentReply.id,
+  ]);
+  assert.equal(history.messages[0]?.attachments?.[0]?.id, "att_only");
+  assert.equal(history.messages.some((message) => message.id === hiddenPrompt.id), false);
+
+  const syncClaim = await claimUnsyncedLocalChatMessages("room_visibility_null");
+  assert.deepEqual(syncClaim.map((message) => message.id), [
+    attachmentOnly.id,
+    attachmentReply.id,
+  ]);
+
+  const thread = await getLocalMessageThread("room_visibility_null", attachmentOnly.id);
+  assert.deepEqual(thread?.replies.map((message) => message.id), [attachmentReply.id]);
+  assert.equal(thread?.summary.reply_count, 1);
+  assert.equal(thread?.summary.latest_reply?.id, attachmentReply.id);
+
+  const inbox = await getLocalMessageThreads("room_visibility_null");
+  assert.deepEqual(inbox.threads.map((item) => item.root.id), [attachmentOnly.id]);
+  assert.equal(inbox.threads[0]?.summary.latest_reply?.id, attachmentReply.id);
+});
+
 test("desktop storage resolver applies app default, room overrides, and local metadata", async () => {
   await setChatStorageMode("cloud");
   assert.equal((await resolveRoomStorageMode("room_a")).effectiveMode, "cloud");
