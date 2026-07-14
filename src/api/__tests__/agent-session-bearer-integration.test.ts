@@ -47,7 +47,7 @@ function responseRecorder() {
   };
 }
 
-async function seed() {
+async function seed(expectBearer = true) {
   if (!db || !accounts || !createProjectWithName || !createRoomAgentSession) throw new Error("missing DB harness");
   const owner = {
     id: "acct_bearer_test",
@@ -74,7 +74,7 @@ async function seed() {
     owner_label: "Worker Owner",
     ide_label: "Agent",
   });
-  assert.ok(session.worker_bearer);
+  if (expectBearer) assert.ok(session.worker_bearer);
   return { room, otherRoom, session };
 }
 
@@ -84,11 +84,23 @@ if (!requiresDatabase) {
 }
 
 test("worker bearer route registry is default-deny and semantic", () => {
-  assert.equal(requiredAgentSessionRouteCapability("GET", "/rooms/room_1/messages"), "messages.read");
-  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/tasks/task_1/lease-action"), "coordination.self_write");
-  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/board-intents"), null);
-  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute"), null);
-  assert.equal(requiredAgentSessionRouteCapability("PATCH", "/rooms/room_1"), null);
+  const allowed: Array<[string, string, string]> = [
+    ["GET", "/rooms/room_1/messages", "messages.read"],
+    ["POST", "/rooms/room_1/messages", "messages.write"],
+    ["GET", "/rooms/room_1/artifacts", "artifacts.read"],
+    ["POST", "/rooms/room_1/artifacts", "artifacts.self_write"],
+    ["GET", "/rooms/room_1/tasks", "coordination.read"],
+    ["POST", "/rooms/room_1/tasks", "coordination.propose"],
+    ["POST", "/rooms/room_1/tasks/task_1/lease-action", "coordination.self_write"],
+    ["PATCH", "/rooms/room_1/reasoning-sessions/session_1", "coordination.self_write"],
+    ["POST", "/rooms/room_1/agent-sessions/agent_session_1/disconnect", "coordination.self_write"],
+  ];
+  for (const [method, route, capability] of allowed) assert.equal(requiredAgentSessionRouteCapability(method, route), capability);
+  for (const [method, route] of [
+    ["POST", "/rooms/room_1/board-intents"], ["POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute"],
+    ["POST", "/rooms/room_1/tasks/task_1/focus-room"], ["POST", "/rooms/room_1/participants/clear-disconnected"],
+    ["PATCH", "/rooms/room_1"], ["POST", "/rooms/room_1/artifacts/future-action"],
+  ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
 });
 
 test("HTTP middleware denies unknown routes and missing semantic capabilities", async () => {
@@ -121,6 +133,19 @@ test("worker bearer rejects cross-room and owner routes without becoming an owne
   assert.equal(crossRoomResponse.statusCode, 403);
 });
 
+test("flag-off worker registration issues no bearer and cannot authenticate one", { skip: requiresDatabase }, async () => {
+  process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "false";
+  try {
+    const { session } = await seed(false);
+    assert.equal(session.worker_bearer, null);
+    const rows = await db!.select().from(room_agent_session_bearers!).where(eq(room_agent_session_bearers!.session_id, session.session_id));
+    assert.equal(rows.length, 0);
+    assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.session_token}` } } as never)).authKind, null);
+  } finally {
+    process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
+  }
+});
+
 test("ended, expired, revoked, and rotated worker bearers cannot replay", { skip: requiresDatabase }, async () => {
   const { session } = await seed();
   const token = session.worker_bearer!;
@@ -146,6 +171,19 @@ test("ended, expired, revoked, and rotated worker bearers cannot replay", { skip
     .where(eq(room_agent_session_bearers!.bearer_id, expiringAuth.agentSession!.bearer_id));
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${expiring.session.worker_bearer}` } } as never)).authKind, null, "expired bearer rejected");
   assert.equal(freshAuth.authKind, "agent_session");
+});
+
+test("concurrent rotation has one winner and one active next generation", { skip: requiresDatabase }, async () => {
+  const { session } = await seed();
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  const [left, right] = await Promise.all([
+    rotateRoomAgentSessionBearer!({ bearer_id: auth.agentSession!.bearer_id }),
+    rotateRoomAgentSessionBearer!({ bearer_id: auth.agentSession!.bearer_id }),
+  ]);
+  assert.equal([left, right].filter(Boolean).length, 1);
+  const rows = await db!.select().from(room_agent_session_bearers!).where(eq(room_agent_session_bearers!.session_id, session.session_id));
+  assert.equal(rows.filter((row) => !row.revoked_at).length, 1);
+  assert.equal(rows.filter((row) => row.generation === 2).length, 1);
 });
 
 test("bearer and body credentials must identify the same worker session", { skip: requiresDatabase }, async () => {
