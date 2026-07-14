@@ -81,23 +81,29 @@ async function seed() {
     display_name: `From${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
     supervisor_grant_id: grant.grant_id,
   });
-  const to = await db!.createRoomAgentSession({
-    room_id: room.id, session_kind: "worker", runtime: "codex",
-    actor_label: `To${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_to_${n}`,
-    display_name: `To${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
-    supervisor_grant_id: grant.grant_id,
-  });
   const task = await db!.createTask(room.id, `fenced task ${n}`, from.actor_label);
   const lease = await db!.createTaskLease({
     room_id: room.id, task_id: task.id, kind: "work", agent_key: agentKey,
     actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
   });
   const grantFence = { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version };
-  return { room, ownerId, agentKey, from, to, task, lease, grantFence };
+  // The rebind enforces successor freshness (created after the predecessor
+  // terminated), so the successor session is minted by the test AFTER it ends
+  // `from` — mirroring the real restart flow.
+  const mintSuccessor = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return db!.createRoomAgentSession({
+      room_id: room.id, session_kind: "worker", runtime: "codex",
+      actor_label: `To${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_to_${n}`,
+      display_name: `To${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
+      supervisor_grant_id: grant.grant_id,
+    });
+  };
+  return { room, ownerId, agentKey, from, mintSuccessor, task, lease, grantFence };
 }
 
 test("(A) a predecessor whose work lease was rebound away is denied at enforcement, never downgraded to allow", { skip: requiresDatabase }, async () => {
-  const { room, ownerId, from, to, task, lease, grantFence } = await seed();
+  const { room, ownerId, from, mintSuccessor, task, lease, grantFence } = await seed();
   // Real bearer auth for the predecessor.
   const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${from.worker_bearer}` } } as never);
   assert.equal(auth.authKind, "agent_session");
@@ -106,6 +112,7 @@ test("(A) a predecessor whose work lease was rebound away is denied at enforceme
   // rebindTaskLease refuses a live predecessor (predecessor_live), so end the
   // from-session first — its bearer/principal was already captured above.
   await db!.endRoomAgentSession({ session_id: from.session_id });
+  const to = await mintSuccessor();
   // The supervisor attests the predecessor's termination before it may rebind,
   // then presents that exact proof (id + execution identity) to the rebind.
   const waA = randomUUID();
@@ -144,7 +151,7 @@ test("(A) a predecessor whose work lease was rebound away is denied at enforceme
 });
 
 test("(B) enforcement captures the current tuple, then a rebind makes the in-tx updateTask fence fail", { skip: requiresDatabase }, async () => {
-  const { room, ownerId, from, to, task, lease, grantFence } = await seed();
+  const { room, ownerId, from, mintSuccessor, task, lease, grantFence } = await seed();
   const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${from.worker_bearer}` } } as never);
   const callerSession = auth.agentSession!.agent_session_id;
 
@@ -165,6 +172,7 @@ test("(B) enforcement captures the current tuple, then a rebind makes the in-tx 
   // Tuple captured while the predecessor was live+holding; now end it (rebind
   // refuses a live predecessor) and rebind so the captured tuple goes stale.
   await db!.endRoomAgentSession({ session_id: from.session_id });
+  const to = await mintSuccessor();
   const waB = randomUUID();
   const egB = randomUUID();
   const attestedB = await db!.recordRebindAttestation({

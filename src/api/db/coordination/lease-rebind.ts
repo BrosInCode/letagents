@@ -22,18 +22,20 @@ import { coordinationId } from "../utils.js";
 // at authentication; `epoch` is the additional monotonic fence that makes
 // concurrent rebinds resolve to exactly one winner.
 
-// The strict terminal/revocation vocabulary an attestation may carry. The
-// first five mirror the daemon adapter's ProviderTerminalCause (an observed OS
-// exit); `revoked` is the explicit-revocation case where the supervisor ends
-// an attempt's authority without having observed a process exit. Free-form
-// causes are rejected — the attestation is normative evidence, not a log line.
+// The strict terminal vocabulary an attestation may carry, mirroring the
+// daemon adapter's ProviderTerminalCause — every value asserts an OBSERVED
+// process exit. Explicit revocation without an observed exit is deliberately
+// NOT attestable: an ended auth session can leave a live OS process writing
+// the reused workspace (the §4.5 two-writer hazard), so revocation may only
+// authorize a rebind once a durable process-terminal/workspace-fence proof
+// (P1b/P1d) can stand in for the observed exit. Free-form causes are rejected —
+// the attestation is normative evidence, not a log line.
 export const REBIND_ATTESTATION_CAUSES = [
   "exited",         // clean process exit
   "killed",         // SIGKILL / force stop
   "stopped",        // graceful SIGTERM stop
   "crashed",        // unexpected death
   "protocol_error", // harness/RPC violation
-  "revoked",        // explicit supervisor revocation without an observed exit
 ] as const;
 export type RebindAttestationCause = (typeof REBIND_ATTESTATION_CAUSES)[number];
 export function isRebindAttestationCause(value: unknown): value is RebindAttestationCause {
@@ -187,6 +189,14 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
       // from P1b can later widen this; session-ended is the conservative floor.)
       if (!fromSession.ended_at) {
         abort("predecessor_live");
+      }
+      // The successor must have been minted AFTER the predecessor terminated.
+      // In the supervised flow the restart registers a fresh session once the
+      // old execution is observed dead; an OLDER live same-grant session is not
+      // that restart, and letting it receive the lease would hand authority to
+      // a parallel writer that predates the attested termination.
+      if (new Date(toSession!.created_at).getTime() <= new Date(fromSession!.ended_at!).getTime()) {
+        abort("session_mismatch");
       }
 
       // Terminal attestation (§4.5): session-ended is the conservative floor, but

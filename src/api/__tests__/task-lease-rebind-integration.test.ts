@@ -37,7 +37,7 @@ if (!requiresDatabase) {
 
 let ordinal = 0;
 
-async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean; recordAttestation?: boolean } = {}) {
+async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean; recordAttestation?: boolean; staleSuccessor?: boolean } = {}) {
   const n = ++ordinal;
   const ownerId = `owner_rebind_${n}`;
   await client!.db.insert(schema!.accounts).values({
@@ -62,21 +62,29 @@ async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean;
     display_name: `From${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
     supervisor_grant_id: grant.grant_id,
   });
-  const to = await db!.createRoomAgentSession({
-    room_id: room.id, session_kind: "worker", runtime: "codex",
-    actor_label: `To${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_to_${n}`,
-    display_name: `To${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
-    supervisor_grant_id: options.successorUnderGrant === false ? null : grant.grant_id,
-  });
 
   const lease = await db!.createTaskLease({
     room_id: room.id, task_id: `task_${n}`, kind: "work", agent_key: agentKey,
     actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
   });
 
+  const mintSuccessor = () => db!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "codex",
+    actor_label: `To${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_to_${n}`,
+    display_name: `To${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: options.successorUnderGrant === false ? null : grant.grant_id,
+  });
+
+  // The supervised flow mints the successor AFTER observing the predecessor
+  // terminate, and the rebind enforces that ordering. staleSuccessor:true
+  // deliberately mints it early to exercise the rejection.
+  let to = options.staleSuccessor ? await mintSuccessor() : null;
   if (options.endFrom !== false) {
     await db!.endRoomAgentSession({ session_id: from.session_id });
+    // Keep created_at strictly after ended_at even on a fast clock.
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
+  to = to ?? await mintSuccessor();
 
   const fence = { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version };
 
@@ -182,6 +190,19 @@ test("a same-room/same-key successor NOT minted under this grant is rejected (wr
   const result = await rebindTaskLease(rebindArgs(s));
   assert.equal(result.ok, false);
   assert.equal((result as { reason: string }).reason, "session_mismatch");
+  assert.equal((await leaseRow(s.lease.id)).agent_session_id, s.from.session_id, "lease stayed with the predecessor");
+});
+
+test("a successor minted BEFORE the predecessor terminated cannot receive the lease", { skip: requiresDatabase }, async () => {
+  // The restart the rebind exists for registers its session after the old
+  // execution was observed dead. An older live same-grant session predates the
+  // attested termination — handing it the lease would authorize a parallel
+  // writer, so the rebind refuses it.
+  const s = await seed({ staleSuccessor: true });
+  const result = await rebindTaskLease(rebindArgs(s));
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, "session_mismatch");
+  assert.equal((await attestationRow(s.attestation!.id)).consumed_at, null, "proof not consumed");
   assert.equal((await leaseRow(s.lease.id)).agent_session_id, s.from.session_id, "lease stayed with the predecessor");
 });
 
@@ -445,6 +466,44 @@ test("recordRebindAttestation default-denies internally: cause enum, UUID ids, l
   // And the untouched valid tuple still records.
   const ok = await recordRebindAttestation(base);
   assert.equal(ok.ok, true);
+});
+
+test("the attestation table's CHECKs hold at the database: cause enum, epoch/generation bounds, consumed coupling", { skip: requiresDatabase }, async () => {
+  // msg_1038 gap 1: the evidence invariants live in migration 0071 itself, not
+  // only in the accessor — a writer that bypasses recordRebindAttestation still
+  // cannot persist free-form causes, negative epochs/generations, or a
+  // consumed_at/consumed_by_epoch mismatch.
+  const s = await seed({ recordAttestation: false });
+  const base = {
+    room_id: s.room.id, lease_id: s.lease.id, epoch: 0, from_agent_session_id: s.from.session_id,
+    grant_id: s.grant.grant_id, supervisor_generation: s.fence.generation,
+  };
+  // Drizzle wraps the pg error ("Failed query: …") with the CHECK violation as
+  // its cause, so match the constraint name through the cause chain.
+  const isCheckViolation = (err: unknown) =>
+    /check constraint/i.test(String((err as { cause?: { message?: string } }).cause?.message ?? (err as Error).message));
+  const rejects = (values: Parameters<typeof insertAttestationRow>[0], label: string) =>
+    assert.rejects(insertAttestationRow(values), isCheckViolation, label);
+
+  await rejects({ ...base, cause: "sdf" }, "free-form cause");
+  await rejects({ ...base, cause: "revoked" }, "revoked is not an observed-exit cause");
+  await rejects({ ...base, epoch: -1 }, "negative epoch");
+  await rejects({ ...base, supervisor_generation: 0 }, "non-positive generation");
+
+  // consumed_at without consumed_by_epoch (and vice versa) is unrepresentable.
+  const pending = await insertAttestationRow(base);
+  await assert.rejects(
+    client!.db.update(schema!.task_lease_rebind_attestations)
+      .set({ consumed_at: new Date().toISOString() })
+      .where(eq(schema!.task_lease_rebind_attestations.id, pending.id)),
+    isCheckViolation, "consumed_at without consumed_by_epoch",
+  );
+  await assert.rejects(
+    client!.db.update(schema!.task_lease_rebind_attestations)
+      .set({ consumed_by_epoch: 1 })
+      .where(eq(schema!.task_lease_rebind_attestations.id, pending.id)),
+    isCheckViolation, "consumed_by_epoch without consumed_at",
+  );
 });
 
 test("acquireLeaseFenceTx accepts the current tuple and rejects a rebound-away predecessor", { skip: requiresDatabase }, async () => {

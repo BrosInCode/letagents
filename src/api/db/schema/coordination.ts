@@ -1,4 +1,4 @@
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 import { supervisor_host_grants } from "./agents.js";
@@ -47,7 +47,11 @@ export const coordination_events = pgTable(
 // exactly one un-consumed row for the {lease_id, epoch, from_agent_session_id}
 // tuple in the same transaction, so a single observed termination authorizes at
 // most one rebind. The partial unique index keeps at most one un-consumed row
-// per predecessor tuple; consumed rows are retained as an audit trail.
+// per predecessor tuple; evidence is immutable (insert-or-identical, conflicting
+// retries are refused) and consumed rows are retained as an audit trail. The
+// CHECKs anchor the evidence invariants in the database itself: observed-exit
+// causes only, nonnegative epoch, positive grant generation, and consumed_at
+// set exactly when consumed_by_epoch records the (strictly higher) new epoch.
 export const task_lease_rebind_attestations = pgTable(
   "task_lease_rebind_attestations",
   {
@@ -78,5 +82,22 @@ export const task_lease_rebind_attestations = pgTable(
       .on(table.lease_id, table.epoch, table.from_agent_session_id)
       .where(sql`${table.consumed_at} IS NULL`),
     lease_idx: index("task_lease_rebind_attestations_lease_idx").on(table.lease_id),
+    cause_check: check(
+      "task_lease_rebind_attestations_cause_check",
+      sql`${table.cause} IN ('exited', 'killed', 'stopped', 'crashed', 'protocol_error')`,
+    ),
+    epoch_check: check("task_lease_rebind_attestations_epoch_check", sql`${table.epoch} >= 0`),
+    generation_check: check(
+      "task_lease_rebind_attestations_generation_check",
+      sql`${table.supervisor_generation} > 0`,
+    ),
+    consumed_coupling_check: check(
+      "task_lease_rebind_attestations_consumed_coupling_check",
+      sql`(${table.consumed_at} IS NULL) = (${table.consumed_by_epoch} IS NULL)`,
+    ),
+    consumed_epoch_check: check(
+      "task_lease_rebind_attestations_consumed_epoch_check",
+      sql`${table.consumed_by_epoch} IS NULL OR ${table.consumed_by_epoch} > ${table.epoch}`,
+    ),
   })
 );
