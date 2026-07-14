@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -166,7 +166,9 @@ test("stdio rotates append-only and GC protects active, ambiguous, quarantined, 
     const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`);
     const create = async () => {
       const workspace = join(env.root, `workspace-${tick}`); await mkdir(workspace, { recursive: true });
-      return store.createAttempt({ taskId: "task", leaseId: `lease-${tick}`, leaseEpoch: 1, workspacePath: workspace });
+      const attempt = await store.createAttempt({ taskId: "task", leaseId: `lease-${tick}`, leaseEpoch: 1, workspacePath: workspace });
+      await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, work_attempt_id: attempt.work_attempt_id, task_id: "task" }));
+      return attempt;
     };
     const first = await create(); const second = await create(); const latest = await create(); const protectedAttempt = await create();
     await store.concludeAttempt(first.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "first" });
@@ -194,10 +196,70 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
       else if (args[0] === "clone") await mkdir(args.at(-1)!, { recursive: true });
     });
     assert.throws(() => provisioner.workspacePath("../dev", "attempt"), /Unsafe repository/);
+    assert.throws(() => provisioner.workspacePath(".", "attempt"), /Unsafe repository/);
     const first = await provisioner.provision({ repo: "repo", workAttemptId: "attempt-1", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
     const second = await provisioner.provision({ repo: "repo", workAttemptId: "attempt-1", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
     assert.equal(first.reused, false); assert.equal(second.reused, true); assert.equal(commands.length, 2);
     assert.match(first.path, /worktrees\/repo\/attempt-1$/);
     assert.ok(commands[0]!.includes("--bare"));
+    await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: "attempt-2", remoteUrl: "https://evil.invalid/repo.git", revision: "abc" }), /identity/);
+    await rm(first.path, { recursive: true });
+    const outside = join(env.root, "outside"); await mkdir(outside);
+    await symlink(outside, first.path);
+    await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: "attempt-1", remoteUrl: "https://example.invalid/repo.git", revision: "abc" }), /symlink/);
+  } finally { await env.cleanup(); }
+});
+
+test("durability store validates destructive identities, serializes GC, and quarantines tampering", async () => {
+  const env = await fixture();
+  let releaseGc!: () => void;
+  let reserved!: () => void;
+  const gcReserved = new Promise<void>((resolve) => { reserved = resolve; });
+  const gcRelease = new Promise<void>((resolve) => { releaseGc = resolve; });
+  try {
+    const path = join(env.root, "attempts.json");
+    const store = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", env.root, async () => { reserved(); await gcRelease; });
+    const workspace = join(env.root, "workspace"); await mkdir(workspace);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace });
+    await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, work_attempt_id: attempt.work_attempt_id, task_id: "task" }));
+    await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
+    await assert.rejects(() => store.appendStdio("../../outside", "nope"), /UUID/);
+    const collecting = store.garbageCollect(0);
+    await gcReserved;
+    await assert.rejects(() => store.markState(attempt.work_attempt_id, "quarantined"), /GC reservation/);
+    releaseGc();
+    assert.deepEqual(await collecting, [attempt.work_attempt_id]);
+
+    const protectedWorkspace = join(env.root, "protected"); await mkdir(protectedWorkspace);
+    const protectedAttempt = await store.createAttempt({ taskId: "task", leaseId: "lease-2", leaseEpoch: 2, workspacePath: protectedWorkspace });
+    await writeFile(join(protectedWorkspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, work_attempt_id: protectedAttempt.work_attempt_id, task_id: "task" }));
+    await store.concludeAttempt(protectedAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
+    await writeFile(path, "{\"version\":2,\"attempts\":[],\"checksum\":\"tampered\"}");
+    const recovered = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:01.000Z", env.root);
+    assert.deepEqual(await recovered.garbageCollect(0), []);
+    assert.equal((await stat(protectedWorkspace)).isDirectory(), true);
+    assert.ok((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")));
+
+    const legacyWorkspace = join(env.root, "legacy"); await mkdir(legacyWorkspace);
+    const legacyStore = new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:02.000Z", env.root);
+    const legacyAttempt = await legacyStore.createAttempt({ taskId: "task", leaseId: "lease-3", leaseEpoch: 3, workspacePath: legacyWorkspace });
+    await legacyStore.concludeAttempt(legacyAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
+    const legacy = JSON.parse(await readFile(join(env.root, "legacy-attempts.json"), "utf8"));
+    await writeFile(join(env.root, "legacy-attempts.json"), JSON.stringify({ version: 1, attempts: legacy.attempts }));
+    assert.equal((await (new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:03.000Z", env.root)).getAttempt(legacyAttempt.work_attempt_id)).state, "unreviewed");
+  } finally { await env.cleanup(); }
+});
+
+test("execution identities prohibit parallel, duplicate, and laundered terminal generations", async () => {
+  const env = await fixture();
+  try {
+    const workspace = join(env.root, "workspace"); await mkdir(workspace);
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z");
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace });
+    const first = await store.startGeneration(attempt.work_attempt_id, "starter", 1);
+    await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 2), /one execution generation/);
+    await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2025-01-01T00:00:00.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "", actor: "other", generation: 1, provider_continuation_id: null }), /identity/);
+    await store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2026-01-01T00:00:01.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crash", actor: "starter", generation: 1, provider_continuation_id: null });
+    await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 1), /strictly monotonic/);
   } finally { await env.cleanup(); }
 });
