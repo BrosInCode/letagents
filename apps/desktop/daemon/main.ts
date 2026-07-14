@@ -119,7 +119,7 @@ export class SupervisorDaemon {
       };
     }
 
-    if (redispatchPending && entry.desired_state === "stopped") {
+    if (redispatchPending && entry.desired_state === "stopped" && redispatchKind !== "stop") {
       reconciliation = completeReconciliationAction(reconciliation, redispatchActionId);
       redispatchPending = false;
       redispatchKind = undefined;
@@ -132,7 +132,7 @@ export class SupervisorDaemon {
       await this.transitionOnce(entryId, entry.observed_state, "quarantined", "cancelled pending provider action because entry is quarantined", actor, reconciliation);
       return { decision: { action: "quarantine" as const, observedState: entry.observed_state, condition: "quarantined" as const, reason: "quarantined entry cannot redispatch pending provider action" }, disposition: "held" as const };
     }
-    if (redispatchPending && input.activeLease && !input.fencedRebindProven) {
+    if (redispatchPending && ["restart_fresh", "restart_with_resume"].includes(redispatchKind ?? "") && input.activeLease) {
       await this.transitionOnce(entryId, "recovering", "coordination_blocked", "pending provider action awaits fenced lease rebind", actor, reconciliation);
       return { decision: { action: "hold_coordination" as const, observedState: "recovering" as const, condition: "coordination_blocked" as const, reason: "pending provider action awaits fenced lease rebind" }, disposition: "held" as const };
     }

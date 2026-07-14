@@ -173,6 +173,10 @@ test("reconciler dispatches fresh, poke, and stop safely and reports port faults
     assert.equal(held.disposition, "held", "a durable pending restart must revalidate current stop/quarantine/lease gates");
     assert.equal(calls.length, before, "an unsafe durable restart is never dispatched");
   }
+  const beforePoke = calls.length;
+  const pendingPoke = await runner.reconcile({ ...base, observedState: "working", lastPollAtMs: 0, addressedMessagesWaiting: 1, activeLease: true, fencedRebindProven: true, forcedAction: "poke" }, 100);
+  assert.equal(pendingPoke.disposition, "executed", "an active lease does not block a safe durable poke");
+  assert.equal(calls.length, beforePoke + 1);
   const broken = new ProviderReconciler({ ...port, spawn: async () => { throw new Error("child failed"); } });
   const result = await broken.reconcile(base, 100);
   assert.equal(result.disposition, "failed");

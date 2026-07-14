@@ -30,7 +30,7 @@ export class ProviderReconciler {
     // P1.5 does not yet expose a daemon-verifiable receipt to this process.
     // Until it does, active-lease restart is hard-off; stop remains permitted.
     const policyDecision = decideReconciliation({ ...input, capabilities, fencedRebindProven: input.activeLease ? false : input.fencedRebindProven }, watchdogThresholdMs);
-    if (input.forcedAction && (input.activeLease || ["quarantined", "coordination_blocked", "auth_blocked", "budget_blocked", "security_blocked"].includes(input.condition) || policyDecision.action !== input.forcedAction)) {
+    if (input.forcedAction && ((input.activeLease && ["restart_fresh", "restart_with_resume"].includes(input.forcedAction)) || ["quarantined", "coordination_blocked", "auth_blocked", "budget_blocked", "security_blocked"].includes(input.condition) || policyDecision.action !== input.forcedAction)) {
       return {
         decision: {
           action: input.condition === "quarantined" ? "quarantine" : "hold_coordination",
