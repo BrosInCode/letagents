@@ -261,6 +261,13 @@ jobs:
           --test
           src/api/__tests__/task-lease-rebind-integration.test.ts
 
+      - name: Run task PATCH fence route tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/task-patch-fence-route-integration.test.ts
+
       - name: Run focus room tests
         timeout-minutes: 5
         run: >-
