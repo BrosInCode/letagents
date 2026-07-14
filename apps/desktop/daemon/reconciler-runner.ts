@@ -6,6 +6,8 @@ export type ReconcilerExecutionInput = Omit<ReconcilerSnapshot, "capabilities"> 
   spawn: ProviderActionSpawn;
   handle: ProviderActionHandle | null;
   resumeFrom: ProviderActionRef | null;
+  p1_5ResumeEnabled: boolean;
+  handoffReceipt: string | null;
 };
 
 /** Executes only actions explicitly selected by the fenced policy. */
@@ -13,6 +15,13 @@ export class ProviderReconciler {
   constructor(private readonly port: ProviderActionPort) {}
 
   async reconcile(input: ReconcilerExecutionInput, watchdogThresholdMs: number): Promise<{ decision: ReconcilerDecision; disposition: "executed" | "held" }> {
+    const owned = input.spawn.workAttemptId === input.workAttemptId
+      && (!input.handle || input.handle.workAttemptId === input.workAttemptId)
+      && (!input.resumeFrom || input.resumeFrom.workAttemptId === input.workAttemptId);
+    if (!owned) return { decision: { action: "hold_coordination", observedState: "recovering", condition: "coordination_blocked", reason: "provider action ownership does not match work attempt" }, disposition: "held" };
+    if (input.activeLease && (!input.p1_5ResumeEnabled || !input.handoffReceipt)) {
+      return { decision: { action: "hold_coordination", observedState: "recovering", condition: "coordination_blocked", reason: "active lease requires enabled P1.5 handoff receipt" }, disposition: "held" };
+    }
     const capabilities = await this.port.capabilities(input.workAttemptId);
     const decision = decideReconciliation({ ...input, capabilities }, watchdogThresholdMs);
     if (decision.action === "poke") {

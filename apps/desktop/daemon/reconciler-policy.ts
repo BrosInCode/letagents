@@ -50,6 +50,9 @@ export function watchdogShouldEscalate(snapshot: Pick<ReconcilerSnapshot, "nowMs
 
 export function decideReconciliation(snapshot: ReconcilerSnapshot, watchdogThresholdMs: number): ReconcilerDecision {
   if (snapshot.desiredState === "stopped") {
+    if (["stopped", "failed", "absent"].includes(snapshot.observedState)) {
+      return { action: "wait", observedState: snapshot.observedState, condition: snapshot.condition, reason: "desired stop already converged" };
+    }
     return { action: "stop", observedState: "stopping", condition: "none", reason: "desired state is stopped" };
   }
 
