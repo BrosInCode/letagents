@@ -486,27 +486,53 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     input: TaskCoordinationMutationInput
   ): Promise<TaskCoordinationGuardDecision> {
     if (input.req.authKind !== "owner_token") {
-      // agent_session (worker-bearer) writes do not run owner-token coordination,
-      // but if the caller holds this task's active session-bound work lease we
-      // still fence the write on it (rebind safety, §4.5) so a rebound-away
-      // predecessor cannot overwrite the successor's state. This never denies —
-      // a caller without a held lease keeps its current behavior. (The broader
-      // "worker with no lease may still PATCH" auto-allow is a separate
-      // authorization question, not a rebind hazard.)
-      const sessionId = input.actorSessionId;
-      if (sessionId) {
-        const heldLeases = await deps.getActiveTaskLeases(input.projectId, input.task.id);
-        const leaseFence = leaseFenceFor(
-          heldLeases.find(
-            (lease) =>
-              lease.kind === "work" &&
-              lease.status === "active" &&
-              lease.agent_session_id === sessionId
-          )
-        );
-        if (leaseFence) return { kind: "allow", leaseFence };
+      // agent_session (worker-bearer) writes. Only WORK-lease-scoped mutations
+      // are holder-scoped: claim creates a fresh lease, review mutations ride a
+      // non-rebindable review lease, and unclassified updates aren't lease-bound.
+      const workerClassified = input.forcedMutation
+        ? { ...input.forcedMutation, claim: false }
+        : classifyTaskCoordinationMutation(input.updates);
+      if (!workerClassified || workerClassified.leaseKind !== "work" || workerClassified.claim) {
+        return { kind: "allow" };
       }
-      return { kind: "allow" };
+      // A work-lease-scoped worker mutation MUST be performed by the CURRENT
+      // holder of the task's active work lease. We capture the lease's identity
+      // and epoch and bind the fence to the CALLER's session. Rebind safety
+      // (§4.5), not orthogonal authz: the earlier "fence only when the caller
+      // still holds it" downgraded a rebound-away predecessor to an unfenced
+      // allow (the exact bypass) — so missing/moved/stale must 409, never
+      // reclassify to ordinary no-lease traffic.
+      const sessionId = input.actorSessionId;
+      const workerLeases = await deps.getActiveTaskLeases(input.projectId, input.task.id);
+      const activeWorkLease = workerLeases.find(
+        (lease) => lease.kind === "work" && lease.status === "active"
+      );
+      if (activeWorkLease && activeWorkLease.agent_session_id && sessionId) {
+        // Fence keyed to the caller: if the lease has moved to a successor its
+        // agent_session_id no longer matches and acquireLeaseFenceTx 409s.
+        return {
+          kind: "allow",
+          leaseFence: {
+            lease_id: activeWorkLease.id,
+            room_id: input.projectId,
+            task_id: input.task.id,
+            kind: "work",
+            expected_epoch: activeWorkLease.epoch,
+            agent_session_id: sessionId,
+          },
+        };
+      }
+      // Sessionless (pre-supervisor) work leases stay on the legacy path the
+      // rebind machinery never touches; anything else lease-scoped with no
+      // holdable tuple is denied rather than downgraded.
+      if (activeWorkLease && !activeWorkLease.agent_session_id) {
+        return { kind: "allow" };
+      }
+      return {
+        kind: "deny",
+        code: "coordination_work_lease_required",
+        error: "This task mutation requires holding the task's active work lease.",
+      };
     }
 
     const classified = input.forcedMutation

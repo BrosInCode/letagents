@@ -242,9 +242,10 @@ test("updateTask fence aborts a stale write when a rebind commits first (barrier
     holder.release();
   }
 
-  // Zero side effect: the stale write never landed.
-  const [taskRow] = await client!.db.select().from(schema!.tasks).where(eq(schema!.tasks.id, task.id)).limit(1);
-  assert.equal(taskRow.pr_url ?? null, initialPrUrl, "the rebound-away predecessor's write did not land");
+  // Zero side effect: the stale write never landed. (tasks has no `id` column —
+  // canonical id is scoped/derived — so read back through getTaskById.)
+  const taskRow = await db!.getTaskById(room.id, task.id);
+  assert.equal(taskRow?.pr_url ?? null, initialPrUrl, "the rebound-away predecessor's write did not land");
 
   // The successor, presenting the current fence, writes successfully.
   const ok = await updateTask(room.id, task.id, { pr_url: "https://example.com/pr/successor" }, {
@@ -298,7 +299,14 @@ test("publishWorkerArtifactFenced aborts atomically when a rebind commits first 
 });
 
 test("a stale-epoch lease-action cannot release the successor's rebound lease, but the current epoch can", { skip: requiresDatabase }, async () => {
-  const { room, from, to, lease, fence } = await seed();
+  const { room, from, to, fence } = await seed();
+  // A real task row is required — applyTaskWorkLeaseAction resolves the task by
+  // {room_id, number} and returns task_not_found otherwise. Bind the lease to it.
+  const task = await db!.createTask(room.id, "lease-action task", from.actor_label);
+  const lease = await db!.createTaskLease({
+    room_id: room.id, task_id: task.id, kind: "work", agent_key: from.agent_key,
+    actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
   // Predecessor observed epoch 0; rebind commits epoch 1 to the successor.
   const rebind = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
   assert.equal(rebind.ok, true);
@@ -306,7 +314,7 @@ test("a stale-epoch lease-action cannot release the successor's rebound lease, b
   // The predecessor's release, carrying its stale epoch 0, must not touch the
   // successor's epoch-1 lease — the destructive UPDATE CAS matches 0 rows.
   const stale = await applyTaskWorkLeaseAction({
-    room_id: room.id, task_id: lease.task_id, active_lease_id: lease.id,
+    room_id: room.id, task_id: task.id, active_lease_id: lease.id,
     expected_lease_epoch: 0, disposition_status: "released", task_updates: {},
   });
   assert.equal(stale.conflict, "lease_not_active");
@@ -317,7 +325,7 @@ test("a stale-epoch lease-action cannot release the successor's rebound lease, b
 
   // The successor, presenting the current epoch, can release it.
   const current = await applyTaskWorkLeaseAction({
-    room_id: room.id, task_id: lease.task_id, active_lease_id: lease.id,
+    room_id: room.id, task_id: task.id, active_lease_id: lease.id,
     expected_lease_epoch: 1, disposition_status: "released", task_updates: {},
   });
   assert.equal(current.conflict, null);
