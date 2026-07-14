@@ -37,7 +37,7 @@ export type Transition = {
 export type DaemonRequest = { version: number; id?: string; method: string; params?: unknown };
 export type DaemonResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 
-export type WorkAttemptState = "active" | "ambiguous" | "quarantined" | "unreviewed" | "cleanly_concluded" | "abandoned" | "gc_pending" | "garbage_collected";
+export type WorkAttemptState = "active" | "ambiguous" | "coordination_blocked" | "quarantined" | "unreviewed" | "cleanly_concluded" | "abandoned" | "gc_pending" | "garbage_collected";
 
 export type LeaseEpoch = { lease_id: string; epoch: number; recorded_at: string };
 

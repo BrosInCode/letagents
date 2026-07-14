@@ -14,6 +14,12 @@ export class AttemptNotFoundError extends Error {}
 export class ImmutableExecutionError extends Error {}
 export class CorruptAttemptStoreError extends Error {}
 export type GcQuiesce = (liveAttempts: TaskWorkAttempt[]) => Promise<() => Promise<void>>;
+export type SupervisorFenceIdentity = { supervisor_id: string; supervisor_generation: number };
+/** Lifecycle injection points used by the supervisor integration and adversarial tests. */
+export type GcQuiescenceHooks = {
+  before_release?: (attempt: TaskWorkAttempt, index: number) => Promise<void>;
+  before_restore?: (attempt: TaskWorkAttempt, index: number) => Promise<void>;
+};
 
 function checksum(attempts: TaskWorkAttempt[]): string {
   return createHash("sha256").update(JSON.stringify(attempts)).digest("hex");
@@ -42,7 +48,7 @@ function isWorkspaceIdentity(value: unknown): boolean {
   try { assertCredentialFreeRemote(identity.remote_url); return true; } catch { return false; }
 }
 
-const attemptStates = new Set<WorkAttemptState>(["active", "ambiguous", "quarantined", "unreviewed", "cleanly_concluded", "abandoned", "gc_pending", "garbage_collected"]);
+const attemptStates = new Set<WorkAttemptState>(["active", "ambiguous", "coordination_blocked", "quarantined", "unreviewed", "cleanly_concluded", "abandoned", "gc_pending", "garbage_collected"]);
 
 function isTerminal(value: unknown): value is ExecutionTerminalPayload {
   if (!value || typeof value !== "object") return false;
@@ -103,9 +109,8 @@ export class WorkDurabilityStore {
   // rebind / successor-generation handoff.  The on-disk PID record lets a new
   // daemon recover after a crash without treating a live predecessor as stale.
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
-  private readonly supervisorIdentity = `supervisor-${randomUUID()}`;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private readonly supervisorFence: SupervisorFenceIdentity = { supervisor_id: "test-supervisor", supervisor_generation: 1 }, private readonly quiescenceHooks?: GcQuiescenceHooks) {
     this.workspaceRoot = resolve(workspaceRoot);
   }
 
@@ -240,7 +245,7 @@ export class WorkDurabilityStore {
     }); } finally { await this.releaseExecutionFence(workAttemptId); }
   }
 
-  async markState(workAttemptId: string, state: Extract<WorkAttemptState, "ambiguous" | "quarantined" | "unreviewed">): Promise<TaskWorkAttempt> {
+  async markState(workAttemptId: string, state: Extract<WorkAttemptState, "ambiguous" | "coordination_blocked" | "quarantined" | "unreviewed">): Promise<TaskWorkAttempt> {
     return this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("GC reservation prevents state changes; retry after recovery.");
@@ -492,7 +497,10 @@ export class WorkDurabilityStore {
 
   private async ensureExecutionFence(attempt: TaskWorkAttempt): Promise<void> {
     if (this.executionFences.has(attempt.work_attempt_id)) return;
-    this.executionFences.set(attempt.work_attempt_id, await acquireWorkspaceFence(attempt.workspace_path, this.supervisorIdentity, attempt.current_lease_epoch, "shared"));
+    if (!this.supervisorFence.supervisor_id.trim() || !Number.isSafeInteger(this.supervisorFence.supervisor_generation) || this.supervisorFence.supervisor_generation < 1) {
+      throw new ImmutableExecutionError("A monotonic P1a supervisor identity and generation are required for execution fencing.");
+    }
+    this.executionFences.set(attempt.work_attempt_id, await acquireWorkspaceFence(attempt.workspace_path, this.supervisorFence.supervisor_id, this.supervisorFence.supervisor_generation, "shared"));
   }
 
   private async releaseExecutionFence(workAttemptId: string): Promise<void> {
@@ -517,14 +525,35 @@ export class WorkDurabilityStore {
     if (!this.quiesceForGc) throw new WorkspaceFenceError("Live repository generations require a supervisor quiescence acknowledgement before GC.");
     const attempts = await Promise.all(held.map(([id]) => this.getAttempt(id)));
     const resume = await this.quiesceForGc(attempts);
+    let restored = false;
     try {
-      for (const [, fence] of held) await fence.release();
-      for (const [id] of held) this.executionFences.delete(id);
+      for (const [index, [id, fence]] of held.entries()) {
+        await this.quiescenceHooks?.before_release?.(attempts[index]!, index);
+        await fence.release();
+        this.executionFences.delete(id);
+      }
       try { return await operation(); }
       finally {
-        for (const attempt of attempts) await this.ensureExecutionFence(await this.getAttempt(attempt.work_attempt_id));
+        for (const [index, attempt] of attempts.entries()) {
+          await this.quiescenceHooks?.before_restore?.(attempt, index);
+          await this.ensureExecutionFence(await this.getAttempt(attempt.work_attempt_id));
+        }
+        restored = true;
       }
-    } finally { await resume(); }
+    } catch (error) {
+      await this.mutate((stored) => {
+        for (const attempt of attempts) {
+          const current = this.required(stored, attempt.work_attempt_id);
+          if (current.state === "active") current.state = "coordination_blocked";
+        }
+        return stored;
+      });
+      throw error;
+    } finally {
+      // Never resume a process unless every original retained handle has been
+      // restored. A partial failure remains coordination-blocked for P1d.
+      if (restored) await resume();
+    }
   }
 
   private async captureGit(args: string[]): Promise<string> {

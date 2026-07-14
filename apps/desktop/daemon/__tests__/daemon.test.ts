@@ -444,3 +444,49 @@ test("supervisor quiescence lets same-repository GC progress without stopping li
     assert.equal((await readdir(join(env.root, "worktrees", "repo", ".letagents-supervisor-workspace.fences"))).filter((name) => name.startsWith("shared-")).length, 1, "live generation fence is restored before it resumes");
   } finally { await env.cleanup(); }
 });
+
+test("quiescence failures never resume a partially unfenced live generation", async () => {
+  const env = await fixture();
+  let resumed = 0;
+  try {
+    const store = new WorkDurabilityStore(
+      join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root),
+      async () => async () => { resumed += 1; }, { supervisor_id: "daemon-host", supervisor_generation: 7 },
+      { before_release: async (_attempt, index) => { if (index === 1) throw new Error("injected partial-release failure"); } },
+    );
+    const targetWorkspace = await provisionedWorkspace(env.root, "target");
+    const firstWorkspace = await provisionedWorkspace(env.root, "first");
+    const secondWorkspace = await provisionedWorkspace(env.root, "second");
+    const target = await store.createAttempt({ taskId: "target", leaseId: "lease-target", leaseEpoch: 1, workspacePath: targetWorkspace.path, workAttemptId: targetWorkspace.id });
+    const first = await store.createAttempt({ taskId: "first", leaseId: "lease-first", leaseEpoch: 1, workspacePath: firstWorkspace.path, workAttemptId: firstWorkspace.id });
+    const second = await store.createAttempt({ taskId: "second", leaseId: "lease-second", leaseEpoch: 1, workspacePath: secondWorkspace.path, workAttemptId: secondWorkspace.id });
+    await store.concludeAttempt(target.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
+    await store.startGeneration(first.work_attempt_id, "daemon", 1);
+    await store.startGeneration(second.work_attempt_id, "daemon", 1);
+    assert.deepEqual(await store.garbageCollect(0), []);
+    assert.equal(resumed, 0);
+    assert.equal((await store.getAttempt(first.work_attempt_id)).state, "coordination_blocked");
+    assert.equal((await store.getAttempt(second.work_attempt_id)).state, "coordination_blocked");
+  } finally { await env.cleanup(); }
+});
+
+test("quiescence restore failure never resumes unfenced work", async () => {
+  const env = await fixture();
+  let resumed = 0;
+  try {
+    const store = new WorkDurabilityStore(
+      join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root),
+      async () => async () => { resumed += 1; }, { supervisor_id: "daemon-host", supervisor_generation: 7 },
+      { before_restore: async () => { throw new Error("injected restore failure"); } },
+    );
+    const targetWorkspace = await provisionedWorkspace(env.root, "target");
+    const liveWorkspace = await provisionedWorkspace(env.root, "live");
+    const target = await store.createAttempt({ taskId: "target", leaseId: "lease-target", leaseEpoch: 1, workspacePath: targetWorkspace.path, workAttemptId: targetWorkspace.id });
+    const live = await store.createAttempt({ taskId: "live", leaseId: "lease-live", leaseEpoch: 1, workspacePath: liveWorkspace.path, workAttemptId: liveWorkspace.id });
+    await store.concludeAttempt(target.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
+    await store.startGeneration(live.work_attempt_id, "daemon", 1);
+    assert.deepEqual(await store.garbageCollect(0), []);
+    assert.equal(resumed, 0);
+    assert.equal((await store.getAttempt(live.work_attempt_id)).state, "coordination_blocked");
+  } finally { await env.cleanup(); }
+});
