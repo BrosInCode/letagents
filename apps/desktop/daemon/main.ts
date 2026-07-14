@@ -14,6 +14,8 @@ export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState"
   reconciliationActionSequence: number;
 };
 
+class ReplacementListenerInstallError extends Error {}
+
 export class SupervisorDaemon {
   private manifestGeneration = 0;
   private readonly singleton: DaemonSingleton;
@@ -232,7 +234,8 @@ export class SupervisorDaemon {
         }));
       };
       const installExitListener = async (nextHandle: ProviderActionHandle, generation: number) => {
-        const nextUnsubscribe = await providerPort.onExit(nextHandle, (terminal) => {
+        let nextUnsubscribe: () => void;
+        try { nextUnsubscribe = await providerPort.onExit(nextHandle, (terminal) => {
           const operation = (async () => {
             try {
               if (generation !== currentHandleGeneration || !sameHandle(nextHandle, currentHandle)) {
@@ -246,7 +249,10 @@ export class SupervisorDaemon {
             }
           })();
           trackCallback(operation);
-        });
+        }); } catch (error) {
+          if (generation > 1) throw new ReplacementListenerInstallError(error instanceof Error ? error.message : "replacement listener installation failed");
+          throw error;
+        }
         if (stopped || generation !== currentHandleGeneration || !sameHandle(nextHandle, currentHandle)) { nextUnsubscribe(); return; }
         const previousUnsubscribe = unsubscribe;
         unsubscribe = nextUnsubscribe;
@@ -286,7 +292,10 @@ export class SupervisorDaemon {
       // A replacement may already exist when its listener bridge transiently
       // fails. Keep the scheduler alive: the next serialized tick retries the
       // same promoted handle instead of launching another child.
-      try { await tick(); } catch (error) { await recordError(error); }
+      try { await tick(); } catch (error) {
+        if (error instanceof ReplacementListenerInstallError) await recordError(error);
+        else throw error;
+      }
       const dispose = async () => {
         if (!stopped) {
           stopped = true;

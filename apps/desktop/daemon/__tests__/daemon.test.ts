@@ -469,7 +469,8 @@ test("a transient replacement listener failure retries the promoted child withou
     await eventually(async () => replacementExit !== null, "replacement listener retry");
     assert.equal(spawnCount, 1);
     replacementExit?.({ endedAt: "later", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
-    await eventually(async () => (await new ManifestStore(manifestPath).load()).entries[0]?.observed_state === "failed", "replacement exit after listener retry");
+    await eventually(async () => (await new ManifestStore(manifestPath).load()).entries[0]?.reconciliation?.last_terminal?.ended_at === "later", "replacement exit after listener retry");
+    assert.equal(spawnCount, 1);
     await stop(); await daemon.stop();
   } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
 });
