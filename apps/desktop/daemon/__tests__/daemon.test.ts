@@ -281,7 +281,7 @@ test("an absent pending intent redispatches its exact durable identity and kind,
     const requests: Array<{ actionId?: string }> = [];
     let attachment: "absent" | "ambiguous" = "absent";
     const port: ProviderActionPort = {
-      capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
       spawn: async (request) => { requests.push({ actionId: request.actionId }); return { workAttemptId: "attempt", pid: 2, providerContinuationId: null, observedState: "starting" }; },
       attach: async () => null,
       attachAction: async () => attachment === "absent" ? { state: "absent" } : { state: "ambiguous", reason: "provider lookup timed out" },
