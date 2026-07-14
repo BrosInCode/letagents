@@ -66,8 +66,19 @@ function fence(grant: { grant_id: string; current_generation: number; token_vers
 
 /** Default-deny route registry: only these lifecycle endpoints accept a supervisor grant. */
 export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolverDeps): void {
-  // Register no privileged grant surface unless the staged rollout is enabled.
-  if (!isSupervisorHostGrantFeatureEnabled()) return;
+  const enabled = isSupervisorHostGrantFeatureEnabled();
+  // Owner revocation is deliberately always registered: turning the rollout
+  // off must never make a previously issued credential impossible to revoke.
+  app.delete("/supervisor-host-grants/:grantId", async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount?.account_id || (req.authKind !== "session" && req.authKind !== "owner_token")) {
+      res.status(401).json({ error: "Supervisor grant revocation requires owner authentication." });
+      return;
+    }
+    const revoked = await revokeSupervisorHostGrant({ grant_id: String(req.params.grantId ?? "").trim(), owner_account_id: req.sessionAccount.account_id });
+    if (!revoked) { res.status(404).json({ error: "Active supervisor grant not found." }); return; }
+    res.json(revoked);
+  });
+  if (!enabled) return;
   app.post("/supervisor-host-grants", async (req: AuthenticatedRequest, res) => {
     if (!req.sessionAccount?.account_id || (req.authKind !== "session" && req.authKind !== "owner_token")) {
       res.status(401).json({ error: "Supervisor grant provisioning requires owner authentication." });
@@ -140,19 +151,6 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       return;
     }
     res.json({ grant_id: advanced.grant_id, generation: advanced.current_generation });
-  });
-
-  app.delete("/supervisor-host-grants/:grantId", async (req: AuthenticatedRequest, res) => {
-    if (!req.sessionAccount?.account_id || (req.authKind !== "session" && req.authKind !== "owner_token")) {
-      res.status(401).json({ error: "Supervisor grant revocation requires owner authentication." });
-      return;
-    }
-    const revoked = await revokeSupervisorHostGrant({ grant_id: String(req.params.grantId ?? "").trim(), owner_account_id: req.sessionAccount.account_id });
-    if (!revoked) {
-      res.status(404).json({ error: "Active supervisor grant not found." });
-      return;
-    }
-    res.json(revoked);
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions", async (req: AuthenticatedRequest, res) => {

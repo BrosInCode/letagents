@@ -537,10 +537,14 @@ export async function advanceSupervisorHostGrantGeneration(input: {
 }
 
 export async function revokeSupervisorHostGrant(input: { grant_id: string; owner_account_id: string }): Promise<SupervisorHostGrant | null> {
-  const [updated] = await db.update(supervisor_host_grants).set({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .where(and(eq(supervisor_host_grants.grant_id, input.grant_id), eq(supervisor_host_grants.owner_account_id, input.owner_account_id), isNull(supervisor_host_grants.revoked_at)))
-    .returning();
-  return updated ? toSupervisorHostGrant(updated) : null;
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${input.grant_id}`}, 0))`);
+    const now = new Date().toISOString();
+    const [updated] = await tx.update(supervisor_host_grants).set({ revoked_at: now, updated_at: now })
+      .where(and(eq(supervisor_host_grants.grant_id, input.grant_id), eq(supervisor_host_grants.owner_account_id, input.owner_account_id), isNull(supervisor_host_grants.revoked_at)))
+      .returning();
+    return updated ? toSupervisorHostGrant(updated) : null;
+  });
 }
 
 export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
