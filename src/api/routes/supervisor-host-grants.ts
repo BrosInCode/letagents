@@ -144,7 +144,11 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
 
   app.post("/supervisor-host-grants/:grantId/handoff", async (req: AuthenticatedRequest, res) => {
     const grant = await requireCurrentSupervisorGrant(req, res);
-    if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
     const advanced = await advanceSupervisorHostGrantGeneration({ grant_id: grant.grant_id, expected_generation: grant.current_generation, expected_token_version: grant.token_version });
     if (!advanced) {
       res.status(409).json({ error: "Host handoff lost its generation fence." });
@@ -155,7 +159,11 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions", async (req: AuthenticatedRequest, res) => {
     const grant = await requireCurrentSupervisorGrant(req, res);
-    if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
     if (!isAgentSessionBearerFeatureEnabled()) {
       res.status(503).json({ error: "Worker bearer mode is not enabled." });
       return;
@@ -194,7 +202,11 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate", async (req: AuthenticatedRequest, res) => {
     const grant = await requireCurrentSupervisorGrant(req, res);
-    if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
     const sessionId = String(req.params.sessionId ?? "").trim();
     const session = await getSupervisorRoomAgentSession({ session_id: sessionId, supervisor_grant_id: grant.grant_id });
     if (!session || !grant.allowed_room_ids.includes(session.room_id) || !grant.allowed_agent_keys.includes(session.agent_key)) {
@@ -214,7 +226,11 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions/:sessionId/end", async (req: AuthenticatedRequest, res) => {
     const grant = await requireCurrentSupervisorGrant(req, res);
-    if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
     const sessionId = String(req.params.sessionId ?? "").trim();
     // A supervisor never receives a session token; this fetch is only a
     // grant-bound ownership check before ending the exact worker session.

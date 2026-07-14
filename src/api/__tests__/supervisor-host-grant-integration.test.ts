@@ -99,6 +99,26 @@ test("lifecycle mint enforces room and agent allowlists through the actual route
   const denied = recorder();
   await mint({ ...reqBase, body: { generation: 1, room_id: "other_room", agent_key: agent.canonical_key } }, denied);
   assert.equal(denied.statusCode, 403);
+  const otherAgent = await authDb!.registerAgentIdentity({ canonical_key: "owner/disallowed-agent", name: "disallowed-agent", display_name: "Disallowed Agent", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const agentDenied = recorder();
+  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: otherAgent.canonical_key } }, agentDenied);
+  assert.equal(agentDenied.statusCode, 403);
+});
+
+test("lifecycle handlers fail closed when the path grant differs from the authenticated grant", { skip: requiresDatabase }, async () => {
+  const { handlers, reqBase } = await setupLifecycle();
+  const requests: Array<[string, Record<string, unknown>]> = [
+    ["POST /supervisor-host-grants/:grantId/handoff", { body: { generation: 1 } }],
+    ["POST /supervisor-host-grants/:grantId/worker-sessions", { body: { generation: 1, room_id: "room", agent_key: "owner/agent" } }],
+    ["POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate", { params: { grantId: "different_grant", sessionId: "session" }, body: { generation: 1, bearer_id: "bearer" } }],
+    ["POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end", { params: { grantId: "different_grant", sessionId: "session" }, body: { generation: 1 } }],
+  ];
+  for (const [route, override] of requests) {
+    const handler = handlers.get(route); assert.ok(handler);
+    const response = recorder();
+    await handler({ ...reqBase, ...override, params: { grantId: "different_grant", ...(override.params as object ?? {}) } }, response);
+    assert.equal(response.statusCode, 403, route);
+  }
 });
 
 test("wrong-session rotation route cannot mutate a grant-bound bearer", { skip: requiresDatabase }, async () => {
