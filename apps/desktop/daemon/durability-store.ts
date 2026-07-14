@@ -226,13 +226,13 @@ export class WorkDurabilityStore {
   async concludeAttempt(workAttemptId: string, input: { state: Extract<WorkAttemptState, "cleanly_concluded" | "abandoned">; cause: string; postmortemDiff?: string; maxPostmortemBytes?: number }): Promise<TaskWorkAttempt> {
     this.assertAttemptId(workAttemptId);
     const current = await this.getAttempt(workAttemptId);
-    if (input.state === "cleanly_concluded" && current.execution_generations.some((generation) => generation.terminal === null)) throw new ImmutableExecutionError("Clean conclusion requires terminal attestation for every execution generation.");
     await this.ensureExecutionFence(current);
-    // A caller-supplied diff is test/backfill input only when no Git runner was
-    // configured. In production the daemon capture below is authoritative.
-    const postmortemDiff = this.git ? await this.capturePostmortemDiff(workAttemptId, input.maxPostmortemBytes) : input.postmortemDiff;
-    if (postmortemDiff === undefined) throw new ImmutableExecutionError("Daemon Git postmortem capture is required for conclusion.");
-    try { return await this.mutate((stored) => {
+    try {
+      // A caller-supplied diff is test/backfill input only when no Git runner
+      // was configured. In production the daemon capture below is authoritative.
+      const postmortemDiff = this.git ? await this.capturePostmortemDiff(workAttemptId, input.maxPostmortemBytes) : input.postmortemDiff;
+      if (postmortemDiff === undefined) throw new ImmutableExecutionError("Daemon Git postmortem capture is required for conclusion.");
+      return await this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("Work attempts can conclude only once.");
       if (!input.cause.trim()) throw new ImmutableExecutionError("Work attempts require an explicit conclusion cause.");
@@ -242,7 +242,8 @@ export class WorkDurabilityStore {
       attempt.conclusion_cause = input.cause;
       attempt.postmortem_diff = postmortemDiff;
       return attempt;
-    }); } finally { await this.releaseExecutionFence(workAttemptId); }
+      });
+    } finally { await this.releaseExecutionFence(workAttemptId); }
   }
 
   async markState(workAttemptId: string, state: Extract<WorkAttemptState, "ambiguous" | "coordination_blocked" | "quarantined" | "unreviewed">): Promise<TaskWorkAttempt> {

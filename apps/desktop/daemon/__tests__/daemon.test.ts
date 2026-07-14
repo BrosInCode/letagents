@@ -311,6 +311,24 @@ test("execution fencing fails closed without an injected P1a supervisor identity
   } finally { await env.cleanup(); }
 });
 
+test("postmortem capture failure releases the retained execution fence", async () => {
+  const env = await fixture();
+  try {
+    const git = async (args: string[]) => {
+      if (args.includes("status")) throw new Error("injected postmortem failure");
+      return fakeGit(env.root)(args);
+    };
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, git, undefined, TEST_SUPERVISOR);
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
+    await store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, { ended_at: "2027-01-01T00:00:01.000Z", exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "done", actor: "daemon", generation: 1, provider_continuation_id: null });
+    await assert.rejects(() => store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done" }), /postmortem failure/);
+    const fenceDir = join(env.root, "worktrees", "repo", ".letagents-supervisor-workspace.fences");
+    assert.equal((await readdir(fenceDir)).some((name) => name.startsWith("shared-")), false);
+  } finally { await env.cleanup(); }
+});
+
 test("attempt creation requires a final provisioned marker and enforces unique exact worktree layout", async () => {
   const env = await fixture();
   try {
