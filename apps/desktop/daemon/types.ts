@@ -4,6 +4,24 @@ export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type PolicyCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
 
+/** Persisted by the daemon so a restart cannot erase crash-loop/backoff state. */
+export type ReconciliationState = {
+  /** Terminal process exits only; this rolling window determines quarantine. */
+  exit_timestamps_ms: number[];
+  /** Consecutive failed recovery actions only; this determines retry backoff. */
+  consecutive_action_failures: number;
+  last_observed_state: ObservedState;
+  next_restart_at_ms: number | null;
+  /** Bounded action journal: rejects replayed or out-of-order provider calls. */
+  completed_action_ids: string[];
+  last_action_sequence: number;
+  pending_action: { id: string; sequence: number; kind: "poke" | "restart_fresh" | "restart_with_resume" | "stop"; recorded_at_ms: number } | null;
+  /** Most recent immutable provider death evidence; copied into escalations. */
+  last_terminal?: ExecutionTerminalPayload;
+};
+
+export type ReconciliationNotice = { at: string; kind: "quarantine_death" | "coordination_escalation"; cause: string; terminal?: ExecutionTerminalPayload };
+
 export type DaemonManifestEntry = {
   id: string;
   room_id: string;
@@ -17,6 +35,8 @@ export type DaemonManifestEntry = {
   permission_profile_id: string | null;
   created_by: string;
   created_at: string;
+  reconciliation?: ReconciliationState;
+  reconciliation_notices?: ReconciliationNotice[];
 };
 
 export type DaemonManifest = {
