@@ -49,6 +49,7 @@ export {
   resolveAgentSession,
   resolveWorkerToolIdentity,
   toPublicAgentSession,
+  WORKER_BEARER_AGENT_SESSION_ID,
 } from "./runtime/agent-sessions.js";
 export {
   appendIncludePromptOnly,

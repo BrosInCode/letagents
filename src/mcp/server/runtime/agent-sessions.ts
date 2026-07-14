@@ -21,10 +21,15 @@ import {
 } from "./identity.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 
+// A worker bearer already represents a server-side worker session. This local
+// marker lets the MCP tool contract stay session-shaped without persisting or
+// transmitting a second set of credentials.
+export const WORKER_BEARER_AGENT_SESSION_ID = "worker_bearer";
+
 export function buildAgentDeliveryHeaders(
   agentSession?: StoredAgentSessionState | null
 ): Record<string, string> {
-  if (!agentSession) {
+  if (!agentSession || requireValidWorkerBearerRuntime().mode === "worker") {
     return {};
   }
 
@@ -119,13 +124,16 @@ export async function resolveWorkerToolIdentity(input: {
   roomId?: string | null;
   agentSessionId?: string | null;
 }): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
-  if (requireValidWorkerBearerRuntime().mode === "worker" && !input.agentSessionId) {
+  if (
+    requireValidWorkerBearerRuntime().mode === "worker" &&
+    (!input.agentSessionId || input.agentSessionId === WORKER_BEARER_AGENT_SESSION_ID)
+  ) {
     const identity = await ensureAgentIdentity();
     const now = new Date().toISOString();
     return {
       identity,
       agentSession: {
-        session_id: "worker_bearer",
+        session_id: WORKER_BEARER_AGENT_SESSION_ID,
         session_token: "",
         room_id: input.roomId ?? "worker_bearer_room",
         session_kind: "worker",

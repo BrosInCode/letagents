@@ -11,6 +11,7 @@ const {
 } = await import("../server/runtime/worker-bearer.js");
 const { ApiError, apiCall, setOwnerAuthStoreLoaderForTest } = await import("../server/runtime/api.js");
 const { agentSessionCredentials } = await import("../server/runtime/agent-sessions.js");
+const { registerAgentSessionTools } = await import("../server/tools/agent-sessions.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
@@ -118,7 +119,7 @@ test("worker bearer mode disables owner-auth onboarding tools without API traffi
   globalThis.fetch = originalFetch;
 });
 
-test("worker bearer mode runs the room send and wait loop without session credentials", async () => {
+test("worker bearer mode runs the room register, send, and wait loop without session credentials", async () => {
   const originalFetch = globalThis.fetch;
   await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
     const requests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> | null }> = [];
@@ -129,15 +130,21 @@ test("worker bearer mode runs the room send and wait loop without session creden
         headers: init?.headers as Record<string, string>,
         body,
       });
+      if (String(url).endsWith("/agent-sessions")) assert.fail("worker bearer registration must not call the owner registration route");
       if (String(url).endsWith("/presence")) return new Response(null, { status: 204 });
       if (String(url).includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
       return new Response(JSON.stringify({ id: "msg_1", text: "hello" }), { status: 200 });
     };
 
+    const register = toolHandler(registerAgentSessionTools, "register_agent_session");
     const send = toolHandler(registerSendMessageTool, "send_message");
     const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
-    const sendResult = await send({ room_id: "room_1", text: "hello" });
-    const waitResult = await wait({ room_id: "room_1", timeout: 1 });
+    const registration = JSON.parse((await register({ room_id: "room_1" })).content[0]!.text);
+    assert.equal(registration.success, true);
+    assert.equal(registration.worker_bearer_mode, true);
+    assert.equal(registration.agent_session_id, "worker_bearer");
+    const sendResult = await send({ room_id: "room_1", text: "hello", agent_session_id: registration.agent_session_id });
+    const waitResult = await wait({ room_id: "room_1", timeout: 1, agent_session_id: registration.agent_session_id });
 
     assert.match(sendResult.content[0]!.text, /msg_1/);
     assert.match(waitResult.content[0]!.text, /messages/);

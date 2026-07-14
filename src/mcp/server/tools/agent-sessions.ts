@@ -31,7 +31,9 @@ import {
   toPublicRoomState,
   toRepoRoomAuthRequiredResult,
   withAgentIdentity,
+  resolveWorkerToolIdentity,
 } from "../runtime.js";
+import { requireValidWorkerBearerRuntime } from "../runtime/worker-bearer.js";
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
@@ -112,6 +114,33 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
+      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
+      const apiRoomId = cloudRoomId || targetRoomId;
+      if (requireValidWorkerBearerRuntime().mode === "worker") {
+        // The supplied bearer is issued for an existing server-side agent
+        // session. Do not call the owner-only registration endpoint or write
+        // any session credential to local storage.
+        const { agentSession } = await resolveWorkerToolIdentity({ roomId: apiRoomId });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  worker_bearer_mode: true,
+                  agent_session: toPublicAgentSession(agentSession),
+                  agent_session_id: agentSession.session_id,
+                  use_agent_session_id: "This local worker-bearer session marker may be passed to room tools. The supplied bearer remains the only server credential.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
       const identity = await ensureAgentIdentity();
       if (!identity.canonical_key) {
         return {
@@ -131,8 +160,6 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
-      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
-      const apiRoomId = cloudRoomId || targetRoomId;
       const created = await apiCall<Record<string, unknown>>(
         `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
         {
