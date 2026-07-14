@@ -72,9 +72,17 @@ import {
   CodexRpcClient,
   type RpcNotification,
   type ThreadReadResult,
+  type ThreadReadTurn,
+  type ThreadReadTurnItem,
   type ThreadStartResult,
   type TurnStartResult,
 } from "./codex-rpc-client.js";
+import {
+  CODEX_EVENT_TURN_ABSOLUTE_TIMEOUT_MS,
+  CODEX_EVENT_TURN_INACTIVITY_TIMEOUT_MS,
+  CodexTurnProgressTracker,
+  type CodexTurnTimeoutReason,
+} from "./codex-turn-progress.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -156,7 +164,6 @@ import {
 
 const SESSION_MONITOR_INTERVAL_MS = 30_000;
 const DESKTOP_EVENT_TURN_POLL_INTERVAL_MS = 1_000;
-const DESKTOP_EVENT_TURN_TIMEOUT_MS = 5 * 60_000;
 const DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT = 3;
 const DESKTOP_EVENT_CONTEXT_REQUEST_TIMEOUT_MS = 30_000;
 const CODEX_RUNTIME_REASONING_THROTTLE_MS = 750;
@@ -166,7 +173,14 @@ const spawnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const codexRuntimeReasoningLastPost = new Map<string, { signature: string; postedAt: number }>();
 const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
+type ActiveCodexTurnProgress = {
+  turnId: string;
+  tracker: CodexTurnProgressTracker;
+  lastWaitingHeartbeatAt: number | null;
+};
+const activeCodexTurnProgress = new Map<string, ActiveCodexTurnProgress>();
 const desktopManagedAgentRuntimes = new DesktopManagedAgentRuntimeRegistry();
+const CODEX_EXTERNAL_WAIT_ITEM_PATTERN = /(command|exec|tool|mcp|collab|web.?search)/i;
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
   "Codex did not get a LetAgents room worker identity. Sign into LetAgents Desktop, then try starting the agent again.";
@@ -375,6 +389,7 @@ function publishCodexRuntimeNotification(
   sessionId: string | null | undefined,
   notification: RpcNotification,
 ): void {
+  observeCodexRuntimeNotificationProgress(sessionId, notification);
   const session = sessionId ? getStoredCodexLiveSession(sessionId) : null;
   if (!session) {
     return;
@@ -399,8 +414,160 @@ function publishCodexRuntimeSnapshot(
 function clearCodexRuntimeReasoningState(sessionId: string): void {
   codexRuntimeReasoningLastPost.delete(sessionId);
   codexRuntimeReasoningPostQueues.delete(sessionId);
+  activeCodexTurnProgress.delete(sessionId);
   clearDesktopManagedAgentReplyChangeState(codexReplyChangeSessionKey(sessionId));
   cleanupAgentSessionAttachments(sessionId);
+}
+
+function startCodexTurnProgress(
+  sessionId: string,
+  turnId: string,
+): ActiveCodexTurnProgress {
+  const tracking: ActiveCodexTurnProgress = {
+    turnId,
+    tracker: new CodexTurnProgressTracker({ startedAt: Date.now() }),
+    lastWaitingHeartbeatAt: null,
+  };
+  activeCodexTurnProgress.set(sessionId, tracking);
+  return tracking;
+}
+
+function stopCodexTurnProgress(sessionId: string, tracking: ActiveCodexTurnProgress): void {
+  if (activeCodexTurnProgress.get(sessionId) === tracking) {
+    activeCodexTurnProgress.delete(sessionId);
+  }
+}
+
+function runtimeRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function runtimeItemStatus(item: ThreadReadTurnItem | null | undefined): string {
+  if (typeof item?.status === "string") return item.status;
+  const status = runtimeRecord(item?.status);
+  return typeof status?.status === "string" ? status.status : "";
+}
+
+function isExplicitExternalWaitItem(item: ThreadReadTurnItem | null | undefined): boolean {
+  return CODEX_EXTERNAL_WAIT_ITEM_PATTERN.test(String(item?.type ?? ""));
+}
+
+function runtimeItemWaitKey(item: ThreadReadTurnItem | null | undefined): string | null {
+  if (!item) return null;
+  const detail = item.id || item.name || item.command || item.type;
+  return detail ? String(detail) : null;
+}
+
+function isActiveRuntimeItem(item: ThreadReadTurnItem): boolean {
+  const status = runtimeItemStatus(item);
+  return !status || isActiveCodexTurnStatus(status);
+}
+
+function notificationTurnId(notification: RpcNotification): string | null {
+  const record = runtimeRecord(notification.params);
+  const turn = runtimeRecord(record?.turn);
+  const value = record?.turnId ?? record?.turn_id ?? turn?.id;
+  return typeof value === "string" ? value : null;
+}
+
+function notificationItem(notification: RpcNotification): ThreadReadTurnItem | null {
+  const item = runtimeRecord(runtimeRecord(notification.params)?.item);
+  return item as ThreadReadTurnItem | null;
+}
+
+function observeCodexRuntimeNotificationProgress(
+  sessionId: string | null | undefined,
+  notification: RpcNotification,
+): void {
+  if (!sessionId || !/^item\/|^turn\//i.test(notification.method)) {
+    return;
+  }
+  const tracking = activeCodexTurnProgress.get(sessionId);
+  if (!tracking || notificationTurnId(notification) !== tracking.turnId) {
+    return;
+  }
+
+  const now = Date.now();
+  const fingerprint = JSON.stringify(notification.params ?? null);
+  const observation = {
+    source: `notification:${notification.method}`,
+    fingerprint,
+    observedAt: now,
+  };
+  const item = notificationItem(notification);
+  const waitKey = runtimeItemWaitKey(item);
+  if (waitKey && isExplicitExternalWaitItem(item) && notification.method === "item/started") {
+    tracking.tracker.beginExplicitWait(`notification:${waitKey}`, observation);
+    return;
+  }
+  if (waitKey && notification.method === "item/completed") {
+    tracking.tracker.endExplicitWait(`notification:${waitKey}`, observation);
+    return;
+  }
+  tracking.tracker.observeProgress(observation);
+}
+
+function observeCodexTurnSnapshot(input: {
+  tracking: ActiveCodexTurnProgress;
+  threadStatus: string | null;
+  turnStatus: string | null;
+  turn: ThreadReadTurn | null | undefined;
+  observedAt: number;
+}): void {
+  const items = input.turn?.items ?? input.turn?.output ?? [];
+  const explicitWaits = items
+    .filter((item) => isExplicitExternalWaitItem(item) && isActiveRuntimeItem(item))
+    .map(runtimeItemWaitKey)
+    .filter((key): key is string => Boolean(key));
+  input.tracking.tracker.replaceExplicitWaits("snapshot", explicitWaits, {
+    source: "snapshot",
+    fingerprint: JSON.stringify({
+      threadStatus: input.threadStatus,
+      turnStatus: input.turnStatus,
+      items,
+    }),
+    observedAt: input.observedAt,
+  });
+}
+
+function maybePublishCodexWaitingHeartbeat(
+  session: DesktopCodexLiveSessionState,
+  tracking: ActiveCodexTurnProgress,
+  now: number,
+): void {
+  if (tracking.tracker.activityState(now) !== "waiting") {
+    tracking.lastWaitingHeartbeatAt = null;
+    return;
+  }
+  if (
+    tracking.lastWaitingHeartbeatAt !== null &&
+    now - tracking.lastWaitingHeartbeatAt < CODEX_RUNTIME_REASONING_REPEAT_MS
+  ) {
+    return;
+  }
+  tracking.lastWaitingHeartbeatAt = now;
+  const explicitWait = tracking.tracker.hasExplicitWait();
+  queueCodexRuntimeReasoningSummary(session, {
+    summary: explicitWait
+      ? "Codex is waiting for an external command or tool to finish."
+      : "Codex is waiting for new runtime progress.",
+    status: "working",
+    checking: explicitWait
+      ? "The app-server still reports an active external operation."
+      : "The desktop supervisor is watching the turn's inactivity window.",
+    next_action: explicitWait
+      ? "Keep the worker heartbeat alive while the external operation runs."
+      : "Continue waiting unless the inactivity deadline is reached.",
+  });
+}
+
+function codexTurnTimeoutError(prefix: string, reason: CodexTurnTimeoutReason): string {
+  if (reason === "absolute") {
+    const minutes = Math.round(CODEX_EVENT_TURN_ABSOLUTE_TIMEOUT_MS / 60_000);
+    return `${prefix} exceeded the ${minutes}-minute absolute limit`;
+  }
+  const minutes = Math.round(CODEX_EVENT_TURN_INACTIVITY_TIMEOUT_MS / 60_000);
+  return `${prefix} made no observable progress for ${minutes} minutes`;
 }
 
 function emitManagedAgentSessionUpdate(session: DesktopCodexLiveSessionState | null | undefined): void {
@@ -1716,76 +1883,94 @@ async function waitForCurrentTurnToIdle(
   client: CodexRpcClient,
   sessionId: string,
 ): Promise<DesktopCodexLiveSessionState | null> {
-  const deadline = Date.now() + DESKTOP_EVENT_TURN_TIMEOUT_MS;
-  while (true) {
-    const session = getStoredCodexLiveSession(sessionId);
-    if (!session || !canDeliverDesktopEventToSession(session)) {
-      return null;
-    }
-
-    let read: ThreadReadResult | null = null;
-    try {
-      read = await client.request<ThreadReadResult>("thread/read", {
-        threadId: session.thread_id,
-        includeTurns: true,
-      });
-    } catch (error) {
-      if (isLikelyMaterializingError(error)) {
-        if (Date.now() >= deadline) {
-          updateCodexLiveSession(sessionId, (current) => ({
-            ...current,
-            status: "unknown",
-            active_work: null,
-            last_error: "previous turn could not be inspected while delivering room event",
-            updated_at: new Date().toISOString(),
-          }));
-          return null;
-        }
-        await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
-        continue;
+  let tracking: ActiveCodexTurnProgress | null = null;
+  try {
+    while (true) {
+      const session = getStoredCodexLiveSession(sessionId);
+      if (!session || !canDeliverDesktopEventToSession(session)) {
+        return null;
       }
-      throw error;
-    }
+      if (!tracking || tracking.turnId !== session.turn_id) {
+        if (tracking) stopCodexTurnProgress(sessionId, tracking);
+        tracking = startCodexTurnProgress(sessionId, session.turn_id);
+      }
 
-    const turns = read?.thread?.turns ?? [];
-    const turn = turns.find((candidate) => candidate.id === session.turn_id);
-    const threadStatus = extractThreadStatus(read?.thread);
-    const turnStatus = extractTurnStatus(turn);
-    publishCodexRuntimeSnapshot(session, {
-      threadStatus,
-      turnStatus,
-      recentItems: turn?.items ?? turn?.output,
-    });
-    if (!isActiveCodexTurnStatus(turnStatus)) {
-      return session;
-    }
-
-    if (Date.now() >= deadline) {
+      let read: ThreadReadResult | null = null;
       try {
-        await client.request("turn/interrupt", {
+        read = await client.request<ThreadReadResult>("thread/read", {
           threadId: session.thread_id,
-          turnId: session.turn_id,
+          includeTurns: true,
         });
-      } catch {
-        // Best effort; the next inspect pass will reconcile the real state.
+      } catch (error) {
+        if (isLikelyMaterializingError(error)) {
+          const now = Date.now();
+          maybePublishCodexWaitingHeartbeat(session, tracking, now);
+          const timeoutReason = tracking.tracker.timeoutReason(now);
+          if (timeoutReason) {
+            updateCodexLiveSession(sessionId, (current) => ({
+              ...current,
+              status: "unknown",
+              active_work: null,
+              last_error: codexTurnTimeoutError(
+                "previous turn could not be inspected and",
+                timeoutReason,
+              ),
+              updated_at: new Date().toISOString(),
+            }));
+            return null;
+          }
+          await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
+          continue;
+        }
+        throw error;
       }
+
+      const turns = read?.thread?.turns ?? [];
+      const turn = turns.find((candidate) => candidate.id === session.turn_id);
+      const threadStatus = extractThreadStatus(read?.thread);
+      const turnStatus = extractTurnStatus(turn);
+      const now = Date.now();
+      observeCodexTurnSnapshot({ tracking, threadStatus, turnStatus, turn, observedAt: now });
+      publishCodexRuntimeSnapshot(session, {
+        threadStatus,
+        turnStatus,
+        recentItems: turn?.items ?? turn?.output,
+      });
+      if (!isActiveCodexTurnStatus(turnStatus)) {
+        return session;
+      }
+
+      maybePublishCodexWaitingHeartbeat(session, tracking, now);
+      const timeoutReason = tracking.tracker.timeoutReason(now);
+      if (timeoutReason) {
+        try {
+          await client.request("turn/interrupt", {
+            threadId: session.thread_id,
+            turnId: session.turn_id,
+          });
+        } catch {
+          // Best effort; the next inspect pass will reconcile the real state.
+        }
+        updateCodexLiveSession(sessionId, (current) => ({
+          ...current,
+          status: "unknown",
+          active_work: null,
+          last_error: codexTurnTimeoutError("previous turn", timeoutReason),
+          updated_at: new Date().toISOString(),
+        }));
+        return null;
+      }
+
       updateCodexLiveSession(sessionId, (current) => ({
         ...current,
-        status: "unknown",
-        active_work: null,
-        last_error: "previous turn was still active while delivering room event",
+        status: "running",
+        last_error: null,
         updated_at: new Date().toISOString(),
       }));
-      return null;
+      await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
     }
-
-    updateCodexLiveSession(sessionId, (current) => ({
-      ...current,
-      status: "running",
-      last_error: null,
-      updated_at: new Date().toISOString(),
-    }));
-    await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
+  } finally {
+    if (tracking) stopCodexTurnProgress(sessionId, tracking);
   }
 }
 
@@ -1794,14 +1979,79 @@ async function waitForDesktopEventTurnCompletion(
   sessionId: string,
   turnId: string,
 ): Promise<string | null> {
-  const deadline = Date.now() + DESKTOP_EVENT_TURN_TIMEOUT_MS;
-  while (true) {
-    await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
-    const session = getStoredCodexLiveSession(sessionId);
-    if (!session) {
-      return null;
-    }
-    if (Date.now() >= deadline) {
+  const tracking = startCodexTurnProgress(sessionId, turnId);
+  try {
+    while (true) {
+      await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
+      const session = getStoredCodexLiveSession(sessionId);
+      if (!session) {
+        return null;
+      }
+
+      let read: ThreadReadResult | null = null;
+      try {
+        read = await client.request<ThreadReadResult>("thread/read", {
+          threadId: session.thread_id,
+          includeTurns: true,
+        });
+      } catch (error) {
+        if (isLikelyMaterializingError(error)) {
+          const now = Date.now();
+          maybePublishCodexWaitingHeartbeat(session, tracking, now);
+          const timeoutReason = tracking.tracker.timeoutReason(now);
+          if (!timeoutReason) {
+            continue;
+          }
+          try {
+            await client.request("turn/interrupt", { threadId: session.thread_id, turnId });
+          } catch {
+            // Best effort; the next inspect pass will reconcile the real state.
+          }
+          clearSessionActiveWork(sessionId, (current) => ({
+            ...current,
+            status: "unknown",
+            last_error: codexTurnTimeoutError("desktop-delivered event turn", timeoutReason),
+            updated_at: new Date().toISOString(),
+          }));
+          return null;
+        }
+        throw error;
+      }
+
+      const turn = (read?.thread?.turns ?? []).find((candidate) => candidate.id === turnId);
+      const threadStatus = extractThreadStatus(read?.thread);
+      const turnStatus = extractTurnStatus(turn);
+      const now = Date.now();
+      observeCodexTurnSnapshot({ tracking, threadStatus, turnStatus, turn, observedAt: now });
+      publishCodexRuntimeSnapshot(session, {
+        threadStatus,
+        turnStatus,
+        recentItems: turn?.items ?? turn?.output,
+      });
+
+      if (turnStatus && !isActiveCodexTurnStatus(turnStatus)) {
+        if (turnStatus === "completed") {
+          const completed = updateCodexLiveSession(sessionId, statusAfterDesktopEventCompletedTurn);
+          emitManagedAgentSessionUpdate(completed);
+          return finalPublicAgentMessageText(turn?.items ?? turn?.output);
+        }
+
+        clearSessionActiveWork(sessionId, (current) => ({
+          ...current,
+          status: turnStatus === "interrupted"
+            ? codexSessionStatusAfterTurnInterrupt(managedAgentDeliveryMode(current), true, false)
+            : "failed",
+          last_error: turnStatus === "interrupted" ? null : `event turn ended with ${turnStatus}`,
+          updated_at: new Date().toISOString(),
+        }));
+        return null;
+      }
+
+      maybePublishCodexWaitingHeartbeat(session, tracking, now);
+      const timeoutReason = tracking.tracker.timeoutReason(now);
+      if (!timeoutReason) {
+        continue;
+      }
       try {
         await client.request("turn/interrupt", {
           threadId: session.thread_id,
@@ -1813,52 +2063,13 @@ async function waitForDesktopEventTurnCompletion(
       clearSessionActiveWork(sessionId, (current) => ({
         ...current,
         status: "unknown",
-        last_error: "desktop-delivered event turn timed out",
+        last_error: codexTurnTimeoutError("desktop-delivered event turn", timeoutReason),
         updated_at: new Date().toISOString(),
       }));
       return null;
     }
-
-    let read: ThreadReadResult | null = null;
-    try {
-      read = await client.request<ThreadReadResult>("thread/read", {
-        threadId: session.thread_id,
-        includeTurns: true,
-      });
-    } catch (error) {
-      if (isLikelyMaterializingError(error)) {
-        continue;
-      }
-      throw error;
-    }
-
-    const turn = (read?.thread?.turns ?? []).find((candidate) => candidate.id === turnId);
-    const threadStatus = extractThreadStatus(read?.thread);
-    const turnStatus = extractTurnStatus(turn);
-    publishCodexRuntimeSnapshot(session, {
-      threadStatus,
-      turnStatus,
-      recentItems: turn?.items ?? turn?.output,
-    });
-    if (!turnStatus || isActiveCodexTurnStatus(turnStatus)) {
-      continue;
-    }
-
-    if (turnStatus === "completed") {
-      const completed = updateCodexLiveSession(sessionId, statusAfterDesktopEventCompletedTurn);
-      emitManagedAgentSessionUpdate(completed);
-      return finalPublicAgentMessageText(turn?.items ?? turn?.output);
-    }
-
-    clearSessionActiveWork(sessionId, (current) => ({
-      ...current,
-      status: turnStatus === "interrupted"
-        ? codexSessionStatusAfterTurnInterrupt(managedAgentDeliveryMode(current), true, false)
-        : "failed",
-      last_error: turnStatus === "interrupted" ? null : `event turn ended with ${turnStatus}`,
-      updated_at: new Date().toISOString(),
-    }));
-    return null;
+  } finally {
+    stopCodexTurnProgress(sessionId, tracking);
   }
 }
 

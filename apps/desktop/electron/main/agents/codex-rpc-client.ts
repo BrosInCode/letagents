@@ -30,10 +30,15 @@ export interface TurnStartResult {
 }
 
 export interface ThreadReadTurnItem {
+  id?: string;
   type?: string;
   text?: string;
   phase?: string;
+  status?: string | { status?: string };
+  name?: string;
+  command?: string;
   content?: Array<{ text?: string }>;
+  [key: string]: unknown;
 }
 
 export interface ThreadReadTurn {
