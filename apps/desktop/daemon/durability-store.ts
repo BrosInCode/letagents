@@ -226,6 +226,9 @@ export class WorkDurabilityStore {
   async concludeAttempt(workAttemptId: string, input: { state: Extract<WorkAttemptState, "cleanly_concluded" | "abandoned">; cause: string; postmortemDiff?: string; maxPostmortemBytes?: number }): Promise<TaskWorkAttempt> {
     this.assertAttemptId(workAttemptId);
     const current = await this.getAttempt(workAttemptId);
+    if (current.execution_generations.some((generation) => generation.terminal === null)) {
+      throw new ImmutableExecutionError("Concluding an attempt requires terminal attestation for every execution generation.");
+    }
     await this.ensureExecutionFence(current);
     try {
       // A caller-supplied diff is test/backfill input only when no Git runner
@@ -236,7 +239,7 @@ export class WorkDurabilityStore {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("Work attempts can conclude only once.");
       if (!input.cause.trim()) throw new ImmutableExecutionError("Work attempts require an explicit conclusion cause.");
-      if (input.state === "cleanly_concluded" && attempt.execution_generations.some((generation) => generation.terminal === null)) throw new ImmutableExecutionError("Clean conclusion requires terminal attestation for every execution generation.");
+      if (attempt.execution_generations.some((generation) => generation.terminal === null)) throw new ImmutableExecutionError("Concluding an attempt requires terminal attestation for every execution generation.");
       attempt.state = input.state;
       attempt.concluded_at = this.now();
       attempt.conclusion_cause = input.cause;

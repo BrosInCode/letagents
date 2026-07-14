@@ -329,6 +329,20 @@ test("postmortem capture failure releases the retained execution fence", async (
   } finally { await env.cleanup(); }
 });
 
+test("live generations block every conclusion before Git capture", async () => {
+  const env = await fixture();
+  let gitCalls = 0;
+  try {
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, async (args) => { gitCalls += 1; return fakeGit(env.root)(args); }, undefined, TEST_SUPERVISOR);
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
+    await assert.rejects(() => store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done" }), /terminal attestation/);
+    await assert.rejects(() => store.concludeAttempt(attempt.work_attempt_id, { state: "abandoned", cause: "stopped" }), /terminal attestation/);
+    assert.equal(gitCalls, 0);
+  } finally { await env.cleanup(); }
+});
+
 test("attempt creation requires a final provisioned marker and enforces unique exact worktree layout", async () => {
   const env = await fixture();
   try {
