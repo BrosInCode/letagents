@@ -3,10 +3,7 @@ import type { Express } from "express";
 import {
   BoardIntentApprovalConsumptionError,
   getActiveTaskLeases,
-  getTaskById,
-  getTaskOwnershipState,
   LeaseFenceStaleError,
-  updateTask,
   type BoardIntentConsumptionInput,
   type TaskStatus,
 } from "../../../db.js";
@@ -42,7 +39,7 @@ export function registerTaskRecordRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const task = await getTaskById(project.id, taskId);
+    const task = await deps.getTaskById(project.id, taskId);
     if (!task) {
       res.status(404).json({ error: "Task not found" });
       return;
@@ -72,8 +69,8 @@ export function registerTaskRecordRoutes(
       return;
     }
 
-    const task = await getTaskById(project.id, taskId);
-    const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+    const task = await deps.getTaskById(project.id, taskId);
+    const taskOwnership = await deps.getTaskOwnershipState(project.id, taskId);
     if (!task || !taskOwnership) {
       res.status(404).json({ error: "Task not found" });
       return;
@@ -219,7 +216,7 @@ export function registerTaskRecordRoutes(
       }
       boardIntentApproval = coordination.boardIntentApproval ?? null;
 
-      const updated = await updateTask(
+      const updated = await deps.updateTask(
         project.id,
         taskId,
         updates,

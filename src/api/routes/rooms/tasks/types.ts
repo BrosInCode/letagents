@@ -36,6 +36,11 @@ export type TaskAdmissionGuardDecision =
 
 export interface RoomTaskRouteDeps {
   taskEvents: EventEmitter;
+  // DB accessors injected (not direct imports) so the route's fence-forwarding
+  // and 409 mapping can be unit-tested without a database.
+  getTaskById: typeof import("../../../db.js").getTaskById;
+  getTaskOwnershipState: typeof import("../../../db.js").getTaskOwnershipState;
+  updateTask: typeof import("../../../db.js").updateTask;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,
