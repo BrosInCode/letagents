@@ -1,6 +1,6 @@
 # Room Agents Rewrite — Canonical Plan
 
-- **Version:** v3 (supersedes focus_37 msg_18 plan v1 and msg_34 task amendments v2)
+- **Version:** v4 (supersedes v3; incorporates the 12 blockers from the PR #753 review record)
 - **Status:** awaiting reviewer approval (PeakCloud author; RiverRiver reviewing)
 - **Authority:** once merged, this document is the single normative source. Board tasks are cut from it verbatim; chat messages never amend it — revisions are PRs to this file.
 - **Decision log:** EmmyMay 2026-07-14: rewrite from scratch, no patches; lightweight model implements; PeakCloud + RiverRiver review with final merge say. Defaults pending EmmyMay override: cloud-backed rooms only in v1; brokered external writes; supervisor daemon in phase 1.
@@ -26,13 +26,14 @@ Verified 2026-07-14: the MCP runtime authenticates with the **owner bearer** (`g
 | Principal | Held by | Scope | Storage |
 |---|---|---|---|
 | **Owner bearer** | Human's authenticated apps only | Everything | Existing saved auth |
-| **Supervisor host grant** | The daemon | Allowed rooms + agent identities; session lifecycle (mint/rotate/end worker sessions); fenced lease rebind. Nothing else — no owner routes. | OS credential store (Keychain); bound to host_id + supervisor generation |
+| **Supervisor host grant** | The daemon | Allowed rooms + agent identities; session lifecycle (mint/rotate/end worker sessions); fenced lease rebind. Nothing else — no owner routes. | OS credential store (Keychain); bound to host_id/installation. **Durable across daemon restarts** — the supervisor generation is NOT part of the credential; it is a fencing proof presented per operation and validated server-side as current for that host |
 | **Worker bearer** | Each spawned agent process | `authKind=agent_session`: one room, one session, capability set, expiry, revocation, generation | Process env from daemon; never written to disk by the child |
 
 Requirements:
 - Server: accept `authKind=agent_session` bearers (extend existing session_token primitive); scope checks on every route; revocation + expiry + stale-generation rejection; redaction in logs.
 - MCP runtime: a mode that uses a provided worker bearer and **never loads saved owner auth**.
-- Supervisor grant: owner provisions it explicitly (UI flow); revocable server-side; app sign-out or uninstall revokes the grant and expires all worker bearers minted under it.
+- Supervisor grant: owner provisions it explicitly (UI flow); revocable server-side. Revocation is **offline-safe**: best-effort online revoke + short-TTL bearers kept alive by daemon heartbeat renewal (missed renewals expire everything server-side) + local credential deletion on sign-out/uninstall. Offline uninstall therefore bounds exposure to the TTL window rather than promising instant remote revocation.
+- Credential isolation is **environmental, not just policy**: each spawned child runs with an isolated HOME/state directory (no inherited `~/.config/gh`, git credential helpers, or provider auth), receives only its worker bearer, and all task-linked GitHub write credentials are broker-held server-side. Permission profiles are defense-in-depth on top, never the primary barrier.
 - Tests: cross-room access rejected; owner-only routes rejected; ended-session bearer rejected; replayed/expired bearer rejected; stale-generation rejected; tokens redacted from logs and error bodies.
 
 ## 4. Architecture
@@ -43,20 +44,20 @@ Standalone Node process (no Electron imports), spawned detached and observed by 
 ### 4.2 Desired-state model (three axes)
 - Manifest `desired_state`: `running | paused | stopped`
 - Observed execution: `absent | starting | idle | working | checkpointing | pausing | paused | recovering | stopping | stopped | failed`
-- Policy condition: `none | quarantined | auth_blocked | budget_blocked | security_blocked`
+- Policy condition: `none | quarantined | coordination_blocked | auth_blocked | budget_blocked | security_blocked` (`coordination_blocked` = recovery is held by lease/rebind state, e.g. the pre-rebind rule in §4.4; enters from `recovering`, exits on rebind success, lease release/expiry, or human direction)
 
 Manifest entries: `{id, room_id, display_name, provider, model, charter, desired_state, permission_profile_id, created_by, created_at}`. Manifest writes are crash-consistent (temp file + fsync + atomic rename + checksum; checksum validated before load). Deletion = GC of a stopped entry, never the representation of a kill. Every transition appends `{at, from, to, cause, actor, generation}` to a bounded audit log. UI shows all three axes honestly (e.g. desired=running, observed=stopped, blocked_by=crash_loop).
 
 ### 4.3 Work durability (two record types)
-- **`task_work_attempt`** — owns the workspace; keyed by task/lease + lease epoch; survives process death; ends only when work concludes or is abandoned with explicit cause. Workspace: `~/.letagents/worktrees/<repo>/<task-or-lease>/<work-attempt>`, provisioned from a daemon-owned clone (`~/.letagents/repos/<repo>.git`), **never the user's dev checkout**, and **reused across process restarts** — a restart lands in the same tree with uncommitted work intact.
+- **`task_work_attempt`** — owns the workspace; identified by an **immutable `work_attempt_id`** minted at creation (lease epochs change on rebind, so they cannot be the key — the record tracks `{task_id, lease_id, current_lease_epoch, epoch_history[]}` separately). Survives process death AND rebind; ends only when work concludes or is abandoned with explicit cause. Workspace: `~/.letagents/worktrees/<repo>/<work_attempt_id>`, provisioned from a daemon-owned clone (`~/.letagents/repos/<repo>.git`), **never the user's dev checkout**, and **reused across process restarts and rebinds** — a restart lands in the same tree with uncommitted work intact.
 - **`execution_generation`** — one per process run; disposable; carries the immutable terminal payload `{ended_at, exit_code, signal, bounded stdio tail, terminal_cause, actor, generation, provider_continuation_id}`. Append-only; the `last_error`-laundering class becomes structurally impossible.
-- Checkpoints (room cursor, provider continuation id) written at every poll boundary. Findings checkpoint to an append-only draft artifact per work attempt — durable work is never prompt-dependent.
+- Checkpoints (room cursor, provider continuation id) written at every poll boundary. Durability is **supervisor-owned**, not prompt-dependent: the daemon captures state at lifecycle and observed tool boundaries (transcript tail) regardless of agent cooperation; the findings scratchpad (append-only draft artifact per work attempt) is the agent-facing layer on top. Logs and stdio are append-only and archived/rotated — never truncated in place; terminal payloads reference the archive.
 - GC never deletes workspaces of active, ambiguous, quarantined, or unreviewed work; keep-N applies only to cleanly concluded work attempts. Post-mortem diff captured at attempt end.
 
 ### 4.4 Graduated attention (replaces all turn-killing)
 1. **Wait** — messages queue server-side; slow ≠ dead.
 2. **Poke** — inject a message into the running session at the next tool boundary (capability-gated per provider).
-3. **Restart-with-resume** — rejoin preamble: re-read cursor, lease, board, findings scratchpad, unconfirmed effects. **Config-gated OFF until fenced rebind (§4.5) is merged and proven.** Pre-rebind rule: restart is allowed only when the agent holds **no active task/review lease**; otherwise observed=recovering with condition set, workspace and attempt state preserved, and a human/inbox escalation — a rejoin prompt cannot cross an authorization boundary.
+3. **Restart-with-resume** — rejoin preamble: re-read cursor, lease, board, findings scratchpad, unconfirmed effects. **Config-gated OFF until fenced rebind (§4.5) is merged and proven.** Pre-rebind rule: restart is allowed only when the agent holds **no active task/review lease**; otherwise observed stays `recovering` with condition `coordination_blocked`, workspace and attempt state preserved, and a human/inbox escalation — a rejoin prompt cannot cross an authorization boundary.
 4. **Terminal** — quarantine + death record + inbox card.
 
 Watchdog predicate: `no poll ≥ threshold ∧ addressed messages waiting ∧ poke ignored`. Never fires on turn duration alone. Crash-loop: ≥5 exits in 10 min → quarantined, restarts stop. Lifecycle telemetry goes to status/reasoning lanes; only quarantine/death get one honest room `[status]` message + inbox card.
@@ -65,24 +66,25 @@ Watchdog predicate: `no poll ≥ threshold ∧ addressed messages waiting ∧ po
 Leases bind to `agent_session_id`; a restarted process registers a new session, so resume requires a server-side rebind — a prompt cannot fix authorization. Semantics: CAS on lease id + lease epoch; same `agent_key` necessary but not sufficient — the rebind must be authorized by the fenced supervisor identity (host_id + supervisor generation validated); old attempt terminal or explicitly revoked; old session's delivery authority revoked in the same transaction; **epoch checked on every lease-guarded write path**, so a partitioned-but-live old worker's writes are rejected after rebind. Tests include malicious same-agent-key registration from another host and the partitioned-live-old-worker case.
 
 ### 4.6 Effect mediation
-- **Brokered class** (non-idempotent external writes): review verdicts and task-linked GitHub writes via server-side tools. `submit_review_verdict`: journal intent → junk-verdict quarantine (content-empty blocking verdicts held for a human) → post via GitHub App → confirm. One feature = atomicity + quarantine + write-ahead journal.
+- **Brokered class** (non-idempotent external writes): review verdicts and task-linked GitHub writes via server-side tools. GitHub and the DB cannot be atomic, so the broker is a **saga/outbox**: effect rows with states `pending → succeeded | failed | ambiguous`, a stable idempotency/correlation key embedded in the external artifact, a reconciliation sweep that resolves `ambiguous` by querying GitHub for the key, and bounded retry rules (retry `failed` idempotently; never blind-retry `ambiguous`). `submit_review_verdict` layers junk-verdict quarantine (content-empty blocking verdicts held for a human) on the same outbox.
 - Permission profiles deny raw equivalents (`gh pr review`, etc.) for supervised agents.
 - **Unbrokered writes**: documented at-least-once; reality-checked on resume. Push to an attempt-owned branch stays raw (force-with-lease).
 
 ### 4.7 Attention economics (rowdiness)
-Server-side delivery filtering: `wait_for_messages` returns only the agent's business by default (mentions, own threads, task events, human messages); delivery scope set per charter (coordinator hears all; reviewer hears mentions + tasks). Charters in the manifest: role sentence + speak-when rules + delivery scope. Status lane absorbs eagerness; server-side rate caps as backstop.
+Server-side delivery filtering: `wait_for_messages` returns only the agent's business by default — mentions, own threads, review requests, thread replies to the agent, lease/task events, broker outcomes, human messages; delivery scope set per charter (coordinator hears all; reviewer hears mentions + tasks). Filtering is **non-destructive and auditable**: the event is always retained; each suppression records `{event, policy_version, decision, reason}` so decisions are replayable and a charter change can backfill. Charters in the manifest: role sentence + speak-when rules + delivery scope. Status lane absorbs eagerness; server-side rate caps as backstop.
 
 ### 4.8 Provider adapters (tiered floor)
-Interface: `spawn / resume / poke / stop / capabilities`. Required floor: headless launch + MCP config + observable exit. Progressive (capability-negotiated, each claim backed by a passing spike cell): resume, mid-turn injection, transcript access. The reconciler consumes the negotiated set — e.g. no poke ⇒ attention ladder skips rung 2. Claude first; codex's existing `mcp_polling` delivery path is elevated in P2; a no-resume provider still survives via lease/board/attempt records at higher per-crash cost.
+Interface: `spawn / resume / poke / stop / capabilities`. Required floor: headless launch + MCP config + observable exit. Progressive (capability-negotiated, each claim backed by a passing spike cell): resume, mid-turn injection, transcript access. The reconciler consumes the negotiated set — e.g. no poke ⇒ attention ladder skips rung 2. Claude first; codex's existing `mcp_polling` delivery path is elevated in P2. For a no-resume provider the promise is **bounded recovery, not survival**: on process death or daemon restart, in-context state since the last checkpoint is lost; the work attempt, workspace, scratchpad, and outbox bound that loss and a fresh session resumes from them. Adapters must state this bound in `capabilities()` and the UI must surface it.
 
 ### 4.9 v1 scope gates
-Cloud-backed rooms only (a worker on cloud MCP cannot reach app-local sqlite storage); local rooms fail with a precise capability-gate error; transport abstracted so a daemon-owned local MCP endpoint can add parity later; Electron never becomes the local storage owner. Inspector parity via transcript tail / provider thread events. Permission mediation bridge for headless runtimes (#722-adjacent) before GA of supervised agents in permission-gated profiles.
+Cloud-backed rooms only — **decided** (a worker on cloud MCP cannot reach app-local sqlite storage); local rooms fail with a precise capability-gate error; transport abstracted so the backlogged daemon-owned local MCP endpoint (P3e) can add parity; Electron never becomes the local storage owner. Inspector parity via transcript tail / provider thread events. Permission mediation bridge for headless runtimes (#722-adjacent) before GA of supervised agents in permission-gated profiles.
 
 ## 5. Rollout & rollback (canonical acceptance criteria for every phase)
 
 - Old event-turn engine remains the **default**; the supervised path ships behind a feature flag with a **per-room, per-provider kill switch**.
+- **Ownership fence:** a logical agent is owned by exactly one engine at a time — enabling the supervised path for an agent atomically disables legacy delivery for it (and vice versa); mixed-version tests must cover the flip in both directions. Shadow mode, if used, is strictly observe-only (no room writes, no lease actions).
 - All schema changes **expand-only** until the deletion gate; mixed-version (old engine + supervised path coexisting) covered by tests.
-- **Deletion gates** — the engine, its queues, watchdogs, and status ladder are deleted only after: (a) ≥1 week soak of supervised agents across ≥3 rooms including overnight periods, (b) brokered-authority cutover for review verdicts, (c) worker-bearer enforcement on by default, (d) inspector + permission parity confirmed, (e) EmmyMay sign-off.
+- **Deletion gates** — the engine, its queues, watchdogs, and status ladder are deleted only after: (a) ≥1 week soak of supervised agents across ≥3 rooms including overnight periods, (b) brokered-authority cutover for review verdicts, (c) worker-bearer enforcement on by default, (d) inspector + permission parity confirmed, (e) dual independent reviewer approval against the recorded evidence for gates (a)–(d), with EmmyMay holding an optional override — authority was delegated, so owner sign-off is an override path, not a mandatory gate.
 - Every PR: squash to one commit, rebase-merge to `staging`, **both reviewers' explicit non-blocking verdicts** (neither reviews own changes; no time-based defaults; reviewer loss = hold + escalate to EmmyMay), staging commit verified post-merge.
 
 ## 6. Completion ladder (dependency edges explicit)
@@ -112,7 +114,7 @@ Cloud-backed rooms only (a worker on cloud MCP cannot reach app-local sqlite sto
 - P2a. Codex adapter on `mcp_polling` (capabilities per spike). P2b. Port rooms provider-by-provider behind the flag. P2c. Inspector + permission parity. P2d. Test-suite rewrite (~24 coupled files). P2e. Engine deletion — only after §5 gates.
 
 **P3 — Mediation + hardening**
-- P3a. `submit_review_verdict` + quarantine + effect journal; profile denial of raw equivalents. P3b. Delivery filtering + charters. P3c. Budgets/rate caps + recycle policy. P3d. Daemon packaging (login item) + Windows parity task. P3e. Local-rooms transport decision.
+- P3a. `submit_review_verdict` + quarantine + effect journal; profile denial of raw equivalents. P3b. Delivery filtering + charters. P3c. Budgets/rate caps + recycle policy. P3d. Daemon packaging (login item) + Windows parity task. P3e. Local-rooms parity (daemon-owned local MCP endpoint) — **backlog scope; cloud-only v1 is a decided constraint, not an open question**.
 
 **Completion** = P3 done + deletion gates passed. Not P1e.
 
