@@ -1,6 +1,16 @@
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 
+type OwnerAuthStore = Pick<typeof import("../../local-state.js"), "clearStoredAuth" | "getStoredAuth">;
+
+let ownerAuthStoreLoader: () => Promise<OwnerAuthStore> = () => import("../../local-state.js");
+
+export function setOwnerAuthStoreLoaderForTest(
+  loader: (() => Promise<OwnerAuthStore>) | null,
+): void {
+  ownerAuthStoreLoader = loader ?? (() => import("../../local-state.js"));
+}
+
 export const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 
 export class ApiError extends Error {
@@ -26,7 +36,7 @@ export async function getLetagentsToken(): Promise<string> {
     return envToken;
   }
 
-  const { getStoredAuth } = await import("../../local-state.js");
+  const { getStoredAuth } = await ownerAuthStoreLoader();
   return getStoredAuth()?.token || "";
 }
 
@@ -95,7 +105,7 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
     if (res.status === 401 && requireValidWorkerBearerRuntime().mode !== "worker") {
       // Only clear on 401 (invalid/expired credential), NOT on 403
       // (valid credential but insufficient permissions, e.g., private repo access)
-      const { clearStoredAuth } = await import("../../local-state.js");
+      const { clearStoredAuth } = await ownerAuthStoreLoader();
       clearStoredAuth();
       clearAuthenticatedAccountCache();
     }
