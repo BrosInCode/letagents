@@ -40,6 +40,24 @@ async function seedOwner(id: string): Promise<void> {
   });
 }
 
+function recorder() {
+  return { statusCode: 200, body: null as any, status(code: number) { this.statusCode = code; return this; }, json(value: unknown) { this.body = value; return this; } };
+}
+
+async function setupLifecycle() {
+  await seedOwner("owner_route");
+  const room = await authDb!.createProjectWithName("supervisor-route-room");
+  const agent = await authDb!.registerAgentIdentity({ canonical_key: "owner/route-agent", name: "route-agent", display_name: "Route Agent", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const grantResult = await authDb!.createSupervisorHostGrant({ owner_account_id: "owner_route", host_id: "host_route", installation_id: "install_route", allowed_room_ids: [room.id], allowed_agent_keys: [agent.canonical_key], expires_at: new Date(Date.now() + 60_000).toISOString() });
+  const handlers = new Map<string, any>();
+  registerSupervisorHostGrantRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, delete(path: string, handler: any) { handlers.set(`DELETE ${path}`, handler); } } as never, {
+    resolveCanonicalRoomRequestId: async (id: string) => id, resolveRoomOrReply: async () => room, requireParticipant: async () => true,
+  });
+  const principal = grantResult.grant;
+  const reqBase = { authKind: "supervisor_grant", supervisorGrant: principal, headers: {}, body: { generation: principal.current_generation }, params: { grantId: principal.grant_id } };
+  return { room, agent, grantResult, handlers, reqBase };
+}
+
 test("supervisor registry is exact default-deny", () => {
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/renew"), true);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/rooms/room_1/messages"), false);
@@ -67,6 +85,28 @@ test("feature-off retains only owner revoke route", () => {
     registerSupervisorHostGrantRoutes({ post(path: string) { paths.push(`POST ${path}`); }, delete(path: string) { paths.push(`DELETE ${path}`); } } as never, {} as never);
     assert.deepEqual(paths, ["DELETE /supervisor-host-grants/:grantId"]);
   } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = prior; }
+});
+
+test("lifecycle mint enforces room and agent allowlists through the actual route", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const allowed = recorder();
+  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key } }, allowed);
+  assert.equal(allowed.statusCode, 201); assert.equal((allowed.body as any).session_token, undefined);
+  const denied = recorder();
+  await mint({ ...reqBase, body: { generation: 1, room_id: "other_room", agent_key: agent.canonical_key } }, denied);
+  assert.equal(denied.statusCode, 403);
+});
+
+test("wrong-session rotation route cannot mutate a grant-bound bearer", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const session = await authDb!.createRoomAgentSession({ room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Route Agent", agent_key: agent.canonical_key, display_name: "Route Agent", owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent", supervisor_grant_id: grantResult.grant.grant_id, worker_bearer_expires_at: new Date(Date.now() + 30_000).toISOString() });
+  const initial = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  const rotate = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate"); assert.ok(rotate);
+  const response = recorder();
+  await rotate({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: "wrong_session" }, body: { generation: 1, bearer_id: initial.agentSession!.bearer_id } }, response);
+  assert.equal(response.statusCode, 403);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never)).authKind, "agent_session");
 });
 
 test("concurrent renewal has exactly one winner and stale token cannot replay", { skip: requiresDatabase }, async () => {
