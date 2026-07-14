@@ -202,7 +202,9 @@ export class WorkDurabilityStore {
     });
   }
 
-  async concludeAttempt(workAttemptId: string, input: { state: Extract<WorkAttemptState, "cleanly_concluded" | "abandoned">; cause: string; postmortemDiff: string }): Promise<TaskWorkAttempt> {
+  async concludeAttempt(workAttemptId: string, input: { state: Extract<WorkAttemptState, "cleanly_concluded" | "abandoned">; cause: string; postmortemDiff?: string; maxPostmortemBytes?: number }): Promise<TaskWorkAttempt> {
+    this.assertAttemptId(workAttemptId);
+    const postmortemDiff = input.postmortemDiff ?? await this.capturePostmortemDiff(workAttemptId, input.maxPostmortemBytes);
     return this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("Work attempts can conclude only once.");
@@ -210,7 +212,7 @@ export class WorkDurabilityStore {
       attempt.state = input.state;
       attempt.concluded_at = this.now();
       attempt.conclusion_cause = input.cause;
-      attempt.postmortem_diff = input.postmortemDiff;
+      attempt.postmortem_diff = postmortemDiff;
       return attempt;
     });
   }
@@ -426,6 +428,39 @@ export class WorkDurabilityStore {
     const result = await this.git?.(args);
     if (typeof result !== "string" || !result.trim()) throw new ImmutableExecutionError(`Git identity query failed: ${args.join(" ")}`);
     return result.trim();
+  }
+
+  private async capturePostmortemDiff(workAttemptId: string, maxBytes = 512 * 1024): Promise<string> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new ImmutableExecutionError("Postmortem capture limit must be a positive integer.");
+    const attempt = await this.getAttempt(workAttemptId);
+    if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot capture a postmortem diff.");
+    await this.verifyWorkspaceForDeletion(attempt);
+    const status = await this.captureGit(["-C", attempt.workspace_path, "status", "--porcelain"]);
+    const diff = await this.captureGit(["-C", attempt.workspace_path, "diff", "--binary", "--no-ext-diff"]);
+    const captured = this.limitPostmortem(`status --porcelain\n${status}\n\ndiff --binary\n${diff}`, maxBytes);
+    const root = await this.managedRealDirectory(this.attemptsRoot, true);
+    const directory = join(root, workAttemptId);
+    await this.ensureManagedDirectory(directory, root, true);
+    const target = join(directory, "postmortem.diff");
+    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    const handle = await open(temporary, "wx", 0o600);
+    try { await handle.writeFile(captured, "utf8"); await handle.sync(); } finally { await handle.close(); }
+    await rename(temporary, target);
+    return captured;
+  }
+
+  private async captureGit(args: string[]): Promise<string> {
+    if (!this.git) throw new ImmutableExecutionError("A Git identity verifier is required for postmortem capture.");
+    const result = await this.git(args);
+    if (result !== undefined && typeof result !== "string") throw new ImmutableExecutionError(`Git postmortem capture returned an invalid result: ${args.join(" ")}`);
+    return result ?? "";
+  }
+
+  private limitPostmortem(value: string, maxBytes: number): string {
+    const data = Buffer.from(value, "utf8");
+    if (data.length <= maxBytes) return value;
+    const suffix = "\n[postmortem output truncated]\n";
+    return `${data.subarray(0, Math.max(0, maxBytes - Buffer.byteLength(suffix))).toString("utf8")}${suffix}`;
   }
 
   private async archiveWithoutClobber(logPath: string): Promise<void> {
