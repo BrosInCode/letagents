@@ -85,14 +85,21 @@ export function resolveApiPath(urlOrPath: string | undefined): string {
 }
 
 export async function apiCall<T = unknown>(path: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(options?.headers as Record<string, string> | undefined),
-  };
+  const headers = new Headers(options?.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
 
-  const authorizationHeader = await getAuthorizationHeader();
-  if (authorizationHeader && !headers.Authorization) {
-    headers.Authorization = authorizationHeader;
+  const runtime = requireValidWorkerBearerRuntime();
+  if (runtime.mode === "worker") {
+    // The bearer is the complete worker credential. Normalize headers first so
+    // every caller spelling of Authorization is overwritten.
+    headers.set("Authorization", `Bearer ${runtime.bearer}`);
+  } else {
+    const authorizationHeader = await getAuthorizationHeader();
+    if (authorizationHeader && !headers.has("Authorization")) {
+      headers.set("Authorization", authorizationHeader);
+    }
   }
 
   const res = await fetch(`${API_URL}${path}`, {

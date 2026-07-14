@@ -3,6 +3,7 @@ import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+process.env.LETAGENTS_API_URL ??= "http://127.0.0.1:39999";
 
 const {
   getWorkerBearerRuntime,
@@ -12,6 +13,11 @@ const {
 const { ApiError, apiCall, setOwnerAuthStoreLoaderForTest } = await import("../server/runtime/api.js");
 const { agentSessionCredentials } = await import("../server/runtime/agent-sessions.js");
 const { registerAgentSessionTools } = await import("../server/tools/agent-sessions.js");
+const {
+  getCurrentRoomPayload,
+  setRoomInspectionOwnerAuthStoreLoaderForTest,
+} = await import("../server/tools/rooms/inspection-tools.js");
+const { rememberRoom, toRoomState } = await import("../server/runtime/room-state.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
@@ -29,20 +35,25 @@ function toolHandler(
 }
 
 function withAuthEnv<T>(
-  values: { bearer?: string | undefined; owner?: string | undefined },
+  values: { bearer?: string | undefined; owner?: string | undefined; apiUrl?: string | null },
   callback: () => T | Promise<T>,
 ): Promise<T> | T {
   const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
   const previousOwner = process.env.LETAGENTS_TOKEN;
+  const previousApiUrl = process.env.LETAGENTS_API_URL;
   if (values.bearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
   else process.env.LETAGENTS_AGENT_SESSION_BEARER = values.bearer;
   if (values.owner === undefined) delete process.env.LETAGENTS_TOKEN;
   else process.env.LETAGENTS_TOKEN = values.owner;
+  if (values.apiUrl === null) delete process.env.LETAGENTS_API_URL;
+  else if (values.apiUrl !== undefined) process.env.LETAGENTS_API_URL = values.apiUrl;
   return Promise.resolve(callback()).finally(() => {
     if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
     else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
     if (previousOwner === undefined) delete process.env.LETAGENTS_TOKEN;
     else process.env.LETAGENTS_TOKEN = previousOwner;
+    if (previousApiUrl === undefined) delete process.env.LETAGENTS_API_URL;
+    else process.env.LETAGENTS_API_URL = previousApiUrl;
   });
 }
 
@@ -52,13 +63,27 @@ test("worker bearer mode uses the worker Authorization header without owner cred
     setOwnerAuthStoreLoaderForTest(async () => assert.fail("worker bearer mode must not load saved auth"));
     try {
       globalThis.fetch = async (_url, init) => {
-        assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer worker-secret");
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer worker-secret");
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       };
       assert.deepEqual(await apiCall("/rooms/room_1/messages"), { ok: true });
     } finally {
       setOwnerAuthStoreLoaderForTest(null);
     }
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("worker bearer mode overwrites every caller Authorization header variant", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+    globalThis.fetch = async (_url, init) => {
+      assert.equal(new Headers(init?.headers).get("authorization"), "Bearer worker-secret");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    await apiCall("/rooms/room_1/messages", {
+      headers: { authorization: "Bearer attacker-controlled" },
+    });
   });
   globalThis.fetch = originalFetch;
 });
@@ -80,6 +105,21 @@ test("worker bearer mode rejects dual owner credentials before an API request", 
 test("blank worker bearer does not activate worker mode", async () => {
   await withAuthEnv({ bearer: "  ", owner: undefined }, async () => {
     assert.deepEqual(getWorkerBearerRuntime(), { mode: "owner" });
+  });
+});
+
+test("worker bearer mode requires an explicit valid API URL", async () => {
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, apiUrl: null }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), {
+      mode: "invalid",
+      error: "Worker bearer mode requires an explicit LETAGENTS_API_URL.",
+    });
+  });
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, apiUrl: "not a URL" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), {
+      mode: "invalid",
+      error: "Worker bearer mode requires LETAGENTS_API_URL to be a valid HTTP(S) URL.",
+    });
   });
 });
 
@@ -119,6 +159,36 @@ test("worker bearer mode disables owner-auth onboarding tools without API traffi
   globalThis.fetch = originalFetch;
 });
 
+test("worker bearer mode keeps room inspection off saved owner auth and local Codex data", async () => {
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+    rememberRoom(toRoomState({ room_id: "room_inspection", joined_via: "join_room", is_local: true }));
+    setRoomInspectionOwnerAuthStoreLoaderForTest(async () => assert.fail("worker room inspection must not load saved auth"));
+    try {
+      const result = await getCurrentRoomPayload();
+      assert.deepEqual(result.auth, {
+        source: "worker_bearer",
+        expires_at: null,
+        account: null,
+      });
+      assert.equal(result.current_local_codex_session, null);
+      assert.equal(result.local_codex_session_count, 0);
+    } finally {
+      setRoomInspectionOwnerAuthStoreLoaderForTest(null);
+    }
+  });
+});
+
+test("worker bearer mode disables local Codex session orchestration", async () => {
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+    const start = toolHandler(registerAgentSessionTools, "start_local_codex_session");
+    assert.deepEqual(JSON.parse((await start({ room: "room_1" })).content[0]!.text), {
+      success: false,
+      error: "worker_bearer_mode",
+      message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
+    });
+  });
+});
+
 test("worker bearer mode runs the room register, send, and wait loop without session credentials", async () => {
   const originalFetch = globalThis.fetch;
   await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
@@ -127,7 +197,7 @@ test("worker bearer mode runs the room register, send, and wait loop without ses
       const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
       requests.push({
         url: String(url),
-        headers: init?.headers as Record<string, string>,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
         body,
       });
       if (String(url).endsWith("/agent-sessions")) assert.fail("worker bearer registration must not call the owner registration route");
@@ -153,7 +223,7 @@ test("worker bearer mode runs the room register, send, and wait loop without ses
     assert.ok(messageRequest);
     assert.ok(pollRequest);
     for (const request of [messageRequest, pollRequest]) {
-      assert.equal(request.headers.Authorization, "Bearer worker-secret");
+      assert.equal(request.headers.authorization, "Bearer worker-secret");
       assert.equal(request.body?.agent_session_id, undefined);
       assert.equal(request.body?.agent_session_token, undefined);
     }

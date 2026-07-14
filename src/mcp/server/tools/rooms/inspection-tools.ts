@@ -17,17 +17,27 @@ import {
   getConversationIdentity,
   getCurrentLiveSessionPayload,
   getStoredAgentIdentity,
-  getStoredAuth,
   listStoredCodexLiveSessions,
   toPublicAgentIdentity,
   toPublicRoomState,
   withJoinRoomAgentPrompt,
 } from "../../runtime.js";
+import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
 import {
   findExistingConfig,
   resolveGitRoot,
 } from "../../repo-context.js";
 import { jsonToolResponse } from "./response.js";
+
+type OwnerAuthStore = Pick<typeof import("../../../local-state.js"), "getStoredAuth">;
+
+let ownerAuthStoreLoader: () => Promise<OwnerAuthStore> = () => import("../../../local-state.js");
+
+export function setRoomInspectionOwnerAuthStoreLoaderForTest(
+  loader: (() => Promise<OwnerAuthStore>) | null,
+): void {
+  ownerAuthStoreLoader = loader ?? (() => import("../../../local-state.js"));
+}
 
 export function registerRoomInspectionTools(server: McpServer): void {
   server.tool(
@@ -39,7 +49,7 @@ export function registerRoomInspectionTools(server: McpServer): void {
         .optional()
         .describe("Optional conversation ID to report the conversation-scoped identity instead of the global one."),
     },
-    async ({ conversation_id }) => jsonToolResponse(getCurrentRoomPayload(conversation_id))
+    async ({ conversation_id }) => jsonToolResponse(await getCurrentRoomPayload(conversation_id))
   );
 
   server.tool(
@@ -57,34 +67,45 @@ export function registerRoomInspectionTools(server: McpServer): void {
   );
 }
 
-function getCurrentRoomPayload(conversationId?: string) {
+export async function getCurrentRoomPayload(conversationId?: string) {
+  const runtime = requireValidWorkerBearerRuntime();
+  const workerAuth = runtime.mode === "worker"
+    ? { source: "worker_bearer", expires_at: null, account: null }
+    : null;
+  const localCodexDetails = runtime.mode === "worker"
+    ? { current_local_codex_session: null, local_codex_session_count: 0 }
+    : {
+        current_local_codex_session: getCurrentLiveSessionPayload(currentRoom?.room_id),
+        local_codex_session_count: listStoredCodexLiveSessions().length,
+      };
   if (!currentRoom) {
     return {
       connected: false,
       message: "Not currently in any room",
-      current_local_codex_session: getCurrentLiveSessionPayload(),
-      local_codex_session_count: listStoredCodexLiveSessions().length,
+      ...localCodexDetails,
+      ...(workerAuth ? { auth: workerAuth } : {}),
     };
   }
 
-  const auth = getStoredAuth();
+  const auth = runtime.mode === "worker"
+    ? null
+    : (await ownerAuthStoreLoader()).getStoredAuth();
   return withJoinRoomAgentPrompt({
     connected: true,
     ...toPublicRoomState(currentRoom),
-    current_local_codex_session: getCurrentLiveSessionPayload(currentRoom.room_id),
-    local_codex_session_count: listStoredCodexLiveSessions().length,
+    ...localCodexDetails,
     agent_identity: toPublicAgentIdentity(
       getConversationIdentity(conversationId)
         ?? currentAgentIdentity
         ?? getStoredAgentIdentity(currentAgentIdentityKey)
     ),
-    auth: auth
+    auth: workerAuth ?? (auth
       ? {
           source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
           expires_at: auth.expires_at ?? null,
           account: auth.account ?? null,
         }
-      : null,
+      : null),
   });
 }
 

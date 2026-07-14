@@ -1,6 +1,5 @@
 import {
   getCurrentCodexLiveSession,
-  getStoredAuth,
   getStoredCodexLiveSession,
   readLocalState,
   updateCodexLiveSession,
@@ -8,6 +7,7 @@ import {
   type StoredAgentSessionState,
 } from "../local-state.js";
 import { encodeRoomIdPath } from "../room-id.js";
+import { apiCall } from "../server/runtime/api.js";
 import { RpcClient, type RpcNotification } from "./rpc-client.js";
 import {
   isCodexAgentSessionMarker,
@@ -48,33 +48,8 @@ export function createCodexRuntimeBridgeController(input: {
   const bindTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const lastPost = new Map<string, { signature: string; postedAt: number }>();
 
-  function apiUrl(): string {
-    return (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
-  }
-
-  function authorizationHeader(): string | null {
-    const token = process.env.LETAGENTS_TOKEN || getStoredAuth()?.token || "";
-    return token ? `Bearer ${token}` : null;
-  }
-
   async function codexBridgeApiCall<T>(path: string, options?: RequestInit): Promise<T> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      ...(options?.headers as Record<string, string> | undefined),
-    };
-    const authorization = authorizationHeader();
-    if (authorization && !headers.Authorization) {
-      headers.Authorization = authorization;
-    }
-
-    const response = await fetch(`${apiUrl()}${path}`, {
-      ...options,
-      headers,
-    });
-    if (!response.ok) {
-      throw new Error(`LetAgents API ${response.status}: ${await response.text()}`);
-    }
-    return (await response.json()) as T;
+    return apiCall<T>(path, options);
   }
 
   function codexWorkerSessionsForRoom(roomId: string): StoredAgentSessionState[] {

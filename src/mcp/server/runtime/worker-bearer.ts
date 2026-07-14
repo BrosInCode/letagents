@@ -18,6 +18,25 @@ export function getWorkerBearerRuntime(): WorkerBearerRuntime {
     return { mode: "owner" };
   }
 
+  const apiUrl = process.env.LETAGENTS_API_URL?.trim();
+  if (!apiUrl) {
+    return {
+      mode: "invalid",
+      error: "Worker bearer mode requires an explicit LETAGENTS_API_URL.",
+    };
+  }
+  try {
+    const parsed = new URL(apiUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("unsupported protocol");
+    }
+  } catch {
+    return {
+      mode: "invalid",
+      error: "Worker bearer mode requires LETAGENTS_API_URL to be a valid HTTP(S) URL.",
+    };
+  }
+
   if (process.env.LETAGENTS_TOKEN?.trim()) {
     return {
       mode: "invalid",
@@ -36,7 +55,9 @@ export function requireValidWorkerBearerRuntime(): WorkerBearerRuntime {
   return runtime;
 }
 
-export function workerModeDisabledToolResult(): Record<string, unknown> | null {
+export function workerModeDisabledToolResult(
+  toolDescription = "This owner-auth onboarding tool",
+): Record<string, unknown> | null {
   const runtime = getWorkerBearerRuntime();
   if (runtime.mode === "invalid") {
     return { success: false, error: "worker_bearer_configuration_invalid", message: runtime.error };
@@ -45,7 +66,7 @@ export function workerModeDisabledToolResult(): Record<string, unknown> | null {
     return {
       success: false,
       error: "worker_bearer_mode",
-      message: "This owner-auth onboarding tool is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
+      message: `${toolDescription} is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.`,
     };
   }
   return null;
