@@ -6,8 +6,6 @@ export type ReconcilerExecutionInput = Omit<ReconcilerSnapshot, "capabilities"> 
   spawn: ProviderActionSpawn;
   handle: ProviderActionHandle | null;
   resumeFrom: ProviderActionRef | null;
-  p1_5ResumeEnabled: boolean;
-  handoffReceipt: string | null;
 };
 
 /** Executes only actions explicitly selected by the fenced policy. */
@@ -19,11 +17,10 @@ export class ProviderReconciler {
       && (!input.handle || input.handle.workAttemptId === input.workAttemptId)
       && (!input.resumeFrom || input.resumeFrom.workAttemptId === input.workAttemptId);
     if (!owned) return { decision: { action: "hold_coordination", observedState: "recovering", condition: "coordination_blocked", reason: "provider action ownership does not match work attempt" }, disposition: "held" };
-    if (input.activeLease && (!input.p1_5ResumeEnabled || !input.handoffReceipt)) {
-      return { decision: { action: "hold_coordination", observedState: "recovering", condition: "coordination_blocked", reason: "active lease requires enabled P1.5 handoff receipt" }, disposition: "held" };
-    }
     const capabilities = await this.port.capabilities(input.workAttemptId);
-    const decision = decideReconciliation({ ...input, capabilities }, watchdogThresholdMs);
+    // P1.5 does not yet expose a daemon-verifiable receipt to this process.
+    // Until it does, active-lease restart is hard-off; stop remains permitted.
+    const decision = decideReconciliation({ ...input, capabilities, fencedRebindProven: input.activeLease ? false : input.fencedRebindProven }, watchdogThresholdMs);
     if (decision.action === "poke") {
       if (!input.handle) return { decision: { ...decision, action: "wait", reason: "poke requires a live provider handle" }, disposition: "held" };
       await this.port.poke(input.handle, "You have addressed room messages waiting.");
