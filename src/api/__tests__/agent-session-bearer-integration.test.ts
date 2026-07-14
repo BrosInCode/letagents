@@ -18,6 +18,7 @@ const { resolveRequestAuth } = await import("../request/auth.js");
 const { resolveRequestAgentIdentity } = await import("../request/agent-identity.js");
 const { requireAdmin, requireParticipant } = await import("../rooms/access.js");
 const { requiredAgentSessionRouteCapability } = await import("../request/agent-session-route-capabilities.js");
+const { registerHttpMiddleware } = await import("../http/middleware.js");
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -86,7 +87,22 @@ test("worker bearer route registry is default-deny and semantic", () => {
   assert.equal(requiredAgentSessionRouteCapability("GET", "/rooms/room_1/messages"), "messages.read");
   assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/tasks/task_1/lease-action"), "coordination.self_write");
   assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/board-intents"), null);
+  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute"), null);
   assert.equal(requiredAgentSessionRouteCapability("PATCH", "/rooms/room_1"), null);
+});
+
+test("HTTP middleware denies unknown routes and missing semantic capabilities", async () => {
+  const handlers: Array<(...args: any[]) => unknown> = [];
+  const app = { use(handler: (...args: any[]) => unknown) { handlers.push(handler); }, options() {} };
+  const principal = { bearer_id: "agent_bearer_1", bearer_generation: 1, capabilities: ["messages.read"], room_id: "room_1", agent_session_id: "agent_session_1", actor_label: "Worker", agent_key: "owner/worker", agent_instance_id: null, session_kind: "worker" as const, runtime: "codex", display_name: "Worker", owner_label: "Owner", ide_label: "Agent", repo_branch: null, expires_at: new Date(Date.now() + 60_000).toISOString() };
+  registerHttpMiddleware(app as never, { resolveRequestAuth: async () => ({ account: null, authKind: "agent_session" as const, agentSession: principal }) });
+  const authHandler = handlers[1]!;
+  for (const [method, path, expected] of [["GET", "/rooms/room_1/messages", 200], ["POST", "/rooms/room_1/messages", 403], ["POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute", 403]] as const) {
+    const res = responseRecorder(); let nexted = false;
+    await authHandler({ method, path, headers: {} }, res, () => { nexted = true; });
+    assert.equal(res.statusCode, expected);
+    assert.equal(nexted, expected === 200);
+  }
 });
 
 test("worker bearer rejects cross-room and owner routes without becoming an owner principal", { skip: requiresDatabase }, async () => {
