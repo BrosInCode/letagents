@@ -118,7 +118,7 @@ export class WorkspaceProvisioner {
         } catch {
           // It is daemon-owned (exact layout + held fence) but cannot prove it
           // is this attempt. Keep it for inspection and make the retry usable.
-          await this.quarantineWorkspace(workspace);
+          await this.quarantineWorkspace(workspace, canonicalBare);
         }
       }
 
@@ -138,8 +138,13 @@ export class WorkspaceProvisioner {
     return { version: 1, repo, work_attempt_id: workAttemptId, task_id: taskId, remote_url: remoteUrl, resolved_revision: resolvedRevision, bare_path: barePath };
   }
 
-  private async quarantineWorkspace(workspace: string): Promise<void> {
+  private async quarantineWorkspace(workspace: string, bare: string): Promise<void> {
     await rename(workspace, `${workspace}.quarantine.${randomUUID()}`);
+    // `worktree add` records its path in the bare repository. Renaming an
+    // unprovable partial preserves it for inspection but does not clear that
+    // exact registration, so remove only the old daemon-owned path before the
+    // retry. Broad `worktree prune` could erase another recoverable attempt.
+    await this.run(["--git-dir", bare, "worktree", "remove", "--force", workspace]);
   }
 
   private async verifyBare(bare: string, remoteUrl: string): Promise<void> {

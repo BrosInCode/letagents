@@ -214,15 +214,16 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
   const env = await fixture();
   try {
     const commands: string[][] = [];
+    let rejectMarkerlessRecovery = false;
     const provisioner = new WorkspaceProvisioner(env.root, async (args) => {
       commands.push(args);
-      if (args.includes("worktree")) await mkdir(args.at(-2)!, { recursive: true });
+      if (args.includes("worktree") && args.includes("add")) { rejectMarkerlessRecovery = false; await mkdir(args.at(-2)!, { recursive: true }); }
       else if (args[0] === "clone") await mkdir(args.at(-1)!, { recursive: true });
       if (args.includes("--is-bare-repository")) return "true";
       if (args.includes("remote") && args.includes("get-url")) return "https://example.invalid/repo.git";
       if (args.includes("cat-file")) return "ok";
       if (args.includes("rev-parse")) {
-        if (args.includes("--git-common-dir")) return join(env.root, "repos", "repo.git");
+        if (args.includes("--git-common-dir")) return rejectMarkerlessRecovery ? join(env.root, "repos", "wrong.git") : join(env.root, "repos", "repo.git");
         return TEST_OID;
       }
       return "";
@@ -238,6 +239,13 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
     await rm(join(first.path, ".letagents-work-attempt.json"));
     const recovered = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
     assert.equal(recovered.reused, true, "an add-before-marker crash is recoverable");
+    await rm(join(first.path, ".letagents-work-attempt.json"));
+    rejectMarkerlessRecovery = true;
+    const reprovisioned = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
+    assert.equal(reprovisioned.reused, false, "an unprovable markerless partial is quarantined and reprovisioned");
+    const remove = commands.findIndex((args) => args.includes("worktree") && args.includes("remove") && args.includes(first.path));
+    const replacementAdd = commands.findIndex((args, index) => index > remove && args.includes("worktree") && args.includes("add") && args.includes(first.path));
+    assert.ok(remove >= 0 && replacementAdd > remove, "the exact stale worktree registration is removed before re-adding");
     await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: randomUUID(), taskId: "task", remoteUrl: "https://token@example.invalid/repo.git", revision: "abc" }), /userinfo/);
     await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: randomUUID(), taskId: "task", remoteUrl: "https://evil.invalid/repo.git", revision: "abc" }), /identity/);
     await rm(first.path, { recursive: true });
