@@ -62,9 +62,14 @@ function reachableSession(overrides: Partial<RoomAgentDeliverySession> = {}): Ro
 
 function candidate(
   session: RoomAgentDeliverySession,
-  endedAt: string | null = null
+  endedAt: string | null = null,
+  runtimeLastActiveAt: string | null = null
 ): LivenessAnnouncementCandidate {
-  return { session, agent_session_ended_at: endedAt };
+  return {
+    session,
+    agent_session_ended_at: endedAt,
+    runtime_last_active_at: runtimeLastActiveAt,
+  };
 }
 
 test("announces a worker offline past the threshold", () => {
@@ -199,21 +204,41 @@ test("emits a recovery transition only after an announced outage", () => {
   );
 });
 
-test("announcement text names the agent and flags the Board Manager role", () => {
+test("announcement text matches the runtime evidence and stays lease-aware", () => {
   const session = buildSession();
-  const plain = buildOfflineAnnouncementText({
+  const unknown = buildOfflineAnnouncementText({
     session,
     offline_for_ms: 3 * 60_000,
     is_board_manager: false,
+    runtime_evidence: "none",
+    runtime_inactive_for_ms: null,
   });
-  assert.ok(plain.startsWith("[status] FieldSignal appears to be offline"));
-  assert.ok(plain.includes("3m"));
-  assert.ok(!plain.includes("Board Manager"));
+  assert.ok(unknown.includes("message channel has been unreachable for 3m"));
+  assert.ok(unknown.includes("runtime activity unknown"));
+  assert.ok(unknown.includes("work leases remain valid"));
+  assert.ok(!unknown.includes("appears to be offline"));
+  assert.ok(!unknown.includes("Board Manager"));
+
+  // Stale ledger evidence never claims death — generic presence writes
+  // default last_tool_call_at, so it only adds the last-seen datapoint.
+  const stale = buildOfflineAnnouncementText({
+    session,
+    offline_for_ms: 3 * 60_000,
+    is_board_manager: false,
+    runtime_evidence: "stale",
+    runtime_inactive_for_ms: 7 * 60_000,
+  });
+  assert.ok(!stale.includes("appears to be offline"));
+  assert.ok(stale.includes("runtime activity unknown"));
+  assert.ok(stale.includes("Last recorded runtime activity was 7m ago"));
+  assert.ok(stale.includes("lease expires, is handed off"));
 
   const manager = buildOfflineAnnouncementText({
     session,
     offline_for_ms: 3 * 60_000,
     is_board_manager: true,
+    runtime_evidence: "none",
+    runtime_inactive_for_ms: null,
   });
   assert.ok(manager.includes("Board Manager"));
 
@@ -221,6 +246,26 @@ test("announcement text names the agent and flags the Board Manager role", () =>
     buildRecoveryAnnouncementText({ session }),
     "[status] FieldSignal is back online and reachable again."
   );
+});
+
+test("a silent channel with an active runtime is never announced", () => {
+  // The channel dropped 3 minutes ago, but the runtime made a tool call
+  // 1 minute ago — the agent is busy working, not dead.
+  const busyWorker = candidate(buildSession(), null, isoMinutesAgo(1));
+  assert.deepEqual(selectLivenessTransitions({ candidates: [busyWorker], now: NOW }), []);
+
+  // Once the runtime evidence also goes stale, the death announces with the
+  // stronger stale-runtime classification.
+  const trulyDead = candidate(buildSession(), null, isoMinutesAgo(9));
+  const [transition] = selectLivenessTransitions({ candidates: [trulyDead], now: NOW });
+  assert.equal(transition?.kind, "offline");
+  assert.equal(transition?.runtime_evidence, "stale");
+  assert.equal(transition?.runtime_inactive_for_ms, 9 * 60_000);
+
+  // Raw MCP workers with no telemetry classify as unknown.
+  const noTelemetry = candidate(buildSession());
+  const [unknownTransition] = selectLivenessTransitions({ candidates: [noTelemetry], now: NOW });
+  assert.equal(unknownTransition?.runtime_evidence, "none");
 });
 
 interface FakeDepsOptions {
@@ -304,7 +349,7 @@ test("sweepOnce announces offline workers with an epoch-stable client message id
   assert.equal(summary.announced_recovered, 0);
   assert.equal(announcedOffline.length, 1);
   assert.equal(announcedOffline[0]?.roomId, "focus_34");
-  assert.ok(announcedOffline[0]!.text.includes("FieldSignal appears to be offline"));
+  assert.ok(announcedOffline[0]!.text.includes("FieldSignal's message channel has been unreachable"));
   assert.equal(
     announcedOffline[0]?.clientMessageId,
     `agent_liveness:offline:${session.delivery_key}:${session.last_disconnected_at}`

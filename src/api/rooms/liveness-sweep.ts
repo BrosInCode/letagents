@@ -22,10 +22,21 @@ export const OFFLINE_ANNOUNCE_MAX_AGE_MS = 60 * 60 * 1000;
 
 export const LIVENESS_SWEEP_INTERVAL_MS = 60 * 1000;
 
+export type LivenessRuntimeEvidence = "none" | "stale";
+
 export interface LivenessTransition {
   kind: "offline" | "recovered";
   session: RoomAgentDeliverySession;
   offline_for_ms: number;
+  /**
+   * "none": the agent reports no runtime telemetry (raw MCP worker) — the
+   * silent channel is the only signal, so the announcement says activity is
+   * unknown. "stale": runtime telemetry exists but has also gone quiet — a
+   * stronger death signal. Agents whose runtime is demonstrably ACTIVE are
+   * never selected at all.
+   */
+  runtime_evidence: LivenessRuntimeEvidence;
+  runtime_inactive_for_ms: number | null;
 }
 
 function parseTime(value: string | null | undefined): number | null {
@@ -86,7 +97,13 @@ export function selectLivenessTransitions(input: {
         offlineAnnouncedAt !== null &&
         (recoveryAnnouncedAt === null || recoveryAnnouncedAt < offlineAnnouncedAt);
       if (needsRecovery) {
-        transitions.push({ kind: "recovered", session, offline_for_ms: 0 });
+        transitions.push({
+          kind: "recovered",
+          session,
+          offline_for_ms: 0,
+          runtime_evidence: "none",
+          runtime_inactive_for_ms: null,
+        });
       }
       continue;
     }
@@ -101,6 +118,13 @@ export function selectLivenessTransitions(input: {
       continue;
     }
 
+    // Transport silence with a recently active runtime is an agent busy
+    // working outside the room, not a death — say nothing.
+    const runtimeLastActiveAt = parseTime(candidate.runtime_last_active_at);
+    if (runtimeLastActiveAt !== null && now - runtimeLastActiveAt < OFFLINE_ANNOUNCE_AFTER_MS) {
+      continue;
+    }
+
     // One announcement per outage epoch: a marker stamped after the epoch
     // means this outage was already announced, while a newer disconnect (or a
     // fresh post-recovery heartbeat that later froze) starts a new epoch.
@@ -111,7 +135,13 @@ export function selectLivenessTransitions(input: {
       continue;
     }
 
-    transitions.push({ kind: "offline", session, offline_for_ms: offlineForMs });
+    transitions.push({
+      kind: "offline",
+      session,
+      offline_for_ms: offlineForMs,
+      runtime_evidence: runtimeLastActiveAt === null ? "none" : "stale",
+      runtime_inactive_for_ms: runtimeLastActiveAt === null ? null : now - runtimeLastActiveAt,
+    });
   }
 
   return transitions;
@@ -121,10 +151,21 @@ export function buildOfflineAnnouncementText(input: {
   session: Pick<RoomAgentDeliverySession, "actor_label" | "display_name">;
   offline_for_ms: number;
   is_board_manager: boolean;
+  runtime_evidence: LivenessRuntimeEvidence;
+  runtime_inactive_for_ms: number | null;
 }): string {
   const label = getAgentPrimaryLabel(input.session.actor_label) || input.session.display_name;
   const offlineFor = formatOfflineDuration(input.offline_for_ms);
-  const base = `[status] ${label} appears to be offline — no active connection for ${offlineFor}. If ${label} owned in-flight work, another agent or a human should pick it up.`;
+  // Transport loss stays visible, but it is never claimed as death: the
+  // ledger's generic presence writes default last_tool_call_at, so even
+  // "stale" evidence cannot prove a stopped runtime — it only adds the
+  // last-seen datapoint. Taking over someone's work is a lease decision,
+  // not a reflex.
+  const staleNote =
+    input.runtime_evidence === "stale"
+      ? ` Last recorded runtime activity was ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)} ago.`
+      : "";
+  const base = `[status] ${label}'s message channel has been unreachable for ${offlineFor} — runtime activity unknown; it may still be working outside the room.${staleNote} Its work leases remain valid. Only pick up its work if a lease expires, is handed off, or a human confirms the loss.`;
   if (!input.is_board_manager) {
     return base;
   }
@@ -224,6 +265,8 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
           is_board_manager: Boolean(
             managerSessionId && session.agent_session_id === managerSessionId
           ),
+          runtime_evidence: transition.runtime_evidence,
+          runtime_inactive_for_ms: transition.runtime_inactive_for_ms,
         }),
         client_message_id: `agent_liveness:offline:${session.delivery_key}:${epoch}`,
         announced_at: announcedAt,

@@ -691,3 +691,98 @@ test(
     assert.deepEqual(pollRes.body, expected);
   }
 );
+
+test(
+  "a re-registering agent instance resumes its previous display name",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    const { endRoomAgentSession } = dbModule!;
+
+    const registrationBody = {
+      actor_key: agentIdentity.canonical_key,
+      display_name: "MistyMorrow",
+      ide_label: "Agent",
+      agent_instance_id: "burst-instance-1",
+      session_kind: "worker",
+      runtime: "claude-code",
+    };
+
+    const first = await invoke(
+      registerHandler,
+      ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+    );
+    assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+    const firstSession = first.body as { session_id?: string; display_name?: string };
+    assert.equal(firstSession.display_name, "MistyMorrow");
+
+    // Clean end, then the SAME instance re-registers: it must resume its
+    // name instead of minting "MistyMorrow 1" (the persistent participant
+    // record used to keep the old name occupied forever).
+    await endRoomAgentSession!({ session_id: firstSession.session_id! });
+    const second = await invoke(
+      registerHandler,
+      ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+    );
+    assert.equal(second.statusCode, 201, JSON.stringify(second.body));
+    const secondSession = second.body as { session_id?: string; display_name?: string };
+    assert.equal(
+      secondSession.display_name,
+      "MistyMorrow",
+      "the same instance resumes its prior name after a clean end"
+    );
+    assert.notEqual(secondSession.session_id, firstSession.session_id);
+
+    // A DIFFERENT instance while the name is actively held still gets a
+    // numbered variant — the live-collision path is unchanged.
+    const third = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        { ...registrationBody, agent_instance_id: "burst-instance-2" },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(third.statusCode, 201, JSON.stringify(third.body));
+    const thirdSession = third.body as { display_name?: string };
+    assert.notEqual(thirdSession.display_name, "MistyMorrow");
+
+    // An explicit DIFFERENT name is a deliberate rename: resumption must not
+    // overwrite it.
+    await endRoomAgentSession!({ session_id: secondSession.session_id! });
+    const renamed = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        { ...registrationBody, display_name: "MorningGlory" },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(renamed.statusCode, 201, JSON.stringify(renamed.body));
+    const renamedSession = renamed.body as { session_id?: string; display_name?: string };
+    assert.equal(
+      renamedSession.display_name,
+      "MorningGlory",
+      "an explicit new name wins over resuming the old one"
+    );
+
+    // And an explicit request for the SAME prior name resumes it cleanly.
+    await endRoomAgentSession!({ session_id: renamedSession.session_id! });
+    const explicitSame = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        { ...registrationBody, display_name: "MorningGlory" },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(explicitSame.statusCode, 201, JSON.stringify(explicitSame.body));
+    assert.equal(
+      (explicitSame.body as { display_name?: string }).display_name,
+      "MorningGlory",
+      "an explicit same-name request resumes without numbering"
+    );
+  }
+);
