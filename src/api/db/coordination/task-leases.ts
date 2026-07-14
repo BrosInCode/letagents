@@ -65,18 +65,6 @@ export async function getActiveTaskLeases(
   return rows.map(toTaskLease);
 }
 
-// Fetch a single lease by id regardless of status. Used by grant-authenticated
-// routes to check a supervisor grant's room+agent scope against the target lease
-// before acting on it.
-export async function getTaskLeaseById(leaseId: string): Promise<TaskLease | null> {
-  const [row] = (await db
-    .select()
-    .from(task_leases)
-    .where(eq(task_leases.id, leaseId))
-    .limit(1)) as TaskLeaseRow[];
-  return row ? toTaskLease(row) : null;
-}
-
 export async function revokeTaskLease(
   roomId: string,
   leaseId: string,
