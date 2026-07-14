@@ -19,6 +19,8 @@ const { resolveRequestAgentIdentity } = await import("../request/agent-identity.
 const { requireAdmin, requireParticipant } = await import("../rooms/access.js");
 const { requiredAgentSessionRouteCapability } = await import("../request/agent-session-route-capabilities.js");
 const { registerHttpMiddleware } = await import("../http/middleware.js");
+const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.js");
+const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/index.js");
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -115,6 +117,29 @@ test("HTTP middleware denies unknown routes and missing semantic capabilities", 
     assert.equal(res.statusCode, expected);
     assert.equal(nexted, expected === 200);
   }
+});
+
+test("bearer route handlers enforce self scope for reasoning and session control", async () => {
+  const principal = { bearer_id: "agent_bearer_1", bearer_generation: 1, capabilities: ["coordination.self_write"], room_id: "room_1", agent_session_id: "agent_session_1", actor_label: "Worker", agent_key: "owner/worker", agent_instance_id: null, session_kind: "worker" as const, runtime: "codex", display_name: "Worker", owner_label: "Owner", ide_label: "Agent", repo_branch: null, expires_at: new Date(Date.now() + 60_000).toISOString() };
+  const reasoningHandlers = new Map<string, (...args: any[]) => Promise<void>>();
+  registerRoomReasoningRoutes({ get() {}, post(path: RegExp, handler: any) { reasoningHandlers.set(path.source, handler); }, patch(path: RegExp, handler: any) { reasoningHandlers.set(path.source, handler); } } as never, {
+    reasoningEvents: { emit() {} }, resolveCanonicalRoomRequestId: async () => "room_1", resolveRoomOrReply: async () => ({ id: "room_1" }), requireParticipant: async () => true,
+    reasoningStore: { getReasoningSessionById: async () => ({ actor_label: "Other" }) },
+  } as never);
+  const reasoningRes = responseRecorder();
+  await [...reasoningHandlers.values()].find((handler, index) => index === 2)!({ params: { 0: "room_1", 1: "reasoning_1" }, body: {}, authKind: "agent_session", agentSession: principal }, reasoningRes);
+  assert.equal(reasoningRes.statusCode, 403);
+
+  const presenceHandlers = new Map<string, (...args: any[]) => Promise<void>>();
+  registerRoomPresenceRoutes({ get() {}, post(path: RegExp, handler: any) { presenceHandlers.set(path.source, handler); } } as never, {
+    resolveCanonicalRoomRequestId: async () => "room_1", resolveRoomOrReply: async () => ({ id: "room_1" }), requireParticipant: async () => true, requireAdmin: async () => false,
+    rememberAgentRoomParticipant: async () => {}, maybeEmitStaleWorkPrompt: async () => {}, emitProjectMessage: async () => ({}),
+  } as never);
+  const disconnect = [...presenceHandlers.entries()].find(([source]) => source.includes("agent-sessions") && source.includes("disconnect"))?.[1];
+  assert.ok(disconnect);
+  const presenceRes = responseRecorder();
+  await disconnect!({ params: { 0: "room_1", 1: "agent_session_other" }, body: {}, authKind: "agent_session", agentSession: principal }, presenceRes);
+  assert.equal(presenceRes.statusCode, 403);
 });
 
 test("worker bearer rejects cross-room and owner routes without becoming an owner principal", { skip: requiresDatabase }, async () => {
