@@ -17,6 +17,8 @@ import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
+import { ProviderReconciler } from "../reconciler-runner.js";
+import type { ProviderActionPort } from "../provider-action-port.js";
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
@@ -80,6 +82,23 @@ test("reconciler policy fences recovery, gates resume, quarantines crash loops, 
   assert.equal(decideReconciliation({ ...base, exitsInWindow: CRASH_LOOP_EXIT_LIMIT }, 1_000).action, "quarantine");
   assert.equal(restartBackoffMs(1), 1_000);
   assert.equal(restartBackoffMs(20), 5 * 60 * 1_000);
+});
+
+test("reconciler executes only fenced, capability-negotiated port actions", async () => {
+  const calls: string[] = [];
+  const handle = { workAttemptId: "attempt", pid: 1, providerContinuationId: "thread", observedState: "failed" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+    spawn: async () => { calls.push("spawn"); return handle; }, attach: async () => null,
+    resume: async () => { calls.push("resume"); return handle; }, poke: async () => { calls.push("poke"); },
+    stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "thread" }), onExit: async () => () => {},
+  };
+  const runner = new ProviderReconciler(port);
+  const base = { workAttemptId: "attempt", desiredState: "running" as const, observedState: "failed" as const, condition: "none" as const, nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, exitsInWindow: 0, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle, resumeFrom: { workAttemptId: "attempt", providerContinuationId: "thread" } };
+  assert.equal((await runner.reconcile({ ...base, activeLease: true, fencedRebindProven: false }, 100)).action, "hold_coordination");
+  assert.deepEqual(calls, []);
+  assert.equal((await runner.reconcile({ ...base, activeLease: false, fencedRebindProven: false }, 100)).action, "restart_with_resume");
+  assert.deepEqual(calls, ["resume"]);
 });
 
 test("singleton fences a second daemon and detects a newer generation", async () => {
