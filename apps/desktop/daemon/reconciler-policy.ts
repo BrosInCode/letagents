@@ -58,7 +58,7 @@ export function decideReconciliation(snapshot: ReconcilerSnapshot, watchdogThres
   }
 
   const needsRecovery = snapshot.desiredState === "running"
-    && (snapshot.observedState === "failed" || snapshot.observedState === "stopped" || snapshot.observedState === "absent");
+    && (snapshot.observedState === "failed" || snapshot.observedState === "stopped" || snapshot.observedState === "absent" || watchdogShouldEscalate(snapshot, watchdogThresholdMs));
   if (needsRecovery) {
     // A prompt/session rotation cannot cross a lease authorization boundary.
     if (snapshot.activeLease && !snapshot.fencedRebindProven) {
@@ -77,12 +77,6 @@ export function decideReconciliation(snapshot: ReconcilerSnapshot, watchdogThres
     && snapshot.nowMs - snapshot.lastPollAtMs >= watchdogThresholdMs
     && !snapshot.pokeIgnored) {
     return { action: "poke", observedState: snapshot.observedState, condition: snapshot.condition, reason: "addressed messages waiting at a poll boundary" };
-  }
-
-  if (watchdogShouldEscalate(snapshot, watchdogThresholdMs)) {
-    // The Poke rung has already been exhausted. Recovery is still subject to
-    // the lease fence above, so re-run through the recovery state next tick.
-    return { action: "wait", observedState: "recovering", condition: snapshot.condition, reason: "poke ignored; await fenced recovery decision" };
   }
 
   return { action: "wait", observedState: snapshot.observedState, condition: snapshot.condition, reason: "no convergence action required" };
