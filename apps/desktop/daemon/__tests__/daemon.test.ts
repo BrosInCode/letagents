@@ -26,6 +26,24 @@ async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }
   return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); } };
 }
 
+async function within<T>(promise: Promise<T>, label: string, timeoutMs = 2_000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<T>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), timeoutMs); })]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
 const TEST_OID = "a".repeat(40);
 const TEST_SUPERVISOR = { supervisor_id: "test-daemon", supervisor_generation: 1 };
 async function provisionedWorkspace(root: string, taskId = "task", workAttemptId = randomUUID()): Promise<{ path: string; id: string; bare: string }> {
@@ -349,9 +367,6 @@ test("scheduled convergence atomically replaces exit subscriptions and preserves
     assert.equal(listeners.has(1), false, "the superseded child listener is removed");
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.ok(poked.every((pid) => pid === 2) && poked.length > 0, "later scheduler ticks target the installed replacement, not input's stale handle");
-    listeners.get(2)?.({ endedAt: "later", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    assert.ok(((await new ManifestStore(manifestPath).load()).entries[0]?.reconciliation?.exit_timestamps_ms.length ?? 0) >= 1, "replacement terminal edge reaches durable reconciliation before any recovery tick");
     await stop(); await sameStop();
 
     await daemon.transition(entry.id, "working", "quarantined", "already quarantined", "test");
@@ -395,14 +410,38 @@ test("a slow old replacement registration cannot overwrite a newer child listene
     let sequence = 0;
     const input = () => { sequence += 1; return { workAttemptId: "attempt", reconciliationActionId: `g-${sequence}`, reconciliationActionSequence: sequence, nowMs: Date.now() + 10_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }; };
     const scheduled = daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "failed" }, input, 100, 60_000);
-    await waitingForSecondRegistration;
+    await within(waitingForSecondRegistration, "the blocked second listener registration");
     listeners.get(1)?.({ endedAt: "early", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
-    await secondSpawned;
+    // The callback tick is deliberately queued behind the blocked first tick;
+    // unblock it before waiting for the callback's successor spawn.
     releaseSecondRegistration();
-    const stop = await scheduled;
-    await thirdInstalled;
+    const stop = await within(scheduled, "the first scheduled convergence");
+    await within(secondSpawned, "the callback successor spawn");
+    await within(thirdInstalled, "the newest child listener");
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual([...listeners.keys()], [3], "serialized installs leave only the newest replacement subscribed");
+    await stop(); await daemon.stop();
+  } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
+});
+
+test("a replacement child terminal callback enters durable convergence", async () => {
+  const env = await fixture();
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    const manifestPath = join(env.root, "manifest.json");
+    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
+    let replacementExit: ((terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void) | null = null;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+      spawn: async () => ({ workAttemptId: "attempt", pid: 2, providerContinuationId: null, observedState: "starting" }), attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+      onExit: async (handle, listener) => { if (handle.pid === 2) replacementExit = listener; return () => {}; },
+    };
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    await daemon.start();
+    const stop = await daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "failed" }, () => ({ workAttemptId: "attempt", reconciliationActionId: "g-1", reconciliationActionSequence: 1, nowMs: Date.now(), lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }), 100, 60_000);
+    assert.ok(replacementExit, "the spawned child replaces the initial exit listener");
+    replacementExit?.({ endedAt: "later", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
+    await eventually(async () => (await new ManifestStore(manifestPath).load()).entries[0]?.observed_state === "failed", "replacement terminal persistence");
     await stop(); await daemon.stop();
   } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
 });
