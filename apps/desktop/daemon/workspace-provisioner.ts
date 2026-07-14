@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 export type GitCommand = (args: string[]) => Promise<void>;
 
 type RepositoryMarker = { version: 1; repo: string; remote_url: string };
-type WorkspaceMarker = { version: 1; repo: string; work_attempt_id: string; remote_url: string; revision: string };
+type WorkspaceMarker = { version: 1; repo: string; work_attempt_id: string; task_id: string | null; remote_url: string; revision: string };
 
 const REPOSITORY_MARKER = ".letagents-repository.json";
 const WORKSPACE_MARKER = ".letagents-work-attempt.json";
@@ -31,7 +31,7 @@ export class WorkspaceProvisioner {
     return this.insideRoot("worktrees", safeSegment(repo, "repository"), safeSegment(workAttemptId, "work attempt id"));
   }
 
-  async provision(input: { repo: string; workAttemptId: string; remoteUrl: string; revision: string }): Promise<{ path: string; reused: boolean }> {
+  async provision(input: { repo: string; workAttemptId: string; taskId?: string; remoteUrl: string; revision: string }): Promise<{ path: string; reused: boolean }> {
     const repo = safeSegment(input.repo, "repository");
     const workAttemptId = safeSegment(input.workAttemptId, "work attempt id");
     const bare = this.insideRoot("repos", `${repo}.git`);
@@ -43,7 +43,7 @@ export class WorkspaceProvisioner {
     const repoWorktrees = this.insideRoot("worktrees", repo);
     await this.ensureDirectory(repoWorktrees, await this.canonicalRoot());
 
-    const workspaceMarker: WorkspaceMarker = { version: 1, repo, work_attempt_id: workAttemptId, remote_url: input.remoteUrl, revision: input.revision };
+    const workspaceMarker: WorkspaceMarker = { version: 1, repo, work_attempt_id: workAttemptId, task_id: input.taskId ?? null, remote_url: input.remoteUrl, revision: input.revision };
     if (await this.exists(workspace)) {
       await this.ensureDirectory(workspace, await realpath(repoWorktrees));
       await this.assertMarker(join(workspace, WORKSPACE_MARKER), workspaceMarker, "workspace");

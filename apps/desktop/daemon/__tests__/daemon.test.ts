@@ -141,7 +141,7 @@ test("work attempts survive generations and lease rebinds while terminal payload
   const env = await fixture();
   let tick = 0;
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:0${tick++}.000Z`);
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:0${tick++}.000Z`, env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: join(env.root, "workspace") });
     await store.checkpoint(attempt.work_attempt_id, { room_cursor: "msg_12", provider_continuation_id: "provider-1" });
     const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
@@ -163,7 +163,7 @@ test("stdio rotates append-only and GC protects active, ambiguous, quarantined, 
   const env = await fixture();
   let tick = 0;
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`);
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`, env.root);
     const create = async () => {
       const workspace = join(env.root, `workspace-${tick}`); await mkdir(workspace, { recursive: true });
       const attempt = await store.createAttempt({ taskId: "task", leaseId: `lease-${tick}`, leaseEpoch: 1, workspacePath: workspace });
@@ -254,7 +254,7 @@ test("execution identities prohibit parallel, duplicate, and laundered terminal 
   const env = await fixture();
   try {
     const workspace = join(env.root, "workspace"); await mkdir(workspace);
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z");
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace });
     const first = await store.startGeneration(attempt.work_attempt_id, "starter", 1);
     await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 2), /one execution generation/);

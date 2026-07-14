@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { appendFile, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
@@ -30,6 +30,7 @@ function isInside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
+function isStrictChild(root: string, candidate: string): boolean { return resolve(root) !== resolve(candidate) && isInside(root, candidate); }
 
 const attemptStates = new Set<WorkAttemptState>(["active", "ambiguous", "quarantined", "unreviewed", "cleanly_concluded", "abandoned", "gc_pending", "garbage_collected"]);
 
@@ -88,16 +89,19 @@ export class WorkDurabilityStore {
   private writes: Promise<void> = Promise.resolve();
   private readonly workspaceRoot: string;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = dirname(attemptsRoot), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>) {
     this.workspaceRoot = resolve(workspaceRoot);
   }
 
-  async createAttempt(input: { taskId: string; leaseId: string; leaseEpoch: number; workspacePath: string }): Promise<TaskWorkAttempt> {
+  static mintWorkAttemptId(): string { return randomUUID(); }
+  async createAttempt(input: { taskId: string; leaseId: string; leaseEpoch: number; workspacePath: string; workAttemptId?: string }): Promise<TaskWorkAttempt> {
     this.assertWorkspacePath(input.workspacePath);
-    return this.mutate((stored) => {
+    const workAttemptId = input.workAttemptId ?? WorkDurabilityStore.mintWorkAttemptId();
+    this.assertAttemptId(workAttemptId);
+    const attempt = await this.mutate((stored) => {
       const createdAt = this.now();
       const attempt: TaskWorkAttempt = {
-        work_attempt_id: randomUUID(), task_id: input.taskId, lease_id: input.leaseId, current_lease_epoch: input.leaseEpoch,
+        work_attempt_id: workAttemptId, task_id: input.taskId, lease_id: input.leaseId, current_lease_epoch: input.leaseEpoch,
         epoch_history: [{ lease_id: input.leaseId, epoch: input.leaseEpoch, recorded_at: createdAt }], workspace_path: input.workspacePath,
         state: "active", created_at: createdAt, concluded_at: null, conclusion_cause: null, postmortem_diff: null,
         checkpoints: [], execution_generations: [],
@@ -105,6 +109,8 @@ export class WorkDurabilityStore {
       stored.attempts.push(attempt);
       return attempt;
     });
+    await this.bindWorkspaceMarker(attempt);
+    return attempt;
   }
 
   async getAttempt(workAttemptId: string): Promise<TaskWorkAttempt> {
@@ -175,7 +181,7 @@ export class WorkDurabilityStore {
       try {
         const info = await lstat(logPath);
         if (info.isSymbolicLink() || !info.isFile()) throw new ImmutableExecutionError("Stdio log must be a regular daemon-owned file.");
-        if (info.size >= maxBytes) await rename(logPath, `${logPath}.${Date.now()}.archive`);
+        if (info.size >= maxBytes) await rename(logPath, `${logPath}.${randomUUID()}.archive`);
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -208,7 +214,7 @@ export class WorkDurabilityStore {
 
   async garbageCollect(keepCleanlyConcluded: number): Promise<string[]> {
     const reserved = await this.mutate((stored) => {
-      const candidates = stored.attempts.filter((attempt) => attempt.state === "cleanly_concluded" && attempt.concluded_at && attempt.postmortem_diff !== null)
+      const candidates = stored.attempts.filter((attempt) => (attempt.state === "cleanly_concluded" && attempt.concluded_at && attempt.postmortem_diff !== null) || attempt.state === "gc_pending")
         .sort((a, b) => (b.concluded_at ?? "").localeCompare(a.concluded_at ?? ""))
         .slice(Math.max(0, keepCleanlyConcluded));
       for (const attempt of candidates) attempt.state = "gc_pending";
@@ -218,6 +224,13 @@ export class WorkDurabilityStore {
     for (const attempt of reserved) {
       try {
         await this.beforeGcDelete?.(attempt);
+        try { await lstat(attempt.workspace_path); }
+        catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await this.mutate((stored) => { const current = this.required(stored, attempt.work_attempt_id); if (current.state !== "gc_pending") throw new ImmutableExecutionError("GC reservation was lost."); current.state = "garbage_collected"; return current; });
+          removed.push(attempt.work_attempt_id);
+          continue;
+        }
         await this.verifyWorkspaceForDeletion(attempt);
         await rm(attempt.workspace_path, { recursive: true, force: false });
         await this.mutate((stored) => { const current = this.required(stored, attempt.work_attempt_id); if (current.state !== "gc_pending") throw new ImmutableExecutionError("GC reservation was lost."); current.state = "garbage_collected"; return current; });
@@ -312,7 +325,7 @@ export class WorkDurabilityStore {
 
   private assertWorkspacePath(path: string): void {
     const candidate = resolve(path);
-    if (!isInside(this.workspaceRoot, candidate)) throw new ImmutableExecutionError("Workspace must remain inside the daemon-owned workspace root.");
+    if (!isStrictChild(this.workspaceRoot, candidate)) throw new ImmutableExecutionError("Workspace must remain inside the daemon-owned workspace root.");
   }
 
   private async managedRealDirectory(path: string, create: boolean): Promise<string> {
@@ -334,7 +347,7 @@ export class WorkDurabilityStore {
     const root = await this.managedRealDirectory(this.workspaceRoot, false);
     const info = await lstat(attempt.workspace_path);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new ImmutableExecutionError("Refusing to delete a non-directory or symlink workspace.");
-    if (!isInside(root, await realpath(attempt.workspace_path))) throw new ImmutableExecutionError("Workspace escaped daemon ownership root.");
+    if (!isStrictChild(root, await realpath(attempt.workspace_path))) throw new ImmutableExecutionError("Workspace escaped daemon ownership root.");
     const markerPath = join(attempt.workspace_path, WORKSPACE_MARKER);
     const markerInfo = await lstat(markerPath);
     if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) throw new ImmutableExecutionError("Workspace marker is missing or unsafe.");
@@ -342,6 +355,17 @@ export class WorkDurabilityStore {
     const valid = marker && typeof marker === "object" && (marker as Partial<WorkspaceMarker>).version === 1
       && (marker as Partial<WorkspaceMarker>).work_attempt_id === attempt.work_attempt_id && (marker as Partial<WorkspaceMarker>).task_id === attempt.task_id;
     if (!valid) throw new ImmutableExecutionError("Workspace marker does not match the durable attempt identity.");
+  }
+
+  private async bindWorkspaceMarker(attempt: TaskWorkAttempt): Promise<void> {
+    const markerPath = join(attempt.workspace_path, WORKSPACE_MARKER);
+    try {
+      const info = await lstat(markerPath);
+      if (!info.isFile() || info.isSymbolicLink()) throw new ImmutableExecutionError("Workspace marker is unsafe.");
+      const marker: unknown = JSON.parse(await readFile(markerPath, "utf8"));
+      if (!marker || typeof marker !== "object" || (marker as { work_attempt_id?: unknown }).work_attempt_id !== attempt.work_attempt_id) throw new ImmutableExecutionError("Workspace marker does not match the supervisor-minted attempt ID.");
+      await writeFile(markerPath, `${JSON.stringify({ ...(marker as Record<string, unknown>), version: 1, task_id: attempt.task_id })}\n`, { mode: 0o600 });
+    } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
 
   private async write(stored: StoredAttempts): Promise<void> {
