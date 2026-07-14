@@ -18,7 +18,7 @@ import { WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
-import { advanceReconciliationState } from "../reconciler-state.js";
+import { advanceReconciliationState, recordReconciliationActionFailure } from "../reconciler-state.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
@@ -88,14 +88,17 @@ test("reconciler policy fences recovery, gates resume, quarantines crash loops, 
 
 test("reconciliation bookkeeping persists one failure edge, retry deadline, and crash-loop window", () => {
   const first = advanceReconciliationState(undefined, "failed", 1_000);
-  assert.deepEqual(first, { failure_timestamps_ms: [1_000], last_observed_state: "failed", next_restart_at_ms: 2_000 });
+  assert.deepEqual(first, { failure_timestamps_ms: [1_000], last_observed_state: "failed", next_restart_at_ms: 2_000, last_failed_action_id: null });
   assert.deepEqual(advanceReconciliationState(first, "failed", 1_500), first, "a polling tick cannot manufacture another exit");
   const recovered = advanceReconciliationState(first, "recovering", 2_000);
-  assert.deepEqual(recovered, { failure_timestamps_ms: [], last_observed_state: "recovering", next_restart_at_ms: null });
+  assert.deepEqual(recovered, { failure_timestamps_ms: [1_000], last_observed_state: "recovering", next_restart_at_ms: null, last_failed_action_id: null });
   const later = advanceReconciliationState({ ...first, last_observed_state: "recovering" }, "failed", 2_000);
   assert.deepEqual(later.failure_timestamps_ms, [1_000, 2_000]);
   const expired = advanceReconciliationState({ ...later, last_observed_state: "recovering" }, "failed", 2_000 + 10 * 60 * 1_000 + 1);
   assert.deepEqual(expired.failure_timestamps_ms, [2_000 + 10 * 60 * 1_000 + 1]);
+  const actionFailure = recordReconciliationActionFailure(first, "generation-2", 2_000);
+  assert.deepEqual(actionFailure.failure_timestamps_ms, [1_000, 2_000]);
+  assert.equal(recordReconciliationActionFailure(actionFailure, "generation-2", 3_000), actionFailure, "retried action is idempotent");
 });
 
 test("reconciler executes only fenced, capability-negotiated port actions", async () => {
@@ -159,13 +162,44 @@ test("supervisor convergence persists the retry deadline before it can restart",
     };
     const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
-    const input = { workAttemptId: "attempt", nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
+    const input = { workAttemptId: "attempt", reconciliationActionId: "generation-1", nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
     assert.equal((await daemon.reconcile(entry.id, input, 100)).decision.action, "wait");
     assert.deepEqual(calls, []);
     assert.equal((await store.load()).entries[0]?.reconciliation?.next_restart_at_ms, 2_000);
     assert.equal((await daemon.reconcile(entry.id, { ...input, nowMs: 2_000 }, 100)).decision.action, "restart_fresh");
     assert.deepEqual(calls, ["spawn"]);
     await daemon.stop();
+  } finally { await env.cleanup(); }
+});
+
+test("five persisted failures across daemon reload quarantine instead of restarting", async () => {
+  const env = await fixture();
+  try {
+    const manifestPath = join(env.root, "manifest.json");
+    const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") };
+    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed" }]);
+    let spawnCalls = 0;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+      spawn: async () => { spawnCalls += 1; throw new Error("crash"); }, attach: async () => null,
+      resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }), onExit: async () => () => {},
+    };
+    const base = { workAttemptId: "attempt", lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
+    const daemon = new SupervisorDaemon(paths, "darwin", port);
+    await daemon.start();
+    assert.equal((await daemon.reconcile(entry.id, { ...base, reconciliationActionId: "initial", nowMs: 1_000 }, 100)).decision.action, "wait");
+    for (const [index, nowMs] of [2_000, 4_000, 8_000, 16_000].entries()) {
+      assert.equal((await daemon.reconcile(entry.id, { ...base, reconciliationActionId: `generation-${index}`, nowMs }, 100)).disposition, "failed");
+    }
+    assert.equal(spawnCalls, 4);
+    await daemon.stop();
+    const reloaded = new SupervisorDaemon(paths, "darwin", port);
+    await reloaded.start();
+    const quarantined = await reloaded.reconcile(entry.id, { ...base, reconciliationActionId: "generation-4", nowMs: 16_001 }, 100);
+    assert.equal(quarantined.decision.action, "quarantine");
+    assert.equal((await new ManifestStore(manifestPath).load()).entries[0]?.condition, "quarantined");
+    assert.equal(spawnCalls, 4, "quarantine blocks another provider launch");
+    await reloaded.stop();
   } finally { await env.cleanup(); }
 });
 

@@ -9,6 +9,8 @@ export type ReconciliationState = {
   failure_timestamps_ms: number[];
   last_observed_state: ObservedState;
   next_restart_at_ms: number | null;
+  /** Prevents a retried tick from recording the same provider action twice. */
+  last_failed_action_id: string | null;
 };
 
 export type DaemonManifestEntry = {
