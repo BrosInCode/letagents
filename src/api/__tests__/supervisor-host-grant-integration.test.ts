@@ -3,12 +3,14 @@ import path from "node:path";
 import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { eq } from "drizzle-orm";
 
 const testDatabaseUrl = process.env.TEST_DB_URL;
 const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) process.env.DB_URL = testDatabaseUrl;
 else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "true";
+process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
 
 const client = testDatabaseUrl ? await import("../db/client.js") : null;
 const authDb = testDatabaseUrl ? await import("../db.js") : null;
@@ -70,4 +72,31 @@ test("handoff is a current-generation CAS and revoked/lapsed grants cannot authe
   assert.equal((await authDb!.advanceSupervisorHostGrantGeneration({ grant_id: created.grant.grant_id, expected_generation: 1, expected_token_version: 1 })), null);
   await authDb!.revokeSupervisorHostGrant({ grant_id: created.grant.grant_id, owner_account_id: "owner_2" });
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${created.token}` } } as never)).authKind, null);
+});
+
+test("an expired grant cannot authenticate even before a worker bearer reaches its own expiry", { skip: requiresDatabase }, async () => {
+  await seedOwner("owner_3");
+  const created = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_3", host_id: "host_3", installation_id: "install_3",
+    allowed_room_ids: ["room_3"], allowed_agent_keys: ["owner/agent_3"], expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await client!.db.update(schema!.supervisor_host_grants).set({ expires_at: new Date(Date.now() - 1000).toISOString() })
+    .where(eq(schema!.supervisor_host_grants.grant_id, created.grant.grant_id));
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${created.token}` } } as never)).authKind, null);
+});
+
+test("revoking a parent grant does not retroactively invalidate an already minted worker bearer", { skip: requiresDatabase }, async () => {
+  await seedOwner("owner_4");
+  const created = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_4", host_id: "host_4", installation_id: "install_4",
+    allowed_room_ids: ["placeholder"], allowed_agent_keys: ["owner/agent_4"], expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const room = await authDb!.createProjectWithName("supervisor-worker-room");
+  const session = await authDb!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Worker | Owner | Agent", agent_key: "owner/agent_4",
+    display_name: "Worker", owner_account_id: "owner_4", owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: created.grant.grant_id, worker_bearer_expires_at: new Date(Date.now() + 30_000).toISOString(),
+  });
+  await authDb!.revokeSupervisorHostGrant({ grant_id: created.grant.grant_id, owner_account_id: "owner_4" });
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never)).authKind, "agent_session");
 });
