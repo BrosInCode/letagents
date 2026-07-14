@@ -7,6 +7,7 @@ const SUPERVISOR_GRANT_ROUTE_PATTERNS: ReadonlyArray<{ method: string; pattern: 
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/rotate$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/end$/ },
+  { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/leases\/[^/]+\/rebind$/ },
 ];
 
 export function isSupervisorGrantRouteAllowed(method: string, path: string): boolean {

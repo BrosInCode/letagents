@@ -340,7 +340,7 @@ export interface SupervisorGrantFence {
   token_version: number;
 }
 
-async function assertSupervisorGrantFenceTx(tx: any, fence: SupervisorGrantFence): Promise<boolean> {
+export async function assertSupervisorGrantFenceTx(tx: any, fence: SupervisorGrantFence): Promise<boolean> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${fence.grant_id}`}, 0))`);
   const [grant] = await tx.select({ grant_id: supervisor_host_grants.grant_id }).from(supervisor_host_grants).where(and(
     eq(supervisor_host_grants.grant_id, fence.grant_id),

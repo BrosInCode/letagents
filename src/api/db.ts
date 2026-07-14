@@ -44,6 +44,8 @@ export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoard
 export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
+export { rebindTaskLease, assertLeaseEpochCurrentTx } from "./db/coordination.js";
+export type { RebindTaskLeaseInput, RebindTaskLeaseResult, RebindTaskLeaseFailure } from "./db/coordination.js";
 export {
   assertConsumeBoardIntentApproval,
   BoardIntentApprovalConsumptionError,

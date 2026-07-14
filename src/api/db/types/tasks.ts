@@ -61,6 +61,7 @@ export interface TaskLease {
   agent_instance_id: string | null;
   agent_session_id: string | null;
   actor_label: string;
+  epoch: number;
   branch_ref: string | null;
   pr_url: string | null;
   output_intent: string | null;
@@ -156,6 +157,7 @@ export interface TaskLeaseRow {
   agent_instance_id: string | null;
   agent_session_id: string | null;
   actor_label: string;
+  epoch: number;
   branch_ref: string | null;
   pr_url: string | null;
   output_intent: string | null;

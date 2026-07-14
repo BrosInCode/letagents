@@ -8,6 +8,7 @@ import {
   getAgentIdentityByCanonicalKey,
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
+  rebindTaskLease,
   revokeSupervisorHostGrant,
   rotateRoomAgentSessionBearer,
   rotateSupervisorHostGrant,
@@ -241,5 +242,43 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     }
     const ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id, supervisor_grant_fence: fence(grant) });
     res.json(ended);
+  });
+
+  // Fenced lease rebind (plan §4.5). A restarted worker's new session takes
+  // over its predecessor's in-flight lease under the supervisor's grant. Same
+  // agent_key is necessary but not sufficient — the grant fence + scope + the
+  // epoch/from-session CAS all gate it, and the predecessor's authority is
+  // revoked in the same transaction.
+  app.post("/supervisor-host-grants/:grantId/leases/:leaseId/rebind", async (req: AuthenticatedRequest, res) => {
+    const grant = await requireCurrentSupervisorGrant(req, res);
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
+    const leaseId = String(req.params.leaseId ?? "").trim();
+    const body = req.body as { expected_epoch?: unknown; from_agent_session_id?: unknown; to_agent_session_id?: unknown };
+    const expectedEpoch = Number(body.expected_epoch);
+    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
+    const toSession = typeof body.to_agent_session_id === "string" ? body.to_agent_session_id.trim() : "";
+    if (!leaseId || !Number.isInteger(expectedEpoch) || expectedEpoch < 0 || !fromSession || !toSession) {
+      res.status(400).json({ error: "leaseId, integer expected_epoch, from_agent_session_id, and to_agent_session_id are required." });
+      return;
+    }
+    const result = await rebindTaskLease({
+      lease_id: leaseId,
+      expected_epoch: expectedEpoch,
+      from_agent_session_id: fromSession,
+      to_agent_session_id: toSession,
+      supervisor_grant_fence: fence(grant),
+    });
+    if (!result.ok) {
+      // lost_race / stale fence → 409 (retryable after re-reading state);
+      // scope / mismatch / live-predecessor → 403 (not authorized as asked).
+      const status = result.reason === "lost_race" || result.reason === "grant_fence_stale" ? 409 : 403;
+      res.status(status).json({ error: `Lease rebind rejected: ${result.reason}.`, code: result.reason });
+      return;
+    }
+    res.json(result.lease);
   });
 }
