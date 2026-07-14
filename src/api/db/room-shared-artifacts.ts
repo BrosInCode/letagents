@@ -13,7 +13,7 @@ import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 
 // A drizzle transaction or the base client — lets a write run standalone or
 // enrolled in a caller's transaction (e.g. under a lease fence).
-type ArtifactWriteExecutor = Pick<typeof db, "insert" | "select">;
+type ArtifactWriteExecutor = Pick<typeof db, "insert" | "select" | "delete">;
 
 export function buildRoomSharedArtifactIdentityKey(
   artifact: Pick<TaskWorkflowArtifact, "provider" | "kind" | "url" | "id" | "number" | "ref" | "title">
@@ -252,7 +252,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
   task_id: string;
   artifacts: TaskWorkflowArtifact[];
   source?: RoomSharedArtifactSource;
-}): Promise<RoomSharedArtifact[]> {
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifact[]> {
   const source = input.source ?? "task_workflow_artifact";
   const synced: RoomSharedArtifact[] = [];
   const identityKeys: string[] = [];
@@ -262,7 +262,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
       room_id: input.room_id,
       artifact,
       source,
-    });
+    }, executor);
     synced.push(sharedArtifact);
     identityKeys.push(sharedArtifact.identity_key);
     await linkRoomSharedArtifactToTask({
@@ -270,7 +270,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
       artifact_identity_key: sharedArtifact.identity_key,
       task_id: input.task_id,
       source,
-    });
+    }, executor);
   }
 
   const taskLinkConditions = [
@@ -278,7 +278,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
     eq(room_shared_artifact_tasks.task_id, input.task_id),
     eq(room_shared_artifact_tasks.source, source),
   ];
-  await db
+  await executor
     .delete(room_shared_artifact_tasks)
     .where(
       identityKeys.length

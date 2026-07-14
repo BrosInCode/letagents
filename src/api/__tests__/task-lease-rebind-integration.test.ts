@@ -298,6 +298,54 @@ test("publishWorkerArtifactFenced aborts atomically when a rebind commits first 
   assert.ok(ok.identity_key, "successor at the current epoch publishes");
 });
 
+test("updateTask fenced side-effects (task + lease ref + artifacts) roll back atomically on a mid-write rebind", { skip: requiresDatabase }, async () => {
+  // Blocker 2: the pr_url lease-ref bind and the shared-artifact upsert/link now
+  // run inside the fenced tx. A rebind committing mid-write must abort ALL of
+  // them together — no task pr_url, no lease ref, no artifact, no link.
+  const { updateTask } = await import("../db/tasks.js");
+  const { room, from, to } = await seed();
+  const task = await db!.createTask(room.id, "atomic task", from.actor_label);
+  const lease = await db!.createTaskLease({
+    room_id: room.id, task_id: task.id, kind: "work", agent_key: from.agent_key,
+    actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
+  const leaseFence = {
+    lease_id: lease.id, room_id: room.id, task_id: task.id, kind: "work" as const,
+    expected_epoch: 0, agent_session_id: from.session_id,
+  };
+
+  const holder = await client!.pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`task_lease:${lease.id}`]);
+    const writePromise = updateTask(
+      room.id, task.id,
+      {
+        pr_url: "https://example.com/pr/atomic",
+        workflow_artifacts: [{ provider: "github", kind: "pull_request", url: "https://example.com/pr/atomic" }],
+      },
+      { leaseFence },
+    );
+    await holder.query(
+      "UPDATE task_leases SET agent_session_id = $1, epoch = epoch + 1, updated_at = now() WHERE id = $2",
+      [to.session_id, lease.id],
+    );
+    await holder.query("COMMIT");
+    await assert.rejects(writePromise, (err: Error) => err.name === "LeaseFenceStaleError");
+  } finally {
+    holder.release();
+  }
+
+  const taskRow = await db!.getTaskById(room.id, task.id);
+  assert.equal(taskRow?.pr_url ?? null, null, "task pr_url not written");
+  const leaseAfter = await leaseRow(lease.id);
+  assert.equal(leaseAfter.pr_url ?? null, null, "lease pr_url ref not bound");
+  const arts = await client!.db.select().from(schema!.room_shared_artifacts).where(eq(schema!.room_shared_artifacts.room_id, room.id));
+  assert.equal(arts.length, 0, "no artifact upserted");
+  const links = await client!.db.select().from(schema!.room_shared_artifact_tasks).where(eq(schema!.room_shared_artifact_tasks.room_id, room.id));
+  assert.equal(links.length, 0, "no artifact-task link");
+});
+
 test("a stale-epoch lease-action cannot release the successor's rebound lease, but the current epoch can", { skip: requiresDatabase }, async () => {
   const { room, from, to, fence } = await seed();
   // A real task row is required — applyTaskWorkLeaseAction resolves the task by

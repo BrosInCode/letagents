@@ -12,6 +12,7 @@ import {
   markBoardIntentTaskResult,
 } from "./coordination/board-intents.js";
 import { createTaskLeaseRow } from "./coordination/lease-rows.js";
+import { updateTaskLeaseWorkflowRefs } from "./coordination/task-leases.js";
 import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import { resolveTaskAssignmentState, type TaskAssignmentPatch } from "./task-assignment.js";
 import { normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
@@ -487,6 +488,28 @@ export async function updateTask(
     );
   };
 
+  // All lease-scoped side effects (the fenced lease's pr_url ref bind + the
+  // shared-artifact upsert/link/prune) run through one executor so that, on the
+  // fenced path, they commit or roll back ATOMICALLY with the task write under
+  // acquireLeaseFenceTx (plan §4.5). No base-client writes leak out of the tx.
+  const writeArtifactSideEffects = async (
+    executor: Parameters<typeof syncRoomSharedArtifactsForTask>[1] &
+      Parameters<typeof updateTaskLeaseWorkflowRefs>[3]
+  ) => {
+    if (options?.leaseFence && updates.pr_url !== undefined) {
+      await updateTaskLeaseWorkflowRefs(
+        roomId,
+        options.leaseFence.lease_id,
+        { pr_url: updates.pr_url ?? null },
+        executor
+      );
+    }
+    await syncRoomSharedArtifactsForTask(
+      { room_id: roomId, task_id: taskId, artifacts: newWorkflowArtifacts },
+      executor
+    );
+  };
+
   if (options?.boardIntentApproval || options?.workLeaseCreation || options?.leaseFence) {
     await db.transaction(async (tx) => {
       // Fence FIRST, under the shared lease advisory lock, so the whole write
@@ -501,16 +524,20 @@ export async function updateTask(
       }
       await writeTaskUpdate(tx);
       await writeWorkLeaseCreation(tx);
+      // Fenced path: refs + artifact sync inside the same fenced tx.
+      if (options.leaseFence) {
+        await writeArtifactSideEffects(tx);
+      }
     });
+    // Non-fenced tx (board-intent / lease-creation only): the lease ref bind is
+    // still performed by enforcement; sync outside the tx as before.
+    if (!options?.leaseFence) {
+      await writeArtifactSideEffects(db);
+    }
   } else {
     await writeTaskUpdate(db);
+    await writeArtifactSideEffects(db);
   }
-
-  await syncRoomSharedArtifactsForTask({
-    room_id: roomId,
-    task_id: taskId,
-    artifacts: newWorkflowArtifacts,
-  });
 
   return toTask({
     ...task,

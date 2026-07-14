@@ -502,36 +502,35 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       // still holds it" downgraded a rebound-away predecessor to an unfenced
       // allow (the exact bypass) — so missing/moved/stale must 409, never
       // reclassify to ordinary no-lease traffic.
+      // Resolve the task's active work lease FIRST. If there is none, or its
+      // holder session differs from the authenticated worker session (moved by
+      // rebind, sessionless, or another worker's), deny outright — never build a
+      // fence from a caller-filtered lookup that returned nothing.
       const sessionId = input.actorSessionId;
       const workerLeases = await deps.getActiveTaskLeases(input.projectId, input.task.id);
       const activeWorkLease = workerLeases.find(
         (lease) => lease.kind === "work" && lease.status === "active"
       );
-      if (activeWorkLease && activeWorkLease.agent_session_id && sessionId) {
-        // Fence keyed to the caller: if the lease has moved to a successor its
-        // agent_session_id no longer matches and acquireLeaseFenceTx 409s.
+      if (!activeWorkLease || !sessionId || activeWorkLease.agent_session_id !== sessionId) {
         return {
-          kind: "allow",
-          leaseFence: {
-            lease_id: activeWorkLease.id,
-            room_id: input.projectId,
-            task_id: input.task.id,
-            kind: "work",
-            expected_epoch: activeWorkLease.epoch,
-            agent_session_id: sessionId,
-          },
+          kind: "deny",
+          code: "coordination_work_lease_required",
+          error: "This task mutation requires holding the task's active work lease.",
         };
       }
-      // Sessionless (pre-supervisor) work leases stay on the legacy path the
-      // rebind machinery never touches; anything else lease-scoped with no
-      // holdable tuple is denied rather than downgraded.
-      if (activeWorkLease && !activeWorkLease.agent_session_id) {
-        return { kind: "allow" };
-      }
+      // Matches now — capture the lease's OWN full tuple; the in-tx shared lock
+      // revalidates it, so a rebind that commits between here and the write
+      // (lookup-before-rebind) still fails the fence and 409s.
       return {
-        kind: "deny",
-        code: "coordination_work_lease_required",
-        error: "This task mutation requires holding the task's active work lease.",
+        kind: "allow",
+        leaseFence: {
+          lease_id: activeWorkLease.id,
+          room_id: input.projectId,
+          task_id: input.task.id,
+          kind: "work",
+          expected_epoch: activeWorkLease.epoch,
+          agent_session_id: activeWorkLease.agent_session_id,
+        },
       };
     }
 
@@ -628,16 +627,17 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         leaseId: decision.lease.id,
         reason: `Allowed ${classified.mutation} with lease ${decision.lease.id}.`,
       });
-      if (classified.mutation === "workflow_artifact_attach") {
-        await bindWorkflowArtifactPrUrlIfPresent(input.projectId, decision.lease.id, input.updates);
-      }
       // Fence the write on the authorizing lease when it is session-bound
       // (rebind safety, §4.5). Sessionless owner-token leases yield null and
       // stay on the unfenced path the rebind never touches.
-      return allowDecision({
-        boardIntentApproval,
-        leaseFence: leaseFenceFor(decision.lease),
-      });
+      const fence = leaseFenceFor(decision.lease);
+      // When fenced, the lease pr_url ref bind is folded into updateTask's fenced
+      // tx (msg_565) so it commits atomically with the task + artifact writes;
+      // only the unfenced (sessionless) path binds here, pre-tx, as before.
+      if (classified.mutation === "workflow_artifact_attach" && !fence) {
+        await bindWorkflowArtifactPrUrlIfPresent(input.projectId, decision.lease.id, input.updates);
+      }
+      return allowDecision({ boardIntentApproval, leaseFence: fence });
     }
 
     if (decision.code === "missing_lease") {

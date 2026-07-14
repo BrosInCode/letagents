@@ -105,7 +105,8 @@ export async function updateTaskLeaseWorkflowRefs(
   updates: {
     branch_ref?: string | null;
     pr_url?: string | null;
-  }
+  },
+  executor: Pick<typeof db, "update"> = db
 ): Promise<TaskLease | null> {
   const patch: {
     branch_ref?: string | null;
@@ -121,7 +122,7 @@ export async function updateTaskLeaseWorkflowRefs(
     patch.pr_url = updates.pr_url ?? null;
   }
 
-  const [row] = (await db
+  const [row] = (await executor
     .update(task_leases)
     .set(patch)
     .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)))
