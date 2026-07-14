@@ -28,10 +28,10 @@ interface SubscriptionTarget {
 
 export class SseClient {
   private readonly apiUrl: string;
-  private readonly getAccessToken?: () => string | null;
+  private readonly getAccessToken?: () => string | null | Promise<string | null>;
   private readonly subscriptions = new Map<string, Subscription>();
 
-  constructor(apiUrl: string, getAccessToken?: () => string | null) {
+  constructor(apiUrl: string, getAccessToken?: () => string | null | Promise<string | null>) {
     this.apiUrl = apiUrl.replace(/\/$/, "");
     this.getAccessToken = getAccessToken;
   }
@@ -77,8 +77,8 @@ export class SseClient {
     }
   }
 
-  private getHeaders(): Record<string, string> {
-    const token = this.getAccessToken?.();
+  private async getHeaders(): Promise<Record<string, string>> {
+    const token = await this.getAccessToken?.();
     if (!token) {
       return { Accept: "text/event-stream" };
     }
@@ -153,7 +153,7 @@ export class SseClient {
     const response = await fetch(
       url,
       {
-        headers: this.getHeaders(),
+        headers: await this.getHeaders(),
         signal,
       }
     );

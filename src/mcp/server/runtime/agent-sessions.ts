@@ -19,6 +19,7 @@ import {
   detectAgentRuntimeLabel,
   ensureAgentIdentity,
 } from "./identity.js";
+import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 
 export function buildAgentDeliveryHeaders(
   agentSession?: StoredAgentSessionState | null
@@ -118,6 +119,36 @@ export async function resolveWorkerToolIdentity(input: {
   roomId?: string | null;
   agentSessionId?: string | null;
 }): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
+  if (requireValidWorkerBearerRuntime().mode === "worker" && !input.agentSessionId) {
+    const identity = await ensureAgentIdentity();
+    const now = new Date().toISOString();
+    return {
+      identity,
+      agentSession: {
+        session_id: "worker_bearer",
+        session_token: "",
+        room_id: input.roomId ?? "worker_bearer_room",
+        session_kind: "worker",
+        runtime: detectAgentRuntimeLabel(),
+        host_id: null,
+        host_kind: null,
+        host_label: null,
+        liveness_capability: null,
+        tool_bridge_id: null,
+        actor_label: identity.actor_label,
+        agent_key: identity.canonical_key ?? identity.runtime_key ?? identity.actor_label,
+        agent_instance_id: AGENT_INSTANCE_UUID,
+        display_name: identity.display_name,
+        owner_label: identity.owner_label,
+        ide_label: identity.ide_label ?? detectAgentIdeLabel(),
+        repo_branch: null,
+        created_at: now,
+        updated_at: now,
+        last_seen_at: now,
+        ended_at: null,
+      },
+    };
+  }
   const agentSession = input.agentSessionId
     ? requireWorkerAgentSession(input.roomId, input.agentSessionId)
     : input.roomId && await isLocalRoomStorageEnabled(input.roomId)
@@ -176,6 +207,12 @@ export function agentSessionCredentials(agentSession: StoredAgentSessionState): 
   agent_session_id: string;
   agent_session_token: string;
 } {
+  if (requireValidWorkerBearerRuntime().mode === "worker") {
+    return {} as {
+      agent_session_id: string;
+      agent_session_token: string;
+    };
+  }
   return {
     agent_session_id: agentSession.session_id,
     agent_session_token: agentSession.session_token,

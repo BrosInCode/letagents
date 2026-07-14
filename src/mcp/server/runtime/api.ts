@@ -1,8 +1,5 @@
-import {
-  clearStoredAuth,
-  getStoredAuth,
-} from "../../local-state.js";
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
+import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 
 export const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 
@@ -18,12 +15,23 @@ export class ApiError extends Error {
   }
 }
 
-export function getLetagentsToken(): string {
-  return process.env.LETAGENTS_TOKEN || getStoredAuth()?.token || "";
+export async function getLetagentsToken(): Promise<string> {
+  const runtime = requireValidWorkerBearerRuntime();
+  if (runtime.mode === "worker") {
+    return runtime.bearer;
+  }
+
+  const envToken = process.env.LETAGENTS_TOKEN?.trim();
+  if (envToken) {
+    return envToken;
+  }
+
+  const { getStoredAuth } = await import("../../local-state.js");
+  return getStoredAuth()?.token || "";
 }
 
-export function getAuthorizationHeader(): string | null {
-  const letagentsToken = getLetagentsToken();
+export async function getAuthorizationHeader(): Promise<string | null> {
+  const letagentsToken = await getLetagentsToken();
   return letagentsToken ? `Bearer ${letagentsToken}` : null;
 }
 
@@ -72,7 +80,7 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
     ...(options?.headers as Record<string, string> | undefined),
   };
 
-  const authorizationHeader = getAuthorizationHeader();
+  const authorizationHeader = await getAuthorizationHeader();
   if (authorizationHeader && !headers.Authorization) {
     headers.Authorization = authorizationHeader;
   }
@@ -84,9 +92,10 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
 
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 401) {
+    if (res.status === 401 && requireValidWorkerBearerRuntime().mode !== "worker") {
       // Only clear on 401 (invalid/expired credential), NOT on 403
       // (valid credential but insufficient permissions, e.g., private repo access)
+      const { clearStoredAuth } = await import("../../local-state.js");
       clearStoredAuth();
       clearAuthenticatedAccountCache();
     }
