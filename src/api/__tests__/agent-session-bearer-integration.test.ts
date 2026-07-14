@@ -233,6 +233,7 @@ test("bearer artifact publishing requires exactly one caller-held work lease", {
     resolveCanonicalRoomRequestId: async () => room.id, resolveRoomOrReply: async () => room, requireParticipant: async () => true,
     requireWorkerRequestAgentIdentity, getRoomSharedArtifacts: async () => [], getRoomSharedArtifactByIdentityKey: async () => null,
     upsertRoomSharedArtifact: async () => ({ identity_key: "artifact" }), linkRoomSharedArtifactToTask: async () => {},
+    publishWorkerArtifactFenced: async () => ({ identity_key: "artifact" }),
   } as never);
   const publish = [...handlers.values()][0]!;
   const invoke = async (body: Record<string, unknown>) => { const res = responseRecorder(); await publish({ params: { 0: room.id }, query: {}, body, ...auth }, res); return res; };

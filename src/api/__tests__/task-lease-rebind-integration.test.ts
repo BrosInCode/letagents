@@ -253,6 +253,50 @@ test("updateTask fence aborts a stale write when a rebind commits first (barrier
   assert.equal(ok?.pr_url, "https://example.com/pr/successor");
 });
 
+test("publishWorkerArtifactFenced aborts atomically when a rebind commits first (barrier) — no artifact, no link", { skip: requiresDatabase }, async () => {
+  // Same barrier as the task-write test, applied to the artifact upsert+link:
+  // the two writes must be atomic AND fenced, so a rebind committing mid-publish
+  // leaves neither an orphan artifact nor a stale task binding.
+  const { publishWorkerArtifactFenced } = await import("../db/room-shared-artifacts.js");
+  const { room, from, to } = await seed();
+  const task = await db!.createTask(room.id, "artifact task", from.actor_label);
+  const lease = await db!.createTaskLease({
+    room_id: room.id, task_id: task.id, kind: "work", agent_key: from.agent_key,
+    actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
+  const leaseFence = {
+    lease_id: lease.id, room_id: room.id, task_id: task.id, kind: "work" as const,
+    expected_epoch: 0, agent_session_id: from.session_id,
+  };
+  const artifact = { provider: "github" as const, kind: "commit" as const, id: "sha_barrier" };
+
+  const holder = await client!.pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`task_lease:${lease.id}`]);
+    const publishPromise = publishWorkerArtifactFenced({ leaseFence, room_id: room.id, artifact, linked_task_id: task.id });
+    await holder.query(
+      "UPDATE task_leases SET agent_session_id = $1, epoch = epoch + 1, updated_at = now() WHERE id = $2",
+      [to.session_id, lease.id],
+    );
+    await holder.query("COMMIT");
+    await assert.rejects(publishPromise, (err: Error) => err.name === "LeaseFenceStaleError");
+  } finally {
+    holder.release();
+  }
+
+  const arts = await client!.db.select().from(schema!.room_shared_artifacts).where(eq(schema!.room_shared_artifacts.room_id, room.id));
+  assert.equal(arts.length, 0, "no artifact upserted by the aborted publish");
+  const links = await client!.db.select().from(schema!.room_shared_artifact_tasks).where(eq(schema!.room_shared_artifact_tasks.room_id, room.id));
+  assert.equal(links.length, 0, "no task link by the aborted publish");
+
+  const ok = await publishWorkerArtifactFenced({
+    leaseFence: { ...leaseFence, expected_epoch: 1, agent_session_id: to.session_id },
+    room_id: room.id, artifact, linked_task_id: task.id,
+  });
+  assert.ok(ok.identity_key, "successor at the current epoch publishes");
+});
+
 test("a stale-epoch lease-action cannot release the successor's rebound lease, but the current epoch can", { skip: requiresDatabase }, async () => {
   const { room, from, to, lease, fence } = await seed();
   // Predecessor observed epoch 0; rebind commits epoch 1 to the successor.

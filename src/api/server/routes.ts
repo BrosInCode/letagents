@@ -12,6 +12,7 @@ import {
   getRoomSharedArtifactByIdentityKey,
   getRoomSharedArtifacts,
   linkRoomSharedArtifactToTask,
+  publishWorkerArtifactFenced,
   updateProjectDisplayName,
   upsertRoomSharedArtifact,
 } from "../db.js";
@@ -333,6 +334,7 @@ export function registerApiRoutes(app: Express): void {
     getRoomSharedArtifactByIdentityKey,
     getRoomSharedArtifacts,
     linkRoomSharedArtifactToTask,
+    publishWorkerArtifactFenced,
     requireWorkerRequestAgentIdentity,
     upsertRoomSharedArtifact,
   } satisfies RoomArtifactRouteDeps;

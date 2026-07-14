@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, notInArray } from "drizzle-orm";
 
 import { db } from "./client.js";
+import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import { toRoomSharedArtifact, toRoomSharedArtifactTaskLink } from "./mappers.js";
 import { room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import type {
@@ -9,6 +10,10 @@ import type {
   RoomSharedArtifactTaskLink,
 } from "./types.js";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
+
+// A drizzle transaction or the base client — lets a write run standalone or
+// enrolled in a caller's transaction (e.g. under a lease fence).
+type ArtifactWriteExecutor = Pick<typeof db, "insert" | "select">;
 
 export function buildRoomSharedArtifactIdentityKey(
   artifact: Pick<TaskWorkflowArtifact, "provider" | "kind" | "url" | "id" | "number" | "ref" | "title">
@@ -70,14 +75,14 @@ export async function upsertRoomSharedArtifact(input: {
   room_id: string;
   artifact: TaskWorkflowArtifact;
   source?: RoomSharedArtifactSource;
-}): Promise<RoomSharedArtifact> {
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifact> {
   const now = new Date().toISOString();
   const identityKey = buildRoomSharedArtifactIdentityKey(input.artifact);
   const requestedSource = input.source ?? "task_workflow_artifact";
   const existingArtifact = await getRoomSharedArtifactByIdentityKey({
     room_id: input.room_id,
     identity_key: identityKey,
-  });
+  }, executor);
   const { artifact, source } = preserveManualRoomSharedArtifactInput({
     artifact: input.artifact,
     source: requestedSource,
@@ -97,7 +102,7 @@ export async function upsertRoomSharedArtifact(input: {
         : "preserve";
   const detailValue = detailAction === "set" ? (input.artifact.detail ?? null) : null;
 
-  const [row] = await db
+  const [row] = await executor
     .insert(room_shared_artifacts)
     .values({
       room_id: input.room_id,
@@ -142,10 +147,10 @@ export async function linkRoomSharedArtifactToTask(input: {
   artifact_identity_key: string;
   task_id: string;
   source?: RoomSharedArtifactSource;
-}): Promise<RoomSharedArtifactTaskLink> {
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifactTaskLink> {
   const now = new Date().toISOString();
   const source = input.source ?? "task_workflow_artifact";
-  const [row] = await db
+  const [row] = await executor
     .insert(room_shared_artifact_tasks)
     .values({
       room_id: input.room_id,
@@ -171,11 +176,46 @@ export async function linkRoomSharedArtifactToTask(input: {
   return toRoomSharedArtifactTaskLink(row);
 }
 
+// Publish a worker's artifact and link it to the task it belongs to, ATOMICALLY
+// and fenced on the caller's held work lease (plan §4.5). The upsert and the
+// task link were previously two separate writes with no fence: a rebound-away
+// predecessor could bind an artifact to a task whose lease had already moved,
+// and a crash between the two left a dangling upsert. Both now run in one tx
+// that first re-validates the lease under the shared advisory lock, so a
+// concurrent rebind advances the epoch and the whole publish aborts with
+// LeaseFenceStaleError — no partial write, no stale binding.
+export async function publishWorkerArtifactFenced(input: {
+  leaseFence: LeaseFence;
+  room_id: string;
+  artifact: TaskWorkflowArtifact;
+  linked_task_id: string;
+  source?: RoomSharedArtifactSource;
+}): Promise<RoomSharedArtifact> {
+  return db.transaction(async (tx) => {
+    const held = await acquireLeaseFenceTx(tx, input.leaseFence);
+    if (!held) throw new LeaseFenceStaleError();
+    const artifact = await upsertRoomSharedArtifact(
+      { room_id: input.room_id, artifact: input.artifact, source: input.source },
+      tx
+    );
+    await linkRoomSharedArtifactToTask(
+      {
+        room_id: input.room_id,
+        artifact_identity_key: artifact.identity_key,
+        task_id: input.linked_task_id,
+        source: input.source,
+      },
+      tx
+    );
+    return artifact;
+  });
+}
+
 export async function getRoomSharedArtifactByIdentityKey(input: {
   room_id: string;
   identity_key: string;
-}): Promise<RoomSharedArtifact | null> {
-  const [artifact] = await db
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifact | null> {
+  const [artifact] = await executor
     .select()
     .from(room_shared_artifacts)
     .where(
@@ -190,7 +230,7 @@ export async function getRoomSharedArtifactByIdentityKey(input: {
     return null;
   }
 
-  const links = await db
+  const links = await executor
     .select()
     .from(room_shared_artifact_tasks)
     .where(
