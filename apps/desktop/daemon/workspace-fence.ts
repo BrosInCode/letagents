@@ -15,7 +15,10 @@ export type WorkspaceFenceHandle = {
 
 type FenceRecord = { owner: string; generation: number; pid: number; workspace_path: string; mode: WorkspaceFenceMode; created_at: string };
 
-function rootFor(workspacePath: string): string { return dirname(dirname(resolve(workspacePath))); }
+// A repository worktree root is the smallest namespace in which a worktree
+// can be substituted for another valid managed worktree.  Scoping here keeps
+// an active agent in repo B from starving safe collection in unrelated repo A.
+function rootFor(workspacePath: string): string { return dirname(resolve(workspacePath)); }
 function fenceDirectory(workspacePath: string): string { return join(rootFor(workspacePath), ".letagents-supervisor-workspace.fences"); }
 function stale(record: FenceRecord): boolean {
   try { process.kill(record.pid, 0); return false; }
@@ -65,7 +68,7 @@ async function removeStale(directory: string): Promise<void> {
 /**
  * The daemon uses a retained shared fence for each live supervisor generation,
  * so independent workspaces execute concurrently.  GC takes an exclusive
- * fence, which cannot be granted while *any* live generation retains shared
+ * fence, which cannot be granted while any live generation for that repository retains shared
  * authority.  The tiny mutation lock makes the shared/exclusive transition
  * atomic; PID-stamped records make crash recovery explicit and safe.
  */

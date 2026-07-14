@@ -15,7 +15,7 @@ import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { WorkspaceProvisioner } from "../workspace-provisioner.js";
-import { withWorkspaceFence } from "../workspace-fence.js";
+import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
@@ -379,7 +379,7 @@ test("retained shared fences permit concurrent work and prevent GC from deleting
     const secondWorkspace = await provisionedWorkspace(env.root, "second");
     const second = await store.createAttempt({ taskId: "second", leaseId: "lease-second", leaseEpoch: 1, workspacePath: secondWorkspace.path, workAttemptId: secondWorkspace.id });
     await store.startGeneration(second.work_attempt_id, "daemon", 1);
-    assert.equal((await readdir(join(env.root, "worktrees", ".letagents-supervisor-workspace.fences"))).filter((name) => name.startsWith("shared-")).length, 2);
+    assert.equal((await readdir(join(env.root, "worktrees", "repo", ".letagents-supervisor-workspace.fences"))).filter((name) => name.startsWith("shared-")).length, 2);
     // Simulate an uncooperative filesystem attacker: it does not acquire any
     // helper fence. GC must fail closed before it can act on either pathname.
     await rm(doomedWorkspace.path, { recursive: true });
@@ -397,12 +397,27 @@ test("one retained supervisor handle survives terminal, rebind, and successor st
     const workspace = await provisionedWorkspace(env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     const first = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
-    const fenceDirectory = join(env.root, "worktrees", ".letagents-supervisor-workspace.fences");
+    const fenceDirectory = join(env.root, "worktrees", "repo", ".letagents-supervisor-workspace.fences");
     const held = (await readdir(fenceDirectory)).find((name) => name.startsWith("shared-"));
     assert.ok(held);
     await store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2027-01-01T00:00:01.000Z", exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "done", actor: "daemon", generation: 1, provider_continuation_id: null });
     await store.rebindAttempt(attempt.work_attempt_id, "lease-2", 2);
     await store.startGeneration(attempt.work_attempt_id, "daemon", 2);
     assert.equal((await readdir(fenceDirectory)).filter((name) => name.startsWith("shared-")).join(), held, "handoff must retain the same fence record without a release/reacquire gap");
+  } finally { await env.cleanup(); }
+});
+
+test("a live fence in an unrelated repository does not starve safe GC", async () => {
+  const env = await fixture();
+  try {
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
+    const unrelated = join(env.root, "worktrees", "other-repo", randomUUID());
+    await mkdir(unrelated, { recursive: true });
+    const live = await acquireWorkspaceFence(unrelated, "other-supervisor", 1, "shared");
+    try { assert.deepEqual(await store.garbageCollect(0), [attempt.work_attempt_id]); }
+    finally { await live.release(); }
   } finally { await env.cleanup(); }
 });
