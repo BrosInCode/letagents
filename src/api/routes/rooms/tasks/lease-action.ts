@@ -331,6 +331,9 @@ export function registerTaskLeaseActionRoute(
         room_id: project.id,
         task_id: task.id,
         active_lease_id: activeWorkLease.id,
+        // Fence the mutation on the epoch we observed: a rebind (§4.5) that
+        // commits after we resolved this lease invalidates a stale action.
+        expected_lease_epoch: activeWorkLease.epoch,
         disposition_status: requesterIsLeaseHolder ? "released" : "revoked",
         disposition_reason: dispositionReason,
         task_updates: leaseActionUpdates,

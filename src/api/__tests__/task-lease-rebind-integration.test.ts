@@ -16,6 +16,7 @@ const client = testDatabaseUrl ? await import("../db/client.js") : null;
 const db = testDatabaseUrl ? await import("../db.js") : null;
 const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { rebindTaskLease, assertLeaseEpochCurrentTx } = await import("../db/coordination/lease-rebind.js");
+const { applyTaskWorkLeaseAction } = await import("../db/coordination/work-lease-actions.js");
 
 async function reset(): Promise<void> {
   if (!client) throw new Error("DB-backed rebind tests require TEST_DB_URL");
@@ -32,7 +33,7 @@ if (!requiresDatabase) {
 
 let ordinal = 0;
 
-async function seed(options: { endFrom?: boolean; sameKey?: boolean } = {}) {
+async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean } = {}) {
   const n = ++ordinal;
   const ownerId = `owner_rebind_${n}`;
   await client!.db.insert(schema!.accounts).values({
@@ -41,17 +42,11 @@ async function seed(options: { endFrom?: boolean; sameKey?: boolean } = {}) {
   });
   const room = await db!.createProjectWithName(`rebind-room-${n}`);
   const agentKey = `owner/rebind-agent-${n}`;
-  const toKey = options.sameKey === false ? `owner/other-agent-${n}` : agentKey;
 
   const from = await db!.createRoomAgentSession({
     room_id: room.id, session_kind: "worker", runtime: "codex",
     actor_label: `From${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_from_${n}`,
     display_name: `From${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
-  });
-  const to = await db!.createRoomAgentSession({
-    room_id: room.id, session_kind: "worker", runtime: "codex",
-    actor_label: `To${n} | Owner's agent | Agent`, agent_key: toKey, agent_instance_id: `inst_to_${n}`,
-    display_name: `To${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
   });
 
   const grant = (await db!.createSupervisorHostGrant({
@@ -59,6 +54,15 @@ async function seed(options: { endFrom?: boolean; sameKey?: boolean } = {}) {
     allowed_room_ids: [room.id], allowed_agent_keys: [agentKey],
     expires_at: new Date(Date.now() + 60_000).toISOString(),
   })).grant;
+
+  // The successor is minted UNDER this grant (the normal supervised path). The
+  // wrong-host case omits supervisor_grant_id so the rebind must reject it.
+  const to = await db!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "codex",
+    actor_label: `To${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_to_${n}`,
+    display_name: `To${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: options.successorUnderGrant === false ? null : grant.grant_id,
+  });
 
   const lease = await db!.createTaskLease({
     room_id: room.id, task_id: `task_${n}`, kind: "work", agent_key: agentKey,
@@ -92,22 +96,25 @@ test("rebind moves the lease, bumps epoch, revokes the predecessor, and stale ep
   assert.equal((stale as { reason: string }).reason, "lost_race");
 });
 
-test("a live, reachable predecessor cannot be displaced", { skip: requiresDatabase }, async () => {
-  const { room, from, to, lease, fence } = await seed({ endFrom: false });
-  // Reachable delivery row (grace window in the future) → predecessor is live.
-  const now = new Date().toISOString();
-  await client!.db.insert(schema!.room_agent_delivery_sessions).values({
-    room_id: room.id, delivery_key: `agent_session:${from.session_id}`, actor_label: from.actor_label,
-    agent_key: from.agent_key, agent_instance_id: from.agent_instance_id, display_name: "From",
-    owner_label: "Owner", ide_label: "Agent", repo_branch: null, agent_session_id: from.session_id,
-    session_kind: "worker", runtime: "codex", transport: "long_poll", active_connection_count: 1,
-    last_connected_at: now, last_disconnected_at: null,
-    reconnect_grace_expires_at: new Date(Date.now() + 60_000).toISOString(),
-    offline_announced_at: null, recovery_announced_at: null, created_at: now, updated_at: now,
-  });
+test("a non-terminal (still-running) predecessor cannot be displaced", { skip: requiresDatabase }, async () => {
+  // endFrom:false → the predecessor session is NOT ended. Reachability is not
+  // termination, so the rebind must refuse — only a genuinely ended predecessor
+  // may be replaced (§4.5 conservative floor).
+  const { from, to, lease, fence } = await seed({ endFrom: false });
   const result = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
   assert.equal(result.ok, false);
   assert.equal((result as { reason: string }).reason, "predecessor_live");
+});
+
+test("a same-room/same-key successor NOT minted under this grant is rejected (wrong host/authority)", { skip: requiresDatabase }, async () => {
+  // successorUnderGrant:false → the `to` session has the same agent_key/room/owner
+  // but no supervisor_grant_id binding it to this grant, i.e. a session another
+  // host registered under the same canonical key. Must not receive the lease.
+  const { from, to, lease, fence } = await seed({ successorUnderGrant: false });
+  const result = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, "session_mismatch");
+  assert.equal((await leaseRow(lease.id)).agent_session_id, from.session_id, "lease stayed with the predecessor");
 });
 
 test("a grant that does not cover the room+agent identity is rejected", { skip: requiresDatabase }, async () => {
@@ -157,4 +164,31 @@ test("the epoch guard rejects a partitioned predecessor's stale epoch after rebi
     // The successor at the current epoch is accepted.
     assert.equal(await assertLeaseEpochCurrentTx(tx, { lease_id: lease.id, expected_epoch: 1, agent_session_id: to.session_id }), true);
   });
+});
+
+test("a stale-epoch lease-action cannot release the successor's rebound lease, but the current epoch can", { skip: requiresDatabase }, async () => {
+  const { room, from, to, lease, fence } = await seed();
+  // Predecessor observed epoch 0; rebind commits epoch 1 to the successor.
+  const rebind = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(rebind.ok, true);
+
+  // The predecessor's release, carrying its stale epoch 0, must not touch the
+  // successor's epoch-1 lease — the destructive UPDATE CAS matches 0 rows.
+  const stale = await applyTaskWorkLeaseAction({
+    room_id: room.id, task_id: lease.task_id, active_lease_id: lease.id,
+    expected_lease_epoch: 0, disposition_status: "released", task_updates: {},
+  });
+  assert.equal(stale.conflict, "lease_not_active");
+  assert.equal(stale.released_lease, null);
+  const stillActive = await leaseRow(lease.id);
+  assert.equal(stillActive.status, "active");
+  assert.equal(stillActive.agent_session_id, to.session_id);
+
+  // The successor, presenting the current epoch, can release it.
+  const current = await applyTaskWorkLeaseAction({
+    room_id: room.id, task_id: lease.task_id, active_lease_id: lease.id,
+    expected_lease_epoch: 1, disposition_status: "released", task_updates: {},
+  });
+  assert.equal(current.conflict, null);
+  assert.equal(current.released_lease?.id, lease.id);
 });

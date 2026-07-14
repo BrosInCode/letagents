@@ -1,18 +1,15 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import {
-  room_agent_delivery_sessions,
   room_agent_session_bearers,
   room_agent_sessions,
   supervisor_host_grants,
   task_leases,
 } from "../schema.js";
-import { toRoomAgentDeliverySession, toTaskLease } from "../mappers.js";
-import { isRoomAgentDeliverySessionReachable } from "../presence/helpers.js";
+import { toTaskLease } from "../mappers.js";
 import { assertSupervisorGrantFenceTx, type SupervisorGrantFence } from "../auth.js";
-import type { RoomAgentSessionKind } from "../../../shared/agent-presence.js";
-import type { RoomAgentDeliverySessionRow, TaskLease, TaskLeaseRow, TaskLeaseStatus } from "../types.js";
+import type { TaskLease, TaskLeaseRow, TaskLeaseStatus } from "../types.js";
 
 // Why rebind exists (plan §4.5): a supervised worker that dies and restarts
 // registers a NEW agent session, but its in-flight lease is bound to the OLD
@@ -27,8 +24,8 @@ export type RebindTaskLeaseFailure =
   | "lost_race"          // lease id/status/epoch/from-session CAS did not match
   | "grant_fence_stale"  // supervisor grant generation/token_version/expiry invalid
   | "grant_scope"        // grant does not authorize this room + agent identity
-  | "session_mismatch"   // the two sessions are missing, cross-room, or different agent_key
-  | "predecessor_live";  // the from-session is neither ended nor delivery-disconnected
+  | "session_mismatch"   // sessions missing, cross-room, wrong key/kind/owner, or successor not under this grant
+  | "predecessor_live";  // the from-session is not ended (not terminal)
 
 export interface RebindTaskLeaseInput {
   lease_id: string;
@@ -96,28 +93,34 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
       || toSession.room_id !== lease.room_id) {
       return { ok: false, reason: "session_mismatch" as const };
     }
-    if (toSession.ended_at) {
-      // The successor must be a live session to receive the lease.
+    // Bind BOTH sides to the fenced supervisor authority — same agent_key is not
+    // enough. The successor must have been minted under THIS grant (so a session
+    // another host registered under the same canonical key cannot receive the
+    // lease), both sides must be workers owned by the grant's owner, and the
+    // successor must be live. This is the "wrong host/authority" AC.
+    if (toSession.ended_at
+      || toSession.session_kind !== "worker"
+      || fromSession.session_kind !== "worker"
+      || toSession.owner_account_id !== grant.owner_account_id
+      || fromSession.owner_account_id !== grant.owner_account_id
+      || toSession.supervisor_grant_id !== grant.grant_id) {
       return { ok: false, reason: "session_mismatch" as const };
     }
 
-    // The predecessor must be gone: either its session is ended, or its
-    // delivery channel is disconnected. We never wrest a lease from a session
-    // that is still both alive and reachable.
-    const deliveryDisconnected = await isDeliveryDisconnectedTx(tx, lease.room_id, input.from_agent_session_id);
-    if (!fromSession.ended_at && !deliveryDisconnected) {
+    // The predecessor must be genuinely terminal: its session is ended (which
+    // also revokes its bearer). Delivery-unreachability is NOT termination — a
+    // live worker between long-poll reconnects has no delivery row — so we do
+    // not wrest a lease on reachability alone. (Attempt-level terminal state
+    // from P1b can later widen this; session-ended is the conservative floor.)
+    if (!fromSession.ended_at) {
       return { ok: false, reason: "predecessor_live" as const };
     }
 
     const now = new Date().toISOString();
 
-    // Revoke the predecessor's authority BEFORE granting the new epoch: end the
-    // old session and revoke its bearers so its credentials stop resolving.
-    if (!fromSession.ended_at) {
-      await tx.update(room_agent_sessions)
-        .set({ ended_at: now, updated_at: now, last_seen_at: now })
-        .where(eq(room_agent_sessions.session_id, input.from_agent_session_id));
-    }
+    // The predecessor's session is already ended (enforced above). Defensively
+    // revoke any bearer that outlived the session so its credentials cannot
+    // resolve past the rebind.
     await tx.update(room_agent_session_bearers)
       .set({ revoked_at: now })
       .where(and(
@@ -171,23 +174,4 @@ export async function assertLeaseEpochCurrentTx(
     ))
     .limit(1);
   return Boolean(row);
-}
-
-async function isDeliveryDisconnectedTx(tx: any, roomId: string, agentSessionId: string): Promise<boolean> {
-  // Disconnected = no *reachable* worker delivery session. Absence of a row is
-  // the common case for a dead worker whose long-poll was already reaped; a
-  // present-but-unreachable row (stale/grace-expired) also counts. Reuses the
-  // canonical reachability predicate so this matches liveness elsewhere.
-  const [row] = await tx
-    .select()
-    .from(room_agent_delivery_sessions)
-    .where(and(
-      eq(room_agent_delivery_sessions.room_id, roomId),
-      eq(room_agent_delivery_sessions.agent_session_id, agentSessionId),
-      eq(room_agent_delivery_sessions.session_kind, "worker" as RoomAgentSessionKind),
-    ))
-    .orderBy(desc(room_agent_delivery_sessions.updated_at))
-    .limit(1);
-  if (!row) return true;
-  return !isRoomAgentDeliverySessionReachable(toRoomAgentDeliverySession(row as RoomAgentDeliverySessionRow));
 }
