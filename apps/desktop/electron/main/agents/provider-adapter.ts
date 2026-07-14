@@ -1,0 +1,146 @@
+// The launcher boundary for supervised provider agents (plan v10 §4.8).
+//
+// Every supervised provider (Codex first, then Claude Code, Cursor) is driven
+// through this one interface. The daemon + reconciler (P1d) consume it; the
+// concrete adapters implement it over each provider's NATIVE harness. Two hard
+// rules from v10 §3/§4.8:
+//   1. This boundary owns NO permission/credential logic. The provider's own
+//      launch policy (its Add Agent choice: Full access / Ask / Sandboxed /
+//      Read-only) governs execution and is passed through UNCHANGED. There is no
+//      curated HOME, no env scrub, no scoped-bearer injection here.
+//   2. Progressive capabilities are opt-in and must each be backed by a passing
+//      P0 spike cell before an adapter claims them. The reconciler consumes the
+//      negotiated set (e.g. no `midTurnInjection` ⇒ the attention ladder skips
+//      the poke rung).
+//
+// Built interface-first so durability (spawn/stop/restart/resume/terminal
+// ordering) is provable against an in-memory fake child with no live provider
+// process — see provider-adapter-fake and its lifecycle tests.
+
+// Provider-runtime observed state, local to the launcher boundary. Kept
+// independent of the daemon's three-axis `ObservedState` (separate compilation
+// unit / process): the daemon/reconciler maps this to its own vocabulary at the
+// control-socket boundary. Deliberately no cross-rootDir import into the daemon.
+export type ProviderObservedState =
+  | "starting"
+  | "working"
+  | "idle"
+  | "stopping"
+  | "stopped"
+  | "failed";
+
+export type ProviderAdapterId = "codex" | "claude-code" | "cursor";
+
+// Negotiated per adapter; each `true` requires a proven spike cell (v10 §4.8).
+export interface ProviderAdapterCapabilities {
+  /** Continue the SAME provider session across a restart (vs. starting fresh). */
+  resume: boolean;
+  /** Inject a message into a running session at its next tool boundary (poke). */
+  midTurnInjection: boolean;
+  /** Read the live transcript/rollout for runtime activity evidence. */
+  transcriptAccess: boolean;
+  /** Surface the provider's native permission prompts through the desktop. */
+  permissionPromptBridging: boolean;
+  /**
+   * v10 §4.8 recovery bound. `true` = the process/session genuinely survives a
+   * restart with in-context state. `false` = "bounded recovery, not survival":
+   * a restart loses in-context state since the last checkpoint; the work
+   * attempt, workspace, scratchpad, and outbox bound that loss. The UI MUST
+   * surface this bound.
+   */
+  survivesRestart: boolean;
+}
+
+export type ProviderTerminalCause =
+  | "exited"        // clean process exit
+  | "killed"        // SIGKILL / force stop
+  | "stopped"       // graceful SIGTERM stop
+  | "crashed"       // unexpected death
+  | "protocol_error"; // harness/RPC violation
+
+// Immutable payload recorded when a generation ends. Mirrors P1b's
+// `execution_generation` terminal record so the reconciler/attestation can
+// consume it directly.
+export interface ProviderTerminalPayload {
+  endedAt: string;
+  exitCode: number | null;
+  signal: string | null;
+  terminalCause: ProviderTerminalCause;
+  /** Provider-native continuation handle (codex thread_id, claude session_id). */
+  providerContinuationId: string | null;
+}
+
+// A provider session that can be resumed/reattached. The work_attempt_id (P1b)
+// is the immutable owner of the workspace and survives death AND rebind.
+export interface ProviderContinuationRef {
+  workAttemptId: string;
+  providerContinuationId: string;
+}
+
+export interface ProviderSpawnRequest {
+  workAttemptId: string;
+  roomId: string;
+  /** The per-work-attempt worktree (daemon-owned; never the user's dev checkout). */
+  cwd: string;
+  /**
+   * The provider's existing launch policy from the desktop Add Agent UI, passed
+   * through unchanged. Opaque to this layer by design (v10 §3) — the adapter
+   * hands it to the native harness verbatim; LetAgents never reinterprets it.
+   */
+  launchPolicy: unknown;
+  /** Present when this spawn continues a prior session (requires capabilities.resume). */
+  resumeFrom?: ProviderContinuationRef | null;
+}
+
+export interface ProviderHandle {
+  readonly workAttemptId: string;
+  /** OS pid of the supervised process, or null for an in-process/attached shape. */
+  readonly pid: number | null;
+  /** The provider-native session id once known (thread/session). */
+  readonly providerContinuationId: string | null;
+  observedState(): ProviderObservedState;
+}
+
+export interface ProviderStopOptions {
+  /** Skip the graceful window and force-kill immediately. */
+  force?: boolean;
+  /** Grace period (ms) before escalating SIGTERM → SIGKILL. */
+  graceMs?: number;
+}
+
+export interface ProviderAdapter {
+  readonly id: ProviderAdapterId;
+
+  /** The negotiated capability set (each `true` backed by a P0 spike cell). */
+  capabilities(): ProviderAdapterCapabilities;
+
+  /** Launch a fresh child under the provider's native harness. */
+  spawn(req: ProviderSpawnRequest): Promise<ProviderHandle>;
+
+  /**
+   * Reattach to a child that is still alive (e.g. after a desktop restart)
+   * WITHOUT relaunching it. Returns null if no live process matches the ref —
+   * the reconciler then decides whether to resume() or treat it as terminal.
+   */
+  attach(ref: ProviderContinuationRef): Promise<ProviderHandle | null>;
+
+  /**
+   * Relaunch continuing the prior session. Requires capabilities().resume; for a
+   * no-resume provider the reconciler must spawn() fresh instead and accept the
+   * bounded-recovery loss.
+   */
+  resume(ref: ProviderContinuationRef, req: ProviderSpawnRequest): Promise<ProviderHandle>;
+
+  /** Inject a message at the next tool boundary. Requires capabilities().midTurnInjection. */
+  poke(handle: ProviderHandle, message: string): Promise<void>;
+
+  /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
+  stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;
+
+  /**
+   * Observe process exit (the "observable exit" floor from v10 §4.8) — however
+   * the child dies, the supervisor learns the terminal payload. Returns an
+   * unsubscribe function.
+   */
+  onExit(handle: ProviderHandle, listener: (payload: ProviderTerminalPayload) => void): () => void;
+}
