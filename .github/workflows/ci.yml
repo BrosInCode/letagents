@@ -158,6 +158,13 @@ jobs:
           src/api/__tests__/message-attachments.test.ts
           src/api/__tests__/message-attachments-db.test.ts
 
+      - name: Run thread inbox parity tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/thread-inbox-parity-db.test.ts
+
       - name: Run webhook integration tests
         run: >-
           node
