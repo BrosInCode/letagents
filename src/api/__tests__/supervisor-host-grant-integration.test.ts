@@ -85,6 +85,18 @@ test("an expired grant cannot authenticate even before a worker bearer reaches i
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${created.token}` } } as never)).authKind, null);
 });
 
+test("a valid browser cookie plus supervisor bearer fails closed", { skip: requiresDatabase }, async () => {
+  await seedOwner("owner_5");
+  const created = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_5", host_id: "host_5", installation_id: "install_5",
+    allowed_room_ids: ["room_5"], allowed_agent_keys: ["owner/agent_5"], expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await authDb!.createSession("owner_5", "browser_session", new Date(Date.now() + 60_000).toISOString());
+  const auth = await resolveRequestAuth({ headers: { cookie: "letagents_session=browser_session", authorization: `Bearer ${created.token}` } } as never);
+  assert.equal(auth.authKind, null);
+  assert.equal(auth.account, null);
+});
+
 test("revoking a parent grant does not retroactively invalidate an already minted worker bearer", { skip: requiresDatabase }, async () => {
   await seedOwner("owner_4");
   const created = await authDb!.createSupervisorHostGrant({
