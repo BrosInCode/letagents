@@ -142,7 +142,8 @@
         :error="inboxError"
         :has-more="inboxHasMore"
         :last-cleared-item="lastClearedInboxItem"
-        @refresh="loadInboxThreads"
+        :degraded-sources="inboxDegradation.sources"
+        @refresh="handleInboxRefresh"
         @load-older="loadOlderInboxThreads"
         @open-thread="openInboxThread"
         @clear-item="clearInboxItem"
@@ -293,6 +294,7 @@ import type {
   DesktopRoomMessage,
   DesktopRoomThreadInboxPage,
   DesktopReasoningSession,
+  DesktopSnapshotSourceStates,
   DesktopTaskSummary,
   RepoStatus,
   WorkerSnapshot,
@@ -355,6 +357,7 @@ import {
 } from "./desktop-chat-message/github-event";
 import {
   buildDesktopInboxItems,
+  deriveInboxDegradation,
   desktopInboxItemFingerprint,
   type DesktopInboxFilter,
   type DesktopInboxItem,
@@ -387,6 +390,7 @@ const props = defineProps<{
   boardSettings: DesktopBoardSettingsSummary | null;
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
+  sourceStates?: DesktopSnapshotSourceStates | null;
   repoStatus: RepoStatus;
   gitRoomMatchesActiveRepo: boolean;
   workers: WorkerSnapshot[];
@@ -625,6 +629,9 @@ const inboxActionableFingerprints = computed(() =>
     .map(desktopInboxItemFingerprint)
 );
 const inboxHasMore = computed(() => Boolean(threadInboxPage.value?.hasMore));
+const inboxDegradation = computed(() =>
+  deriveInboxDegradation(props.sourceStates ?? null)
+);
 
 watch(() => props.githubEvents, (nextPage) => {
   if (!nextPage) {
@@ -1057,6 +1064,16 @@ async function loadInboxThreads(options: { append?: boolean; baselineIndicator?:
 
 function loadOlderInboxThreads(): void {
   void loadInboxThreads({ append: true });
+}
+
+function handleInboxRefresh(): void {
+  // Always reload the thread inbox. If snapshot-backed inbox sources (tasks,
+  // GitHub events, agent sessions, presence) are degraded, also ask the app to
+  // re-fetch the room snapshot so a retry can recover them, not just the threads.
+  void loadInboxThreads().catch(() => undefined);
+  if (inboxDegradation.value.degraded) {
+    emit("refresh-room");
+  }
 }
 
 function mergeThreadInboxPages(

@@ -22,6 +22,53 @@ describe("desktop room snapshot merging", () => {
     assert.deepEqual(merged.messages.map((message) => message.text), ["Local message"]);
   });
 
+  it("preserves last-good data for sources that failed to refresh", () => {
+    const current = {
+      ...roomSnapshot("cloud", "hello", "msg_1"),
+      tasks: [{ id: "task_1", title: "Keep me" }],
+      reasoningSessions: [{ id: "reason_1" }],
+    } as DesktopRoomSnapshot;
+    const incoming = {
+      ...roomSnapshot("cloud", "hello", "msg_1"),
+      tasks: [],
+      reasoningSessions: [],
+      participants: [],
+      sourceStates: {
+        ...readyStates(),
+        tasks: { status: "error", error: "API request failed: 500" },
+        reasoning: { status: "error", error: "network down" },
+      },
+    } as DesktopRoomSnapshot;
+
+    const merged = mergeRoomSnapshotMessages(current, incoming);
+
+    // Failed sources keep the previously loaded data instead of blanking.
+    assert.deepEqual(merged.tasks.map((task) => task.id), ["task_1"]);
+    assert.deepEqual(merged.reasoningSessions.map((session) => session.id), ["reason_1"]);
+    // The fresh (error) states are still reported so the UI can show a banner.
+    assert.equal(merged.sourceStates.tasks.status, "error");
+    assert.equal(merged.sourceStates.reasoning.status, "error");
+    // A source that loaded fine (ready) with an empty result is NOT preserved.
+    assert.deepEqual(merged.participants, []);
+    assert.equal(merged.sourceStates.participants.status, "ready");
+  });
+
+  it("replaces a source that recovered to ready", () => {
+    const current = {
+      ...roomSnapshot("cloud", "hi", "msg_1"),
+      tasks: [{ id: "stale" }],
+      sourceStates: { ...readyStates(), tasks: { status: "error", error: "x" } },
+    } as DesktopRoomSnapshot;
+    const incoming = {
+      ...roomSnapshot("cloud", "hi", "msg_1"),
+      tasks: [{ id: "fresh" }],
+    } as DesktopRoomSnapshot;
+
+    const merged = mergeRoomSnapshotMessages(current, incoming);
+
+    assert.deepEqual(merged.tasks.map((task) => task.id), ["fresh"]);
+  });
+
   it("upserts room artifacts by identity and keeps newest activity first", () => {
     const snapshot = {
       ...roomSnapshot("local", "Local message", "msg_1", "local_room"),
@@ -130,6 +177,23 @@ function roomSnapshot(
     },
     messages: [roomMessage(messageId, text)],
     githubEvents: null,
+    sourceStates: readyStates(),
+  };
+}
+
+function readyStates(): DesktopRoomSnapshot["sourceStates"] {
+  const ready = () => ({ status: "ready" as const, error: null });
+  return {
+    focusRooms: ready(),
+    tasks: ready(),
+    participants: ready(),
+    presence: ready(),
+    reasoning: ready(),
+    activityHistory: ready(),
+    roomArtifacts: ready(),
+    boardSettings: ready(),
+    messages: ready(),
+    githubEvents: ready(),
   };
 }
 

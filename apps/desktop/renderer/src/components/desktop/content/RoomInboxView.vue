@@ -47,6 +47,12 @@
       <button type="button" @click="emit('refresh')">Retry</button>
     </div>
 
+    <div v-if="hasDegradedSources" class="desktop-inbox-error desktop-inbox-degraded" role="status">
+      <AlertTriangle :size="16" />
+      <span>{{ degradedLabel }} — showing what's available.</span>
+      <button type="button" @click="emit('refresh')">Retry</button>
+    </div>
+
     <Transition name="desktop-inbox-undo-motion">
       <div v-if="lastClearedItem" class="desktop-inbox-undo" role="status">
         <span>Dismissed "{{ lastClearedItem.title }}"</span>
@@ -65,7 +71,7 @@
       </div>
     </div>
 
-    <div v-else-if="!error && items.length === 0" class="desktop-inbox-empty">
+    <div v-else-if="!error && items.length === 0 && !hasDegradedSources" class="desktop-inbox-empty">
       <Inbox :size="22" />
       <strong>{{ filter === "actionable" ? "Nothing needs your attention" : "No inbox history yet" }}</strong>
       <span>{{ filter === "actionable" ? "Unread threads, blocked work, failed checks, and reviews will appear here." : "Threads, tasks, checks, and agent updates will appear here as they happen." }}</span>
@@ -269,7 +275,18 @@ const props = defineProps<{
   error: string | null;
   hasMore: boolean;
   lastClearedItem: DesktopInboxItem | null;
+  degradedSources?: string[];
 }>();
+
+const degradedSources = computed(() => props.degradedSources ?? []);
+const hasDegradedSources = computed(() => degradedSources.value.length > 0);
+const degradedLabel = computed(() => {
+  const names = degradedSources.value;
+  if (names.length === 0) return "";
+  if (names.length === 1) return `${names[0]} couldn't be loaded`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} couldn't be loaded`;
+  return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)} couldn't be loaded`;
+});
 
 const emit = defineEmits<{
   "update:filter": [filter: DesktopInboxFilter];

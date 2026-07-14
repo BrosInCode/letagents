@@ -5,11 +5,53 @@ import type {
   DesktopRoomMessage,
   DesktopRoomMessageThreadSummary,
   DesktopRoomThreadInboxPage,
+  DesktopSnapshotSourceKey,
+  DesktopSnapshotSourceStates,
   DesktopTaskSummary,
 } from "../../../../../../electron/ipc-types";
 import { presentDesktopGitHubEvent } from "../room-events/presenter";
 
 export type DesktopInboxFilter = "actionable" | "all";
+
+/**
+ * Snapshot sources that actually feed the inbox, with the label shown in the
+ * degraded banner. Must match what `buildDesktopInboxItems` consumes: tasks,
+ * GitHub events, reasoning sessions, and presence (offline-agent rows). A
+ * failure in any of these means the inbox may be missing items, so it must not
+ * be presented as a clean empty inbox. NB: snapshot `messages` is NOT an inbox
+ * source (threads load separately), so it is intentionally absent; a thread
+ * load failure is surfaced by the inbox's own error banner, not here.
+ */
+const INBOX_SOURCE_LABELS: ReadonlyArray<[DesktopSnapshotSourceKey, string]> = [
+  ["tasks", "Tasks"],
+  ["githubEvents", "GitHub checks"],
+  ["reasoning", "Agent sessions"],
+  ["presence", "Agents"],
+];
+
+export interface DesktopInboxDegradation {
+  degraded: boolean;
+  /** Human-readable labels of the inbox sources that failed to load. */
+  sources: string[];
+}
+
+/**
+ * Derive whether the inbox is showing a partial view because one or more of its
+ * snapshot-backed sources failed to load. When degraded, the UI shows a "some
+ * sources unavailable" affordance instead of a false-empty state. Thread-inbox
+ * load failures are handled separately by the inbox error banner.
+ */
+export function deriveInboxDegradation(
+  sourceStates: DesktopSnapshotSourceStates | null | undefined,
+): DesktopInboxDegradation {
+  const sources: string[] = [];
+  if (sourceStates) {
+    for (const [key, label] of INBOX_SOURCE_LABELS) {
+      if (sourceStates[key]?.status === "error") sources.push(label);
+    }
+  }
+  return { degraded: sources.length > 0, sources };
+}
 
 export type DesktopInboxItemKind =
   | "thread"
