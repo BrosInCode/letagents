@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createElectronTestEnv } from "./harness.js";
+import { createElectronTestEnv, installNoProdNetworkGuard } from "./harness.js";
 
 // Characterization tests for the Codex managed-agent event-delivery lifecycle in
 // codex-supervisor.ts. These lock the CURRENT behavior of the codex runtime
@@ -19,6 +19,12 @@ const { tempDir, resetState } = createElectronTestEnv({
   prefix: "letagents-codex-event-lifecycle-",
   paths: ["state", "chatStorage", "localChatDb"],
 });
+
+// Guard the whole suite against a real API call escaping between the
+// per-test `installFakeCodexServer` fetch stubs — notably the managed-worker
+// desktop-heartbeat/desktop-pause timer, which resolves against
+// `LETAGENTS_API_URL` (PROD by default when unset).
+const netGuard = installNoProdNetworkGuard({ autoRestore: false });
 
 const {
   saveAgentSession,
@@ -829,4 +835,11 @@ test("codex publishes to the storage destination captured at enqueue time, not a
     await setLocalAwareRoomStorageMode(roomIdentifier, "local");
     server.restore();
   }
+});
+
+test("no runtime network call escapes to the real API during this suite", () => {
+  // Codex runs its rooms in local storage mode, so the managed-worker cloud
+  // heartbeat/pause path stays dormant; this asserts nothing slipped past the
+  // per-test fake server to a real (prod) endpoint.
+  assert.deepEqual(netGuard.escapedUrls(), []);
 });

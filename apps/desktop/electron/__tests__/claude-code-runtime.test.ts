@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createElectronTestEnv } from "./harness.js";
+import { createElectronTestEnv, installNoProdNetworkGuard } from "./harness.js";
 
 const { tempDir, resetState } = createElectronTestEnv({
   prefix: "letagents-claude-code-runtime-",
   paths: ["state", "chatStorage", "localChatDb", "localProfile"],
 });
+
+// The managed-worker desktop-heartbeat/desktop-pause timer fires background
+// `apiFetch` calls that these fixture-seeded sessions never await. Without this
+// guard those calls resolve against `LETAGENTS_API_URL` — which defaults to the
+// PRODUCTION host when unset — so intercept them for the whole suite.
+const netGuard = installNoProdNetworkGuard({ autoRestore: false });
 
 const {
   createDesktopClaudeCodeRuntime,
@@ -1241,4 +1247,11 @@ test("a verified model is probed once per app session", async () => {
     modelSource: "known",
   });
   assert.equal(probes, 1, "a previously verified model must not probe again");
+});
+
+test("no runtime network call escapes to the real API during this suite", () => {
+  // The only outbound fetch these fixture-seeded sessions may make is the
+  // managed-worker heartbeat/pause timer, which the guard intercepts locally.
+  // Anything else (a real prod call) would be recorded here.
+  assert.deepEqual(netGuard.escapedUrls(), []);
 });

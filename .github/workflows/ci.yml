@@ -95,6 +95,12 @@ jobs:
         run: npm --prefix apps/desktop run lint:vue-components
 
       - name: Test desktop
+        # Pin the API base URL to an unroutable local address so the desktop
+        # runtime tests (which seed fixture sessions and fire a background
+        # heartbeat/pause timer) can never reach the production API. Nothing
+        # listens on port 9, so a stray call fails fast instead of hitting prod.
+        env:
+          LETAGENTS_API_URL: http://127.0.0.1:9
         run: npm --prefix apps/desktop test
 
       - name: Build desktop
