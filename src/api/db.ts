@@ -10,7 +10,7 @@ export { listStalledRoomCandidates, markRoomStallNudgedTx } from "./db/coordinat
 export type { StalledRoomCandidate } from "./db/coordination.js";
 export type { ActiveBoardManagerAssignmentCandidate } from "./db/coordination.js";
 export type { GitHubWebhookDelivery, Account, Session, SessionAccount, OwnerToken, OwnerTokenAccount, AuthState, AgentIdentity } from "./db/types.js";
-export type { RoomAgentPresence, RoomAgentRegistrationLiveness, RoomAgentLivenessObservation, RoomAgentDeliverySession, RoomAgentSession, CreatedRoomAgentSession, RoomParticipant, RoomActivityActorCount } from "./db/types.js";
+export type { RoomAgentPresence, RoomAgentRegistrationLiveness, RoomAgentLivenessObservation, RoomAgentDeliverySession, RoomAgentSession, RoomAgentSessionBearer, CreatedRoomAgentSession, RoomParticipant, RoomActivityActorCount } from "./db/types.js";
 export type { ReasoningSession, ReasoningSessionUpdate, Message, MessageReplyReference, MessageThreadParticipant, MessageThreadSummary, MessageAttachment, MessageAttachmentData, MessageAttachmentUpload, TaskStatus } from "./db/types.js";
 export type { TaskLeaseKind, TaskLeaseStatus, TaskLockScope, TaskLockReason, CoordinationDecision, Task, TaskStalePromptState, TaskLease, TaskWorkLeaseCreationInput } from "./db/types.js";
 export type { TaskLock, StaleTaskPromptMute, CoordinationEvent, TaskOwnershipState, TaskWorkLeaseActionConflict, GitHubRoomEvent, GitHubRoomEventMetadata, TaskGitHubArtifactStatus } from "./db/types.js";
@@ -33,7 +33,7 @@ export type { LivenessAnnouncementCandidate } from "./db/presence.js";
 export { upsertRoomParticipant, getRoomParticipants, getRoomParticipantsForRooms, setRoomParticipantsHidden } from "./db/participants.js";
 export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession } from "./db/reasoning.js";
 export { createAuthState, consumeAuthState, upsertAccount, createSession, refreshProviderAccessTokenForAccount, getSessionAccountByToken, deleteSessionByToken, createOwnerToken } from "./db/auth.js";
-export { getOwnerTokenAccountByToken, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, getLastEndedWorkerSessionDisplayName, touchRoomAgentSession } from "./db/auth.js";
+export { getOwnerTokenAccountByToken, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, getRoomAgentSessionBearerByToken, rotateRoomAgentSessionBearer, revokeRoomAgentSessionBearer, getLastEndedWorkerSessionDisplayName, touchRoomAgentSession } from "./db/auth.js";
 export {
   endRoomAgentSession,
   assignProjectAdmin,

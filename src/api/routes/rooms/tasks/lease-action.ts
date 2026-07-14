@@ -99,6 +99,10 @@ export function registerTaskLeaseActionRoute(
       res.status(400).json({ error: "action must be 'release' or 'handoff'" });
       return;
     }
+    if (req.authKind === "agent_session" && action !== "release") {
+      res.status(403).json({ error: "Worker bearers may only release their own work lease." });
+      return;
+    }
 
     const actorLabel = workerIdentity?.actor_label
       ?? normalizeTaskActorLabel(requestBody.actor_label)
@@ -143,7 +147,7 @@ export function registerTaskLeaseActionRoute(
       return;
     }
 
-    const requesterIsLeaseHolder = req.authKind === "owner_token" && leaseMatchesActor(activeWorkLease, {
+    const requesterIsLeaseHolder = (req.authKind === "owner_token" || req.authKind === "agent_session") && leaseMatchesActor(activeWorkLease, {
       actorLabel,
       agentKey: actorKey,
       agentInstanceId: actorInstanceId,

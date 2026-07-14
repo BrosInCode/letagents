@@ -1,12 +1,13 @@
 import crypto from "crypto";
-import { and, asc, desc, eq, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_sessions } from "./schema.js";
+import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_session_bearers, room_agent_sessions } from "./schema.js";
 import { AUTH_STATE_TTL_MS, hashToken, nextPrefixedId } from "./utils.js";
 import { toRoomAgentSession } from "./mappers.js";
-import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionRow, Session, SessionAccount } from "./types.js";
+import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionBearer, RoomAgentSessionRow, Session, SessionAccount } from "./types.js";
 import type { RoomAgentSessionKind } from "../../shared/agent-presence.js";
+import { DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES, getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, type AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
   const now = new Date();
@@ -309,6 +310,28 @@ export function makeAgentSessionToken(): string {
   return crypto.randomBytes(32).toString("base64url");
 }
 
+export function makeAgentSessionBearerToken(): string {
+  return `lasb_${crypto.randomBytes(32).toString("base64url")}`;
+}
+
+function toRoomAgentSessionBearer(row: typeof room_agent_session_bearers.$inferSelect): RoomAgentSessionBearer {
+  return {
+    bearer_id: row.bearer_id,
+    session_id: row.session_id,
+    room_id: row.room_id,
+    generation: row.generation,
+    capabilities: row.capabilities,
+    issued_at: row.issued_at,
+    expires_at: row.expires_at,
+    revoked_at: row.revoked_at,
+    rotated_from_bearer_id: row.rotated_from_bearer_id,
+  };
+}
+
+function newBearerExpiry(now: Date): string {
+  return new Date(now.getTime() + getAgentSessionBearerTtlMs()).toISOString();
+}
+
 export async function createRoomAgentSession(input: {
   room_id: string;
   session_kind: RoomAgentSessionKind;
@@ -323,8 +346,12 @@ export async function createRoomAgentSession(input: {
   owner_label: string;
   ide_label: string;
 }): Promise<CreatedRoomAgentSession> {
-  const now = new Date().toISOString();
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
   const sessionToken = makeAgentSessionToken();
+  const workerBearer = input.session_kind === "worker" && isAgentSessionBearerFeatureEnabled()
+    ? makeAgentSessionBearerToken()
+    : null;
   const session = {
     session_id: await nextPrefixedId("room_agent_sessions", "agent_session"),
     room_id: input.room_id,
@@ -350,15 +377,23 @@ export async function createRoomAgentSession(input: {
     ended_at: null,
   };
 
-  const [created] = await db
-    .insert(room_agent_sessions)
-    .values(session)
-    .returning();
-
-  return {
-    ...toRoomAgentSession(created as RoomAgentSessionRow),
-    session_token: sessionToken,
-  };
+  return db.transaction(async (tx) => {
+    const [created] = await tx.insert(room_agent_sessions).values(session).returning();
+    if (workerBearer) await tx.insert(room_agent_session_bearers).values({
+      bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
+      session_id: session.session_id,
+      room_id: session.room_id,
+      token_hash: hashToken(workerBearer),
+      generation: 1,
+      capabilities: DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES,
+      issued_at: now,
+      expires_at: newBearerExpiry(nowDate),
+      revoked_at: null,
+      rotated_from_bearer_id: null,
+      created_at: now,
+    });
+    return { ...toRoomAgentSession(created as RoomAgentSessionRow), session_token: sessionToken, worker_bearer: workerBearer };
+  });
 }
 
 export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
@@ -434,6 +469,93 @@ export async function getRoomAgentSessionByCredentials(input: {
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
 }
 
+export interface ResolvedRoomAgentSessionBearer {
+  bearer: RoomAgentSessionBearer;
+  session: RoomAgentSession;
+}
+
+export async function getRoomAgentSessionBearerByToken(
+  token: string
+): Promise<ResolvedRoomAgentSessionBearer | null> {
+  const now = new Date().toISOString();
+  const [row] = await db
+    .select({ bearer: room_agent_session_bearers, session: room_agent_sessions })
+    .from(room_agent_session_bearers)
+    .innerJoin(
+      room_agent_sessions,
+      eq(room_agent_session_bearers.session_id, room_agent_sessions.session_id)
+    )
+    .where(and(
+      eq(room_agent_session_bearers.token_hash, hashToken(token)),
+      isNull(room_agent_session_bearers.revoked_at),
+      gt(room_agent_session_bearers.expires_at, now),
+      isNull(room_agent_sessions.ended_at),
+      eq(room_agent_session_bearers.room_id, room_agent_sessions.room_id),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+    ))
+    .limit(1);
+
+  return row ? {
+    bearer: toRoomAgentSessionBearer(row.bearer),
+    session: toRoomAgentSession(row.session as RoomAgentSessionRow),
+  } : null;
+}
+
+export async function revokeRoomAgentSessionBearer(input: {
+  bearer_id: string;
+  session_id?: string;
+}): Promise<RoomAgentSessionBearer | null> {
+  const conditions = [eq(room_agent_session_bearers.bearer_id, input.bearer_id), isNull(room_agent_session_bearers.revoked_at)];
+  if (input.session_id) conditions.push(eq(room_agent_session_bearers.session_id, input.session_id));
+  const [row] = await db
+    .update(room_agent_session_bearers)
+    .set({ revoked_at: new Date().toISOString() })
+    .where(and(...conditions))
+    .returning();
+  return row ? toRoomAgentSessionBearer(row) : null;
+}
+
+export async function rotateRoomAgentSessionBearer(input: {
+  bearer_id: string;
+  capabilities?: AgentSessionBearerCapability[];
+}): Promise<{ bearer: RoomAgentSessionBearer; token: string } | null> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_bearer:${input.bearer_id}`}, 0))`);
+    const [current] = await tx
+      .select()
+      .from(room_agent_session_bearers)
+      .where(and(
+        eq(room_agent_session_bearers.bearer_id, input.bearer_id),
+        isNull(room_agent_session_bearers.revoked_at),
+      ))
+      .limit(1);
+    if (!current) return null;
+
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
+    await tx.update(room_agent_session_bearers)
+      .set({ revoked_at: now })
+      .where(eq(room_agent_session_bearers.bearer_id, current.bearer_id));
+
+    const token = makeAgentSessionBearerToken();
+    const next = {
+      bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
+      session_id: current.session_id,
+      room_id: current.room_id,
+      token_hash: hashToken(token),
+      generation: current.generation + 1,
+      capabilities: input.capabilities ?? current.capabilities,
+      issued_at: now,
+      expires_at: newBearerExpiry(nowDate),
+      revoked_at: null,
+      rotated_from_bearer_id: current.bearer_id,
+      created_at: now,
+    };
+    const [created] = await tx.insert(room_agent_session_bearers).values(next).returning();
+    return { bearer: toRoomAgentSessionBearer(created), token };
+  });
+}
+
 export async function touchRoomAgentSession(sessionId: string): Promise<void> {
   const now = new Date().toISOString();
   await db
@@ -468,6 +590,15 @@ export async function endRoomAgentSession(input: {
     })
     .where(and(...conditions))
     .returning();
+
+  if (row) {
+    await db.update(room_agent_session_bearers)
+      .set({ revoked_at: now })
+      .where(and(
+        eq(room_agent_session_bearers.session_id, row.session_id),
+        isNull(room_agent_session_bearers.revoked_at),
+      ));
+  }
 
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
 }

@@ -246,8 +246,8 @@ export function registerAgentSessionRoutes(
       agent_session_id?: string;
       agent_session_token?: string;
     };
-    const hasSelfCredentials =
-      typeof body.agent_session_id === "string" || typeof body.agent_session_token === "string";
+    const hasSelfCredentials = req.authKind === "agent_session"
+      || typeof body.agent_session_id === "string" || typeof body.agent_session_token === "string";
     let ownerAccountScope: string | null = null;
 
     if (hasSelfCredentials) {

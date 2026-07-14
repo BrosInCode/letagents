@@ -1,7 +1,7 @@
 import type { Express, Response } from "express";
 import type { EventEmitter } from "node:events";
 
-import type { Project, RoomSharedArtifact } from "../../db.js";
+import { getActiveTaskLeases, type Project, type RoomSharedArtifact } from "../../db.js";
 import type {
   AuthenticatedRequest,
 } from "../../http/helpers.js";
@@ -237,7 +237,7 @@ export function registerRoomArtifactRoutes(
     // credentials are an error rather than a silent downgrade to manual.
     let source: PublishedArtifactSource = "manual";
     let workerIdentity: OwnershipWorkerIdentity | null = null;
-    if (req.authKind === "owner_token" && hasAgentSessionCredentials(body)) {
+    if (req.authKind === "agent_session" || req.authKind === "owner_token" && hasAgentSessionCredentials(body)) {
       const worker = await deps.requireWorkerRequestAgentIdentity({
         req,
         body,
@@ -262,6 +262,20 @@ export function registerRoomArtifactRoutes(
         return;
       }
       const linkedTaskIds = parseLinkedTaskIds(body);
+      if (workerIdentity && req.authKind === "agent_session") {
+        if (linkedTaskIds.length !== 1) {
+          res.status(403).json({ error: "Worker artifacts must be bound to exactly one active task." });
+          return;
+        }
+        const leases = await getActiveTaskLeases(project.id, linkedTaskIds[0]!);
+        const ownsWorkLease = leases.some((lease) => lease.kind === "work"
+          && lease.status === "active"
+          && lease.agent_session_id === workerIdentity.agent_session_id);
+        if (!ownsWorkLease) {
+          res.status(403).json({ error: "Worker artifacts must be bound to the caller's active work lease." });
+          return;
+        }
+      }
       const sharedArtifact = await deps.upsertRoomSharedArtifact({
         room_id: project.id,
         artifact,

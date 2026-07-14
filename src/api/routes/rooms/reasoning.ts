@@ -183,7 +183,7 @@ export function registerRoomReasoningRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const agentSessionIdentity = req.authKind === "owner_token"
+    const agentSessionIdentity = req.authKind === "owner_token" || req.authKind === "agent_session"
       ? await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id })
       : null;
     if (agentSessionIdentity && !agentSessionIdentity.ok) {
@@ -268,11 +268,19 @@ export function registerRoomReasoningRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const agentSessionIdentity = req.authKind === "owner_token"
+    const agentSessionIdentity = req.authKind === "owner_token" || req.authKind === "agent_session"
       ? await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id })
       : null;
     if (agentSessionIdentity && !agentSessionIdentity.ok) {
       res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+      return;
+    }
+    const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
+    const existingSession = workerIdentity
+      ? await reasoningStore.getReasoningSessionById(project.id, sessionId)
+      : null;
+    if (workerIdentity && (!existingSession || existingSession.actor_label !== workerIdentity.actor_label)) {
+      res.status(403).json({ error: "Worker bearers can only update their own reasoning sessions." });
       return;
     }
     const hasChanges =
@@ -342,7 +350,7 @@ export function registerRoomReasoningRoutes(
       if (!(await deps.requireParticipant(req, res, project))) return;
 
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const agentSessionIdentity = req.authKind === "owner_token"
+      const agentSessionIdentity = req.authKind === "owner_token" || req.authKind === "agent_session"
         ? await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id })
         : null;
       if (agentSessionIdentity && !agentSessionIdentity.ok) {
@@ -350,6 +358,14 @@ export function registerRoomReasoningRoutes(
         return;
       }
       const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
+
+      if (workerIdentity) {
+        const existingSession = await reasoningStore.getReasoningSessionById(project.id, sessionId);
+        if (!existingSession || existingSession.actor_label !== workerIdentity.actor_label) {
+          res.status(403).json({ error: "Worker bearers can only append to their own reasoning sessions." });
+          return;
+        }
+      }
 
       try {
         const result = await reasoningStore.appendReasoningSessionUpdate({

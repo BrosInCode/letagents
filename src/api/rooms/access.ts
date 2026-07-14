@@ -270,6 +270,10 @@ export async function requireAdmin(
   res: Response,
   project: Project
 ): Promise<boolean> {
+  if (req.authKind === "agent_session") {
+    res.status(403).json({ error: "Worker bearers cannot perform owner or admin actions." });
+    return false;
+  }
   if (!req.sessionAccount) {
     res.status(401).json({ error: "Authentication required" });
     return false;
@@ -289,6 +293,10 @@ export async function requireGitRoomAdmin(
   res: Response,
   project: Project
 ): Promise<boolean> {
+  if (req.authKind === "agent_session") {
+    res.status(403).json({ error: "Worker bearers cannot perform owner or admin actions." });
+    return false;
+  }
   if (!req.sessionAccount) {
     res.status(401).json({ error: "Authentication required" });
     return false;
@@ -308,6 +316,13 @@ export async function requireParticipant(
   res: Response,
   project: Project
 ): Promise<boolean> {
+  if (req.authKind === "agent_session") {
+    if (req.agentSession?.room_id === project.id) {
+      return true;
+    }
+    res.status(403).json({ error: "Worker bearer is scoped to a different room." });
+    return false;
+  }
   if (!isRepoBackedProject(project)) {
     return true;
   }

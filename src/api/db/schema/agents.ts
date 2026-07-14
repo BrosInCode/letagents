@@ -93,6 +93,39 @@ export const room_agent_sessions = pgTable(
   })
 );
 
+// A worker bearer is deliberately separate from the legacy session_token.
+// The legacy token remains an owner-authorized, body-supplied credential while
+// this record is the short-lived, least-privilege credential a spawned worker
+// may use directly as an Authorization bearer.
+export const room_agent_session_bearers = pgTable(
+  "room_agent_session_bearers",
+  {
+    bearer_id: text("bearer_id").primaryKey(),
+    session_id: text("session_id")
+      .notNull()
+      .references(() => room_agent_sessions.session_id, { onDelete: "cascade", onUpdate: "cascade" }),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    token_hash: text("token_hash").notNull().unique(),
+    generation: integer("generation").notNull(),
+    capabilities: text("capabilities").array().notNull(),
+    issued_at: timestamp("issued_at", { mode: "string", withTimezone: true }).notNull(),
+    expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull(),
+    revoked_at: timestamp("revoked_at", { mode: "string", withTimezone: true }),
+    rotated_from_bearer_id: text("rotated_from_bearer_id"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    session_idx: index("room_agent_session_bearers_session_id_idx").on(table.session_id),
+    room_idx: index("room_agent_session_bearers_room_id_idx").on(table.room_id),
+    active_session_idx: index("room_agent_session_bearers_active_session_idx")
+      .on(table.session_id, table.revoked_at, table.expires_at),
+    generation_unique: uniqueIndex("room_agent_session_bearers_session_generation_idx")
+      .on(table.session_id, table.generation),
+  })
+);
+
 export const room_agent_liveness_observations = pgTable(
   "room_agent_liveness_observations",
   {

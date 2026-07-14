@@ -159,7 +159,7 @@ export function registerTaskListAndCreateRoutes(
       throw error;
     }
 
-    if (req.authKind === "owner_token" && !isDesktopHumanWrite(req, requestBody)) {
+    if ((req.authKind === "owner_token" || req.authKind === "agent_session") && !isDesktopHumanWrite(req, requestBody)) {
       await createCoordinationEvent({
         room_id: project.id,
         task_id: task.id,
