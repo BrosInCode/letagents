@@ -364,7 +364,7 @@ test("workspace fences and terminal attestation protect clean GC", async () => {
   } finally { await env.cleanup(); }
 });
 
-test("a retained live-generation fence prevents GC from deleting a swapped active workspace", async () => {
+test("retained shared fences permit concurrent work and prevent GC from deleting a swapped active workspace", async () => {
   const env = await fixture();
   try {
     const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
@@ -373,12 +373,36 @@ test("a retained live-generation fence prevents GC from deleting a swapped activ
     const doomed = await store.createAttempt({ taskId: "doomed", leaseId: "lease-doomed", leaseEpoch: 1, workspacePath: doomedWorkspace.path, workAttemptId: doomedWorkspace.id });
     const active = await store.createAttempt({ taskId: "active", leaseId: "lease-active", leaseEpoch: 1, workspacePath: activeWorkspace.path, workAttemptId: activeWorkspace.id });
     await store.concludeAttempt(doomed.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
-    await store.startGeneration(active.work_attempt_id, "daemon", 1);
+    const activeGeneration = await store.startGeneration(active.work_attempt_id, "daemon", 1);
+    // Independent supervisor generations share read authority instead of
+    // serializing all agents behind a global exclusive lock.
+    const secondWorkspace = await provisionedWorkspace(env.root, "second");
+    const second = await store.createAttempt({ taskId: "second", leaseId: "lease-second", leaseEpoch: 1, workspacePath: secondWorkspace.path, workAttemptId: secondWorkspace.id });
+    await store.startGeneration(second.work_attempt_id, "daemon", 1);
+    assert.equal((await readdir(join(env.root, "worktrees", ".letagents-supervisor-workspace.fences"))).filter((name) => name.startsWith("shared-")).length, 2);
     // Simulate an uncooperative filesystem attacker: it does not acquire any
     // helper fence. GC must fail closed before it can act on either pathname.
     await rm(doomedWorkspace.path, { recursive: true });
     await symlink(activeWorkspace.path, doomedWorkspace.path);
     assert.deepEqual(await store.garbageCollect(0), []);
     assert.equal((await stat(activeWorkspace.path)).isDirectory(), true);
+    await store.recordTerminal(active.work_attempt_id, activeGeneration.execution_generation_id, { ended_at: "2027-01-01T00:00:01.000Z", exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "done", actor: "daemon", generation: 1, provider_continuation_id: null });
+  } finally { await env.cleanup(); }
+});
+
+test("one retained supervisor handle survives terminal, rebind, and successor start", async () => {
+  const env = await fixture();
+  try {
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    const first = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
+    const fenceDirectory = join(env.root, "worktrees", ".letagents-supervisor-workspace.fences");
+    const held = (await readdir(fenceDirectory)).find((name) => name.startsWith("shared-"));
+    assert.ok(held);
+    await store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2027-01-01T00:00:01.000Z", exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "done", actor: "daemon", generation: 1, provider_continuation_id: null });
+    await store.rebindAttempt(attempt.work_attempt_id, "lease-2", 2);
+    await store.startGeneration(attempt.work_attempt_id, "daemon", 2);
+    assert.equal((await readdir(fenceDirectory)).filter((name) => name.startsWith("shared-")).join(), held, "handoff must retain the same fence record without a release/reacquire gap");
   } finally { await env.cleanup(); }
 });

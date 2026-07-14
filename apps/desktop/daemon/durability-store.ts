@@ -102,6 +102,7 @@ export class WorkDurabilityStore {
   // rebind / successor-generation handoff.  The on-disk PID record lets a new
   // daemon recover after a crash without treating a live predecessor as stale.
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
+  private readonly supervisorIdentity = `supervisor-${randomUUID()}`;
 
   constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand) {
     this.workspaceRoot = resolve(workspaceRoot);
@@ -149,12 +150,8 @@ export class WorkDurabilityStore {
       attempt.epoch_history.push({ lease_id: leaseId, epoch: leaseEpoch, recorded_at: this.now() });
       return attempt;
     });
-    const held = this.executionFences.get(workAttemptId);
-    if (held) {
-      await held.release();
-      try { this.executionFences.set(workAttemptId, await acquireWorkspaceFence(rebound.workspace_path, rebound.lease_id, rebound.current_lease_epoch)); }
-      catch (error) { this.executionFences.delete(workAttemptId); throw error; }
-    }
+    // A retained supervisor-generation handle deliberately survives rebind.
+    // Releasing before the successor is started would reopen the handoff race.
     return rebound;
   }
 
@@ -271,7 +268,7 @@ export class WorkDurabilityStore {
           removed.push(attempt.work_attempt_id);
           continue;
         }
-        const fence = await acquireWorkspaceFence(attempt.workspace_path, `gc:${attempt.work_attempt_id}`, attempt.current_lease_epoch);
+        const fence = await acquireWorkspaceFence(attempt.workspace_path, `gc:${attempt.work_attempt_id}`, attempt.current_lease_epoch, "exclusive");
         try {
           try { await lstat(attempt.workspace_path); }
           catch (error: unknown) {
@@ -487,7 +484,7 @@ export class WorkDurabilityStore {
 
   private async ensureExecutionFence(attempt: TaskWorkAttempt): Promise<void> {
     if (this.executionFences.has(attempt.work_attempt_id)) return;
-    this.executionFences.set(attempt.work_attempt_id, await acquireWorkspaceFence(attempt.workspace_path, attempt.lease_id, attempt.current_lease_epoch));
+    this.executionFences.set(attempt.work_attempt_id, await acquireWorkspaceFence(attempt.workspace_path, this.supervisorIdentity, attempt.current_lease_epoch, "shared"));
   }
 
   private async releaseExecutionFence(workAttemptId: string): Promise<void> {
