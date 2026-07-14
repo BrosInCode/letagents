@@ -3,7 +3,7 @@ import { and, asc, eq, lte, sql } from "drizzle-orm";
 import { db } from "../client.js";
 import { task_leases } from "../schema.js";
 import { toTaskLease } from "../mappers.js";
-import type { TaskLease, TaskLeaseRow, TaskLeaseStatus } from "../types.js";
+import type { TaskLease, TaskLeaseKind, TaskLeaseRow, TaskLeaseStatus } from "../types.js";
 import { createTaskLeaseRow, type CreateTaskLeaseRowInput } from "./lease-rows.js";
 
 export async function expireStaleTaskLeases(
@@ -85,18 +85,46 @@ export async function revokeTaskLease(
 
 export async function releaseTaskLease(
   roomId: string,
-  leaseId: string
+  leaseId: string,
+  // Optional fence (plan §4.5). Release is a lease-authorized destructive write;
+  // when the caller passes the lease identity it observed, the CAS + the shared
+  // task_lease:<id> advisory lock linearize it against a concurrent rebind or
+  // release so a stale predecessor's release becomes a no-op (returns null)
+  // instead of acting on state that moved under it. Review leases are
+  // non-rebindable so their epoch is a static 0 consistency assertion; the
+  // status=active guard alone also closes the read-then-release TOCTOU.
+  fence?: {
+    kind?: TaskLeaseKind;
+    expected_epoch?: number;
+    expected_agent_session_id?: string | null;
+  }
 ): Promise<TaskLease | null> {
-  const [row] = (await db
-    .update(task_leases)
-    .set({
-      status: "released",
-      updated_at: new Date().toISOString(),
-    })
-    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)))
-    .returning()) as TaskLeaseRow[];
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`task_lease:${leaseId}`}, 0))`
+    );
+    const [row] = (await tx
+      .update(task_leases)
+      .set({
+        status: "released",
+        updated_at: new Date().toISOString(),
+      })
+      .where(and(
+        eq(task_leases.room_id, roomId),
+        eq(task_leases.id, leaseId),
+        eq(task_leases.status, "active" as TaskLeaseStatus),
+        ...(fence?.kind ? [eq(task_leases.kind, fence.kind)] : []),
+        ...(typeof fence?.expected_epoch === "number"
+          ? [eq(task_leases.epoch, fence.expected_epoch)]
+          : []),
+        ...(typeof fence?.expected_agent_session_id === "string" && fence.expected_agent_session_id
+          ? [eq(task_leases.agent_session_id, fence.expected_agent_session_id)]
+          : []),
+      ))
+      .returning()) as TaskLeaseRow[];
 
-  return row ? toTaskLease(row) : null;
+    return row ? toTaskLease(row) : null;
+  });
 }
 
 export async function updateTaskLeaseWorkflowRefs(

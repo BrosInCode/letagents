@@ -17,6 +17,7 @@ const db = testDatabaseUrl ? await import("../db.js") : null;
 const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { rebindTaskLease, assertLeaseEpochCurrentTx } = await import("../db/coordination/lease-rebind.js");
 const { applyTaskWorkLeaseAction } = await import("../db/coordination/work-lease-actions.js");
+const { releaseTaskLease } = await import("../db/coordination/task-leases.js");
 
 async function reset(): Promise<void> {
   if (!client) throw new Error("DB-backed rebind tests require TEST_DB_URL");
@@ -296,6 +297,31 @@ test("publishWorkerArtifactFenced aborts atomically when a rebind commits first 
     room_id: room.id, artifact, linked_task_id: task.id,
   });
   assert.ok(ok.identity_key, "successor at the current epoch publishes");
+});
+
+test("releaseTaskLease fence: only the current active holder tuple releases; stale/mismatch is a no-op", { skip: requiresDatabase }, async () => {
+  // review-lease release surface: the CAS + advisory lock make a stale or
+  // double release a no-op (null) instead of acting on moved/gone state.
+  const { room, from, to } = await seed();
+  const task = await db!.createTask(room.id, "review task", from.actor_label);
+  const lease = await db!.createTaskLease({
+    room_id: room.id, task_id: task.id, kind: "review", agent_key: from.agent_key,
+    actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
+
+  // Wrong epoch → no-op.
+  assert.equal(await releaseTaskLease(room.id, lease.id, { kind: "review", expected_epoch: 1, expected_agent_session_id: from.session_id }), null);
+  // Wrong session → no-op.
+  assert.equal(await releaseTaskLease(room.id, lease.id, { kind: "review", expected_epoch: 0, expected_agent_session_id: to.session_id }), null);
+  // Wrong kind → no-op.
+  assert.equal(await releaseTaskLease(room.id, lease.id, { kind: "work", expected_epoch: 0, expected_agent_session_id: from.session_id }), null);
+  assert.equal((await leaseRow(lease.id)).status, "active", "no mismatched call touched the lease");
+
+  // Correct tuple → releases.
+  const ok = await releaseTaskLease(room.id, lease.id, { kind: "review", expected_epoch: 0, expected_agent_session_id: from.session_id });
+  assert.equal(ok?.status, "released");
+  // Double release (now inactive) → no-op.
+  assert.equal(await releaseTaskLease(room.id, lease.id, { kind: "review", expected_epoch: 0, expected_agent_session_id: from.session_id }), null);
 });
 
 test("updateTask fenced side-effects (task + lease ref + artifacts) roll back atomically on a mid-write rebind", { skip: requiresDatabase }, async () => {
