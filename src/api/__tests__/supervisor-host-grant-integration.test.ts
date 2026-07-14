@@ -17,6 +17,8 @@ const authDb = testDatabaseUrl ? await import("../db.js") : null;
 const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { resolveRequestAuth } = await import("../request/auth.js");
 const { isSupervisorGrantRouteAllowed } = await import("../request/supervisor-grant-route-registry.js");
+const { registerHttpMiddleware } = await import("../http/middleware.js");
+const { registerSupervisorHostGrantRoutes } = await import("../routes/supervisor-host-grants.js");
 
 async function reset() {
   if (!client) throw new Error("DB-backed supervisor tests require TEST_DB_URL");
@@ -42,6 +44,29 @@ test("supervisor registry is exact default-deny", () => {
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/renew"), true);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/rooms/room_1/messages"), false);
   assert.equal(isSupervisorGrantRouteAllowed("DELETE", "/supervisor-host-grants/grant_1"), false);
+});
+
+test("middleware attaches the supervisor principal and rejects non-registry routes", async () => {
+  const handlers: Array<(...args: any[]) => unknown> = [];
+  const app = { use(handler: (...args: any[]) => unknown) { handlers.push(handler); }, options() {} };
+  const principal = { grant_id: "grant_1", owner_account_id: "owner", host_id: "host", installation_id: "install", token_version: 1, allowed_room_ids: ["room"], allowed_agent_keys: ["owner/agent"], current_generation: 1, issued_at: new Date().toISOString(), expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null };
+  registerHttpMiddleware(app as never, { resolveRequestAuth: async () => ({ account: null, authKind: "supervisor_grant" as const, supervisorGrant: principal }) });
+  const auth = handlers[1]!;
+  for (const [path, status] of [["/supervisor-host-grants/grant_1/renew", 200], ["/rooms/room/messages", 403]] as const) {
+    const res: any = { statusCode: 200, status(code: number) { this.statusCode = code; return this; }, json() {} }; let next = false;
+    await auth({ method: "POST", path, headers: {} }, res, () => { next = true; });
+    assert.equal(res.statusCode, status); assert.equal(next, status === 200);
+  }
+});
+
+test("feature-off retains only owner revoke route", () => {
+  const prior = process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED;
+  process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "false";
+  const paths: string[] = [];
+  try {
+    registerSupervisorHostGrantRoutes({ post(path: string) { paths.push(`POST ${path}`); }, delete(path: string) { paths.push(`DELETE ${path}`); } } as never, {} as never);
+    assert.deepEqual(paths, ["DELETE /supervisor-host-grants/:grantId"]);
+  } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = prior; }
 });
 
 test("concurrent renewal has exactly one winner and stale token cannot replay", { skip: requiresDatabase }, async () => {
