@@ -110,6 +110,19 @@ export interface RoomAgentSession {
 
 export interface CreatedRoomAgentSession extends RoomAgentSession {
   session_token: string;
+  worker_bearer: string | null;
+}
+
+export interface RoomAgentSessionBearer {
+  bearer_id: string;
+  session_id: string;
+  room_id: string;
+  generation: number;
+  capabilities: string[];
+  issued_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  rotated_from_bearer_id: string | null;
 }
 
 export interface RoomParticipant {

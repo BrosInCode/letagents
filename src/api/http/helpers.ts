@@ -4,16 +4,37 @@ import type { Response } from "express";
 import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
 import { RequestValidationError } from "../validation-error.js";
 import type { OwnerTokenAccount, SessionAccount } from "../db.js";
+import type { AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
+
+export interface AgentSessionRequestPrincipal {
+  bearer_id: string;
+  bearer_generation: number;
+  capabilities: AgentSessionBearerCapability[];
+  room_id: string;
+  agent_session_id: string;
+  actor_label: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  session_kind: "worker";
+  runtime: string;
+  display_name: string;
+  owner_label: string;
+  ide_label: string;
+  repo_branch: string | null;
+  expires_at: string;
+}
 
 export interface AuthenticatedRequest extends express.Request {
   sessionAccount?: SessionAccount | OwnerTokenAccount | null;
-  authKind?: "session" | "owner_token" | null;
+  authKind?: "session" | "owner_token" | "agent_session" | null;
+  agentSession?: AgentSessionRequestPrincipal | null;
   rawBody?: Buffer;
 }
 
 export interface ResolvedRequestAuth {
   account: SessionAccount | OwnerTokenAccount | null;
-  authKind: "session" | "owner_token" | null;
+  authKind: "session" | "owner_token" | "agent_session" | null;
+  agentSession?: AgentSessionRequestPrincipal | null;
 }
 
 export function parsePollTimeout(timeoutValue: string | undefined): number {

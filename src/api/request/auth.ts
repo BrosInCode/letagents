@@ -2,12 +2,14 @@ import type { Request } from "express";
 
 import {
   getOwnerTokenAccountByToken,
+  getRoomAgentSessionBearerByToken,
   getSessionAccountByToken,
 } from "../db.js";
 import {
   parseCookies,
   type ResolvedRequestAuth,
 } from "../http/helpers.js";
+import { isAgentSessionBearerCapability, isAgentSessionBearerFeatureEnabled } from "../../shared/agent-session-bearer.js";
 
 export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestAuth> {
   const cookies = parseCookies(req.headers.cookie);
@@ -44,6 +46,34 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
       account: ownerTokenAccount,
       authKind: "owner_token",
     };
+  }
+
+  if (isAgentSessionBearerFeatureEnabled()) {
+    const workerBearer = await getRoomAgentSessionBearerByToken(providerToken);
+    if (workerBearer) {
+      const { bearer, session } = workerBearer;
+      return {
+        account: null,
+        authKind: "agent_session",
+        agentSession: {
+          bearer_id: bearer.bearer_id,
+          bearer_generation: bearer.generation,
+          capabilities: bearer.capabilities.filter(isAgentSessionBearerCapability),
+          room_id: session.room_id,
+          agent_session_id: session.session_id,
+          actor_label: session.actor_label,
+          agent_key: session.agent_key,
+          agent_instance_id: session.agent_instance_id,
+          session_kind: "worker",
+          runtime: session.runtime,
+          display_name: session.display_name,
+          owner_label: session.owner_label,
+          ide_label: session.ide_label,
+          repo_branch: session.repo_branch ?? null,
+          expires_at: bearer.expires_at,
+        },
+      };
+    }
   }
 
   return {

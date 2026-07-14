@@ -35,6 +35,7 @@ export function registerCreateMessageRoute(
       const attachments = normalizeMessageAttachmentReferences(body.attachments);
       const desktopHumanWrite = isDesktopHumanWrite(req, sessionCredentials);
       const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
+        || req.authKind === "agent_session"
         || hasAgentSessionCredentials(sessionCredentials)
         || isAgentLikeSender(body.sender));
       const agentSessionIdentity = requiresWorkerSession

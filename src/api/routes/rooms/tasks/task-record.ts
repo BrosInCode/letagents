@@ -126,7 +126,7 @@ export function registerTaskRecordRoutes(
         return;
       }
 
-      if (isReviewChangeRequest && req.authKind !== "owner_token") {
+      if (isReviewChangeRequest && req.authKind !== "owner_token" && req.authKind !== "agent_session") {
         res.status(403).json({
           error: "Registered review worker session is required to request changes.",
           code: "coordination_review_worker_required",
@@ -144,15 +144,17 @@ export function registerTaskRecordRoutes(
         }) &&
         !reviewDecisionOnly
       ) {
-        const actorValidation = await deps.validateOwnerTokenTaskActorKey({
-          req,
-          actorKey,
-        });
-        if (actorValidation.error) {
-          res.status(409).json({ error: actorValidation.error });
-          return;
+        if (req.authKind === "owner_token") {
+          const actorValidation = await deps.validateOwnerTokenTaskActorKey({
+            req,
+            actorKey,
+          });
+          if (actorValidation.error) {
+            res.status(409).json({ error: actorValidation.error });
+            return;
+          }
+          verifiedActorKey = actorValidation.actorKey;
         }
-        verifiedActorKey = actorValidation.actorKey;
       }
       auditActorKey = verifiedActorKey;
 

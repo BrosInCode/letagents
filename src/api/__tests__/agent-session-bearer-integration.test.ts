@@ -1,0 +1,157 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import test from "node:test";
+
+import { eq } from "drizzle-orm";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+
+const testDatabaseUrl = process.env.TEST_DB_URL;
+const requiresDatabase = !testDatabaseUrl;
+if (testDatabaseUrl) process.env.DB_URL = testDatabaseUrl;
+else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
+
+const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
+const dbModule = testDatabaseUrl ? await import("../db.js") : null;
+const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
+const { resolveRequestAuth } = await import("../request/auth.js");
+const { resolveRequestAgentIdentity } = await import("../request/agent-identity.js");
+const { requireAdmin, requireParticipant } = await import("../rooms/access.js");
+const { requiredAgentSessionRouteCapability } = await import("../request/agent-session-route-capabilities.js");
+
+const db = dbClientModule?.db;
+const pool = dbClientModule?.pool;
+const accounts = schemaModule?.accounts;
+const room_agent_session_bearers = schemaModule?.room_agent_session_bearers;
+const createProjectWithName = dbModule?.createProjectWithName;
+const createRoomAgentSession = dbModule?.createRoomAgentSession;
+const endRoomAgentSession = dbModule?.endRoomAgentSession;
+const revokeRoomAgentSessionBearer = dbModule?.revokeRoomAgentSessionBearer;
+const rotateRoomAgentSessionBearer = dbModule?.rotateRoomAgentSessionBearer;
+
+async function resetDatabase(): Promise<void> {
+  if (!db || !pool) throw new Error("DB-backed worker bearer tests require TEST_DB_URL");
+  await pool.query("DROP SCHEMA IF EXISTS public CASCADE");
+  await pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
+  await pool.query("CREATE SCHEMA public");
+  await migrate(db, { migrationsFolder: path.resolve(process.cwd(), "drizzle") });
+}
+
+function responseRecorder() {
+  return {
+    statusCode: 200,
+    body: null as unknown,
+    status(code: number) { this.statusCode = code; return this; },
+    json(value: unknown) { this.body = value; return this; },
+  };
+}
+
+async function seed() {
+  if (!db || !accounts || !createProjectWithName || !createRoomAgentSession) throw new Error("missing DB harness");
+  const owner = {
+    id: "acct_bearer_test",
+    provider: "github",
+    provider_user_id: "bearer-test",
+    login: "worker-owner",
+    display_name: "Worker Owner",
+    avatar_url: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  await db.insert(accounts).values(owner).onConflictDoNothing();
+  const room = await createProjectWithName("bearer-room");
+  const otherRoom = await createProjectWithName("other-bearer-room");
+  const session = await createRoomAgentSession({
+    room_id: room.id,
+    session_kind: "worker",
+    runtime: "codex",
+    actor_label: "BearerWorker | Worker Owner's agent | Agent",
+    agent_key: "WorkerOwner/bearerworker",
+    agent_instance_id: "instance_bearer",
+    display_name: "BearerWorker",
+    owner_account_id: owner.id,
+    owner_label: "Worker Owner",
+    ide_label: "Agent",
+  });
+  assert.ok(session.worker_bearer);
+  return { room, otherRoom, session };
+}
+
+if (!requiresDatabase) {
+  test.beforeEach(resetDatabase);
+  test.after(async () => { await pool?.end(); });
+}
+
+test("worker bearer route registry is default-deny and semantic", () => {
+  assert.equal(requiredAgentSessionRouteCapability("GET", "/rooms/room_1/messages"), "messages.read");
+  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/tasks/task_1/lease-action"), "coordination.self_write");
+  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/room_1/board-intents"), null);
+  assert.equal(requiredAgentSessionRouteCapability("PATCH", "/rooms/room_1"), null);
+});
+
+test("worker bearer rejects cross-room and owner routes without becoming an owner principal", { skip: requiresDatabase }, async () => {
+  const { room, otherRoom, session } = await seed();
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  assert.equal(auth.authKind, "agent_session");
+  assert.equal(auth.account, null);
+  assert.ok(auth.agentSession);
+  assert.equal(JSON.stringify(auth).includes(session.worker_bearer!), false, "auth result must not retain raw bearer");
+
+  const adminResponse = responseRecorder();
+  assert.equal(await requireAdmin(auth as never, adminResponse as never, room), false);
+  assert.equal(adminResponse.statusCode, 403);
+  const crossRoomResponse = responseRecorder();
+  assert.equal(await requireParticipant(auth as never, crossRoomResponse as never, otherRoom), false);
+  assert.equal(crossRoomResponse.statusCode, 403);
+});
+
+test("ended, expired, revoked, and rotated worker bearers cannot replay", { skip: requiresDatabase }, async () => {
+  const { session } = await seed();
+  const token = session.worker_bearer!;
+  const initial = await resolveRequestAuth({ headers: { authorization: `Bearer ${token}` } } as never);
+  assert.equal(initial.authKind, "agent_session");
+  const bearerId = initial.agentSession!.bearer_id;
+
+  const rotated = await rotateRoomAgentSessionBearer!({ bearer_id: bearerId });
+  assert.ok(rotated);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${token}` } } as never)).authKind, null, "stale generation rejected");
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${rotated!.token}` } } as never)).authKind, "agent_session");
+  await revokeRoomAgentSessionBearer!({ bearer_id: rotated!.bearer.bearer_id });
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${rotated!.token}` } } as never)).authKind, null, "revoked bearer rejected");
+
+  const fresh = await seed();
+  const freshAuth = await resolveRequestAuth({ headers: { authorization: `Bearer ${fresh.session.worker_bearer}` } } as never);
+  await endRoomAgentSession!({ session_id: fresh.session.session_id });
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${fresh.session.worker_bearer}` } } as never)).authKind, null, "ended session rejected");
+
+  const expiring = await seed();
+  const expiringAuth = await resolveRequestAuth({ headers: { authorization: `Bearer ${expiring.session.worker_bearer}` } } as never);
+  await db!.update(room_agent_session_bearers!).set({ expires_at: new Date(Date.now() - 1000).toISOString() })
+    .where(eq(room_agent_session_bearers!.bearer_id, expiringAuth.agentSession!.bearer_id));
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${expiring.session.worker_bearer}` } } as never)).authKind, null, "expired bearer rejected");
+  assert.equal(freshAuth.authKind, "agent_session");
+});
+
+test("bearer and body credentials must identify the same worker session", { skip: requiresDatabase }, async () => {
+  const first = await seed();
+  const second = await createRoomAgentSession!({
+    room_id: first.room.id,
+    session_kind: "worker",
+    runtime: "codex",
+    actor_label: "OtherWorker | Worker Owner's agent | Agent",
+    agent_key: "WorkerOwner/otherworker",
+    agent_instance_id: "instance_other",
+    display_name: "OtherWorker",
+    owner_account_id: "acct_bearer_test",
+    owner_label: "Worker Owner",
+    ide_label: "Agent",
+  });
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${first.session.worker_bearer}` } } as never);
+  const identity = await resolveRequestAgentIdentity({
+    req: auth as never,
+    room_id: first.room.id,
+    agent_session_id: second.session_id,
+    agent_session_token: second.session_token,
+  });
+  assert.equal(identity, null);
+});
