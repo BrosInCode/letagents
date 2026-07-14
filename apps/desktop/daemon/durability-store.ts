@@ -3,7 +3,8 @@ import { appendFile, link, lstat, mkdir, open, readFile, realpath, rename, rm } 
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
-import { normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
+import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
+import { withWorkspaceFence } from "./workspace-fence.js";
 
 const STORE_VERSION = 2;
 type StoredAttempts = { version: typeof STORE_VERSION; attempts: TaskWorkAttempt[]; checksum: string };
@@ -35,8 +36,9 @@ function isSafeSegment(value: unknown): value is string { return typeof value ==
 function isWorkspaceIdentity(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const identity = value as Partial<TaskWorkAttempt["workspace_identity"]>;
-  return isSafeSegment(identity.repo) && typeof identity.remote_url === "string" && identity.remote_url.trim().length > 0
-    && /^[0-9a-f]{40,64}$/i.test(identity.resolved_revision ?? "") && typeof identity.bare_path === "string" && isAbsolute(identity.bare_path);
+  if (!(isSafeSegment(identity.repo) && typeof identity.remote_url === "string" && identity.remote_url.trim().length > 0
+    && /^[0-9a-f]{40,64}$/i.test(identity.resolved_revision ?? "") && typeof identity.bare_path === "string" && isAbsolute(identity.bare_path))) return false;
+  try { assertCredentialFreeRemote(identity.remote_url); return true; } catch { return false; }
 }
 
 const attemptStates = new Set<WorkAttemptState>(["active", "ambiguous", "quarantined", "unreviewed", "cleanly_concluded", "abandoned", "gc_pending", "garbage_collected"]);
@@ -84,7 +86,8 @@ function isAttempt(value: unknown): value is TaskWorkAttempt {
   if (typedExecutions.some((item, index) => item.work_attempt_id !== attempt.work_attempt_id || (index > 0 && item.generation <= typedExecutions[index - 1]!.generation)
     || (item.terminal && (item.terminal.actor !== item.actor || item.terminal.generation !== item.generation || Date.parse(item.terminal.ended_at) < Date.parse(item.started_at))))) return false;
   if (typedExecutions.filter((item) => item.terminal === null).length > 1) return false;
-  return !(attempt.state === "cleanly_concluded" && (!attempt.concluded_at || !attempt.conclusion_cause || attempt.postmortem_diff === null));
+  const requiresAttestedTerminal = attempt.state === "cleanly_concluded" || attempt.state === "gc_pending" || attempt.state === "garbage_collected";
+  return !(requiresAttestedTerminal && (!attempt.concluded_at || !attempt.conclusion_cause || attempt.postmortem_diff === null || typedExecutions.some((item) => item.terminal === null)));
 }
 
 /**
@@ -204,11 +207,14 @@ export class WorkDurabilityStore {
 
   async concludeAttempt(workAttemptId: string, input: { state: Extract<WorkAttemptState, "cleanly_concluded" | "abandoned">; cause: string; postmortemDiff?: string; maxPostmortemBytes?: number }): Promise<TaskWorkAttempt> {
     this.assertAttemptId(workAttemptId);
+    const current = await this.getAttempt(workAttemptId);
+    if (input.state === "cleanly_concluded" && current.execution_generations.some((generation) => generation.terminal === null)) throw new ImmutableExecutionError("Clean conclusion requires terminal attestation for every execution generation.");
     const postmortemDiff = input.postmortemDiff ?? await this.capturePostmortemDiff(workAttemptId, input.maxPostmortemBytes);
     return this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("Work attempts can conclude only once.");
       if (!input.cause.trim()) throw new ImmutableExecutionError("Work attempts require an explicit conclusion cause.");
+      if (input.state === "cleanly_concluded" && attempt.execution_generations.some((generation) => generation.terminal === null)) throw new ImmutableExecutionError("Clean conclusion requires terminal attestation for every execution generation.");
       attempt.state = input.state;
       attempt.concluded_at = this.now();
       attempt.conclusion_cause = input.cause;
@@ -246,9 +252,17 @@ export class WorkDurabilityStore {
           removed.push(attempt.work_attempt_id);
           continue;
         }
-        await this.verifyWorkspaceForDeletion(attempt);
-        await rm(attempt.workspace_path, { recursive: true, force: false });
-        await this.finishGarbageCollection(attempt.work_attempt_id);
+        await withWorkspaceFence(attempt.workspace_path, async () => {
+          try { await lstat(attempt.workspace_path); }
+          catch (error: unknown) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            await this.finishGarbageCollection(attempt.work_attempt_id);
+            return;
+          }
+          await this.verifyWorkspaceForDeletion(attempt);
+          await rm(attempt.workspace_path, { recursive: true, force: false });
+          await this.finishGarbageCollection(attempt.work_attempt_id);
+        });
         removed.push(attempt.work_attempt_id);
       } catch (error) {
         console.error(`Refusing to garbage collect work attempt ${attempt.work_attempt_id}:`, error);
@@ -400,6 +414,7 @@ export class WorkDurabilityStore {
       && typeof typed.resolved_revision === "string" && /^[0-9a-f]{40,64}$/i.test(typed.resolved_revision)
       && typeof typed.bare_path === "string" && isAbsolute(typed.bare_path);
     if (!valid) throw new ImmutableExecutionError("Workspace marker does not match the durable attempt identity.");
+    try { assertCredentialFreeRemote(typed.remote_url!); } catch (error) { throw new ImmutableExecutionError((error as Error).message); }
     return { repo: typed.repo!, remote_url: normalizeRemote(typed.remote_url!), resolved_revision: typed.resolved_revision!, bare_path: resolve(typed.bare_path!) };
   }
 

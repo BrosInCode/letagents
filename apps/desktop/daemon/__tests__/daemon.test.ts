@@ -15,6 +15,7 @@ import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { WorkspaceProvisioner } from "../workspace-provisioner.js";
+import { withWorkspaceFence } from "../workspace-fence.js";
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
@@ -176,6 +177,7 @@ test("work attempts survive generations and lease rebinds while terminal payload
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).workspace_path, workspace.path);
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).epoch_history.length, 2);
     assert.equal(resumed.generation, 2);
+    await store.recordTerminal(attempt.work_attempt_id, resumed.execution_generation_id, { ended_at: "2026-01-01T00:00:10.000Z", exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "done", terminal_cause: "completed", actor: "daemon", generation: 2, provider_continuation_id: null });
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "reviewed", postmortemDiff: "diff --git a/a b/a" });
     await assert.rejects(() => store.rebindAttempt(attempt.work_attempt_id, "lease-3", 3), ImmutableExecutionError);
   } finally { await env.cleanup(); }
@@ -232,6 +234,10 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
     assert.equal(first.reused, false); assert.equal(second.reused, true); assert.ok(commands.length > 2);
     assert.match(first.path, new RegExp(`worktrees/repo/${workAttemptId}$`));
     assert.ok(commands[0]!.includes("--bare"));
+    await rm(join(first.path, ".letagents-work-attempt.json"));
+    const recovered = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
+    assert.equal(recovered.reused, true, "an add-before-marker crash is recoverable");
+    await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: randomUUID(), taskId: "task", remoteUrl: "https://token@example.invalid/repo.git", revision: "abc" }), /userinfo/);
     await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: randomUUID(), taskId: "task", remoteUrl: "https://evil.invalid/repo.git", revision: "abc" }), /identity/);
     await rm(first.path, { recursive: true });
     const outside = join(env.root, "outside"); await mkdir(outside);
@@ -334,5 +340,22 @@ test("GC replays every pending tombstone and refuses a Git identity mismatch", a
     await guarded.concludeAttempt(other.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
     assert.deepEqual(await guarded.garbageCollect(0), []);
     assert.equal((await stat(mismatch.path)).isDirectory(), true);
+  } finally { await env.cleanup(); }
+});
+
+test("workspace fences and terminal attestation protect clean GC", async () => {
+  const env = await fixture();
+  try {
+    const workspace = await provisionedWorkspace(env.root);
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
+    await assert.rejects(() => store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" }), /terminal attestation/);
+    await store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, { ended_at: "2027-01-01T00:00:01.000Z", exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "done", actor: "daemon", generation: 1, provider_continuation_id: null });
+    await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
+    await withWorkspaceFence(workspace.path, async () => {
+      assert.deepEqual(await store.garbageCollect(0), []);
+      assert.equal((await stat(workspace.path)).isDirectory(), true);
+    });
   } finally { await env.cleanup(); }
 });

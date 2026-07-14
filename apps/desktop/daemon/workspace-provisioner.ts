@@ -1,5 +1,6 @@
 import { lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { withWorkspaceFence } from "./workspace-fence.js";
 
 /** Action commands return void; identity queries must return stdout. */
 export type GitCommand = (args: string[]) => Promise<string | void>;
@@ -34,6 +35,13 @@ export function normalizeRemote(value: string): string {
   return trimmed.endsWith(".git") ? trimmed.slice(0, -4) : trimmed;
 }
 
+export function assertCredentialFreeRemote(value: string): void {
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return;
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error("Remote URL is malformed."); }
+  if (parsed.username || parsed.password) throw new Error("Remote URLs with userinfo are forbidden in daemon state.");
+}
+
 function sameRecord(value: unknown, expected: Record<string, unknown>): boolean {
   return !!value && typeof value === "object" && Object.entries(expected).every(([key, entry]) => (value as Record<string, unknown>)[key] === entry);
 }
@@ -51,6 +59,7 @@ export class WorkspaceProvisioner {
     const workAttemptId = safeSegment(input.workAttemptId, "work attempt id");
     if (!isUuid(workAttemptId)) throw new Error("Work attempt IDs must be supervisor-minted UUIDs.");
     if (!input.taskId.trim()) throw new Error("A task ID is required for a workspace attempt.");
+    assertCredentialFreeRemote(input.remoteUrl);
     const remoteUrl = normalizeRemote(input.remoteUrl);
     if (!remoteUrl) throw new Error("A remote URL is required for a workspace attempt.");
     const bare = this.insideRoot("repos", `${repo}.git`);
@@ -64,38 +73,62 @@ export class WorkspaceProvisioner {
     await this.ensureDirectory(repoWorktrees, await realpath(worktreesRoot));
 
     const repositoryMarker: RepositoryMarker = { version: 1, repo, remote_url: remoteUrl };
-    if (await this.exists(bare)) {
-      await this.ensureDirectory(bare, await realpath(reposRoot));
-      await this.assertMarker(join(bare, REPOSITORY_MARKER), repositoryMarker, "bare repository");
-    } else {
-      await this.run(["clone", "--bare", input.remoteUrl, bare]);
-      await this.ensureDirectory(bare, await realpath(reposRoot));
-      await this.writeMarker(join(bare, REPOSITORY_MARKER), repositoryMarker);
-    }
+    await withWorkspaceFence(bare, async () => {
+      if (await this.exists(bare)) {
+        await this.ensureDirectory(bare, await realpath(reposRoot));
+        const markerPath = join(bare, REPOSITORY_MARKER);
+        if (await this.exists(markerPath)) await this.assertMarker(markerPath, repositoryMarker, "bare repository");
+        else {
+          // Recover the narrow clone-before-marker crash window only after
+          // proving this is the expected bare repository and origin.
+          await this.verifyBare(await realpath(bare), remoteUrl);
+          await this.writeMarker(markerPath, repositoryMarker);
+        }
+      } else {
+        await this.run(["clone", "--bare", input.remoteUrl, bare]);
+        await this.ensureDirectory(bare, await realpath(reposRoot));
+        await this.verifyBare(await realpath(bare), remoteUrl);
+        await this.writeMarker(join(bare, REPOSITORY_MARKER), repositoryMarker);
+      }
+    });
     const canonicalBare = await realpath(bare);
     await this.verifyBare(canonicalBare, remoteUrl);
 
-    if (await this.exists(workspace)) {
-      await this.ensureDirectory(workspace, await realpath(repoWorktrees));
-      const identity = await this.readWorkspaceMarker(join(workspace, WORKSPACE_MARKER));
-      if (identity.repo !== repo || identity.work_attempt_id !== workAttemptId || identity.task_id !== input.taskId
-        || identity.remote_url !== remoteUrl || identity.bare_path !== canonicalBare) {
-        throw new Error("Workspace identity does not match the requested repository and attempt.");
+    return withWorkspaceFence(workspace, async () => {
+      if (await this.exists(workspace)) {
+        await this.ensureDirectory(workspace, await realpath(repoWorktrees));
+        const markerPath = join(workspace, WORKSPACE_MARKER);
+        if (await this.exists(markerPath)) {
+          const identity = await this.readWorkspaceMarker(markerPath);
+          if (identity.repo !== repo || identity.work_attempt_id !== workAttemptId || identity.task_id !== input.taskId
+            || identity.remote_url !== remoteUrl || identity.bare_path !== canonicalBare) {
+            throw new Error("Workspace identity does not match the requested repository and attempt.");
+          }
+          await this.verifyWorkspace(workspace, identity);
+          return { path: workspace, reused: true, identity };
+        }
+        // A crash after worktree-add is recoverable: prove the exact expected
+        // Git identity, then finish the final marker rather than orphaning it.
+        const recovered = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision);
+        await this.verifyWorkspace(workspace, recovered);
+        await this.writeMarker(markerPath, recovered);
+        return { path: workspace, reused: true, identity: recovered };
       }
+
+      const identity = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision);
+      await this.run(["--git-dir", canonicalBare, "worktree", "add", "--detach", workspace, identity.resolved_revision]);
+      await this.ensureDirectory(workspace, await realpath(repoWorktrees));
       await this.verifyWorkspace(workspace, identity);
-      return { path: workspace, reused: true, identity };
-    }
+      // The provisioner writes the complete, final marker atomically before the store may persist an attempt.
+      await this.writeMarker(join(workspace, WORKSPACE_MARKER), identity);
+      return { path: workspace, reused: false, identity };
+    });
+  }
 
-    const resolvedRevision = await this.query(["--git-dir", canonicalBare, "rev-parse", "--verify", `${input.revision}^{commit}`]);
-    await this.query(["--git-dir", canonicalBare, "cat-file", "-e", `${resolvedRevision}^{commit}`]);
-    const identity: WorkspaceMarker = { version: 1, repo, work_attempt_id: workAttemptId, task_id: input.taskId, remote_url: remoteUrl, resolved_revision: resolvedRevision, bare_path: canonicalBare };
-
-    await this.run(["--git-dir", canonicalBare, "worktree", "add", "--detach", workspace, resolvedRevision]);
-    await this.ensureDirectory(workspace, await realpath(repoWorktrees));
-    await this.verifyWorkspace(workspace, identity);
-    // The provisioner writes the complete, final marker atomically before the store may persist an attempt.
-    await this.writeMarker(join(workspace, WORKSPACE_MARKER), identity);
-    return { path: workspace, reused: false, identity };
+  private async resolveIdentity(repo: string, workAttemptId: string, taskId: string, remoteUrl: string, barePath: string, revision: string): Promise<WorkspaceMarker> {
+    const resolvedRevision = await this.query(["--git-dir", barePath, "rev-parse", "--verify", `${revision}^{commit}`]);
+    await this.query(["--git-dir", barePath, "cat-file", "-e", `${resolvedRevision}^{commit}`]);
+    return { version: 1, repo, work_attempt_id: workAttemptId, task_id: taskId, remote_url: remoteUrl, resolved_revision: resolvedRevision, bare_path: barePath };
   }
 
   private async verifyBare(bare: string, remoteUrl: string): Promise<void> {
@@ -172,6 +205,7 @@ export class WorkspaceProvisioner {
       || !safeSegment(String(marker.work_attempt_id ?? ""), "work attempt id") || typeof marker.task_id !== "string" || !marker.task_id.trim()
       || typeof marker.remote_url !== "string" || !marker.remote_url.trim() || typeof marker.resolved_revision !== "string" || !/^[0-9a-f]{40,64}$/i.test(marker.resolved_revision)
       || typeof marker.bare_path !== "string" || !isAbsolute(marker.bare_path)) throw new Error("Malformed workspace identity marker.");
+    assertCredentialFreeRemote(marker.remote_url);
     return { version: 1, repo: marker.repo!, work_attempt_id: marker.work_attempt_id!, task_id: marker.task_id, remote_url: normalizeRemote(marker.remote_url), resolved_revision: marker.resolved_revision, bare_path: resolve(marker.bare_path) };
   }
 
