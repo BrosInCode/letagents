@@ -1,6 +1,6 @@
 # Room Agents Rewrite — Canonical Plan
 
-- **Version:** v8 (supersedes v7; records P0-safe proof status per isolation vector and gates instruction-memory suppression to P0-live)
+- **Version:** v9 (supersedes v8; ratifies the grant-gated HTTP rebind route, adds the both-sessions-bound-to-grant rule + the terminal-attestation contract, and sequences P1.5 after P1b per the #761 review)
 - **Status:** v6 + v7 approved and merged (staging 0643f047 / 8b700bce). Each revision becomes authoritative only when merged. **Author (PeakCloud) is excluded from this document's review gate.** Plan gate reviewers: RiverRiver (architecture) + RiverSilver (independent evidence check); EmmyMay morning ratification recorded in the decision log as override authority.
 - **Authority:** once merged, this document is the single normative source. Board tasks are cut from it verbatim; chat messages never amend it — revisions are PRs to this file.
 - **Decision log:** EmmyMay 2026-07-14: rewrite from scratch, no patches; lightweight model implements; PeakCloud + RiverRiver hold final merge say on **implementation PRs** (author always excluded from any gate they authored — for THIS document the gate is RiverRiver + RiverSilver, PeakCloud counts zero). Defaults pending EmmyMay override: cloud-backed rooms only in v1; brokered external writes; supervisor daemon in phase 1.
@@ -67,6 +67,14 @@ Watchdog predicate: `no poll ≥ threshold ∧ addressed messages waiting ∧ po
 ### 4.5 Fenced lease rebind (server)
 Leases bind to `agent_session_id`; a restarted process registers a new session, so resume requires a server-side rebind — a prompt cannot fix authorization. Semantics: CAS on lease id + lease epoch; same `agent_key` necessary but not sufficient — the rebind must be authorized by the fenced supervisor identity (host_id + supervisor generation validated); old attempt terminal or explicitly revoked; old session's delivery authority revoked in the same transaction; **epoch checked on every lease-guarded write path**, so a partitioned-but-live old worker's writes are rejected after rebind. Tests include malicious same-agent-key registration from another host and the partitioned-live-old-worker case.
 
+**Control surface (ratified):** rebind is exposed as a **grant-gated HTTP route** (`POST /supervisor-host-grants/:grantId/leases/:leaseId/rebind`), NOT an MCP tool. This follows the F3 precedent — supervisor-authority operations are HTTP routes the daemon calls with its grant bearer; the daemon is not an MCP worker. The route is default-deny in the supervisor-grant route registry. (Supersedes the "MCP tool" wording in the task_13 board text.)
+
+**Both sessions bound to the grant:** both the predecessor (`from`) and successor (`to`) session must be `session_kind==='worker'`, owned by the grant's owner, and carry `supervisor_grant_id === grant.grant_id` — so a grant for host A cannot seize a same-agent-key lease whose predecessor belongs to host B.
+
+**Terminal attestation (P1.5-final, requires P1b/P1d):** generic `session.ended_at` is *auth* terminality, not *process/work* terminality — an ended session can still leave a live OS process writing the reused workspace (two-writers hazard). The complete rebind therefore consumes a **grant-authored, auditable terminal/revocation attestation** bound to `{lease_id, epoch, from_session, work_attempt_id, execution_generation_id, supervisor_generation}`, consumed exactly once inside the rebind transaction. This depends on P1b's `execution_generation` terminal state and P1d's obligation to **wait/kill-confirm the predecessor OS process and hold a single-writer workspace fence before spawning the successor**. Until P1b lands, the conservative floor (`from`-session ended) ships but does NOT satisfy this clause; final P1.5 approval is gated on the attestation.
+
+**Sequencing:** P1.5 rebind is **blocked on P1b (task_15)** — the terminal attestation and the mandatory epoch sweep across *every* lease-authorized `agent_session` write surface (task mutations, artifact writes, lease actions) are completed on top of the merged attempt model, with barrier-paused authenticated-HTTP race tests. The migration (0070 `task_leases.epoch`), the rebind op with grant/epoch CAS, and the lease-action epoch fence built ahead of P1b stand and are completed there.
+
 ### 4.6 Effect mediation
 - **Brokered class** (non-idempotent external writes): review verdicts and task-linked GitHub writes via server-side tools. GitHub and the DB cannot be atomic, so the broker is a **saga/outbox**: effect rows with states `pending → succeeded | failed | ambiguous`, a stable idempotency/correlation key embedded in the external artifact, a reconciliation sweep that resolves `ambiguous` by querying GitHub for the key, and bounded retry rules (retry `failed` idempotently; never blind-retry `ambiguous`). `submit_review_verdict` layers junk-verdict quarantine (content-empty blocking verdicts held for a human) on the same outbox.
 - Permission profiles deny raw equivalents (`gh pr review`, etc.) for supervised agents.
@@ -110,7 +118,7 @@ Cloud-backed rooms only — **decided** (a worker on cloud MCP cannot reach app-
 - P1e. Electron: detached daemon lifecycle, manifest-backed Add Agent (cloud rooms only; visible gate elsewhere), honest three-axis detail UI, protocol-version handoff without blind worker kills.
 
 **P1.5 — Server rebind** (parallel with P1b–P1d; blocks resume-enable)
-- Lease epochs + fenced `rebind_task_lease` per §4.5; epoch check on all lease-guarded writes; anti-hijack tests. Enables P1d resume path.
+- Lease epochs + fenced rebind per §4.5 (grant-gated HTTP route). **Blocked on P1b (task_15)**: the terminal-attestation predicate + the mandatory epoch sweep across every lease-authorized write + barrier-paused HTTP race tests land on top of the merged attempt model. Enables P1d resume path.
 
 **P2 — Codex + migration**
 - P2a. Codex adapter on `mcp_polling` (capabilities per spike). P2b. Port rooms provider-by-provider behind the flag. P2c. Inspector + permission parity. P2d. Test-suite rewrite (~24 coupled files). P2e. Engine deletion — only after §5 gates.
