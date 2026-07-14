@@ -169,6 +169,24 @@ export interface TaskLeaseRow {
   updated_at: string;
 }
 
+export interface RebindAttestationRow {
+  id: string;
+  room_id: string;
+  lease_id: string;
+  epoch: number;
+  from_agent_session_id: string;
+  grant_id: string;
+  supervisor_generation: number;
+  work_attempt_id: string;
+  execution_generation_id: string;
+  cause: string;
+  attested_at: string;
+  consumed_at: string | null;
+  consumed_by_epoch: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface StaleTaskPromptMuteRow {
   room_id: string;
   task_id: string;

@@ -1,5 +1,7 @@
-import { index, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
+import { supervisor_host_grants } from "./agents.js";
 import { rooms } from "./core.js";
 import { coordinationDecisionEnum } from "./enums.js";
 import { task_leases, task_locks } from "./tasks.js";
@@ -37,5 +39,44 @@ export const coordination_events = pgTable(
     ),
     lease_idx: index("coordination_events_lease_idx").on(table.lease_id),
     lock_idx: index("coordination_events_lock_idx").on(table.lock_id),
+  })
+);
+
+// Terminal rebind attestation (plan §4.5). A fenced supervisor persists one row
+// here per predecessor execution it observed as dead; rebindTaskLease consumes
+// exactly one un-consumed row for the {lease_id, epoch, from_agent_session_id}
+// tuple in the same transaction, so a single observed termination authorizes at
+// most one rebind. The partial unique index keeps at most one un-consumed row
+// per predecessor tuple; consumed rows are retained as an audit trail.
+export const task_lease_rebind_attestations = pgTable(
+  "task_lease_rebind_attestations",
+  {
+    id: text("id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    lease_id: text("lease_id")
+      .notNull()
+      .references(() => task_leases.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    epoch: integer("epoch").notNull(),
+    from_agent_session_id: text("from_agent_session_id").notNull(),
+    grant_id: text("grant_id")
+      .notNull()
+      .references(() => supervisor_host_grants.grant_id, { onDelete: "cascade", onUpdate: "cascade" }),
+    supervisor_generation: integer("supervisor_generation").notNull(),
+    work_attempt_id: text("work_attempt_id").notNull(),
+    execution_generation_id: text("execution_generation_id").notNull(),
+    cause: text("cause").notNull(),
+    attested_at: timestamp("attested_at", { mode: "string", withTimezone: true }).notNull(),
+    consumed_at: timestamp("consumed_at", { mode: "string", withTimezone: true }),
+    consumed_by_epoch: integer("consumed_by_epoch"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    unconsumed_idx: uniqueIndex("task_lease_rebind_attestations_unconsumed_idx")
+      .on(table.lease_id, table.epoch, table.from_agent_session_id)
+      .where(sql`${table.consumed_at} IS NULL`),
+    lease_idx: index("task_lease_rebind_attestations_lease_idx").on(table.lease_id),
   })
 );

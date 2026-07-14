@@ -60,6 +60,8 @@ async function setupLifecycle() {
 
 test("supervisor registry is exact default-deny", () => {
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/renew"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/leases/tl_1/attestation"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/leases/tl_1/rebind"), true);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/rooms/room_1/messages"), false);
   assert.equal(isSupervisorGrantRouteAllowed("DELETE", "/supervisor-host-grants/grant_1"), false);
 });
@@ -130,6 +132,46 @@ test("wrong-session rotation route cannot mutate a grant-bound bearer", { skip: 
   await rotate({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: "wrong_session" }, body: { generation: 1, bearer_id: initial.agentSession!.bearer_id } }, response);
   assert.equal(response.statusCode, 403);
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never)).authKind, "agent_session");
+});
+
+test("attestation route persists under grant scope and refuses leases it does not cover", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const attest = handlers.get("POST /supervisor-host-grants/:grantId/leases/:leaseId/attestation"); assert.ok(attest);
+  const grantId = reqBase.params.grantId;
+
+  const from = await authDb!.createRoomAgentSession({ room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Route Agent", agent_key: agent.canonical_key, display_name: "Route Agent", owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent" });
+  const lease = await authDb!.createTaskLease({ room_id: room.id, task_id: "task_1", kind: "work", agent_key: agent.canonical_key, actor_label: "Route Agent", created_by: "Route Agent", agent_session_id: from.session_id });
+
+  // In-scope lease → 201, recorded at the grant's current generation, un-consumed.
+  const ok = recorder();
+  await attest({ ...reqBase, params: { grantId, leaseId: lease.id }, body: { generation: 1, expected_epoch: 0, from_agent_session_id: from.session_id, work_attempt_id: "wa_1", execution_generation_id: "eg_1", cause: "crashed" } }, ok);
+  assert.equal(ok.statusCode, 201);
+  assert.equal((ok.body as any).lease_id, lease.id);
+  assert.equal((ok.body as any).supervisor_generation, 1);
+  assert.equal((ok.body as any).consumed_at, null);
+
+  // Body cannot forge a different generation than the validated grant fence.
+  const forged = recorder();
+  await attest({ ...reqBase, params: { grantId, leaseId: lease.id }, body: { generation: 1, expected_epoch: 0, from_agent_session_id: from.session_id, work_attempt_id: "wa_1", execution_generation_id: "eg_1", cause: "crashed", supervisor_generation: 99 } }, forged);
+  assert.equal(forged.statusCode, 201);
+  assert.equal((forged.body as any).supervisor_generation, 1, "generation is taken from the grant, not the body");
+
+  // A lease the grant does not scope (different agent key) → 403, nothing written.
+  const otherAgent = await authDb!.registerAgentIdentity({ canonical_key: "owner/other-agent", name: "other-agent", display_name: "Other", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const otherLease = await authDb!.createTaskLease({ room_id: room.id, task_id: "task_2", kind: "work", agent_key: otherAgent.canonical_key, actor_label: "Other", created_by: "Other" });
+  const denied = recorder();
+  await attest({ ...reqBase, params: { grantId, leaseId: otherLease.id }, body: { generation: 1, expected_epoch: 0, from_agent_session_id: "sess_x", work_attempt_id: "wa", execution_generation_id: "eg", cause: "crashed" } }, denied);
+  assert.equal(denied.statusCode, 403);
+
+  // Unknown lease → 404.
+  const missing = recorder();
+  await attest({ ...reqBase, params: { grantId, leaseId: "tl_nope" }, body: { generation: 1, expected_epoch: 0, from_agent_session_id: "s", work_attempt_id: "wa", execution_generation_id: "eg", cause: "crashed" } }, missing);
+  assert.equal(missing.statusCode, 404);
+
+  // Missing required fields → 400.
+  const bad = recorder();
+  await attest({ ...reqBase, params: { grantId, leaseId: lease.id }, body: { generation: 1, expected_epoch: 0, from_agent_session_id: from.session_id } }, bad);
+  assert.equal(bad.statusCode, 400);
 });
 
 test("concurrent renewal has exactly one winner and stale token cannot replay", { skip: requiresDatabase }, async () => {

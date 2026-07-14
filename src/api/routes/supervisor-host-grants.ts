@@ -8,7 +8,9 @@ import {
   getAgentIdentityByCanonicalKey,
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
+  getTaskLeaseById,
   rebindTaskLease,
+  recordRebindAttestation,
   revokeSupervisorHostGrant,
   rotateRoomAgentSessionBearer,
   rotateSupervisorHostGrant,
@@ -242,6 +244,59 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     }
     const ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id, supervisor_grant_fence: fence(grant) });
     res.json(ended);
+  });
+
+  // Terminal rebind attestation (plan §4.5). Before a supervisor may rebind an
+  // in-flight lease it must attest — under its current grant fence — that it
+  // observed the predecessor execution terminate. This persists that proof for
+  // the {lease, epoch, from-session} tuple; rebindTaskLease consumes exactly one
+  // such row. The grant must scope the lease's room + agent, and the recorded
+  // supervisor_generation is taken from the validated grant (never the body) so
+  // a stale generation cannot be forged.
+  app.post("/supervisor-host-grants/:grantId/leases/:leaseId/attestation", async (req: AuthenticatedRequest, res) => {
+    const grant = await requireCurrentSupervisorGrant(req, res);
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
+    const leaseId = String(req.params.leaseId ?? "").trim();
+    const body = req.body as {
+      expected_epoch?: unknown; from_agent_session_id?: unknown;
+      work_attempt_id?: unknown; execution_generation_id?: unknown; cause?: unknown;
+    };
+    const expectedEpoch = Number(body.expected_epoch);
+    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
+    const workAttemptId = typeof body.work_attempt_id === "string" ? body.work_attempt_id.trim() : "";
+    const executionGenerationId = typeof body.execution_generation_id === "string" ? body.execution_generation_id.trim() : "";
+    const cause = typeof body.cause === "string" ? body.cause.trim().slice(0, 255) : "";
+    if (!leaseId || !Number.isInteger(expectedEpoch) || expectedEpoch < 0 || !fromSession
+      || !workAttemptId || !executionGenerationId || !cause) {
+      res.status(400).json({ error: "leaseId, integer expected_epoch, from_agent_session_id, work_attempt_id, execution_generation_id, and cause are required." });
+      return;
+    }
+    const lease = await getTaskLeaseById(leaseId);
+    if (!lease) { res.status(404).json({ error: "Lease not found." }); return; }
+    if (!grant.allowed_room_ids.includes(lease.room_id) || !grant.allowed_agent_keys.includes(lease.agent_key)) {
+      res.status(403).json({ error: "Grant does not authorize that lease's room and agent identity." });
+      return;
+    }
+    try {
+      const attestation = await recordRebindAttestation({
+        room_id: lease.room_id,
+        lease_id: leaseId,
+        epoch: expectedEpoch,
+        from_agent_session_id: fromSession,
+        grant_id: grant.grant_id,
+        supervisor_generation: grant.current_generation,
+        work_attempt_id: workAttemptId,
+        execution_generation_id: executionGenerationId,
+        cause,
+      });
+      res.status(201).json(attestation);
+    } catch (error) {
+      respondWithInternalError(res, "POST /supervisor-host-grants/:grantId/leases/:leaseId/attestation", error, "Terminal attestation could not be recorded.");
+    }
   });
 
   // Fenced lease rebind (plan §4.5). A restarted worker's new session takes

@@ -2,6 +2,7 @@ export {
   createTaskLease,
   expireStaleTaskLeases,
   getActiveTaskLeases,
+  getTaskLeaseById,
   releaseTaskLease,
   revokeTaskLease,
   updateTaskLeaseWorkflowRefs,
@@ -12,8 +13,8 @@ export {
   upsertStaleTaskPromptMute,
 } from "./coordination/stale-task-prompt-mutes.js";
 export { applyTaskWorkLeaseAction } from "./coordination/work-lease-actions.js";
-export { rebindTaskLease, assertLeaseEpochCurrentTx, acquireLeaseFenceTx, LeaseFenceStaleError } from "./coordination/lease-rebind.js";
-export type { RebindTaskLeaseInput, RebindTaskLeaseResult, RebindTaskLeaseFailure, LeaseFence } from "./coordination/lease-rebind.js";
+export { rebindTaskLease, assertLeaseEpochCurrentTx, acquireLeaseFenceTx, recordRebindAttestation, LeaseFenceStaleError } from "./coordination/lease-rebind.js";
+export type { RebindTaskLeaseInput, RebindTaskLeaseResult, RebindTaskLeaseFailure, LeaseFence, RecordRebindAttestationInput } from "./coordination/lease-rebind.js";
 export {
   clearTaskLock,
   createTaskLock,

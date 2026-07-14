@@ -15,7 +15,7 @@ process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
 const client = testDatabaseUrl ? await import("../db/client.js") : null;
 const db = testDatabaseUrl ? await import("../db.js") : null;
 const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
-const { rebindTaskLease, assertLeaseEpochCurrentTx } = await import("../db/coordination/lease-rebind.js");
+const { rebindTaskLease, assertLeaseEpochCurrentTx, recordRebindAttestation } = await import("../db/coordination/lease-rebind.js");
 const { applyTaskWorkLeaseAction } = await import("../db/coordination/work-lease-actions.js");
 const { releaseTaskLease } = await import("../db/coordination/task-leases.js");
 const { upsertStaleTaskPromptMute, getStaleTaskPromptMutes } = await import("../db/coordination/stale-task-prompt-mutes.js");
@@ -36,7 +36,7 @@ if (!requiresDatabase) {
 
 let ordinal = 0;
 
-async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean } = {}) {
+async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean; recordAttestation?: boolean } = {}) {
   const n = ++ordinal;
   const ownerId = `owner_rebind_${n}`;
   await client!.db.insert(schema!.accounts).values({
@@ -78,6 +78,19 @@ async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean 
   }
 
   const fence = { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version };
+
+  // A rebind now requires a terminal attestation for the predecessor tuple.
+  // Record the matching one by default so the success paths exercise the full
+  // require+consume flow; negative tests pass recordAttestation:false and craft
+  // their own (missing / stale-generation / wrong-tuple) case.
+  if (options.recordAttestation !== false) {
+    await recordRebindAttestation({
+      room_id: room.id, lease_id: lease.id, epoch: 0, from_agent_session_id: from.session_id,
+      grant_id: grant.grant_id, supervisor_generation: grant.current_generation,
+      work_attempt_id: `wa_${n}`, execution_generation_id: `eg_${n}`, cause: "crashed",
+    });
+  }
+
   return { room, ownerId, agentKey, from, to, grant, lease, fence };
 }
 
@@ -94,6 +107,10 @@ test("rebind moves the lease, bumps epoch, revokes the predecessor, and stale ep
   assert.equal(row.epoch, 1);
   assert.equal(row.agent_session_id, to.session_id);
   assert.equal(row.agent_key, to.agent_key);
+  // The terminal attestation was consumed exactly once, stamped with the new epoch.
+  const [att] = await client!.db.select().from(schema!.task_lease_rebind_attestations).where(eq(schema!.task_lease_rebind_attestations.lease_id, lease.id)).limit(1);
+  assert.ok(att.consumed_at, "attestation marked consumed");
+  assert.equal(att.consumed_by_epoch, 1, "consumed_by_epoch records the resulting epoch");
   // A second attempt at the now-stale epoch loses the CAS.
   const stale = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
   assert.equal(stale.ok, false);
@@ -172,6 +189,65 @@ test("a review lease is not rebindable — the generic route rejects the non-wor
   assert.equal(result.ok, false);
   assert.equal((result as { reason: string }).reason, "kind_not_rebindable");
   assert.equal((await leaseRow(reviewLease.id)).agent_session_id, from.session_id, "review lease stayed put");
+});
+
+test("a rebind without a terminal attestation is rejected", { skip: requiresDatabase }, async () => {
+  // Session-ended alone is not enough (§4.5): with no persisted attestation for
+  // the predecessor tuple, the rebind must refuse — the supervisor never
+  // attested the termination.
+  const { from, to, lease, fence } = await seed({ recordAttestation: false });
+  const result = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, "attestation_missing");
+  assert.equal((await leaseRow(lease.id)).agent_session_id, from.session_id, "lease stayed with the predecessor");
+});
+
+test("an attestation authored at a stale grant generation is rejected", { skip: requiresDatabase }, async () => {
+  // The attestation binds to the grant generation that authored it. A rebind
+  // presenting the CURRENT fence must reject an attestation minted at a
+  // superseded generation — otherwise a rotated-out supervisor's stale proof
+  // could still move a lease.
+  const { room, from, to, lease, grant, fence } = await seed({ recordAttestation: false });
+  await recordRebindAttestation({
+    room_id: room.id, lease_id: lease.id, epoch: 0, from_agent_session_id: from.session_id,
+    grant_id: grant.grant_id, supervisor_generation: fence.generation + 1,
+    work_attempt_id: "wa_stale", execution_generation_id: "eg_stale", cause: "crashed",
+  });
+  const result = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, "attestation_stale");
+  assert.equal((await leaseRow(lease.id)).agent_session_id, from.session_id, "lease stayed with the predecessor");
+});
+
+test("an attestation for a different predecessor tuple does not authorize the rebind", { skip: requiresDatabase }, async () => {
+  // The attestation is bound to {lease, epoch, from-session}. One recorded for a
+  // different session (here the successor's) is not a match, so the rebind of
+  // the real predecessor finds no un-consumed proof and refuses.
+  const { room, from, to, lease, grant, fence } = await seed({ recordAttestation: false });
+  await recordRebindAttestation({
+    room_id: room.id, lease_id: lease.id, epoch: 0, from_agent_session_id: to.session_id,
+    grant_id: grant.grant_id, supervisor_generation: fence.generation,
+    work_attempt_id: "wa_x", execution_generation_id: "eg_x", cause: "crashed",
+  });
+  const result = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, "attestation_missing");
+});
+
+test("a consumed attestation cannot authorize a second rebind (one-time consumption)", { skip: requiresDatabase }, async () => {
+  // The one-time guard is independent of the epoch CAS. After a successful
+  // rebind consumes the attestation, we contrive the lease back to the
+  // predecessor at epoch 0 (as if the CAS would pass again). The spent
+  // attestation must STILL block the replay.
+  const { from, to, lease, fence } = await seed();
+  const first = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(first.ok, true);
+  await client!.db.update(schema!.task_leases)
+    .set({ agent_session_id: from.session_id, epoch: 0 })
+    .where(eq(schema!.task_leases.id, lease.id));
+  const replay = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(replay.ok, false);
+  assert.equal((replay as { reason: string }).reason, "attestation_missing");
 });
 
 test("acquireLeaseFenceTx accepts the current tuple and rejects a rebound-away predecessor", { skip: requiresDatabase }, async () => {
@@ -432,6 +508,12 @@ test("a stale-epoch lease-action cannot release the successor's rebound lease, b
   const lease = await db!.createTaskLease({
     room_id: room.id, task_id: task.id, kind: "work", agent_key: from.agent_key,
     actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
+  // This test creates its own lease (not the seed's), so attest its predecessor.
+  await recordRebindAttestation({
+    room_id: room.id, lease_id: lease.id, epoch: 0, from_agent_session_id: from.session_id,
+    grant_id: fence.grant_id, supervisor_generation: fence.generation,
+    work_attempt_id: "wa_la", execution_generation_id: "eg_la", cause: "crashed",
   });
   // Predecessor observed epoch 0; rebind commits epoch 1 to the successor.
   const rebind = await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
