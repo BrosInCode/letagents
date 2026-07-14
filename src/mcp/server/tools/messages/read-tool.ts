@@ -51,7 +51,7 @@ function withRecencyTelemetry(
 
 // Fetch the most recent messages by paging BACKWARDS from the tail
 // (before=latest), so a limited read never walks the full room history.
-async function fetchRecentRemoteMessages(input: {
+export async function fetchRecentRemoteMessages(input: {
   targetRoomId: string | null;
   targetProjectId: string | null;
   limit: number;
