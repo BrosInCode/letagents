@@ -88,11 +88,14 @@ test("feature-off retains only owner revoke route", () => {
 });
 
 test("lifecycle mint enforces room and agent allowlists through the actual route", { skip: requiresDatabase }, async () => {
-  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
   const allowed = recorder();
   await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key } }, allowed);
   assert.equal(allowed.statusCode, 201); assert.equal((allowed.body as any).session_token, undefined);
+  const mintedAuth = await resolveRequestAuth({ headers: { authorization: `Bearer ${(allowed.body as any).worker_bearer}` } } as never);
+  assert.ok(mintedAuth.agentSession);
+  assert.ok(new Date(mintedAuth.agentSession!.expires_at).getTime() <= new Date(grantResult.grant.expires_at).getTime());
   const denied = recorder();
   await mint({ ...reqBase, body: { generation: 1, room_id: "other_room", agent_key: agent.canonical_key } }, denied);
   assert.equal(denied.statusCode, 403);
