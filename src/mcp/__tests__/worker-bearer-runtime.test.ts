@@ -219,6 +219,11 @@ test("worker bearer startup binds its configured room locally for omitted-room t
         }
         if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
         if (requestUrl.includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+        // No-cursor wait_for_messages now reads the bounded recent tail
+        // (GET /messages?before=…&limit=…) instead of long-polling /messages/poll.
+        if (requestUrl.includes("/messages?") && requestUrl.includes("before=")) {
+          return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+        }
         return new Response(JSON.stringify({ id: "msg_autobind", text: "hello" }), { status: 200 });
       };
       await autoJoinFromContext();
@@ -236,7 +241,11 @@ test("worker bearer startup binds its configured room locally for omitted-room t
       );
     });
     assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages")));
-    assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages/poll")));
+    // No-cursor wait autobinds to the configured room and reads its bounded
+    // recent tail (before=/limit=), not the long-poll endpoint.
+    assert.ok(requests.some((url) =>
+      url.includes("/rooms/room_autobind/messages?") && url.includes("before=") && url.includes("limit=")
+    ));
   } finally {
     globalThis.fetch = originalFetch;
     process.chdir(originalCwd);
@@ -260,6 +269,11 @@ test("worker bearer mode runs the room register, send, and wait loop without ses
       if (String(url).endsWith("/agent-sessions")) assert.fail("worker bearer registration must not call the owner registration route");
       if (String(url).endsWith("/presence")) return new Response(null, { status: 204 });
       if (String(url).includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      // No-cursor wait_for_messages now reads the bounded recent tail
+      // (GET /messages?before=…&limit=…) instead of long-polling /messages/poll.
+      if (String(url).includes("/messages?") && String(url).includes("before=")) {
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      }
       return new Response(JSON.stringify({ id: "msg_1", text: "hello" }), { status: 200 });
     };
 
@@ -276,10 +290,16 @@ test("worker bearer mode runs the room register, send, and wait loop without ses
     assert.match(sendResult.content[0]!.text, /msg_1/);
     assert.match(waitResult.content[0]!.text, /messages/);
     const messageRequest = requests.find((request) => request.url.endsWith("/rooms/room_1/messages"));
-    const pollRequest = requests.find((request) => request.url.includes("/rooms/room_1/messages/poll"));
+    // No-cursor wait reads the bounded recent tail (before=/limit=) instead of
+    // long-polling /messages/poll.
+    const tailRequest = requests.find((request) =>
+      request.url.includes("/rooms/room_1/messages?") &&
+      request.url.includes("before=") &&
+      request.url.includes("limit=")
+    );
     assert.ok(messageRequest);
-    assert.ok(pollRequest);
-    for (const request of [messageRequest, pollRequest]) {
+    assert.ok(tailRequest);
+    for (const request of [messageRequest, tailRequest]) {
       assert.equal(request.headers.authorization, "Bearer worker-secret");
       assert.equal(request.body?.agent_session_id, undefined);
       assert.equal(request.body?.agent_session_token, undefined);
