@@ -283,7 +283,10 @@ export class SupervisorDaemon {
         trackCallback(tick().catch(async (error) => { try { await recordError(error); } catch { /* See terminal callback. */ } }));
       }, intervalMs);
       await queueExitListenerInstall(handle);
-      await tick();
+      // A replacement may already exist when its listener bridge transiently
+      // fails. Keep the scheduler alive: the next serialized tick retries the
+      // same promoted handle instead of launching another child.
+      try { await tick(); } catch (error) { await recordError(error); }
       const dispose = async () => {
         if (!stopped) {
           stopped = true;

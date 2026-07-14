@@ -166,7 +166,7 @@ test("reconciler dispatches fresh, poke, and stop safely and reports port faults
   for (const unsafe of [
     { desiredState: "stopped" as const },
     { condition: "quarantined" as const },
-    { activeLease: true, fencedRebindProven: false },
+    { activeLease: true, fencedRebindProven: true },
   ]) {
     const before = calls.length;
     const held = await runner.reconcile({ ...base, forcedAction: "restart_fresh", ...unsafe }, 100);
@@ -445,6 +445,31 @@ test("a replacement child terminal callback enters durable convergence", async (
     assert.ok(replacementExit, "the spawned child replaces the initial exit listener");
     replacementExit?.({ endedAt: "later", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
     await eventually(async () => (await new ManifestStore(manifestPath).load()).entries[0]?.observed_state === "failed", "replacement terminal persistence");
+    await stop(); await daemon.stop();
+  } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
+});
+
+test("a transient replacement listener failure retries the promoted child without a second spawn", async () => {
+  const env = await fixture();
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    const manifestPath = join(env.root, "manifest.json");
+    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
+    let spawnCount = 0;
+    let failReplacementListener = true;
+    let replacementExit: ((terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void) | null = null;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+      spawn: async () => { spawnCount += 1; return { workAttemptId: "attempt", pid: 2, providerContinuationId: null, observedState: "starting" }; }, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+      onExit: async (handle, listener) => { if (handle.pid === 2 && failReplacementListener) { failReplacementListener = false; throw new Error("transient replacement listener failure"); } if (handle.pid === 2) replacementExit = listener; return () => {}; },
+    };
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    await daemon.start();
+    const stop = await daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "failed" }, () => ({ workAttemptId: "attempt", reconciliationActionId: "g-1", reconciliationActionSequence: 1, nowMs: Date.now(), lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }), 100, 5);
+    await eventually(async () => replacementExit !== null, "replacement listener retry");
+    assert.equal(spawnCount, 1);
+    replacementExit?.({ endedAt: "later", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
+    await eventually(async () => (await new ManifestStore(manifestPath).load()).entries[0]?.observed_state === "failed", "replacement exit after listener retry");
     await stop(); await daemon.stop();
   } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
 });
