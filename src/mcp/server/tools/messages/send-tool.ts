@@ -31,10 +31,7 @@ type SendMessageInput = {
   agent_session_id?: string;
 };
 
-type AgentSessionCredentialPayload = {
-  agent_session_id: string;
-  agent_session_token: string;
-};
+type AgentSessionCredentialPayload = Record<string, string>;
 
 export function buildSendMessageRequestBody(input: {
   sender: string;

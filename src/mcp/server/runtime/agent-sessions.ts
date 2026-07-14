@@ -203,15 +203,9 @@ export function getAgentSessionRepoBranch(cwd?: string | null): string | null {
   return getGitCurrentBranch(workingDir);
 }
 
-export function agentSessionCredentials(agentSession: StoredAgentSessionState): {
-  agent_session_id: string;
-  agent_session_token: string;
-} {
+export function agentSessionCredentials(agentSession: StoredAgentSessionState): Record<string, string> {
   if (requireValidWorkerBearerRuntime().mode === "worker") {
-    return {} as {
-      agent_session_id: string;
-      agent_session_token: string;
-    };
+    return {};
   }
   return {
     agent_session_id: agentSession.session_id,
