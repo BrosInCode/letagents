@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
-import { acquireWorkspaceFence, type WorkspaceFenceHandle } from "./workspace-fence.js";
+import { acquireWorkspaceFence, WorkspaceFenceError, type WorkspaceFenceHandle } from "./workspace-fence.js";
 
 const STORE_VERSION = 2;
 type StoredAttempts = { version: typeof STORE_VERSION; attempts: TaskWorkAttempt[]; checksum: string };
@@ -13,6 +13,7 @@ type LegacyStoredAttempts = { version: 1; attempts: TaskWorkAttempt[] };
 export class AttemptNotFoundError extends Error {}
 export class ImmutableExecutionError extends Error {}
 export class CorruptAttemptStoreError extends Error {}
+export type GcQuiesce = (liveAttempts: TaskWorkAttempt[]) => Promise<() => Promise<void>>;
 
 function checksum(attempts: TaskWorkAttempt[]): string {
   return createHash("sha256").update(JSON.stringify(attempts)).digest("hex");
@@ -104,7 +105,7 @@ export class WorkDurabilityStore {
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
   private readonly supervisorIdentity = `supervisor-${randomUUID()}`;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce) {
     this.workspaceRoot = resolve(workspaceRoot);
   }
 
@@ -268,21 +269,28 @@ export class WorkDurabilityStore {
           removed.push(attempt.work_attempt_id);
           continue;
         }
-        const fence = await acquireWorkspaceFence(attempt.workspace_path, `gc:${attempt.work_attempt_id}`, attempt.current_lease_epoch, "exclusive");
-        try {
+        const collected = await this.withRepositoryGcQuiescence(attempt, async () => {
+          const fence = await acquireWorkspaceFence(attempt.workspace_path, `gc:${attempt.work_attempt_id}`, attempt.current_lease_epoch, "exclusive");
+          try {
           try { await lstat(attempt.workspace_path); }
           catch (error: unknown) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             await this.finishGarbageCollection(attempt.work_attempt_id);
-            continue;
+            return true;
           }
           await this.verifyWorkspaceForDeletion(attempt);
           await rm(attempt.workspace_path, { recursive: true, force: false });
           await this.finishGarbageCollection(attempt.work_attempt_id);
-        } finally { await fence.release(); }
-        removed.push(attempt.work_attempt_id);
+          return true;
+          } finally { await fence.release(); }
+        });
+        if (collected) removed.push(attempt.work_attempt_id);
       } catch (error) {
         console.error(`Refusing to garbage collect work attempt ${attempt.work_attempt_id}:`, error);
+        // A live fence/quiescence is temporary backpressure, not evidence that
+        // the durable record is unsafe. Keep the reservation for a later
+        // bounded retry; integrity/identity failures still become unreviewed.
+        if (error instanceof WorkspaceFenceError) continue;
         await this.mutate((stored) => { const current = this.required(stored, attempt.work_attempt_id); if (current.state === "gc_pending") current.state = "unreviewed"; return current; });
       }
     }
@@ -492,6 +500,31 @@ export class WorkDurabilityStore {
     if (!held) return;
     this.executionFences.delete(workAttemptId);
     await held.release();
+  }
+
+  /**
+   * GC may need exclusive repository authority while unrelated attempts are
+   * still executing. The supervisor callback first checkpoints/pauses their
+   * filesystem activity (not the process or its room work), then this method
+   * drops only those retained shared records, collects, restores them, and
+   * resumes the generations. Without that explicit acknowledgement we fail
+   * closed rather than make a long-lived agent silently unsafe or starve GC.
+   */
+  private async withRepositoryGcQuiescence<T>(candidate: TaskWorkAttempt, operation: () => Promise<T>): Promise<T> {
+    const repository = dirname(candidate.workspace_path);
+    const held = [...this.executionFences.entries()].filter(([, fence]) => fence.mode === "shared" && dirname(fence.workspacePath) === repository);
+    if (held.length === 0) return operation();
+    if (!this.quiesceForGc) throw new WorkspaceFenceError("Live repository generations require a supervisor quiescence acknowledgement before GC.");
+    const attempts = await Promise.all(held.map(([id]) => this.getAttempt(id)));
+    const resume = await this.quiesceForGc(attempts);
+    try {
+      for (const [, fence] of held) await fence.release();
+      for (const [id] of held) this.executionFences.delete(id);
+      try { return await operation(); }
+      finally {
+        for (const attempt of attempts) await this.ensureExecutionFence(await this.getAttempt(attempt.work_attempt_id));
+      }
+    } finally { await resume(); }
   }
 
   private async captureGit(args: string[]): Promise<string> {

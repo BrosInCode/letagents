@@ -421,3 +421,26 @@ test("a live fence in an unrelated repository does not starve safe GC", async ()
     finally { await live.release(); }
   } finally { await env.cleanup(); }
 });
+
+test("supervisor quiescence lets same-repository GC progress without stopping live work", async () => {
+  const env = await fixture();
+  let quiesced: string[] = [];
+  let resumed = false;
+  try {
+    const store = new WorkDurabilityStore(
+      join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root),
+      async (attempts) => { quiesced = attempts.map((attempt) => attempt.work_attempt_id); return async () => { resumed = true; }; },
+    );
+    const doomedWorkspace = await provisionedWorkspace(env.root, "doomed");
+    const liveWorkspace = await provisionedWorkspace(env.root, "live");
+    const doomed = await store.createAttempt({ taskId: "doomed", leaseId: "lease-doomed", leaseEpoch: 1, workspacePath: doomedWorkspace.path, workAttemptId: doomedWorkspace.id });
+    const live = await store.createAttempt({ taskId: "live", leaseId: "lease-live", leaseEpoch: 1, workspacePath: liveWorkspace.path, workAttemptId: liveWorkspace.id });
+    await store.concludeAttempt(doomed.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
+    await store.startGeneration(live.work_attempt_id, "daemon", 1);
+    assert.deepEqual(await store.garbageCollect(0), [doomed.work_attempt_id]);
+    assert.deepEqual(quiesced, [live.work_attempt_id]);
+    assert.equal(resumed, true);
+    assert.equal((await stat(liveWorkspace.path)).isDirectory(), true);
+    assert.equal((await readdir(join(env.root, "worktrees", "repo", ".letagents-supervisor-workspace.fences"))).filter((name) => name.startsWith("shared-")).length, 1, "live generation fence is restored before it resumes");
+  } finally { await env.cleanup(); }
+});
