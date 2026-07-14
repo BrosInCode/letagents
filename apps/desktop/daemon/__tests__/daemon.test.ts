@@ -292,7 +292,9 @@ test("execution identities prohibit parallel, duplicate, and laundered terminal 
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     const first = await store.startGeneration(attempt.work_attempt_id, "starter", 1);
     await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 2), /one execution generation/);
-    await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2025-01-01T00:00:00.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "", actor: "other", generation: 1, provider_continuation_id: null }), /identity/);
+    await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2025-01-01T00:00:00.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "", actor: "other", generation: 1, provider_continuation_id: null }), /runtime schema|identity/);
+    await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2026-01-01T00:00:01.000Z", exit_code: 1.5, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crash", actor: "starter", generation: 1, provider_continuation_id: null }), /runtime schema/);
+    assert.equal((await store.getAttempt(attempt.work_attempt_id)).execution_generations[0]?.terminal, null, "invalid runtime input must never poison the persisted authority record");
     await store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2026-01-01T00:00:01.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crash", actor: "starter", generation: 1, provider_continuation_id: null });
     await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 1), /strictly monotonic/);
   } finally { await env.cleanup(); }
@@ -335,9 +337,11 @@ test("GC replays every pending tombstone and refuses a Git identity mismatch", a
     release(); await collecting;
 
     const mismatch = await provisionedWorkspace(env.root);
-    const guarded = new WorkDurabilityStore(join(env.root, "mismatch.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, async (args) => args.includes("remote") ? "https://evil.invalid/repo.git" : await fakeGit(env.root)(args));
+    let evilRemote = false;
+    const guarded = new WorkDurabilityStore(join(env.root, "mismatch.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, async (args) => evilRemote && args.includes("remote") ? "https://evil.invalid/repo.git" : await fakeGit(env.root)(args));
     const other = await guarded.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: mismatch.path, workAttemptId: mismatch.id });
     await guarded.concludeAttempt(other.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
+    evilRemote = true;
     assert.deepEqual(await guarded.garbageCollect(0), []);
     assert.equal((await stat(mismatch.path)).isDirectory(), true);
   } finally { await env.cleanup(); }
@@ -357,5 +361,24 @@ test("workspace fences and terminal attestation protect clean GC", async () => {
       assert.deepEqual(await store.garbageCollect(0), []);
       assert.equal((await stat(workspace.path)).isDirectory(), true);
     });
+  } finally { await env.cleanup(); }
+});
+
+test("a retained live-generation fence prevents GC from deleting a swapped active workspace", async () => {
+  const env = await fixture();
+  try {
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const doomedWorkspace = await provisionedWorkspace(env.root, "doomed");
+    const activeWorkspace = await provisionedWorkspace(env.root, "active");
+    const doomed = await store.createAttempt({ taskId: "doomed", leaseId: "lease-doomed", leaseEpoch: 1, workspacePath: doomedWorkspace.path, workAttemptId: doomedWorkspace.id });
+    const active = await store.createAttempt({ taskId: "active", leaseId: "lease-active", leaseEpoch: 1, workspacePath: activeWorkspace.path, workAttemptId: activeWorkspace.id });
+    await store.concludeAttempt(doomed.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
+    await store.startGeneration(active.work_attempt_id, "daemon", 1);
+    // Simulate an uncooperative filesystem attacker: it does not acquire any
+    // helper fence. GC must fail closed before it can act on either pathname.
+    await rm(doomedWorkspace.path, { recursive: true });
+    await symlink(activeWorkspace.path, doomedWorkspace.path);
+    assert.deepEqual(await store.garbageCollect(0), []);
+    assert.equal((await stat(activeWorkspace.path)).isDirectory(), true);
   } finally { await env.cleanup(); }
 });

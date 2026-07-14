@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
-import { withWorkspaceFence } from "./workspace-fence.js";
+import { acquireWorkspaceFence, type WorkspaceFenceHandle } from "./workspace-fence.js";
 
 const STORE_VERSION = 2;
 type StoredAttempts = { version: typeof STORE_VERSION; attempts: TaskWorkAttempt[]; checksum: string };
@@ -98,6 +98,10 @@ function isAttempt(value: unknown): value is TaskWorkAttempt {
 export class WorkDurabilityStore {
   private writes: Promise<void> = Promise.resolve();
   private readonly workspaceRoot: string;
+  // Retained for the lifetime of a live execution, including its terminal /
+  // rebind / successor-generation handoff.  The on-disk PID record lets a new
+  // daemon recover after a crash without treating a live predecessor as stale.
+  private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
 
   constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand) {
     this.workspaceRoot = resolve(workspaceRoot);
@@ -136,7 +140,7 @@ export class WorkDurabilityStore {
   }
 
   async rebindAttempt(workAttemptId: string, leaseId: string, leaseEpoch: number): Promise<TaskWorkAttempt> {
-    return this.mutate((stored) => {
+    const rebound = await this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot be rebound.");
       if (!Number.isInteger(leaseEpoch) || leaseEpoch <= attempt.current_lease_epoch) throw new ImmutableExecutionError("Lease epochs must advance monotonically.");
@@ -145,6 +149,13 @@ export class WorkDurabilityStore {
       attempt.epoch_history.push({ lease_id: leaseId, epoch: leaseEpoch, recorded_at: this.now() });
       return attempt;
     });
+    const held = this.executionFences.get(workAttemptId);
+    if (held) {
+      await held.release();
+      try { this.executionFences.set(workAttemptId, await acquireWorkspaceFence(rebound.workspace_path, rebound.lease_id, rebound.current_lease_epoch)); }
+      catch (error) { this.executionFences.delete(workAttemptId); throw error; }
+    }
+    return rebound;
   }
 
   async checkpoint(workAttemptId: string, checkpoint: Omit<WorkAttemptCheckpoint, "at"> & { at?: string }): Promise<TaskWorkAttempt> {
@@ -157,7 +168,9 @@ export class WorkDurabilityStore {
   }
 
   async startGeneration(workAttemptId: string, actor: string, generation: number): Promise<ExecutionGeneration> {
-    return this.mutate((stored) => {
+    const attempt = await this.getAttempt(workAttemptId);
+    await this.ensureExecutionFence(attempt);
+    try { return await this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot start a generation.");
       if (!actor.trim() || !Number.isInteger(generation) || generation < 1) throw new ImmutableExecutionError("Generation actor and number are required.");
@@ -167,10 +180,12 @@ export class WorkDurabilityStore {
       const execution: ExecutionGeneration = { execution_generation_id: randomUUID(), work_attempt_id: workAttemptId, started_at: this.now(), actor, generation, terminal: null };
       attempt.execution_generations.push(execution);
       return execution;
-    });
+    }); } catch (error) { await this.releaseExecutionFence(workAttemptId); throw error; }
   }
 
   async recordTerminal(workAttemptId: string, executionGenerationId: string, terminal: ExecutionTerminalPayload, maxStdioTailBytes = 64 * 1024): Promise<ExecutionGeneration> {
+    if (!isTerminal(terminal)) throw new ImmutableExecutionError("Terminal payload has an invalid runtime schema.");
+    if (!Number.isInteger(maxStdioTailBytes) || maxStdioTailBytes < 0) throw new ImmutableExecutionError("Terminal stdio limit must be a non-negative integer.");
     return this.mutate((stored) => {
       const execution = this.required(stored, workAttemptId).execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
       if (!execution) throw new AttemptNotFoundError(`Unknown execution generation: ${executionGenerationId}`);
@@ -209,8 +224,12 @@ export class WorkDurabilityStore {
     this.assertAttemptId(workAttemptId);
     const current = await this.getAttempt(workAttemptId);
     if (input.state === "cleanly_concluded" && current.execution_generations.some((generation) => generation.terminal === null)) throw new ImmutableExecutionError("Clean conclusion requires terminal attestation for every execution generation.");
-    const postmortemDiff = input.postmortemDiff ?? await this.capturePostmortemDiff(workAttemptId, input.maxPostmortemBytes);
-    return this.mutate((stored) => {
+    await this.ensureExecutionFence(current);
+    // A caller-supplied diff is test/backfill input only when no Git runner was
+    // configured. In production the daemon capture below is authoritative.
+    const postmortemDiff = this.git ? await this.capturePostmortemDiff(workAttemptId, input.maxPostmortemBytes) : input.postmortemDiff;
+    if (postmortemDiff === undefined) throw new ImmutableExecutionError("Daemon Git postmortem capture is required for conclusion.");
+    try { return await this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("Work attempts can conclude only once.");
       if (!input.cause.trim()) throw new ImmutableExecutionError("Work attempts require an explicit conclusion cause.");
@@ -220,7 +239,7 @@ export class WorkDurabilityStore {
       attempt.conclusion_cause = input.cause;
       attempt.postmortem_diff = postmortemDiff;
       return attempt;
-    });
+    }); } finally { await this.releaseExecutionFence(workAttemptId); }
   }
 
   async markState(workAttemptId: string, state: Extract<WorkAttemptState, "ambiguous" | "quarantined" | "unreviewed">): Promise<TaskWorkAttempt> {
@@ -252,17 +271,18 @@ export class WorkDurabilityStore {
           removed.push(attempt.work_attempt_id);
           continue;
         }
-        await withWorkspaceFence(attempt.workspace_path, async () => {
+        const fence = await acquireWorkspaceFence(attempt.workspace_path, `gc:${attempt.work_attempt_id}`, attempt.current_lease_epoch);
+        try {
           try { await lstat(attempt.workspace_path); }
           catch (error: unknown) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             await this.finishGarbageCollection(attempt.work_attempt_id);
-            return;
+            continue;
           }
           await this.verifyWorkspaceForDeletion(attempt);
           await rm(attempt.workspace_path, { recursive: true, force: false });
           await this.finishGarbageCollection(attempt.work_attempt_id);
-        });
+        } finally { await fence.release(); }
         removed.push(attempt.work_attempt_id);
       } catch (error) {
         console.error(`Refusing to garbage collect work attempt ${attempt.work_attempt_id}:`, error);
@@ -452,7 +472,8 @@ export class WorkDurabilityStore {
     await this.verifyWorkspaceForDeletion(attempt);
     const status = await this.captureGit(["-C", attempt.workspace_path, "status", "--porcelain"]);
     const diff = await this.captureGit(["-C", attempt.workspace_path, "diff", "--binary", "--no-ext-diff"]);
-    const captured = this.limitPostmortem(`status --porcelain\n${status}\n\ndiff --binary\n${diff}`, maxBytes);
+    const untracked = await this.captureUntrackedContents(attempt.workspace_path);
+    const captured = this.limitPostmortem(`status --porcelain\n${status}\n\ndiff --binary\n${diff}\n\nuntracked contents\n${untracked}`, maxBytes);
     const root = await this.managedRealDirectory(this.attemptsRoot, true);
     const directory = join(root, workAttemptId);
     await this.ensureManagedDirectory(directory, root, true);
@@ -464,11 +485,36 @@ export class WorkDurabilityStore {
     return captured;
   }
 
+  private async ensureExecutionFence(attempt: TaskWorkAttempt): Promise<void> {
+    if (this.executionFences.has(attempt.work_attempt_id)) return;
+    this.executionFences.set(attempt.work_attempt_id, await acquireWorkspaceFence(attempt.workspace_path, attempt.lease_id, attempt.current_lease_epoch));
+  }
+
+  private async releaseExecutionFence(workAttemptId: string): Promise<void> {
+    const held = this.executionFences.get(workAttemptId);
+    if (!held) return;
+    this.executionFences.delete(workAttemptId);
+    await held.release();
+  }
+
   private async captureGit(args: string[]): Promise<string> {
     if (!this.git) throw new ImmutableExecutionError("A Git identity verifier is required for postmortem capture.");
     const result = await this.git(args);
     if (result !== undefined && typeof result !== "string") throw new ImmutableExecutionError(`Git postmortem capture returned an invalid result: ${args.join(" ")}`);
     return result ?? "";
+  }
+
+  private async captureUntrackedContents(workspacePath: string): Promise<string> {
+    const names = await this.captureGit(["-C", workspacePath, "ls-files", "--others", "--exclude-standard", "-z"]);
+    const entries: string[] = [];
+    for (const name of names.split("\0").filter(Boolean)) {
+      const path = resolve(workspacePath, name);
+      if (!isStrictChild(workspacePath, path) || !isInside(workspacePath, path)) throw new ImmutableExecutionError("Git returned an unsafe untracked path.");
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink()) throw new ImmutableExecutionError("Untracked postmortem input must be a regular file.");
+      entries.push(`--- ${name} (base64)\n${(await readFile(path)).toString("base64")}`);
+    }
+    return entries.join("\n");
   }
 
   private limitPostmortem(value: string, maxBytes: number): string {
