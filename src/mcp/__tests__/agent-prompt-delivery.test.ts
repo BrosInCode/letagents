@@ -35,3 +35,19 @@ test("compact prompts stay small and point back at the standing instructions", (
   }
   assert.equal(buildCompactRoomAgentPrompt("join"), buildRoomAgentPrompt("join"));
 });
+
+test("every prompt variant teaches agents to act on liveness signals", () => {
+  for (const kind of ["join", "inline", "auto"] as const) {
+    const full = buildRoomAgentPrompt(kind);
+    assert.match(full, /Resilience:/);
+    assert.match(full, /never reply that you are waiting/);
+    assert.match(full, /register_task_create_intent/);
+    assert.match(full, /list_board_intents/);
+  }
+  for (const kind of ["inline", "auto"] as const) {
+    assert.match(
+      buildCompactRoomAgentPrompt(kind),
+      /offline\/failover\/stall system messages as actionable/
+    );
+  }
+});
