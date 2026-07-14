@@ -9,16 +9,18 @@
     "dev:renderer": "vite",
     "watch:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "serve:electron": "wait-on tcp:5174 dist-electron/main.js && cross-env LETAGENTS_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5174 electron .",
-    "build": "npm run build:renderer && npm run build:electron",
+    "build": "npm run build:renderer && npm run build:electron && npm run build:daemon",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
+    "build:daemon": "tsc -p tsconfig.daemon.json",
     "smoke:electron": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 electron .",
     "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
-    "test": "npm run test:renderer && npm run test:electron",
+    "test": "npm run test:renderer && npm run test:electron && npm run test:daemon",
     "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
     "test:electron": "node --import tsx --test electron/__tests__/*.test.ts",
+    "test:daemon": "node --import tsx --test daemon/__tests__/*.test.ts",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
-    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
+    "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.196",

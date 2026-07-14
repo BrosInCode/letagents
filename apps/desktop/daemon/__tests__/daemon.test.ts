@@ -1,0 +1,86 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { AuditLog } from "../audit-log.js";
+import { DaemonControlSocket } from "../control-socket.js";
+import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
+import { assertMacOS } from "../platform.js";
+import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+
+async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
+  const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
+  return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); } };
+}
+
+const entry: DaemonManifestEntry = {
+  id: "agent_1", room_id: "room_1", display_name: "Agent", provider: "test", model: null, charter: "test",
+  desired_state: "running", observed_state: "idle", condition: "none", permission_profile_id: null, created_by: "test", created_at: "2026-01-01T00:00:00.000Z",
+};
+
+test("daemon is visibly gated to macOS", () => {
+  assert.throws(() => assertMacOS("linux"), /macOS only/);
+});
+
+test("singleton fences a second daemon and detects a newer generation", async () => {
+  const env = await fixture();
+  try {
+    const lock = join(env.root, "daemon.lock");
+    const first = new DaemonSingleton(lock, "darwin");
+    assert.equal(await first.acquire(), 1);
+    await assert.rejects(() => new DaemonSingleton(lock, "darwin").acquire(), DaemonAlreadyRunningError);
+    await writeFile(`${lock}.generation`, "2\n");
+    await assert.rejects(() => first.assertCurrent(), DaemonFenceLostError);
+    await first.release();
+  } finally { await env.cleanup(); }
+});
+
+test("manifest writes CAS, fsync/rename payloads, and quarantines corruption", async () => {
+  const env = await fixture();
+  try {
+    const path = join(env.root, "manifest.json");
+    const store = new ManifestStore(path);
+    const saved = await store.write(0, [entry]);
+    assert.equal(saved.generation, 1);
+    await assert.rejects(() => store.write(0, []), ManifestConflictError);
+    await writeFile(path, '{"manifest":{"generation":7},"checksum":"bad"}');
+    assert.deepEqual(await store.load(), { generation: 0, entries: [] });
+    assert.ok((await readdir(env.root)).some((name) => name.startsWith("manifest.json.corrupt-")));
+  } finally { await env.cleanup(); }
+});
+
+test("audit transitions append and rotate instead of truncating", async () => {
+  const env = await fixture();
+  try {
+    const path = join(env.root, "audit.jsonl");
+    const log = new AuditLog(path, 1);
+    await log.append({ at: "2026-01-01T00:00:00.000Z", entry_id: "agent", from: "idle", to: "recovering", cause: "test", actor: "test", generation: 1 });
+    await log.append({ at: "2026-01-01T00:00:01.000Z", entry_id: "agent", from: "recovering", to: "idle", cause: "test", actor: "test", generation: 2 });
+    const names = await readdir(env.root);
+    assert.ok(names.some((name) => name.startsWith("audit.jsonl.") && name.endsWith(".archive")));
+    assert.match(await readFile(path, "utf8"), /"generation":2/);
+  } finally { await env.cleanup(); }
+});
+
+test("control socket rejects protocol mismatch explicitly", async () => {
+  const env = await fixture();
+  try {
+    const socketPath = join(env.root, "daemon.sock");
+    const socket = new DaemonControlSocket(socketPath, () => ({ healthy: true }));
+    await socket.start();
+    const response = await new Promise<string>((resolve, reject) => {
+      const client = createConnection(socketPath);
+      let received = "";
+      client.setEncoding("utf8");
+      client.once("error", reject);
+      client.on("data", (chunk) => { received += chunk; if (received.includes("\n")) { client.end(); resolve(received); } });
+      client.on("connect", () => client.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION + 1, id: "bad", method: "manifest.list" }) + "\n"));
+    });
+    assert.match(response, /Protocol version mismatch/);
+    await socket.stop();
+  } finally { await env.cleanup(); }
+});
