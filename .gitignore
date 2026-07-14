@@ -2,6 +2,7 @@ node_modules/
 dist/
 apps/desktop/dist-electron/
 apps/desktop/dist-renderer/
+apps/desktop/dist-daemon/
 *.log
 .DS_Store
 SCR-*.png
