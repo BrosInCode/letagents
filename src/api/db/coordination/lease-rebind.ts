@@ -103,7 +103,11 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
       || fromSession.session_kind !== "worker"
       || toSession.owner_account_id !== grant.owner_account_id
       || fromSession.owner_account_id !== grant.owner_account_id
-      || toSession.supervisor_grant_id !== grant.grant_id) {
+      || toSession.supervisor_grant_id !== grant.grant_id
+      // BOTH sides bound to this grant: the predecessor must also have been
+      // minted under it, so a grant for host A cannot seize a same-key lease
+      // whose predecessor belongs to host B.
+      || fromSession.supervisor_grant_id !== grant.grant_id) {
       return { ok: false, reason: "session_mismatch" as const };
     }
 

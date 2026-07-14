@@ -43,20 +43,21 @@ async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean 
   const room = await db!.createProjectWithName(`rebind-room-${n}`);
   const agentKey = `owner/rebind-agent-${n}`;
 
-  const from = await db!.createRoomAgentSession({
-    room_id: room.id, session_kind: "worker", runtime: "codex",
-    actor_label: `From${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_from_${n}`,
-    display_name: `From${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
-  });
-
   const grant = (await db!.createSupervisorHostGrant({
     owner_account_id: ownerId, host_id: `host_${n}`, installation_id: `install_${n}`,
     allowed_room_ids: [room.id], allowed_agent_keys: [agentKey],
     expires_at: new Date(Date.now() + 60_000).toISOString(),
   })).grant;
 
-  // The successor is minted UNDER this grant (the normal supervised path). The
-  // wrong-host case omits supervisor_grant_id so the rebind must reject it.
+  // Both predecessor and successor are minted UNDER this grant (the supervised
+  // path). The wrong-host case omits the successor's supervisor_grant_id so the
+  // rebind must reject it.
+  const from = await db!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "codex",
+    actor_label: `From${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_from_${n}`,
+    display_name: `From${n}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: grant.grant_id,
+  });
   const to = await db!.createRoomAgentSession({
     room_id: room.id, session_kind: "worker", runtime: "codex",
     actor_label: `To${n} | Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `inst_to_${n}`,
