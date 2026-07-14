@@ -21,7 +21,6 @@
         class="sidebar-search-button"
         type="button"
         :data-active="searchOpen"
-        :data-reduced-motion="searchMotionReduced"
         :aria-expanded="searchOpen"
         aria-controls="sidebar-room-search"
         :aria-label="searchOpen ? 'Close room search' : 'Search rooms'"
@@ -29,21 +28,17 @@
         data-testid="sidebar-search-button"
         @click="toggleSearch"
       >
-        <Transition name="sidebar-search-icon" mode="out-in">
-          <X v-if="searchOpen" key="close" aria-hidden="true" />
-          <Search v-else key="search" aria-hidden="true" />
-        </Transition>
+        <X v-if="searchOpen" aria-hidden="true" />
+        <Search v-else aria-hidden="true" />
       </button>
     </div>
 
-    <Transition name="sidebar-navigation-swap">
-      <section
-        v-if="sidebarMode === 'expanded' && searchOpen"
-        id="sidebar-room-search"
-        class="sidebar-room-search"
-        :data-reduced-motion="searchMotionReduced"
-        data-testid="sidebar-room-search"
-      >
+    <section
+      v-if="sidebarMode === 'expanded' && searchOpen"
+      id="sidebar-room-search"
+      class="sidebar-room-search"
+      data-testid="sidebar-room-search"
+    >
         <label class="sidebar-search-field">
           <Search aria-hidden="true" />
           <input
@@ -105,9 +100,9 @@
           No rooms match “{{ searchQuery.trim() }}”
         </p>
         <p v-else class="sidebar-search-empty">Search by room, branch, or task.</p>
-      </section>
+    </section>
 
-      <div v-else-if="sidebarMode === 'expanded'" class="sidebar-navigation">
+    <div v-else-if="sidebarMode === 'expanded'" class="sidebar-navigation">
         <div class="sidebar-actions" @contextmenu.prevent="openBackgroundContextMenu">
       <button
         class="sidebar-cta"
@@ -355,8 +350,7 @@
         </div>
       </Transition>
         </section>
-      </div>
-    </Transition>
+    </div>
 
     <div v-if="sidebarMode === 'expanded'" class="sidebar-footer">
       <button
@@ -496,7 +490,6 @@ const searchInput = ref<HTMLInputElement | null>(null);
 const searchOpen = ref(false);
 const searchQuery = ref("");
 const activeSearchIndex = ref(0);
-const searchMotionReduced = ref(false);
 
 // The sidebar peek panel closes on pointerleave; it needs to know a menu is
 // active (teleported outside the panel) so it can stay open underneath it.
@@ -676,8 +669,7 @@ function selectOrToggleProject(project: ProjectGroup): void {
   }
 }
 
-function toggleSearch(event: MouseEvent): void {
-  searchMotionReduced.value = event.detail === 0;
+function toggleSearch(): void {
   if (searchOpen.value) closeSearch();
   else openSearch();
 }
@@ -702,7 +694,6 @@ function resetSearch(): void {
 function handleSearchKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape") {
     event.preventDefault();
-    searchMotionReduced.value = true;
     closeSearch();
     return;
   }
@@ -721,7 +712,6 @@ function handleSearchKeydown(event: KeyboardEvent): void {
   }
   if (event.key === "Enter") {
     event.preventDefault();
-    searchMotionReduced.value = true;
     const result = searchResults.value[activeSearchIndex.value];
     if (result) selectSearchResult(result.entry);
   }
