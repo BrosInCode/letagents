@@ -231,7 +231,7 @@ test("bearer artifact publishing requires exactly one caller-held work lease", {
   const handlers = new Map<string, (...args: any[]) => Promise<void>>();
   registerRoomArtifactRoutes({ get() {}, post(path: RegExp, handler: any) { handlers.set(path.source, handler); } } as never, {
     resolveCanonicalRoomRequestId: async () => room.id, resolveRoomOrReply: async () => room, requireParticipant: async () => true,
-    requireWorkerRequestAgentIdentity, getRoomSharedArtifacts: async () => [], getRoomSharedArtifactByIdentityKey: async () => null,
+    requireWorkerRequestAgentIdentity, getActiveTaskLeases: dbModule!.getActiveTaskLeases, getRoomSharedArtifacts: async () => [], getRoomSharedArtifactByIdentityKey: async () => null,
     upsertRoomSharedArtifact: async () => ({ identity_key: "artifact" }), linkRoomSharedArtifactToTask: async () => {},
     publishWorkerArtifactFenced: async () => ({ identity_key: "artifact" }),
   } as never);

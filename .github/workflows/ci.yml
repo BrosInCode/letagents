@@ -275,6 +275,13 @@ jobs:
           --test
           src/api/__tests__/task-record-fence-wiring.test.ts
 
+      - name: Run artifact fence wiring test
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/artifact-fence-wiring.test.ts
+
       - name: Run focus room tests
         timeout-minutes: 5
         run: >-
