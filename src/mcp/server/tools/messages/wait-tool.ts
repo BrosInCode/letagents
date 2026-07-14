@@ -439,21 +439,14 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const allMessages: unknown[] = [];
       let roomIdFromResponse: string | undefined;
 
-      if (fetchPlan.mode === "catch_up_tail") {
-        // No cursor: catch up on only the bounded recent tail. Mirror
-        // read_messages by paging BACKWARDS from the tail (before=latest) so we
-        // return the newest N and never walk the full room history. This also
-        // advances the session cursor to the newest message returned.
-        const recent = await fetchRecentRemoteMessages({
-          targetRoomId,
-          targetProjectId,
-          limit: fetchPlan.limit,
-        });
-        allMessages.push(...recent.messages);
-        roomIdFromResponse = recent.roomIdFromResponse;
-      } else {
+      // Long-poll the server (blocks up to serverTimeout for new messages),
+      // optionally seeded with a cursor. Shared by the cursor path and by the
+      // no-cursor empty-tail fallback so a quiet room still blocks instead of
+      // busy-spinning. When `after` is provided this also catches up any backlog
+      // after the cursor via forward pagination.
+      const longPollFromCursor = async (after?: string): Promise<void> => {
         const params = new URLSearchParams();
-        params.set("after", fetchPlan.after);
+        if (after) params.set("after", after);
         params.set("timeout", String(serverTimeout));
 
         const queryString = params.toString();
@@ -476,7 +469,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         });
 
         allMessages.push(...(firstResult.messages ?? []));
-        roomIdFromResponse = firstResult.room_id || firstResult.project_id;
+        roomIdFromResponse = roomIdFromResponse || firstResult.room_id || firstResult.project_id;
 
         if (firstResult.has_more && allMessages.length > 0) {
           let afterCursor = (allMessages[allMessages.length - 1] as { id?: string })?.id;
@@ -503,6 +496,31 @@ export function registerWaitForMessagesTool(server: McpServer): void {
             afterCursor = (msgs[msgs.length - 1] as { id?: string })?.id;
           }
         }
+      };
+
+      if (fetchPlan.mode === "catch_up_tail") {
+        // No cursor: catch up on only the bounded recent tail. Mirror
+        // read_messages by paging BACKWARDS from the tail (before=latest) so we
+        // return the newest N and never walk the full room history. This also
+        // advances the session cursor to the newest message returned.
+        const recent = await fetchRecentRemoteMessages({
+          targetRoomId,
+          targetProjectId,
+          limit: fetchPlan.limit,
+        });
+        if (recent.messages.length > 0) {
+          allMessages.push(...recent.messages);
+          roomIdFromResponse = recent.roomIdFromResponse;
+        } else {
+          // Empty tail => the room is effectively empty, so there is nothing to
+          // dump. Fall through to the long-poll (no cursor) so a worker looping
+          // in a quiet room blocks up to the timeout instead of busy-spinning,
+          // exactly as the local path does via waitForLocalChatMessages.
+          roomIdFromResponse = recent.roomIdFromResponse;
+          await longPollFromCursor();
+        }
+      } else {
+        await longPollFromCursor(fetchPlan.after);
       }
 
       const routing = filterSilentActivationMessages(allMessages);
