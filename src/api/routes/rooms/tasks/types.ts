@@ -4,6 +4,7 @@ import type { Response } from "express";
 import type {
   GitRoomBinding,
   BoardIntentConsumptionInput,
+  LeaseFence,
   Project,
   Task,
   TaskLeaseKind,
@@ -25,6 +26,7 @@ export type TaskCoordinationGuardDecision =
       kind: "allow";
       boardIntentApproval?: BoardIntentConsumptionInput | null;
       workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+      leaseFence?: LeaseFence | null;
     }
   | { kind: "deny"; code: string; error: string };
 

@@ -201,6 +201,58 @@ test("the epoch guard rejects a partitioned predecessor's stale epoch after rebi
   });
 });
 
+test("updateTask fence aborts a stale write when a rebind commits first (barrier) — zero side effect, current epoch succeeds", { skip: requiresDatabase }, async () => {
+  // Barrier per §4.5: an authenticated worker's task write and a supervisor
+  // rebind race for the same lease. Both take the `task_lease:<id>` advisory
+  // lock, so they linearize. We force "rebind first" deterministically by
+  // holding that exact lock on a dedicated connection before firing the write,
+  // so updateTask blocks at acquireLeaseFenceTx; we commit the rebind under the
+  // held lock, release, and the resumed write must observe the advanced epoch
+  // and abort with LeaseFenceStaleError, leaving the task untouched.
+  const { updateTask } = await import("../db/tasks.js");
+  const { room, from, to } = await seed();
+  const task = await db!.createTask(room.id, "fenced task", from.actor_label);
+  const lease = await db!.createTaskLease({
+    room_id: room.id, task_id: task.id, kind: "work", agent_key: from.agent_key,
+    actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
+  const leaseFence = {
+    lease_id: lease.id, room_id: room.id, task_id: task.id, kind: "work" as const,
+    expected_epoch: 0, agent_session_id: from.session_id,
+  };
+  const initialPrUrl = task.pr_url ?? null;
+
+  const holder = await client!.pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`task_lease:${lease.id}`]);
+
+    // Fire the guarded write; it progresses to the fence and blocks on the lock.
+    const writePromise = updateTask(room.id, task.id, { pr_url: "https://example.com/pr/stale" }, { leaseFence });
+
+    // A rebind commits while the write waits: repoint to the successor, bump epoch.
+    await holder.query(
+      "UPDATE task_leases SET agent_session_id = $1, epoch = epoch + 1, updated_at = now() WHERE id = $2",
+      [to.session_id, lease.id],
+    );
+    await holder.query("COMMIT"); // releases the lock
+
+    await assert.rejects(writePromise, (err: Error) => err.name === "LeaseFenceStaleError");
+  } finally {
+    holder.release();
+  }
+
+  // Zero side effect: the stale write never landed.
+  const [taskRow] = await client!.db.select().from(schema!.tasks).where(eq(schema!.tasks.id, task.id)).limit(1);
+  assert.equal(taskRow.pr_url ?? null, initialPrUrl, "the rebound-away predecessor's write did not land");
+
+  // The successor, presenting the current fence, writes successfully.
+  const ok = await updateTask(room.id, task.id, { pr_url: "https://example.com/pr/successor" }, {
+    leaseFence: { lease_id: lease.id, room_id: room.id, task_id: task.id, kind: "work", expected_epoch: 1, agent_session_id: to.session_id },
+  });
+  assert.equal(ok?.pr_url, "https://example.com/pr/successor");
+});
+
 test("a stale-epoch lease-action cannot release the successor's rebound lease, but the current epoch can", { skip: requiresDatabase }, async () => {
   const { room, from, to, lease, fence } = await seed();
   // Predecessor observed epoch 0; rebind commits epoch 1 to the successor.

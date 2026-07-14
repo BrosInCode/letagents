@@ -12,6 +12,7 @@ import {
   markBoardIntentTaskResult,
 } from "./coordination/board-intents.js";
 import { createTaskLeaseRow } from "./coordination/lease-rows.js";
+import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import { resolveTaskAssignmentState, type TaskAssignmentPatch } from "./task-assignment.js";
 import { normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
 import type { BoardIntent, BoardIntentConsumptionInput, BoardIntentPayload, Task, TaskOwnershipState, TaskRow, TaskStatus, TaskWorkLeaseCreationInput } from "./types.js";
@@ -416,6 +417,14 @@ export async function updateTask(
   options?: {
     boardIntentApproval?: BoardIntentConsumptionInput | null;
     workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+    // When the caller's authority to mutate this task derives from holding a
+    // work lease, the observed lease identity is fenced INSIDE the write tx
+    // (plan §4.5): the shared advisory lock + full-tuple re-validation runs
+    // atomically with the UPDATE, so a rebind that commits between the route's
+    // lease read and this write makes the fence stale and the write throws
+    // LeaseFenceStaleError instead of a stale predecessor overwriting the
+    // successor's task state. Absent for owner/admin or lease-creation writes.
+    leaseFence?: LeaseFence | null;
   }
 ): Promise<Task | null> {
   const task = await getTaskRowById(roomId, taskId);
@@ -478,8 +487,15 @@ export async function updateTask(
     );
   };
 
-  if (options?.boardIntentApproval || options?.workLeaseCreation) {
+  if (options?.boardIntentApproval || options?.workLeaseCreation || options?.leaseFence) {
     await db.transaction(async (tx) => {
+      // Fence FIRST, under the shared lease advisory lock, so the whole write
+      // linearizes against a concurrent rebind. A stale fence aborts the tx
+      // before any task state changes.
+      if (options.leaseFence) {
+        const held = await acquireLeaseFenceTx(tx, options.leaseFence);
+        if (!held) throw new LeaseFenceStaleError();
+      }
       if (options.boardIntentApproval) {
         await assertConsumeBoardIntentApproval(options.boardIntentApproval, tx);
       }

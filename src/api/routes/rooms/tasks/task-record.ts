@@ -5,6 +5,7 @@ import {
   getActiveTaskLeases,
   getTaskById,
   getTaskOwnershipState,
+  LeaseFenceStaleError,
   updateTask,
   type BoardIntentConsumptionInput,
   type TaskStatus,
@@ -225,6 +226,7 @@ export function registerTaskRecordRoutes(
         {
           boardIntentApproval,
           workLeaseCreation: coordination.workLeaseCreation ?? null,
+          leaseFence: coordination.leaseFence ?? null,
         }
       );
       if (updated && updates.status && updates.status !== task.status) {
@@ -243,6 +245,10 @@ export function registerTaskRecordRoutes(
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       if (error instanceof BoardIntentApprovalConsumptionError) {
         await recordBoardIntentConsumptionFailure({
           roomId: project.id,
