@@ -43,13 +43,13 @@ function storePath(): string {
 // Exported for a mockable Keychain-storage test. The raw token is only ever
 // passed through main-process functions and is never put in IPC return values.
 export function encryptSupervisorGrantForStorage(token: string, storage = getStorage()): string {
-  return storage.isEncryptionAvailable()
-    ? `safe:${storage.encryptString(token).toString("base64")}`
-    : `plain:${token}`;
+  if (!storage.isEncryptionAvailable()) {
+    throw new Error("macOS Keychain encryption is unavailable; host grant was not stored.");
+  }
+  return `safe:${storage.encryptString(token).toString("base64")}`;
 }
 
 export function decryptSupervisorGrantFromStorage(value: string, storage = getStorage()): string | null {
-  if (value.startsWith("plain:")) return value.slice(6) || null;
   if (!value.startsWith("safe:") || !storage.isEncryptionAvailable()) return null;
   try { return storage.decryptString(Buffer.from(value.slice(5), "base64")); } catch { return null; }
 }
@@ -66,6 +66,14 @@ function toMetadata(response: {
 }
 
 export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSupervisorGrantInput): Promise<DesktopSupervisorGrantMetadata> {
+  if (!getStorage().isEncryptionAvailable()) {
+    throw new Error("macOS Keychain encryption is unavailable; host grant was not provisioned.");
+  }
+  // Refuse replacement while a live local grant exists. The owner must revoke
+  // it explicitly instead of silently orphaning a durable host credential.
+  if (await getDesktopSupervisorGrantMetadata()) {
+    throw new Error("A host grant is already stored on this desktop. Revoke it before provisioning a replacement.");
+  }
   const response = await apiFetch<{
     grant_id: string; host_id: string; installation_id: string; allowed_room_ids: string[];
     allowed_agent_keys: string[]; current_generation: number; expires_at: string; supervisor_grant: string;

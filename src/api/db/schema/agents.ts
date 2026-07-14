@@ -112,6 +112,7 @@ export const supervisor_host_grants = pgTable(
     host_id: text("host_id").notNull(),
     installation_id: text("installation_id").notNull(),
     token_hash: text("token_hash").notNull().unique(),
+    token_version: integer("token_version").notNull().default(1),
     allowed_room_ids: text("allowed_room_ids").array().notNull(),
     allowed_agent_keys: text("allowed_agent_keys").array().notNull(),
     current_generation: integer("current_generation").notNull().default(1),

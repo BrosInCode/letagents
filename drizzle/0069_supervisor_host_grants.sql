@@ -4,6 +4,7 @@ CREATE TABLE "supervisor_host_grants" (
   "host_id" text NOT NULL,
   "installation_id" text NOT NULL,
   "token_hash" text NOT NULL UNIQUE,
+  "token_version" integer NOT NULL DEFAULT 1,
   "allowed_room_ids" text[] NOT NULL,
   "allowed_agent_keys" text[] NOT NULL,
   "current_generation" integer NOT NULL DEFAULT 1,

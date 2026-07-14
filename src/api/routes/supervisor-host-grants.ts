@@ -6,6 +6,7 @@ import {
   createSupervisorHostGrant,
   endRoomAgentSession,
   getAgentIdentityByCanonicalKey,
+  getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
   revokeSupervisorHostGrant,
   rotateRoomAgentSessionBearer,
@@ -13,7 +14,7 @@ import {
 } from "../db.js";
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
 import { buildAgentActorLabel } from "../../shared/agent-identity.js";
-import { getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled } from "../../shared/agent-session-bearer.js";
+import { getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 
 const MAX_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -36,14 +37,23 @@ function requestedGeneration(req: AuthenticatedRequest): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function requireCurrentSupervisorGrant(req: AuthenticatedRequest, res: Response) {
+async function requireCurrentSupervisorGrant(req: AuthenticatedRequest, res: Response) {
   const grant = req.authKind === "supervisor_grant" ? req.supervisorGrant : null;
   const generation = requestedGeneration(req);
   if (!grant || generation === null || generation !== grant.current_generation) {
     res.status(403).json({ error: "A current supervisor grant and generation proof are required." });
     return null;
   }
-  return grant;
+  // Re-read immediately before a privileged mutation. A bearer resolved before
+  // a concurrent renewal, handoff, lapse, or revocation is rejected rather
+  // than relying on the middleware snapshot.
+  const current = await getSupervisorHostGrantById(grant.grant_id);
+  if (!current || current.revoked_at || new Date(current.expires_at).getTime() <= Date.now()
+    || current.current_generation !== generation || current.token_version !== grant.token_version) {
+    res.status(409).json({ error: "Supervisor grant fence is stale." });
+    return null;
+  }
+  return current;
 }
 
 function cappedExpiry(grantExpiry: string): string {
@@ -52,6 +62,8 @@ function cappedExpiry(grantExpiry: string): string {
 
 /** Default-deny route registry: only these lifecycle endpoints accept a supervisor grant. */
 export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolverDeps): void {
+  // Register no privileged grant surface unless the staged rollout is enabled.
+  if (!isSupervisorHostGrantFeatureEnabled()) return;
   app.post("/supervisor-host-grants", async (req: AuthenticatedRequest, res) => {
     if (!req.sessionAccount?.account_id || (req.authKind !== "session" && req.authKind !== "owner_token")) {
       res.status(401).json({ error: "Supervisor grant provisioning requires owner authentication." });
@@ -97,7 +109,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/renew", async (req: AuthenticatedRequest, res) => {
-    const grant = requireCurrentSupervisorGrant(req, res);
+    const grant = await requireCurrentSupervisorGrant(req, res);
     if (!grant) return;
     const grantId = String(req.params.grantId ?? "").trim();
     const body = req.body as Record<string, unknown>;
@@ -107,7 +119,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     }
     const ttlMs = typeof body.ttl_ms === "number" && Number.isFinite(body.ttl_ms)
       ? Math.max(60_000, Math.min(body.ttl_ms, MAX_GRANT_TTL_MS)) : MAX_GRANT_TTL_MS;
-    const renewed = await rotateSupervisorHostGrant({ grant_id: grantId, expected_generation: grant.current_generation, expires_at: new Date(Date.now() + ttlMs).toISOString() });
+    const renewed = await rotateSupervisorHostGrant({ grant_id: grantId, expected_generation: grant.current_generation, expected_token_version: grant.token_version, expires_at: new Date(Date.now() + ttlMs).toISOString() });
     if (!renewed) {
       res.status(409).json({ error: "Grant renewal lost its fence or the grant is no longer active." });
       return;
@@ -116,7 +128,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/handoff", async (req: AuthenticatedRequest, res) => {
-    const grant = requireCurrentSupervisorGrant(req, res);
+    const grant = await requireCurrentSupervisorGrant(req, res);
     if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
     const advanced = await advanceSupervisorHostGrantGeneration({ grant_id: grant.grant_id, expected_generation: grant.current_generation });
     if (!advanced) {
@@ -140,7 +152,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions", async (req: AuthenticatedRequest, res) => {
-    const grant = requireCurrentSupervisorGrant(req, res);
+    const grant = await requireCurrentSupervisorGrant(req, res);
     if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
     if (!isAgentSessionBearerFeatureEnabled()) {
       res.status(503).json({ error: "Worker bearer mode is not enabled." });
@@ -178,7 +190,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate", async (req: AuthenticatedRequest, res) => {
-    const grant = requireCurrentSupervisorGrant(req, res);
+    const grant = await requireCurrentSupervisorGrant(req, res);
     if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
     const sessionId = String(req.params.sessionId ?? "").trim();
     const session = await getSupervisorRoomAgentSession({ session_id: sessionId, supervisor_grant_id: grant.grant_id });
@@ -189,8 +201,8 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     const body = req.body as { bearer_id?: unknown };
     const bearerId = typeof body.bearer_id === "string" ? body.bearer_id.trim() : "";
     if (!bearerId) { res.status(400).json({ error: "bearer_id is required." }); return; }
-    const rotated = await rotateRoomAgentSessionBearer({ bearer_id: bearerId, supervisor_grant_id: grant.grant_id, expires_at: cappedExpiry(grant.expires_at) });
-    if (!rotated || rotated.bearer.session_id !== sessionId) {
+    const rotated = await rotateRoomAgentSessionBearer({ bearer_id: bearerId, session_id: sessionId, supervisor_grant_id: grant.grant_id, expires_at: cappedExpiry(grant.expires_at) });
+    if (!rotated) {
       res.status(403).json({ error: "Grant does not authorize that worker bearer." });
       return;
     }
@@ -198,7 +210,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions/:sessionId/end", async (req: AuthenticatedRequest, res) => {
-    const grant = requireCurrentSupervisorGrant(req, res);
+    const grant = await requireCurrentSupervisorGrant(req, res);
     if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
     const sessionId = String(req.params.sessionId ?? "").trim();
     // A supervisor never receives a session token; this fetch is only a

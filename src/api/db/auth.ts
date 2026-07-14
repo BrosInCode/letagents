@@ -324,6 +324,7 @@ function toSupervisorHostGrant(row: typeof supervisor_host_grants.$inferSelect):
     owner_account_id: row.owner_account_id,
     host_id: row.host_id,
     installation_id: row.installation_id,
+    token_version: row.token_version,
     allowed_room_ids: row.allowed_room_ids,
     allowed_agent_keys: row.allowed_agent_keys,
     current_generation: row.current_generation,
@@ -436,6 +437,7 @@ export async function createSupervisorHostGrant(input: {
     host_id: input.host_id,
     installation_id: input.installation_id,
     token_hash: hashToken(token),
+    token_version: 1,
     allowed_room_ids: input.allowed_room_ids,
     allowed_agent_keys: input.allowed_agent_keys,
     current_generation: 1,
@@ -467,6 +469,7 @@ export async function getSupervisorHostGrantById(grantId: string): Promise<Super
 export async function rotateSupervisorHostGrant(input: {
   grant_id: string;
   expected_generation: number;
+  expected_token_version: number;
   expires_at: string;
 }): Promise<{ grant: SupervisorHostGrant; token: string } | null> {
   return db.transaction(async (tx) => {
@@ -474,6 +477,7 @@ export async function rotateSupervisorHostGrant(input: {
     const [current] = await tx.select().from(supervisor_host_grants).where(and(
       eq(supervisor_host_grants.grant_id, input.grant_id),
       eq(supervisor_host_grants.current_generation, input.expected_generation),
+      eq(supervisor_host_grants.token_version, input.expected_token_version),
       isNull(supervisor_host_grants.revoked_at),
       gt(supervisor_host_grants.expires_at, new Date().toISOString()),
     )).limit(1);
@@ -481,7 +485,7 @@ export async function rotateSupervisorHostGrant(input: {
     const token = makeSupervisorGrantToken();
     const now = new Date().toISOString();
     const [updated] = await tx.update(supervisor_host_grants).set({
-      token_hash: hashToken(token), expires_at: input.expires_at, updated_at: now,
+      token_hash: hashToken(token), token_version: input.expected_token_version + 1, expires_at: input.expires_at, updated_at: now,
     }).where(eq(supervisor_host_grants.grant_id, input.grant_id)).returning();
     return { grant: toSupervisorHostGrant(updated), token };
   });
@@ -646,6 +650,7 @@ export async function revokeRoomAgentSessionBearer(input: {
 
 export async function rotateRoomAgentSessionBearer(input: {
   bearer_id: string;
+  session_id?: string;
   capabilities?: AgentSessionBearerCapability[];
   expires_at?: string;
   supervisor_grant_id?: string;
@@ -657,6 +662,7 @@ export async function rotateRoomAgentSessionBearer(input: {
       .from(room_agent_session_bearers)
       .where(and(
         eq(room_agent_session_bearers.bearer_id, input.bearer_id),
+        ...(input.session_id ? [eq(room_agent_session_bearers.session_id, input.session_id)] : []),
         isNull(room_agent_session_bearers.revoked_at),
         ...(input.supervisor_grant_id ? [eq(room_agent_session_bearers.supervisor_grant_id, input.supervisor_grant_id)] : []),
       ))
