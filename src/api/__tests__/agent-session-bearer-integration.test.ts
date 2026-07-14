@@ -21,6 +21,8 @@ const { requiredAgentSessionRouteCapability } = await import("../request/agent-s
 const { registerHttpMiddleware } = await import("../http/middleware.js");
 const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.js");
 const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/index.js");
+const { registerRoomArtifactRoutes } = await import("../routes/rooms/artifacts.js");
+const { requireWorkerRequestAgentIdentity } = await import("../request/agent-identity.js");
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -31,6 +33,8 @@ const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const endRoomAgentSession = dbModule?.endRoomAgentSession;
 const revokeRoomAgentSessionBearer = dbModule?.revokeRoomAgentSessionBearer;
 const rotateRoomAgentSessionBearer = dbModule?.rotateRoomAgentSessionBearer;
+const createTask = dbModule?.createTask;
+const createTaskLease = dbModule?.createTaskLease;
 
 async function resetDatabase(): Promise<void> {
   if (!db || !pool) throw new Error("DB-backed worker bearer tests require TEST_DB_URL");
@@ -209,6 +213,27 @@ test("concurrent rotation has one winner and one active next generation", { skip
   const rows = await db!.select().from(room_agent_session_bearers!).where(eq(room_agent_session_bearers!.session_id, session.session_id));
   assert.equal(rows.filter((row) => !row.revoked_at).length, 1);
   assert.equal(rows.filter((row) => row.generation === 2).length, 1);
+});
+
+test("bearer artifact publishing requires exactly one caller-held work lease", { skip: requiresDatabase }, async () => {
+  const { room, session } = await seed();
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  const handlers = new Map<string, (...args: any[]) => Promise<void>>();
+  registerRoomArtifactRoutes({ get() {}, post(path: RegExp, handler: any) { handlers.set(path.source, handler); } } as never, {
+    resolveCanonicalRoomRequestId: async () => room.id, resolveRoomOrReply: async () => room, requireParticipant: async () => true,
+    requireWorkerRequestAgentIdentity, getRoomSharedArtifacts: async () => [], getRoomSharedArtifactByIdentityKey: async () => null,
+    upsertRoomSharedArtifact: async () => ({ identity_key: "artifact" }), linkRoomSharedArtifactToTask: async () => {},
+  } as never);
+  const publish = [...handlers.values()][0]!;
+  const invoke = async (body: Record<string, unknown>) => { const res = responseRecorder(); await publish({ params: { 0: room.id }, query: {}, body, ...auth }, res); return res; };
+  const base = { provider: "github", kind: "commit", id: "abc" };
+  assert.equal((await invoke(base)).statusCode, 403);
+  const first = await createTask!(room.id, "first", "Worker");
+  const second = await createTask!(room.id, "second", "Worker");
+  assert.equal((await invoke({ ...base, linked_task_ids: [first.id, second.id] })).statusCode, 403);
+  assert.equal((await invoke({ ...base, task_id: first.id })).statusCode, 403);
+  await createTaskLease!({ room_id: room.id, task_id: first.id, kind: "work", agent_key: auth.agentSession!.agent_key, agent_session_id: auth.agentSession!.agent_session_id, actor_label: auth.agentSession!.actor_label, created_by: auth.agentSession!.actor_label });
+  assert.equal((await invoke({ ...base, task_id: first.id })).statusCode, 200);
 });
 
 test("bearer and body credentials must identify the same worker session", { skip: requiresDatabase }, async () => {
