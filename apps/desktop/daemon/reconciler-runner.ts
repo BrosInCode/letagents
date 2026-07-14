@@ -3,6 +3,7 @@ import { decideReconciliation, type ReconcilerDecision, type ReconcilerSnapshot 
 
 export type ReconcilerExecutionInput = Omit<ReconcilerSnapshot, "capabilities"> & {
   actionId?: string;
+  forcedAction?: "poke" | "restart_fresh" | "restart_with_resume" | "stop";
   workAttemptId: string;
   spawn: ProviderActionSpawn;
   handle: ProviderActionHandle | null;
@@ -15,7 +16,7 @@ export type ReconcilerExecutionHooks = { beforeAction?: (action: "poke" | "resta
 export class ProviderReconciler {
   constructor(private readonly port: ProviderActionPort) {}
 
-  async reconcile(input: ReconcilerExecutionInput, watchdogThresholdMs: number, hooks: ReconcilerExecutionHooks = {}): Promise<{ decision: ReconcilerDecision; disposition: "executed" | "held" | "failed" }> {
+  async reconcile(input: ReconcilerExecutionInput, watchdogThresholdMs: number, hooks: ReconcilerExecutionHooks = {}): Promise<{ decision: ReconcilerDecision; disposition: "executed" | "held" | "failed"; replacementHandle?: ProviderActionHandle }> {
     const owned = input.spawn.workAttemptId === input.workAttemptId
       && (!input.handle || input.handle.workAttemptId === input.workAttemptId)
       && (!input.resumeFrom || input.resumeFrom.workAttemptId === input.workAttemptId);
@@ -28,7 +29,9 @@ export class ProviderReconciler {
     }
     // P1.5 does not yet expose a daemon-verifiable receipt to this process.
     // Until it does, active-lease restart is hard-off; stop remains permitted.
-    const decision = decideReconciliation({ ...input, capabilities, fencedRebindProven: input.activeLease ? false : input.fencedRebindProven }, watchdogThresholdMs);
+    const policyDecision = decideReconciliation({ ...input, capabilities, fencedRebindProven: input.activeLease ? false : input.fencedRebindProven }, watchdogThresholdMs);
+    const decision = input.forcedAction ? { ...policyDecision, action: input.forcedAction, reason: `redispatching durable ${input.forcedAction} intent` } : policyDecision;
+    let replacementHandle: ProviderActionHandle | undefined;
     try {
       if (decision.action === "poke") {
         if (!input.handle) return { decision: { ...decision, action: "wait", reason: "poke requires a live provider handle" }, disposition: "held" };
@@ -37,12 +40,12 @@ export class ProviderReconciler {
       }
       if (decision.action === "restart_fresh") {
         await hooks.beforeAction?.("restart_fresh");
-        await this.port.spawn({ ...input.spawn, actionId: input.actionId });
+        replacementHandle = await this.port.spawn({ ...input.spawn, actionId: input.actionId });
       }
       if (decision.action === "restart_with_resume") {
         if (!input.resumeFrom) return { decision: { ...decision, action: "hold_coordination", condition: "coordination_blocked", reason: "resume requires a durable provider continuation" }, disposition: "held" };
         await hooks.beforeAction?.("restart_with_resume");
-        await this.port.resume(input.resumeFrom, { ...input.spawn, actionId: input.actionId });
+        replacementHandle = await this.port.resume(input.resumeFrom, { ...input.spawn, actionId: input.actionId });
       }
       if (decision.action === "stop") {
         if (!input.handle) return { decision: { ...decision, action: "wait", reason: "stop requires a live provider handle" }, disposition: "held" };
@@ -52,6 +55,6 @@ export class ProviderReconciler {
     } catch (error) {
       return { decision: { action: "wait", observedState: "failed", condition: "none", reason: `provider ${decision.action} failed: ${error instanceof Error ? error.message : "unknown error"}` }, disposition: "failed" };
     }
-    return { decision, disposition: decision.action === "wait" || decision.action === "hold_coordination" || decision.action === "quarantine" ? "held" : "executed" };
+    return { decision, disposition: decision.action === "wait" || decision.action === "hold_coordination" || decision.action === "quarantine" ? "held" : "executed", replacementHandle };
   }
 }

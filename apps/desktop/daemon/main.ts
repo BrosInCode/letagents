@@ -6,7 +6,7 @@ import type { ProviderActionHandle, ProviderActionPort, ProviderActionTerminal }
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
-import type { DaemonManifestEntry, ObservedState, PolicyCondition } from "./types.js";
+import type { DaemonManifestEntry, ExecutionTerminalPayload, ObservedState, PolicyCondition, ReconciliationNotice } from "./types.js";
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
@@ -21,6 +21,7 @@ export class SupervisorDaemon {
   private readonly audit: AuditLog;
   private readonly socket: DaemonControlSocket;
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
+  private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
   private manifestMutation: Promise<void> = Promise.resolve();
 
   constructor(paths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort) {
@@ -42,6 +43,7 @@ export class SupervisorDaemon {
   }
 
   async stop(): Promise<void> {
+    await Promise.all([...this.scheduledConvergence.values()].map(async (scheduled) => (await scheduled).dispose()));
     await this.socket.stop();
     await this.singleton.release();
   }
@@ -55,15 +57,16 @@ export class SupervisorDaemon {
     return this.serializeManifestMutation(() => this.transitionOnce(entryId, to, condition, cause, actor, reconciliation));
   }
 
-  private async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"]): Promise<void> {
+  private async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload): Promise<void> {
     await this.singleton.assertCurrent();
     const manifest = await this.store.load();
     const entry = manifest.entries.find((candidate) => candidate.id === entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+    const nextReconciliation = reconciliation ?? advanceReconciliationState(entry.reconciliation, to, Date.now());
+    const noticeKind = notice ?? (condition === "quarantined" ? "quarantine_death" : condition === "coordination_blocked" ? "coordination_escalation" : undefined);
     const notices = [...(entry.reconciliation_notices ?? [])];
-    if (condition === "quarantined") notices.push({ at: new Date().toISOString(), kind: "quarantine_death", cause });
-    if (condition === "coordination_blocked") notices.push({ at: new Date().toISOString(), kind: "coordination_escalation", cause });
-    const updated: DaemonManifestEntry = { ...entry, observed_state: to, condition, reconciliation: reconciliation ?? advanceReconciliationState(entry.reconciliation, to, Date.now()), reconciliation_notices: notices.slice(-32) };
+    if (noticeKind) notices.push({ at: new Date().toISOString(), kind: noticeKind, cause, terminal: terminal ?? nextReconciliation.last_terminal ?? undefined });
+    const updated: DaemonManifestEntry = { ...entry, observed_state: to, condition, reconciliation: nextReconciliation, reconciliation_notices: notices.slice(-32) };
     const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
     this.manifestGeneration = next.generation;
     await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });
@@ -92,21 +95,32 @@ export class SupervisorDaemon {
       this.manifestGeneration = next.generation;
     }
 
+    let redispatchPending = false;
+    let redispatchKind: "poke" | "restart_fresh" | "restart_with_resume" | "stop" | undefined;
+    let redispatchActionId = input.reconciliationActionId;
+    let redispatchActionSequence = input.reconciliationActionSequence;
     if (reconciliation.pending_action) {
-      const attached = await this.providerPort.attachAction?.(reconciliation.pending_action.id, input.workAttemptId);
-      if (attached) {
-        reconciliation = completeReconciliationAction(reconciliation, reconciliation.pending_action.id);
-        await this.transitionOnce(entryId, attached.observedState, entry.condition, "reconciled pending provider action", actor, reconciliation);
+      const pending = reconciliation.pending_action;
+      const attachment = await this.providerPort.attachAction(pending.id, input.workAttemptId);
+      if (attachment.state === "attached") {
+        reconciliation = completeReconciliationAction(reconciliation, pending.id);
+        await this.transitionOnce(entryId, attachment.handle.observedState, entry.condition, "reconciled pending provider action", actor, reconciliation);
       }
-      return {
-        decision: { action: "hold_coordination" as const, observedState: attached?.observedState ?? "recovering", condition: "coordination_blocked" as const, reason: attached ? "pending provider action attached; await next convergence tick" : "pending provider action requires attach reconciliation" },
+      if (attachment.state === "absent") { redispatchPending = true; redispatchActionId = pending.id; redispatchActionSequence = pending.sequence; redispatchKind = pending.kind; }
+      if (attachment.state === "ambiguous") {
+        await this.transitionOnce(entryId, "recovering", "coordination_blocked", `pending provider action ambiguous: ${attachment.reason}`, actor, reconciliation);
+        return { decision: { action: "hold_coordination" as const, observedState: "recovering" as const, condition: "coordination_blocked" as const, reason: `pending provider action ambiguous: ${attachment.reason}` }, disposition: "held" as const };
+      }
+      if (attachment.state === "attached") return {
+        decision: { action: "hold_coordination" as const, observedState: attachment.handle.observedState, condition: "coordination_blocked" as const, reason: "pending provider action attached; await next convergence tick" },
         disposition: "held" as const,
       };
     }
 
     const result = await new ProviderReconciler(this.providerPort).reconcile({
       ...input,
-      actionId: input.reconciliationActionId,
+      actionId: redispatchActionId,
+      forcedAction: redispatchKind,
       desiredState: entry.desired_state,
       observedState: entry.observed_state,
       condition: entry.condition,
@@ -114,14 +128,15 @@ export class SupervisorDaemon {
       nextRestartAtMs: reconciliation.next_restart_at_ms,
     }, watchdogThresholdMs, {
       beforeAction: async (kind) => {
-        reconciliation = beginReconciliationAction(reconciliation, { id: input.reconciliationActionId, sequence: input.reconciliationActionSequence, kind, recorded_at_ms: input.nowMs });
+        if (redispatchPending) return;
+        reconciliation = beginReconciliationAction(reconciliation, { id: redispatchActionId, sequence: redispatchActionSequence, kind, recorded_at_ms: input.nowMs });
         await this.transitionOnce(entryId, entry.observed_state, entry.condition, `persisted ${kind} action intent`, actor, reconciliation);
       },
     });
     const finalReconciliation = result.disposition === "failed"
-      ? recordReconciliationActionFailure(reconciliation, input.reconciliationActionId, input.nowMs)
+      ? recordReconciliationActionFailure(reconciliation, redispatchActionId, input.nowMs)
       : result.disposition === "executed"
-        ? completeReconciliationAction(reconciliation, input.reconciliationActionId)
+        ? completeReconciliationAction(reconciliation, redispatchActionId)
         : reconciliation;
     const target = result.disposition === "failed"
       ? { observedState: "failed" as const, condition: "none" as const }
@@ -148,19 +163,104 @@ export class SupervisorDaemon {
   /** Provider terminal callback: records an actual exit edge before the next tick. */
   async observeProviderExit(entryId: string, terminal: ProviderActionTerminal, actor = "provider"): Promise<void> {
     await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
-      await this.transitionOnce(entryId, "failed", "none", `provider terminal: ${terminal.terminalCause}`, actor);
+      const manifest = await this.store.load();
+      const entry = manifest.entries.find((candidate) => candidate.id === entryId);
+      if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+      const payload = this.terminalPayload(terminal, actor);
+      if (entry.condition === "quarantined") {
+        // A stale child cannot unquarantine the entry, but its immutable death
+        // evidence must still reach the durable operator inbox.
+        await this.transitionOnce(entryId, entry.observed_state, "quarantined", `late provider terminal: ${terminal.terminalCause}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, Date.now()), last_terminal: payload }, "quarantine_death", payload);
+        return;
+      }
+      const intentional = entry.desired_state === "stopped";
+      const observedState = intentional ? "stopped" : "failed";
+      const reconciliation = { ...advanceReconciliationState(entry.reconciliation, observedState, Date.now()), last_terminal: payload };
+      await this.transitionOnce(entryId, observedState, "none", `provider terminal: ${terminal.terminalCause}`, actor, reconciliation);
     }));
   }
 
   /** Starts periodic convergence and joins provider onExit to the same durable path. */
   async scheduleConvergence(entryId: string, handle: ProviderActionHandle, input: () => DaemonReconcileInput, watchdogThresholdMs: number, intervalMs: number, actor = "reconciler"): Promise<() => Promise<void>> {
-    if (!this.providerPort) throw new Error("Provider action port is unavailable");
-    let stopped = false;
-    const tick = async () => { if (!stopped) await this.reconcile(entryId, input(), watchdogThresholdMs, actor); };
-    const timer = setInterval(() => { void tick().catch(() => undefined); }, intervalMs);
-    const unsubscribe = await this.providerPort.onExit(handle, (terminal) => { void this.observeProviderExit(entryId, terminal, actor).then(tick).catch(() => undefined); });
-    await tick();
-    return async () => { stopped = true; clearInterval(timer); unsubscribe(); };
+    const providerPort = this.providerPort;
+    if (!providerPort) throw new Error("Provider action port is unavailable");
+    const existing = this.scheduledConvergence.get(entryId);
+    if (existing) return (await existing).dispose;
+    let resolveReservation!: (control: { dispose: () => Promise<void> }) => void;
+    const reservation = new Promise<{ dispose: () => Promise<void> }>((resolve) => { resolveReservation = resolve; });
+    this.scheduledConvergence.set(entryId, reservation);
+    let timer: ReturnType<typeof setInterval> | null = null;
+    let unsubscribe = () => {};
+    try {
+      let stopped = false;
+      let currentHandle = handle;
+      let listenerInstallTail: Promise<void> = Promise.resolve();
+      const activeCallbacks = new Set<Promise<void>>();
+      const trackCallback = (operation: Promise<void>) => {
+        activeCallbacks.add(operation);
+        void operation.then(() => activeCallbacks.delete(operation), () => activeCallbacks.delete(operation));
+      };
+      const recordError = async (error: unknown) => this.recordSchedulerFailure(entryId, error, actor);
+      const installExitListener = async (nextHandle: ProviderActionHandle) => {
+        const nextUnsubscribe = await providerPort.onExit(nextHandle, (terminal) => {
+          const operation = (async () => {
+            try {
+              await this.observeProviderExit(entryId, terminal, actor);
+              await tick();
+            } catch (error) {
+              try { await recordError(error); } catch { /* A fenced daemon cannot persist after losing authority. */ }
+            }
+          })();
+          trackCallback(operation);
+        });
+        if (stopped) { nextUnsubscribe(); return; }
+        const previousUnsubscribe = unsubscribe;
+        unsubscribe = nextUnsubscribe;
+        currentHandle = nextHandle;
+        previousUnsubscribe();
+      };
+      const queueExitListenerInstall = (nextHandle: ProviderActionHandle) => {
+        const operation = listenerInstallTail.then(() => installExitListener(nextHandle));
+        // Do not let a failed registration poison later recovery registrations.
+        listenerInstallTail = operation.catch(() => undefined);
+        return operation;
+      };
+      let tickTail: Promise<void> = Promise.resolve();
+      const tick = () => {
+        const operation = tickTail.then(async () => {
+          if (stopped) return;
+          const result = await this.reconcile(entryId, { ...input(), handle: currentHandle }, watchdogThresholdMs, actor);
+          if (!stopped && result.replacementHandle) await queueExitListenerInstall(result.replacementHandle);
+        });
+        // A failed action is durably escalated by the caller, but must not
+        // prevent the next convergence edge from observing the new handle.
+        tickTail = operation.catch(() => undefined);
+        return operation;
+      };
+      timer = setInterval(() => {
+        trackCallback(tick().catch(async (error) => { try { await recordError(error); } catch { /* See terminal callback. */ } }));
+      }, intervalMs);
+      await queueExitListenerInstall(handle);
+      await tick();
+      const dispose = async () => {
+        if (!stopped) {
+          stopped = true;
+          if (timer) clearInterval(timer);
+          unsubscribe();
+          if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
+        }
+        await Promise.all([...activeCallbacks]);
+      };
+      resolveReservation({ dispose });
+      return dispose;
+    } catch (error) {
+      if (timer) clearInterval(timer);
+      unsubscribe();
+      try { await this.recordSchedulerFailure(entryId, error, actor); } catch { /* Preserve the original setup failure for the caller. */ }
+      resolveReservation({ dispose: async () => {} });
+      if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
+      throw error;
+    }
   }
 
   private async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -169,6 +269,31 @@ export class SupervisorDaemon {
     this.manifestMutation = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try { return await operation(); } finally { release(); }
+  }
+
+  private terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload {
+    return {
+      ended_at: terminal.endedAt,
+      exit_code: terminal.exitCode,
+      signal: terminal.signal,
+      stdio_archive_ref: null,
+      stdio_tail: "",
+      terminal_cause: terminal.terminalCause,
+      actor,
+      generation: this.singleton.currentGeneration,
+      provider_continuation_id: terminal.providerContinuationId,
+    };
+  }
+
+  private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {
+    const message = error instanceof Error ? error.message : "unknown scheduler failure";
+    await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
+      const manifest = await this.store.load();
+      const entry = manifest.entries.find((candidate) => candidate.id === entryId);
+      if (!entry) return;
+      const condition = entry.condition === "quarantined" ? "quarantined" : "coordination_blocked";
+      await this.transitionOnce(entryId, entry.observed_state, condition, `convergence scheduler failure: ${message}`, actor, undefined, "coordination_escalation");
+    }));
   }
 }
 

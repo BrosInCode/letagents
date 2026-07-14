@@ -23,10 +23,10 @@ export function advanceReconciliationState(
 ): ReconciliationState {
   const exits = liveExits(previous, nowMs);
   if (observedState === "idle" || observedState === "working") {
-    return { exit_timestamps_ms: exits, consecutive_action_failures: 0, last_observed_state: observedState, next_restart_at_ms: null, completed_action_ids: completed(previous), last_action_sequence: previous?.last_action_sequence ?? 0, pending_action: previous?.pending_action ?? null };
+    return { exit_timestamps_ms: exits, consecutive_action_failures: 0, last_observed_state: observedState, next_restart_at_ms: null, completed_action_ids: completed(previous), last_action_sequence: previous?.last_action_sequence ?? 0, pending_action: previous?.pending_action ?? null, last_terminal: previous?.last_terminal };
   }
   if (observedState !== "failed" || previous?.last_observed_state === "failed") {
-    return { exit_timestamps_ms: exits, consecutive_action_failures: previous?.consecutive_action_failures ?? 0, last_observed_state: observedState, next_restart_at_ms: previous?.next_restart_at_ms ?? null, completed_action_ids: completed(previous), last_action_sequence: previous?.last_action_sequence ?? 0, pending_action: previous?.pending_action ?? null };
+    return { exit_timestamps_ms: exits, consecutive_action_failures: previous?.consecutive_action_failures ?? 0, last_observed_state: observedState, next_restart_at_ms: previous?.next_restart_at_ms ?? null, completed_action_ids: completed(previous), last_action_sequence: previous?.last_action_sequence ?? 0, pending_action: previous?.pending_action ?? null, last_terminal: previous?.last_terminal };
   }
   const failures = (previous?.consecutive_action_failures ?? 0) + 1;
   return {
@@ -37,6 +37,7 @@ export function advanceReconciliationState(
     completed_action_ids: completed(previous),
     last_action_sequence: previous?.last_action_sequence ?? 0,
     pending_action: previous?.pending_action ?? null,
+    last_terminal: previous?.last_terminal,
   };
 }
 

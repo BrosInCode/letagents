@@ -16,9 +16,11 @@ export type ReconciliationState = {
   completed_action_ids: string[];
   last_action_sequence: number;
   pending_action: { id: string; sequence: number; kind: "poke" | "restart_fresh" | "restart_with_resume" | "stop"; recorded_at_ms: number } | null;
+  /** Most recent immutable provider death evidence; copied into escalations. */
+  last_terminal?: ExecutionTerminalPayload;
 };
 
-export type ReconciliationNotice = { at: string; kind: "quarantine_death" | "coordination_escalation"; cause: string };
+export type ReconciliationNotice = { at: string; kind: "quarantine_death" | "coordination_escalation"; cause: string; terminal?: ExecutionTerminalPayload };
 
 export type DaemonManifestEntry = {
   id: string;
