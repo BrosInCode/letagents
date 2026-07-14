@@ -52,6 +52,9 @@ jobs:
       - name: Test MCP helpers
         run: npm run test:mcp
 
+      - name: Test packed MCP runtime
+        run: npm run test:package-runtime
+
       - name: Install Vue dependencies without lifecycle scripts
         run: cd src/web && npm ci --ignore-scripts
 
