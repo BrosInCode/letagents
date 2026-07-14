@@ -23,6 +23,7 @@ async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }
 }
 
 const TEST_OID = "a".repeat(40);
+const TEST_SUPERVISOR = { supervisor_id: "test-daemon", supervisor_generation: 1 };
 async function provisionedWorkspace(root: string, taskId = "task", workAttemptId = randomUUID()): Promise<{ path: string; id: string; bare: string }> {
   const bare = join(root, "repos", "repo.git");
   const path = join(root, "worktrees", "repo", workAttemptId);
@@ -163,7 +164,7 @@ test("work attempts survive generations and lease rebinds while terminal payload
   const env = await fixture();
   let tick = 0;
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:0${tick++}.000Z`, join(env.root, "worktrees"));
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:0${tick++}.000Z`, join(env.root, "worktrees"), undefined, undefined, undefined, TEST_SUPERVISOR);
     const workspace = await provisionedWorkspace(env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     await store.checkpoint(attempt.work_attempt_id, { room_cursor: "msg_12", provider_continuation_id: "provider-1" });
@@ -187,7 +188,7 @@ test("stdio rotates append-only and GC protects active, ambiguous, quarantined, 
   const env = await fixture();
   let tick = 0;
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`, join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
     const create = async () => {
       const workspace = await provisionedWorkspace(env.root);
       const attempt = await store.createAttempt({ taskId: "task", leaseId: `lease-${tick}`, leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
@@ -254,7 +255,7 @@ test("durability store validates destructive identities, serializes GC, and quar
   const gcRelease = new Promise<void>((resolve) => { releaseGc = resolve; });
   try {
     const path = join(env.root, "attempts.json");
-    const store = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"), async () => { reserved(); await gcRelease; }, fakeGit(env.root));
+    const store = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"), async () => { reserved(); await gcRelease; }, fakeGit(env.root), undefined, TEST_SUPERVISOR);
     const workspace = await provisionedWorkspace(env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
@@ -275,7 +276,7 @@ test("durability store validates destructive identities, serializes GC, and quar
     assert.ok((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")));
 
     const legacyWorkspace = await provisionedWorkspace(env.root);
-    const legacyStore = new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:02.000Z", join(env.root, "worktrees"));
+    const legacyStore = new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:02.000Z", join(env.root, "worktrees"), undefined, undefined, undefined, TEST_SUPERVISOR);
     const legacyAttempt = await legacyStore.createAttempt({ taskId: "task", leaseId: "lease-3", leaseEpoch: 3, workspacePath: legacyWorkspace.path, workAttemptId: legacyWorkspace.id });
     await legacyStore.concludeAttempt(legacyAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
     const legacy = JSON.parse(await readFile(join(env.root, "legacy-attempts.json"), "utf8"));
@@ -288,7 +289,7 @@ test("execution identities prohibit parallel, duplicate, and laundered terminal 
   const env = await fixture();
   try {
     const workspace = await provisionedWorkspace(env.root);
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"));
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"), undefined, undefined, undefined, TEST_SUPERVISOR);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     const first = await store.startGeneration(attempt.work_attempt_id, "starter", 1);
     await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 2), /one execution generation/);
@@ -297,6 +298,16 @@ test("execution identities prohibit parallel, duplicate, and laundered terminal 
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).execution_generations[0]?.terminal, null, "invalid runtime input must never poison the persisted authority record");
     await store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2026-01-01T00:00:01.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crash", actor: "starter", generation: 1, provider_continuation_id: null });
     await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 1), /strictly monotonic/);
+  } finally { await env.cleanup(); }
+});
+
+test("execution fencing fails closed without an injected P1a supervisor identity", async () => {
+  const env = await fixture();
+  try {
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"));
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "daemon", 1), /P1a supervisor identity/);
   } finally { await env.cleanup(); }
 });
 
@@ -327,7 +338,7 @@ test("GC replays every pending tombstone and refuses a Git identity mismatch", a
   try {
     const path = join(env.root, "attempts.json");
     const workspace = await provisionedWorkspace(env.root);
-    const first = new WorkDurabilityStore(path, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), async () => { reserved(); await blocked; }, fakeGit(env.root));
+    const first = new WorkDurabilityStore(path, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), async () => { reserved(); await blocked; }, fakeGit(env.root), undefined, TEST_SUPERVISOR);
     const attempt = await first.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     await first.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
     assert.match(await readFile(join(env.root, "attempt-data", attempt.work_attempt_id, "postmortem.diff"), "utf8"), /status --porcelain/);
@@ -338,7 +349,7 @@ test("GC replays every pending tombstone and refuses a Git identity mismatch", a
 
     const mismatch = await provisionedWorkspace(env.root);
     let evilRemote = false;
-    const guarded = new WorkDurabilityStore(join(env.root, "mismatch.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, async (args) => evilRemote && args.includes("remote") ? "https://evil.invalid/repo.git" : await fakeGit(env.root)(args));
+    const guarded = new WorkDurabilityStore(join(env.root, "mismatch.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, async (args) => evilRemote && args.includes("remote") ? "https://evil.invalid/repo.git" : await fakeGit(env.root)(args), undefined, TEST_SUPERVISOR);
     const other = await guarded.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: mismatch.path, workAttemptId: mismatch.id });
     await guarded.concludeAttempt(other.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
     evilRemote = true;
@@ -351,7 +362,7 @@ test("workspace fences and terminal attestation protect clean GC", async () => {
   const env = await fixture();
   try {
     const workspace = await provisionedWorkspace(env.root);
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
     await assert.rejects(() => store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" }), /terminal attestation/);
@@ -367,7 +378,7 @@ test("workspace fences and terminal attestation protect clean GC", async () => {
 test("retained shared fences permit concurrent work and prevent GC from deleting a swapped active workspace", async () => {
   const env = await fixture();
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
     const doomedWorkspace = await provisionedWorkspace(env.root, "doomed");
     const activeWorkspace = await provisionedWorkspace(env.root, "active");
     const doomed = await store.createAttempt({ taskId: "doomed", leaseId: "lease-doomed", leaseEpoch: 1, workspacePath: doomedWorkspace.path, workAttemptId: doomedWorkspace.id });
@@ -393,7 +404,7 @@ test("retained shared fences permit concurrent work and prevent GC from deleting
 test("one retained supervisor handle survives terminal, rebind, and successor start", async () => {
   const env = await fixture();
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
     const workspace = await provisionedWorkspace(env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     const first = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
@@ -410,7 +421,7 @@ test("one retained supervisor handle survives terminal, rebind, and successor st
 test("a live fence in an unrelated repository does not starve safe GC", async () => {
   const env = await fixture();
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
     const workspace = await provisionedWorkspace(env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
@@ -429,7 +440,7 @@ test("supervisor quiescence lets same-repository GC progress without stopping li
   try {
     const store = new WorkDurabilityStore(
       join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root),
-      async (attempts) => { quiesced = attempts.map((attempt) => attempt.work_attempt_id); return async () => { resumed = true; }; },
+      async (attempts) => { quiesced = attempts.map((attempt) => attempt.work_attempt_id); return async () => { resumed = true; }; }, TEST_SUPERVISOR,
     );
     const doomedWorkspace = await provisionedWorkspace(env.root, "doomed");
     const liveWorkspace = await provisionedWorkspace(env.root, "live");
@@ -487,6 +498,24 @@ test("quiescence restore failure never resumes unfenced work", async () => {
     await store.startGeneration(live.work_attempt_id, "daemon", 1);
     assert.deepEqual(await store.garbageCollect(0), []);
     assert.equal(resumed, 0);
+    assert.equal((await store.getAttempt(live.work_attempt_id)).state, "coordination_blocked");
+  } finally { await env.cleanup(); }
+});
+
+test("quiescence resume failure blocks the live attempt", async () => {
+  const env = await fixture();
+  try {
+    const store = new WorkDurabilityStore(
+      join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root),
+      async () => async () => { throw new Error("injected resume failure"); }, { supervisor_id: "daemon-host", supervisor_generation: 7 },
+    );
+    const targetWorkspace = await provisionedWorkspace(env.root, "target");
+    const liveWorkspace = await provisionedWorkspace(env.root, "live");
+    const target = await store.createAttempt({ taskId: "target", leaseId: "lease-target", leaseEpoch: 1, workspacePath: targetWorkspace.path, workAttemptId: targetWorkspace.id });
+    const live = await store.createAttempt({ taskId: "live", leaseId: "lease-live", leaseEpoch: 1, workspacePath: liveWorkspace.path, workAttemptId: liveWorkspace.id });
+    await store.concludeAttempt(target.work_attempt_id, { state: "cleanly_concluded", cause: "done" });
+    await store.startGeneration(live.work_attempt_id, "daemon", 1);
+    assert.deepEqual(await store.garbageCollect(0), []);
     assert.equal((await store.getAttempt(live.work_attempt_id)).state, "coordination_blocked");
   } finally { await env.cleanup(); }
 });

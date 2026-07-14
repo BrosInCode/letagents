@@ -110,7 +110,7 @@ export class WorkDurabilityStore {
   // daemon recover after a crash without treating a live predecessor as stale.
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private readonly supervisorFence: SupervisorFenceIdentity = { supervisor_id: "test-supervisor", supervisor_generation: 1 }, private readonly quiescenceHooks?: GcQuiescenceHooks) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private readonly supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks) {
     this.workspaceRoot = resolve(workspaceRoot);
   }
 
@@ -497,7 +497,7 @@ export class WorkDurabilityStore {
 
   private async ensureExecutionFence(attempt: TaskWorkAttempt): Promise<void> {
     if (this.executionFences.has(attempt.work_attempt_id)) return;
-    if (!this.supervisorFence.supervisor_id.trim() || !Number.isSafeInteger(this.supervisorFence.supervisor_generation) || this.supervisorFence.supervisor_generation < 1) {
+    if (!this.supervisorFence || !this.supervisorFence.supervisor_id.trim() || !Number.isSafeInteger(this.supervisorFence.supervisor_generation) || this.supervisorFence.supervisor_generation < 1) {
       throw new ImmutableExecutionError("A monotonic P1a supervisor identity and generation are required for execution fencing.");
     }
     this.executionFences.set(attempt.work_attempt_id, await acquireWorkspaceFence(attempt.workspace_path, this.supervisorFence.supervisor_id, this.supervisorFence.supervisor_generation, "shared"));
@@ -541,19 +541,26 @@ export class WorkDurabilityStore {
         restored = true;
       }
     } catch (error) {
-      await this.mutate((stored) => {
-        for (const attempt of attempts) {
-          const current = this.required(stored, attempt.work_attempt_id);
-          if (current.state === "active") current.state = "coordination_blocked";
-        }
-        return stored;
-      });
+      await this.blockQuiescedAttempts(attempts);
       throw error;
     } finally {
       // Never resume a process unless every original retained handle has been
       // restored. A partial failure remains coordination-blocked for P1d.
-      if (restored) await resume();
+      if (restored) {
+        try { await resume(); }
+        catch (error) { await this.blockQuiescedAttempts(attempts); throw error; }
+      }
     }
+  }
+
+  private async blockQuiescedAttempts(attempts: TaskWorkAttempt[]): Promise<void> {
+    await this.mutate((stored) => {
+      for (const attempt of attempts) {
+        const current = this.required(stored, attempt.work_attempt_id);
+        if (current.state === "active") current.state = "coordination_blocked";
+      }
+      return stored;
+    });
   }
 
   private async captureGit(args: string[]): Promise<string> {
