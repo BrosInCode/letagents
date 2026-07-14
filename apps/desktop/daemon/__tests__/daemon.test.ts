@@ -18,6 +18,7 @@ import { WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
+import { advanceReconciliationState } from "../reconciler-state.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
@@ -82,6 +83,19 @@ test("reconciler policy fences recovery, gates resume, quarantines crash loops, 
   assert.equal(decideReconciliation({ ...base, exitsInWindow: CRASH_LOOP_EXIT_LIMIT }, 1_000).action, "quarantine");
   assert.equal(restartBackoffMs(1), 1_000);
   assert.equal(restartBackoffMs(20), 5 * 60 * 1_000);
+  assert.equal(decideReconciliation({ ...base, activeLease: false, nextRestartAtMs: 1_001, nowMs: 1_000 }, 1_000).action, "wait");
+});
+
+test("reconciliation bookkeeping persists one failure edge, retry deadline, and crash-loop window", () => {
+  const first = advanceReconciliationState(undefined, "failed", 1_000);
+  assert.deepEqual(first, { failure_timestamps_ms: [1_000], last_observed_state: "failed", next_restart_at_ms: 2_000 });
+  assert.deepEqual(advanceReconciliationState(first, "failed", 1_500), first, "a polling tick cannot manufacture another exit");
+  const recovered = advanceReconciliationState(first, "recovering", 2_000);
+  assert.deepEqual(recovered, { failure_timestamps_ms: [], last_observed_state: "recovering", next_restart_at_ms: null });
+  const later = advanceReconciliationState({ ...first, last_observed_state: "recovering" }, "failed", 2_000);
+  assert.deepEqual(later.failure_timestamps_ms, [1_000, 2_000]);
+  const expired = advanceReconciliationState({ ...later, last_observed_state: "recovering" }, "failed", 2_000 + 10 * 60 * 1_000 + 1);
+  assert.deepEqual(expired.failure_timestamps_ms, [2_000 + 10 * 60 * 1_000 + 1]);
 });
 
 test("reconciler executes only fenced, capability-negotiated port actions", async () => {
@@ -102,6 +116,57 @@ test("reconciler executes only fenced, capability-negotiated port actions", asyn
   const missing = await runner.reconcile({ ...base, activeLease: false, fencedRebindProven: false, resumeFrom: null }, 100);
   assert.equal(missing.decision.action, "hold_coordination");
   assert.equal(missing.disposition, "held");
+});
+
+test("reconciler dispatches fresh, poke, and stop safely and reports port faults", async () => {
+  const calls: string[] = [];
+  const handle = { workAttemptId: "attempt", pid: 1, providerContinuationId: "thread", observedState: "working" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+    spawn: async () => { calls.push("spawn"); return handle; }, attach: async () => null,
+    resume: async () => { calls.push("resume"); return handle; }, poke: async () => { calls.push("poke"); },
+    stop: async () => { calls.push("stop"); return { endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "thread" }; }, onExit: async () => () => {},
+  };
+  const runner = new ProviderReconciler(port);
+  const base = { workAttemptId: "attempt", desiredState: "running" as const, observedState: "failed" as const, condition: "none" as const, nowMs: 10_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, exitsInWindow: 0, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle, resumeFrom: null };
+  assert.equal((await runner.reconcile(base, 100)).decision.action, "restart_fresh");
+  assert.deepEqual(calls, ["spawn"]);
+  const poke = await runner.reconcile({ ...base, observedState: "working", lastPollAtMs: 0, addressedMessagesWaiting: 1 }, 100);
+  assert.equal(poke.decision.action, "poke");
+  const stop = await runner.reconcile({ ...base, desiredState: "stopped", observedState: "working" }, 100);
+  assert.equal(stop.decision.action, "stop");
+  assert.deepEqual(calls, ["spawn", "poke", "stop"]);
+  assert.equal((await runner.reconcile({ ...base, observedState: "working", lastPollAtMs: 0, addressedMessagesWaiting: 1, handle: null }, 100)).disposition, "held");
+  assert.equal((await runner.reconcile({ ...base, desiredState: "stopped", observedState: "working", handle: null }, 100)).disposition, "held");
+  const broken = new ProviderReconciler({ ...port, spawn: async () => { throw new Error("child failed"); } });
+  const result = await broken.reconcile(base, 100);
+  assert.equal(result.disposition, "failed");
+  assert.match(result.decision.reason, /child failed/);
+});
+
+test("supervisor convergence persists the retry deadline before it can restart", async () => {
+  const env = await fixture();
+  try {
+    const manifestPath = join(env.root, "manifest.json");
+    const store = new ManifestStore(manifestPath);
+    await store.write(0, [{ ...entry, observed_state: "failed" }]);
+    const calls: string[] = [];
+    const handle = { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "starting" as const };
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+      spawn: async () => { calls.push("spawn"); return handle; }, attach: async () => null, resume: async () => handle,
+      poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }), onExit: async () => () => {},
+    };
+    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    await daemon.start();
+    const input = { workAttemptId: "attempt", nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
+    assert.equal((await daemon.reconcile(entry.id, input, 100)).decision.action, "wait");
+    assert.deepEqual(calls, []);
+    assert.equal((await store.load()).entries[0]?.reconciliation?.next_restart_at_ms, 2_000);
+    assert.equal((await daemon.reconcile(entry.id, { ...input, nowMs: 2_000 }, 100)).decision.action, "restart_fresh");
+    assert.deepEqual(calls, ["spawn"]);
+    await daemon.stop();
+  } finally { await env.cleanup(); }
 });
 
 test("singleton fences a second daemon and detects a newer generation", async () => {

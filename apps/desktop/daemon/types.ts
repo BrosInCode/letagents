@@ -4,6 +4,13 @@ export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type PolicyCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
 
+/** Persisted by the daemon so a restart cannot erase crash-loop/backoff state. */
+export type ReconciliationState = {
+  failure_timestamps_ms: number[];
+  last_observed_state: ObservedState;
+  next_restart_at_ms: number | null;
+};
+
 export type DaemonManifestEntry = {
   id: string;
   room_id: string;
@@ -17,6 +24,7 @@ export type DaemonManifestEntry = {
   permission_profile_id: string | null;
   created_by: string;
   created_at: string;
+  reconciliation?: ReconciliationState;
 };
 
 export type DaemonManifest = {

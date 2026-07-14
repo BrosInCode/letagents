@@ -22,6 +22,8 @@ export type ReconcilerSnapshot = {
   activeLease: boolean;
   fencedRebindProven: boolean;
   exitsInWindow: number;
+  /** Persisted restart gate. A process restart must not erase this deadline. */
+  nextRestartAtMs?: number | null;
 };
 
 export type ReconcilerDecision = {
@@ -66,6 +68,9 @@ export function decideReconciliation(snapshot: ReconcilerSnapshot, watchdogThres
     // A prompt/session rotation cannot cross a lease authorization boundary.
     if (snapshot.activeLease && !snapshot.fencedRebindProven) {
       return { action: "hold_coordination", observedState: "recovering", condition: "coordination_blocked", reason: "active lease requires fenced rebind before restart" };
+    }
+    if (snapshot.nextRestartAtMs !== null && snapshot.nextRestartAtMs !== undefined && snapshot.nowMs < snapshot.nextRestartAtMs) {
+      return { action: "wait", observedState: snapshot.observedState, condition: snapshot.condition, reason: "restart backoff has not elapsed" };
     }
     if (snapshot.capabilities.resume) {
       return { action: "restart_with_resume", observedState: "recovering", condition: "none", reason: "provider negotiated resume" };
