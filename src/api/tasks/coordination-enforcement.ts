@@ -485,7 +485,11 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
   async function enforceTaskCoordinationMutation(
     input: TaskCoordinationMutationInput
   ): Promise<TaskCoordinationGuardDecision> {
-    if (input.req.authKind !== "owner_token") {
+    // The work-lease fence applies ONLY to authenticated worker (agent_session)
+    // writes. Anonymous / human-session / other non-owner_token requests are
+    // NOT lease principals and must not be reclassified as work-lease traffic —
+    // check agent_session explicitly, not "!== owner_token".
+    if (input.req.authKind === "agent_session") {
       // agent_session (worker-bearer) writes. Only WORK-lease-scoped mutations
       // are holder-scoped: claim creates a fresh lease, review mutations ride a
       // non-rebindable review lease, and unclassified updates aren't lease-bound.
@@ -532,6 +536,12 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
           agent_session_id: activeWorkLease.agent_session_id,
         },
       };
+    }
+
+    // Non-owner, non-worker requests (anonymous / human session / other) are not
+    // lease principals — preserve their prior behavior, no coordination fence.
+    if (input.req.authKind !== "owner_token") {
+      return { kind: "allow" };
     }
 
     const classified = input.forcedMutation
