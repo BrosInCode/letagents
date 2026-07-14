@@ -3,6 +3,7 @@ export const AGENT_SESSION_BEARER_CAPABILITIES = [
   "messages.write",
   "coordination.read",
   "coordination.self_write",
+  "coordination.propose",
   "artifacts.read",
   "artifacts.self_write",
 ] as const;

@@ -17,3 +17,4 @@ CREATE TABLE "room_agent_session_bearers" (
 CREATE INDEX "room_agent_session_bearers_session_id_idx" ON "room_agent_session_bearers" USING btree ("session_id");--> statement-breakpoint
 CREATE INDEX "room_agent_session_bearers_room_id_idx" ON "room_agent_session_bearers" USING btree ("room_id");--> statement-breakpoint
 CREATE INDEX "room_agent_session_bearers_active_session_idx" ON "room_agent_session_bearers" USING btree ("session_id", "revoked_at", "expires_at");
+CREATE UNIQUE INDEX "room_agent_session_bearers_session_generation_idx" ON "room_agent_session_bearers" USING btree ("session_id", "generation");

@@ -55,8 +55,12 @@ export function hashToken(token: string): string {
 
 export const AUTH_STATE_TTL_MS = 15 * 60 * 1000;
 
-export async function nextPrefixedId(sequenceName: string, prefix: string): Promise<string> {
-  const [next] = await db
+export async function nextPrefixedId(
+  sequenceName: string,
+  prefix: string,
+  executor: RoomSequenceExecutor = db
+): Promise<string> {
+  const [next] = await executor
     .insert(id_sequences)
     .values({ name: sequenceName, value: 1 })
     .onConflictDoUpdate({

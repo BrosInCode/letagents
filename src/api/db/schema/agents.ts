@@ -121,6 +121,8 @@ export const room_agent_session_bearers = pgTable(
     room_idx: index("room_agent_session_bearers_room_id_idx").on(table.room_id),
     active_session_idx: index("room_agent_session_bearers_active_session_idx")
       .on(table.session_id, table.revoked_at, table.expires_at),
+    generation_unique: uniqueIndex("room_agent_session_bearers_session_generation_idx")
+      .on(table.session_id, table.generation),
   })
 );
 

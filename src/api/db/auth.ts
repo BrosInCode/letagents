@@ -7,7 +7,7 @@ import { AUTH_STATE_TTL_MS, hashToken, nextPrefixedId } from "./utils.js";
 import { toRoomAgentSession } from "./mappers.js";
 import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionBearer, RoomAgentSessionRow, Session, SessionAccount } from "./types.js";
 import type { RoomAgentSessionKind } from "../../shared/agent-presence.js";
-import { DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES, getAgentSessionBearerTtlMs, type AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
+import { DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES, getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, type AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
   const now = new Date();
@@ -349,7 +349,9 @@ export async function createRoomAgentSession(input: {
   const nowDate = new Date();
   const now = nowDate.toISOString();
   const sessionToken = makeAgentSessionToken();
-  const workerBearer = input.session_kind === "worker" ? makeAgentSessionBearerToken() : null;
+  const workerBearer = input.session_kind === "worker" && isAgentSessionBearerFeatureEnabled()
+    ? makeAgentSessionBearerToken()
+    : null;
   const session = {
     session_id: await nextPrefixedId("room_agent_sessions", "agent_session"),
     room_id: input.room_id,
@@ -375,14 +377,10 @@ export async function createRoomAgentSession(input: {
     ended_at: null,
   };
 
-  const [created] = await db
-    .insert(room_agent_sessions)
-    .values(session)
-    .returning();
-
-  if (workerBearer) {
-    await db.insert(room_agent_session_bearers).values({
-      bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer"),
+  return db.transaction(async (tx) => {
+    const [created] = await tx.insert(room_agent_sessions).values(session).returning();
+    if (workerBearer) await tx.insert(room_agent_session_bearers).values({
+      bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
       session_id: session.session_id,
       room_id: session.room_id,
       token_hash: hashToken(workerBearer),
@@ -394,13 +392,8 @@ export async function createRoomAgentSession(input: {
       rotated_from_bearer_id: null,
       created_at: now,
     });
-  }
-
-  return {
-    ...toRoomAgentSession(created as RoomAgentSessionRow),
-    session_token: sessionToken,
-    worker_bearer: workerBearer,
-  };
+    return { ...toRoomAgentSession(created as RoomAgentSessionRow), session_token: sessionToken, worker_bearer: workerBearer };
+  });
 }
 
 export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
@@ -527,6 +520,7 @@ export async function rotateRoomAgentSessionBearer(input: {
   capabilities?: AgentSessionBearerCapability[];
 }): Promise<{ bearer: RoomAgentSessionBearer; token: string } | null> {
   return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_bearer:${input.bearer_id}`}, 0))`);
     const [current] = await tx
       .select()
       .from(room_agent_session_bearers)
@@ -545,7 +539,7 @@ export async function rotateRoomAgentSessionBearer(input: {
 
     const token = makeAgentSessionBearerToken();
     const next = {
-      bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer"),
+      bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
       session_id: current.session_id,
       room_id: current.room_id,
       token_hash: hashToken(token),
