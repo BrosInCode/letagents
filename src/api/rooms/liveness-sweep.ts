@@ -145,7 +145,7 @@ export function selectLivenessTransitions(input: {
     // Transport silence with a recently active runtime is an agent busy
     // working outside the room, not a death — say nothing.
     const runtimeLastActiveAt = parseTime(candidate.runtime_last_active_at);
-    if (runtimeLastActiveAt !== null && now - runtimeLastActiveAt < CHANNEL_STALE_AFTER_MS) {
+    if (runtimeLastActiveAt !== null && now - runtimeLastActiveAt < offlineAnnounceAfterMs) {
       continue;
     }
 

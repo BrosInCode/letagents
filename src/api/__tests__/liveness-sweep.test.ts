@@ -297,6 +297,12 @@ test("a silent channel with an active runtime is never announced", () => {
   const busyWorker = candidate(buildSession(), null, isoMinutesAgo(1));
   assert.deepEqual(selectLivenessTransitions({ candidates: [busyWorker], now: NOW }), []);
 
+  // Runtime activity in the band between the 2-minute internal stale signal
+  // and the 5-minute visible grace also suppresses the room notice. This is
+  // the ordinary long tool/test gap the separate visible timer protects.
+  const burstWorker = candidate(buildSession(), null, isoMinutesAgo(4));
+  assert.deepEqual(selectLivenessTransitions({ candidates: [burstWorker], now: NOW }), []);
+
   // Once the runtime evidence also goes stale, the death announces with the
   // stronger stale-runtime classification.
   const trulyDead = candidate(buildSession(), null, isoMinutesAgo(9));
