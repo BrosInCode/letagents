@@ -166,7 +166,7 @@ test("supervisor convergence persists the retry deadline before it can restart",
     };
     const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
-    const input = { workAttemptId: "attempt", reconciliationActionId: "generation-1", nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
+    const input = { workAttemptId: "attempt", reconciliationActionId: "generation-1", reconciliationActionSequence: 1, nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
     assert.equal((await daemon.reconcile(entry.id, input, 100)).decision.action, "wait");
     assert.deepEqual(calls, []);
     assert.equal((await store.load()).entries[0]?.reconciliation?.next_restart_at_ms, 2_000);
@@ -198,7 +198,7 @@ test("five terminal exit edges across reload quarantine even with intermediate w
     await daemon.stop();
     const reloaded = new SupervisorDaemon(paths, "darwin", port);
     await reloaded.start();
-    const quarantined = await reloaded.reconcile(entry.id, { ...base, reconciliationActionId: "generation-5", nowMs: Date.now() }, 100);
+    const quarantined = await reloaded.reconcile(entry.id, { ...base, reconciliationActionId: "generation-5", reconciliationActionSequence: 5, nowMs: Date.now() }, 100);
     assert.equal(quarantined.decision.action, "quarantine");
     assert.equal((await new ManifestStore(manifestPath).load()).entries[0]?.condition, "quarantined");
     assert.equal(spawnCalls, 0, "quarantine blocks another provider launch");
@@ -211,7 +211,7 @@ test("reconciliation journals intent before provider dispatch and attaches it af
   try {
     const manifestPath = join(env.root, "manifest.json");
     const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") };
-    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [0], consecutive_action_failures: 1, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], pending_action: null } }]);
+    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [0], consecutive_action_failures: 1, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
     let releaseSpawn!: () => void;
     let signalSpawn!: () => void;
     const spawned = new Promise<void>((resolve) => { signalSpawn = resolve; });
@@ -220,7 +220,7 @@ test("reconciliation journals intent before provider dispatch and attaches it af
       spawn: async () => { signalSpawn(); await new Promise<void>((resolve) => { releaseSpawn = resolve; }); return { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "starting" }; }, attach: async () => null,
       resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }), onExit: async () => () => {},
     };
-    const input = { workAttemptId: "attempt", reconciliationActionId: "generation-2", nowMs: 2_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
+    const input = { workAttemptId: "attempt", reconciliationActionId: "generation-2", reconciliationActionSequence: 2, nowMs: 2_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
     const daemon = new SupervisorDaemon(paths, "darwin", port);
     await daemon.start();
     const running = daemon.reconcile(entry.id, input, 100);
@@ -231,10 +231,10 @@ test("reconciliation journals intent before provider dispatch and attaches it af
     await daemon.stop();
     const reloadedPort: ProviderActionPort = { ...port, spawn: async () => { throw new Error("must not respawn a pending action"); }, attachAction: async (id) => id === "orphan" ? { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "starting" } : null };
     const stored = await new ManifestStore(manifestPath).load();
-    await new ManifestStore(manifestPath).write(stored.generation, stored.entries.map((candidate) => candidate.id === entry.id ? { ...candidate, reconciliation: { ...candidate.reconciliation!, pending_action: { id: "orphan", kind: "restart_fresh", recorded_at_ms: 3_000 } } } : candidate));
+    await new ManifestStore(manifestPath).write(stored.generation, stored.entries.map((candidate) => candidate.id === entry.id ? { ...candidate, reconciliation: { ...candidate.reconciliation!, pending_action: { id: "orphan", sequence: 3, kind: "restart_fresh", recorded_at_ms: 3_000 } } } : candidate));
     const reloaded = new SupervisorDaemon(paths, "darwin", reloadedPort);
     await reloaded.start();
-    assert.equal((await reloaded.reconcile(entry.id, { ...input, reconciliationActionId: "generation-3", nowMs: 3_001 }, 100)).disposition, "held");
+    assert.equal((await reloaded.reconcile(entry.id, { ...input, reconciliationActionId: "generation-3", reconciliationActionSequence: 3, nowMs: 3_001 }, 100)).disposition, "held");
     assert.equal((await new ManifestStore(manifestPath).load()).entries[0]?.reconciliation?.pending_action, null);
     await reloaded.stop();
   } finally { await env.cleanup(); }
@@ -249,6 +249,32 @@ test("global manifest mutation serialization preserves concurrent different-entr
     await daemon.start();
     await Promise.all([daemon.transition("agent_1", "failed", "none", "exit", "test"), daemon.transition("agent_2", "failed", "none", "exit", "test")]);
     assert.deepEqual((await new ManifestStore(manifestPath).load()).entries.map((candidate) => candidate.observed_state), ["failed", "failed"]);
+    await daemon.stop();
+  } finally { await env.cleanup(); }
+});
+
+test("scheduled convergence records provider exits and durable escalation notices", async () => {
+  const env = await fixture();
+  try {
+    const manifestPath = join(env.root, "manifest.json");
+    await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "working" }]);
+    let onExit: ((terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null }) => void) | null = null;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }), spawn: async () => { throw new Error("unreachable"); }, attach: async () => null, resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+      onExit: async (_handle, listener) => { onExit = listener; return () => { onExit = null; }; },
+    };
+    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    await daemon.start();
+    const stop = await daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "working" }, () => ({ workAttemptId: "attempt", reconciliationActionId: "generation-1", reconciliationActionSequence: 1, nowMs: Date.now(), lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }), 100, 60_000);
+    onExit?.({ endedAt: "now", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal((await new ManifestStore(manifestPath).load()).entries[0]?.observed_state, "failed");
+    await daemon.transition(entry.id, "failed", "quarantined", "five exits in window", "reconciler");
+    const notices = (await new ManifestStore(manifestPath).load()).entries[0]?.reconciliation_notices ?? [];
+    assert.deepEqual(notices.map((notice) => notice.kind), ["quarantine_death"]);
+    await daemon.transition(entry.id, "recovering", "coordination_blocked", "active lease needs rebind", "reconciler");
+    assert.deepEqual(((await new ManifestStore(manifestPath).load()).entries[0]?.reconciliation_notices ?? []).map((notice) => notice.kind), ["quarantine_death", "coordination_escalation"]);
+    await stop();
     await daemon.stop();
   } finally { await env.cleanup(); }
 });

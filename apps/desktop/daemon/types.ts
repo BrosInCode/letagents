@@ -14,8 +14,11 @@ export type ReconciliationState = {
   next_restart_at_ms: number | null;
   /** Bounded action journal: rejects replayed or out-of-order provider calls. */
   completed_action_ids: string[];
-  pending_action: { id: string; kind: "poke" | "restart_fresh" | "restart_with_resume" | "stop"; recorded_at_ms: number } | null;
+  last_action_sequence: number;
+  pending_action: { id: string; sequence: number; kind: "poke" | "restart_fresh" | "restart_with_resume" | "stop"; recorded_at_ms: number } | null;
 };
+
+export type ReconciliationNotice = { at: string; kind: "quarantine_death" | "coordination_escalation"; cause: string };
 
 export type DaemonManifestEntry = {
   id: string;
@@ -31,6 +34,7 @@ export type DaemonManifestEntry = {
   created_by: string;
   created_at: string;
   reconciliation?: ReconciliationState;
+  reconciliation_notices?: ReconciliationNotice[];
 };
 
 export type DaemonManifest = {

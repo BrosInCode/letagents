@@ -23,10 +23,10 @@ export function advanceReconciliationState(
 ): ReconciliationState {
   const exits = liveExits(previous, nowMs);
   if (observedState === "idle" || observedState === "working") {
-    return { exit_timestamps_ms: exits, consecutive_action_failures: 0, last_observed_state: observedState, next_restart_at_ms: null, completed_action_ids: completed(previous), pending_action: previous?.pending_action ?? null };
+    return { exit_timestamps_ms: exits, consecutive_action_failures: 0, last_observed_state: observedState, next_restart_at_ms: null, completed_action_ids: completed(previous), last_action_sequence: previous?.last_action_sequence ?? 0, pending_action: previous?.pending_action ?? null };
   }
   if (observedState !== "failed" || previous?.last_observed_state === "failed") {
-    return { exit_timestamps_ms: exits, consecutive_action_failures: previous?.consecutive_action_failures ?? 0, last_observed_state: observedState, next_restart_at_ms: previous?.next_restart_at_ms ?? null, completed_action_ids: completed(previous), pending_action: previous?.pending_action ?? null };
+    return { exit_timestamps_ms: exits, consecutive_action_failures: previous?.consecutive_action_failures ?? 0, last_observed_state: observedState, next_restart_at_ms: previous?.next_restart_at_ms ?? null, completed_action_ids: completed(previous), last_action_sequence: previous?.last_action_sequence ?? 0, pending_action: previous?.pending_action ?? null };
   }
   const failures = (previous?.consecutive_action_failures ?? 0) + 1;
   return {
@@ -35,14 +35,16 @@ export function advanceReconciliationState(
     last_observed_state: "failed",
     next_restart_at_ms: nowMs + restartBackoffMs(failures),
     completed_action_ids: completed(previous),
+    last_action_sequence: previous?.last_action_sequence ?? 0,
     pending_action: previous?.pending_action ?? null,
   };
 }
 
 export function beginReconciliationAction(previous: ReconciliationState, action: NonNullable<ReconciliationState["pending_action"]>): ReconciliationState {
   if (previous.completed_action_ids.includes(action.id)) throw new Error(`replayed reconciliation action: ${action.id}`);
+  if (action.sequence <= previous.last_action_sequence) throw new Error(`stale reconciliation action sequence: ${action.sequence}`);
   if (previous.pending_action && previous.pending_action.id !== action.id) throw new Error(`unresolved reconciliation action: ${previous.pending_action.id}`);
-  return { ...previous, pending_action: action };
+  return { ...previous, last_action_sequence: action.sequence, pending_action: action };
 }
 
 /** Records a failed provider action exactly once, with bounded replay memory. */

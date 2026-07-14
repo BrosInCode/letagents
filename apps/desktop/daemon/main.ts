@@ -2,7 +2,7 @@ import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
-import type { ProviderActionPort } from "./provider-action-port.js";
+import type { ProviderActionHandle, ProviderActionPort, ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
@@ -11,6 +11,7 @@ import type { DaemonManifestEntry, ObservedState, PolicyCondition } from "./type
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
   reconciliationActionId: string;
+  reconciliationActionSequence: number;
 };
 
 export class SupervisorDaemon {
@@ -59,7 +60,10 @@ export class SupervisorDaemon {
     const manifest = await this.store.load();
     const entry = manifest.entries.find((candidate) => candidate.id === entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
-    const updated: DaemonManifestEntry = { ...entry, observed_state: to, condition, reconciliation: reconciliation ?? advanceReconciliationState(entry.reconciliation, to, Date.now()) };
+    const notices = [...(entry.reconciliation_notices ?? [])];
+    if (condition === "quarantined") notices.push({ at: new Date().toISOString(), kind: "quarantine_death", cause });
+    if (condition === "coordination_blocked") notices.push({ at: new Date().toISOString(), kind: "coordination_escalation", cause });
+    const updated: DaemonManifestEntry = { ...entry, observed_state: to, condition, reconciliation: reconciliation ?? advanceReconciliationState(entry.reconciliation, to, Date.now()), reconciliation_notices: notices.slice(-32) };
     const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
     this.manifestGeneration = next.generation;
     await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });
@@ -110,7 +114,7 @@ export class SupervisorDaemon {
       nextRestartAtMs: reconciliation.next_restart_at_ms,
     }, watchdogThresholdMs, {
       beforeAction: async (kind) => {
-        reconciliation = beginReconciliationAction(reconciliation, { id: input.reconciliationActionId, kind, recorded_at_ms: input.nowMs });
+        reconciliation = beginReconciliationAction(reconciliation, { id: input.reconciliationActionId, sequence: input.reconciliationActionSequence, kind, recorded_at_ms: input.nowMs });
         await this.transitionOnce(entryId, entry.observed_state, entry.condition, `persisted ${kind} action intent`, actor, reconciliation);
       },
     });
@@ -139,6 +143,24 @@ export class SupervisorDaemon {
       release();
       if (this.reconciliationTicks.get(entryId) === tail) this.reconciliationTicks.delete(entryId);
     }
+  }
+
+  /** Provider terminal callback: records an actual exit edge before the next tick. */
+  async observeProviderExit(entryId: string, terminal: ProviderActionTerminal, actor = "provider"): Promise<void> {
+    await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
+      await this.transitionOnce(entryId, "failed", "none", `provider terminal: ${terminal.terminalCause}`, actor);
+    }));
+  }
+
+  /** Starts periodic convergence and joins provider onExit to the same durable path. */
+  async scheduleConvergence(entryId: string, handle: ProviderActionHandle, input: () => DaemonReconcileInput, watchdogThresholdMs: number, intervalMs: number, actor = "reconciler"): Promise<() => Promise<void>> {
+    if (!this.providerPort) throw new Error("Provider action port is unavailable");
+    let stopped = false;
+    const tick = async () => { if (!stopped) await this.reconcile(entryId, input(), watchdogThresholdMs, actor); };
+    const timer = setInterval(() => { void tick().catch(() => undefined); }, intervalMs);
+    const unsubscribe = await this.providerPort.onExit(handle, (terminal) => { void this.observeProviderExit(entryId, terminal, actor).then(tick).catch(() => undefined); });
+    await tick();
+    return async () => { stopped = true; clearInterval(timer); unsubscribe(); };
   }
 
   private async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
