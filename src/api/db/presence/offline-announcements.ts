@@ -1,4 +1,4 @@
-import { and, eq, gte } from "drizzle-orm";
+import { and, eq, gte, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import { toRoomAgentDeliverySession } from "../mappers.js";
@@ -9,20 +9,37 @@ export interface LivenessAnnouncementCandidate {
   session: RoomAgentDeliverySession;
   /** Set when the linked worker session was ended deliberately (clean exit). */
   agent_session_ended_at: string | null;
+  /**
+   * Freshest runtime evidence (tool call or supervisor observation) from the
+   * liveness-observation ledger, or null for agents that report none — a
+   * silent message channel with a recently active runtime is an agent busy
+   * working, not a death.
+   */
+  runtime_last_active_at: string | null;
 }
+
+const runtimeLastActiveAt = sql<string | null>`(
+  SELECT max(GREATEST(o.last_observed_at, COALESCE(o.last_tool_call_at, o.last_observed_at)))
+  FROM room_agent_liveness_observations o
+  WHERE o.room_id = ${room_agent_delivery_sessions.room_id}
+    AND o.agent_session_id = ${room_agent_delivery_sessions.agent_session_id}
+)`;
 
 const candidateSelection = {
   session: room_agent_delivery_sessions,
   agent_session_ended_at: room_agent_sessions.ended_at,
+  runtime_last_active_at: runtimeLastActiveAt,
 };
 
 function toCandidate(row: {
   session: typeof room_agent_delivery_sessions.$inferSelect;
   agent_session_ended_at: string | null;
+  runtime_last_active_at: string | null;
 }): LivenessAnnouncementCandidate {
   return {
     session: toRoomAgentDeliverySession(row.session as RoomAgentDeliverySessionRow),
     agent_session_ended_at: row.agent_session_ended_at ?? null,
+    runtime_last_active_at: row.runtime_last_active_at ?? null,
   };
 }
 

@@ -379,6 +379,33 @@ export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
   return rows.map((row) => toRoomAgentSession(row as RoomAgentSessionRow));
 }
 
+/**
+ * The display name this agent instance used the last time it worked in this
+ * room, when that session ended cleanly. Burst workers re-register per work
+ * cycle; resuming the prior name keeps one stable identity in the room
+ * instead of minting "Name 2", "Name 3", ... per burst.
+ */
+export async function getLastEndedWorkerSessionDisplayName(input: {
+  room_id: string;
+  agent_key: string;
+  agent_instance_id: string;
+}): Promise<string | null> {
+  const [row] = await db
+    .select({ display_name: room_agent_sessions.display_name })
+    .from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.room_id, input.room_id),
+      eq(room_agent_sessions.agent_key, input.agent_key),
+      eq(room_agent_sessions.agent_instance_id, input.agent_instance_id),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      sql`${room_agent_sessions.ended_at} IS NOT NULL`
+    ))
+    .orderBy(desc(room_agent_sessions.ended_at))
+    .limit(1);
+
+  return row?.display_name ?? null;
+}
+
 export async function getRoomAgentSessionByCredentials(input: {
   session_id: string;
   session_token: string;

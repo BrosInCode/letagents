@@ -6,6 +6,7 @@ import {
   forceDisconnectRoomAgentDeliverySession,
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
+  getLastEndedWorkerSessionDisplayName,
   getRoomParticipants,
   upsertDesktopRoomAgentDeliveryHeartbeat,
   upsertRoomAgentPresence,
@@ -115,7 +116,7 @@ export function registerAgentSessionRoutes(
       const requestedTokens = requestedDisplayName.toLowerCase().split(/[\s_-]+/).filter((token) => token.length > 0);
       const isGenericName = !requestedDisplayName || requestedTokens.every((token) => genericKeywords.has(token));
 
-      const baseDisplayName = isGenericName
+      let baseDisplayName = isGenericName
         ? pickLocalCodename(agent.canonical_key).display_name
         : (requestedDisplayName || agent.display_name);
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
@@ -132,6 +133,28 @@ export function registerAgentSessionRoutes(
         ...activeParticipants.map((participant) => participant.display_name),
         ...activeSessionsForIdentity.map((session) => session.display_name),
       ]);
+
+      // Burst workers resume the name their instance used last time instead
+      // of minting a numbered variant: the persistent participant record
+      // keeps old names in usedDisplayNames forever, but a name whose worker
+      // session ENDED is free again (the active-worker unique index only
+      // guards live sessions; a genuine live collision still falls through
+      // to the conflict-retry loop below).
+      const priorInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
+      if (requestedSessionKind === "worker" && priorInstanceId) {
+        const resumableName = await getLastEndedWorkerSessionDisplayName({
+          room_id: project.id,
+          agent_key: agent.canonical_key,
+          agent_instance_id: priorInstanceId,
+        });
+        if (
+          resumableName
+          && !activeSessionsForIdentity.some((session) => session.display_name === resumableName)
+        ) {
+          usedDisplayNames.delete(resumableName);
+          baseDisplayName = resumableName;
+        }
+      }
       const pickSessionDisplayName = (suffixOffset: number): string => (
         suffixOffset === 0
           ? baseDisplayName

@@ -316,3 +316,88 @@ test(
     assert.equal(hookRuns, 1, "the replay path must not rerun the atomic side effect");
   }
 );
+
+test(
+  "runtime evidence from the liveness ledger suppresses and reclassifies announcements",
+  skipOptions,
+  async () => {
+    const {
+      createRoomAgentSession,
+      markRoomAgentDeliveryConnected,
+      markRoomAgentDeliveryDisconnected,
+      upsertAccount,
+      upsertRoomAgentLivenessObservation,
+      getLivenessAnnouncementCandidate,
+    } = dbModule!;
+    const { createProjectWithName } = dbModule!;
+    const project = await createProjectWithName!("liveness-runtime-evidence-test");
+
+    const account = await upsertAccount!({
+      provider: "github",
+      provider_user_id: "runtime-evidence-test",
+      login: "EmmyMay",
+      display_name: "EmmyMay",
+    });
+    const session = await createRoomAgentSession!({
+      room_id: project.id,
+      session_kind: "worker",
+      runtime: "claude-code",
+      actor_label: ACTOR_LABEL,
+      agent_key: "EmmyMay/field-signal",
+      display_name: "FieldSignal",
+      owner_account_id: account.id,
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+    });
+    await markRoomAgentDeliveryConnected!({
+      room_id: project.id,
+      actor_label: ACTOR_LABEL,
+      agent_session_id: session.session_id,
+      session_kind: "worker",
+      display_name: "FieldSignal",
+      transport: "long_poll",
+    });
+    const disconnected = await markRoomAgentDeliveryDisconnected!({
+      room_id: project.id,
+      actor_label: ACTOR_LABEL,
+      agent_session_id: session.session_id,
+    });
+    const deliveryKey = disconnected!.delivery_key;
+    await backdateDelivery(project.id, deliveryKey, {
+      updated_at: 5,
+      last_disconnected_at: 5,
+      reconnect_grace_expires_at: 5,
+    });
+
+    // Fresh tool activity: the channel is silent but the runtime is working.
+    await upsertRoomAgentLivenessObservation!({
+      room_id: project.id,
+      agent_session_id: session.session_id,
+      last_observed_at: isoMinutesAgo(1),
+      last_tool_call_at: isoMinutesAgo(1),
+    });
+    let candidate = await getLivenessAnnouncementCandidate!({
+      room_id: project.id,
+      delivery_key: deliveryKey,
+    });
+    assert.ok(candidate?.runtime_last_active_at, "the ledger evidence must surface on the candidate");
+    assert.deepEqual(
+      selectLivenessTransitions({ candidates: [candidate!] }),
+      [],
+      "an active runtime suppresses the offline announcement"
+    );
+
+    // Stale runtime evidence: now it is a real death, classified as such.
+    await pool!.query(
+      "UPDATE room_agent_liveness_observations SET last_observed_at = $2, last_tool_call_at = $2 WHERE agent_session_id = $1",
+      [session.session_id, new Date(Date.now() - 20 * 60_000)]
+    );
+    candidate = await getLivenessAnnouncementCandidate!({
+      room_id: project.id,
+      delivery_key: deliveryKey,
+    });
+    const [transition] = selectLivenessTransitions({ candidates: [candidate!] });
+    assert.equal(transition?.kind, "offline");
+    assert.equal(transition?.runtime_evidence, "stale");
+  }
+);
