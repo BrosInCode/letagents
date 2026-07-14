@@ -86,6 +86,7 @@
         :app-agent-settings="appAgentSettings"
         @save-app-agent-settings="$emit('save-app-agent-settings', $event)"
       />
+      <SettingsSupervisorGrantPane v-else-if="activePane === 'system:supervisor'" />
 
       <SettingsRuntimePane
         v-else-if="activePane === 'system:runtime'"
@@ -152,6 +153,7 @@ import SettingsRoomsPane from "../settings/panes/SettingsRoomsPane.vue";
 import SettingsRuntimePane from "../settings/panes/SettingsRuntimePane.vue";
 import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
 import SettingsStoragePane from "../settings/panes/SettingsStoragePane.vue";
+import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGrantPane.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
 import type { SettingsFeedback, SettingsNavGroup, SettingsPaneId } from "../settings/types";
 import type { DesktopMcpWizardStep } from "../setup/types";
@@ -236,6 +238,7 @@ const settingsNavGroups: SettingsNavGroup[] = [
     items: [
       { id: "system:setup", title: "Setup", description: "Install LetAgents", icon: Wrench },
       { id: "system:app-agent", title: "App Agent", description: "App control", icon: KeyRound },
+      { id: "system:supervisor", title: "Supervisor", description: "Host grants and scope", icon: KeyRound },
       { id: "system:runtime", title: "Runtime", description: "Repo and desktop state", icon: GitBranch },
       { id: "system:mcp", title: "Agent app connections", description: "Connected apps", icon: ServerCog },
       { id: "system:agents", title: "Agents", description: "Status and availability", icon: Bot },

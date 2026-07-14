@@ -53,6 +53,7 @@ import type {
   DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
   DesktopPendingDeviceAuth,
+  DesktopProvisionSupervisorGrantInput,
   DesktopReasoningSession,
   DesktopReasoningSessionDetail,
   DesktopReasoningUpdate,
@@ -83,6 +84,7 @@ import type {
   DesktopTaskReviewWorkerActionInput,
   DesktopTaskWorkerActionInput,
   DesktopTaskSummary,
+  DesktopSupervisorGrantMetadata,
   RepoStatus,
   WorkerSnapshot,
 } from "../ipc-types.js";
@@ -109,6 +111,7 @@ import {
   setAuthInvalidatedHandler,
   startDeviceAuthFlow,
 } from "./auth.js";
+import { getDesktopSupervisorGrantMetadata, provisionDesktopSupervisorGrant, revokeDesktopSupervisorGrant } from "./supervisor-grant.js";
 import {
   buildMcpInstallState,
   completeMcpOnboarding,
@@ -240,6 +243,7 @@ export function registerDesktopIpcHandlers(
       apiUrl,
     }),
   );
+  targetIpcMain.handle("desktop:supervisor-grant:revoke", async (): Promise<void> => revokeDesktopSupervisorGrant());
   targetIpcMain.handle(
     "desktop:app:open-github-url",
     async (_event, url: string): Promise<void> => {
@@ -728,6 +732,14 @@ export function registerDesktopIpcHandlers(
       await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
       return getDesktopAuthStatus();
     },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:get",
+    async (): Promise<DesktopSupervisorGrantMetadata | null> => getDesktopSupervisorGrantMetadata(),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:provision",
+    async (_event, input: DesktopProvisionSupervisorGrantInput): Promise<DesktopSupervisorGrantMetadata> => provisionDesktopSupervisorGrant(input),
   );
   targetIpcMain.handle(
     "desktop:setup:get-mcp-install-state",

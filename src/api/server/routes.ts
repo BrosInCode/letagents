@@ -129,6 +129,7 @@ import {
   registerRoomTaskRoutes,
   type RoomTaskRouteDeps,
 } from "../routes/rooms/tasks/index.js";
+import { registerSupervisorHostGrantRoutes } from "../routes/supervisor-host-grants.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import {
   createListing,
@@ -416,6 +417,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
+  registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
   registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
   registerRoomFocusRoutes(app, roomFocusRouteDeps);
   registerRoomTaskRoutes(app, roomTaskRouteDeps);

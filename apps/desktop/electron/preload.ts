@@ -173,6 +173,11 @@ const api: DesktopApi = {
     openVerification: (url: string) => ipcRenderer.invoke("desktop:auth:open-verification", url),
     signOut: () => ipcRenderer.invoke("desktop:auth:sign-out"),
   },
+  supervisorGrant: {
+    get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
+    provision: (input) => ipcRenderer.invoke("desktop:supervisor-grant:provision", input),
+    revoke: () => ipcRenderer.invoke("desktop:supervisor-grant:revoke"),
+  },
   setup: {
     getMcpInstallState: () => ipcRenderer.invoke("desktop:setup:get-mcp-install-state"),
     installMcpServer: (targetId) =>

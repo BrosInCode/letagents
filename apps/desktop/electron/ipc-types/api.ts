@@ -1,4 +1,5 @@
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
+import type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "./supervisor-grant.js";
 import type {
   DesktopAppInfo,
   DesktopGitHubPullRequestStats,
@@ -234,6 +235,11 @@ export interface DesktopApi {
     pollDeviceFlow: (requestId?: string | null) => Promise<DesktopAuthPollResult>;
     openVerification: (url: string) => Promise<void>;
     signOut: () => Promise<DesktopAuthStatus>;
+  };
+  supervisorGrant: {
+    get: () => Promise<DesktopSupervisorGrantMetadata | null>;
+    provision: (input: DesktopProvisionSupervisorGrantInput) => Promise<DesktopSupervisorGrantMetadata>;
+    revoke: () => Promise<void>;
   };
   setup: {
     getMcpInstallState: () => Promise<DesktopMcpInstallState>;

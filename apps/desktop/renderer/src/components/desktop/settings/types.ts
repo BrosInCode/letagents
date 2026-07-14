@@ -10,6 +10,7 @@ export type SettingsPaneId =
   | "storage:database"
   | "system:setup"
   | "system:app-agent"
+  | "system:supervisor"
   | "system:runtime"
   | "system:mcp"
   | "system:agents"

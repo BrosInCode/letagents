@@ -4,6 +4,7 @@ import {
   getOwnerTokenAccountByToken,
   getRoomAgentSessionBearerByToken,
   getSessionAccountByToken,
+  getSupervisorHostGrantByToken,
 } from "../db.js";
 import {
   parseCookies,
@@ -14,29 +15,24 @@ import { isAgentSessionBearerCapability, isAgentSessionBearerFeatureEnabled } fr
 export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestAuth> {
   const cookies = parseCookies(req.headers.cookie);
   const sessionToken = cookies.letagents_session;
+  let cookieSessionAccount = null;
   if (sessionToken) {
-    const sessionAccount = await getSessionAccountByToken(sessionToken);
-    if (sessionAccount) {
-      return {
-        account: sessionAccount,
-        authKind: "session",
-      };
-    }
+    cookieSessionAccount = await getSessionAccountByToken(sessionToken);
   }
 
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
     return {
-      account: null,
-      authKind: null,
+      account: cookieSessionAccount,
+      authKind: cookieSessionAccount ? "session" : null,
     };
   }
 
   const providerToken = authHeader.slice("Bearer ".length).trim();
   if (!providerToken) {
     return {
-      account: null,
-      authKind: null,
+      account: cookieSessionAccount,
+      authKind: cookieSessionAccount ? "session" : null,
     };
   }
 
@@ -46,6 +42,14 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
       account: ownerTokenAccount,
       authKind: "owner_token",
     };
+  }
+
+  const supervisorGrant = await getSupervisorHostGrantByToken(providerToken);
+  if (supervisorGrant) {
+    // A browser/session credential and a host credential in one request is a
+    // confused-deputy envelope. Do not silently choose either principal.
+    if (cookieSessionAccount) return { account: null, authKind: null };
+    return { account: null, authKind: "supervisor_grant", supervisorGrant };
   }
 
   if (isAgentSessionBearerFeatureEnabled()) {
