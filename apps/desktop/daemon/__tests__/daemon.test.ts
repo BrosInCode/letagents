@@ -95,10 +95,13 @@ test("reconciler executes only fenced, capability-negotiated port actions", asyn
   };
   const runner = new ProviderReconciler(port);
   const base = { workAttemptId: "attempt", desiredState: "running" as const, observedState: "failed" as const, condition: "none" as const, nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, exitsInWindow: 0, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle, resumeFrom: { workAttemptId: "attempt", providerContinuationId: "thread" } };
-  assert.equal((await runner.reconcile({ ...base, activeLease: true, fencedRebindProven: false }, 100)).action, "hold_coordination");
+  assert.equal((await runner.reconcile({ ...base, activeLease: true, fencedRebindProven: false }, 100)).decision.action, "hold_coordination");
   assert.deepEqual(calls, []);
-  assert.equal((await runner.reconcile({ ...base, activeLease: false, fencedRebindProven: false }, 100)).action, "restart_with_resume");
+  assert.equal((await runner.reconcile({ ...base, activeLease: false, fencedRebindProven: false }, 100)).decision.action, "restart_with_resume");
   assert.deepEqual(calls, ["resume"]);
+  const missing = await runner.reconcile({ ...base, activeLease: false, fencedRebindProven: false, resumeFrom: null }, 100);
+  assert.equal(missing.decision.action, "hold_coordination");
+  assert.equal(missing.disposition, "held");
 });
 
 test("singleton fences a second daemon and detects a newer generation", async () => {
