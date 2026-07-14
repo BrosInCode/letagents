@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +19,26 @@ import { WorkspaceProvisioner } from "../workspace-provisioner.js";
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
   return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); } };
+}
+
+const TEST_OID = "a".repeat(40);
+async function provisionedWorkspace(root: string, taskId = "task", workAttemptId = randomUUID()): Promise<{ path: string; id: string; bare: string }> {
+  const bare = join(root, "repos", "repo.git");
+  const path = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(bare, { recursive: true });
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo", work_attempt_id: workAttemptId, task_id: taskId, remote_url: "https://example.invalid/repo", resolved_revision: TEST_OID, bare_path: bare }));
+  return { path, id: workAttemptId, bare };
+}
+function fakeGit(root: string): (args: string[]) => Promise<string> {
+  return async (args) => {
+    if (args.includes("--git-common-dir")) return join(root, "repos", "repo.git");
+    if (args.includes("remote") && args.includes("get-url")) return "https://example.invalid/repo.git";
+    if (args.includes("--is-bare-repository")) return "true";
+    if (args.includes("cat-file")) return "ok";
+    if (args.includes("rev-parse")) return TEST_OID;
+    return "";
+  };
 }
 
 const entry: DaemonManifestEntry = {
@@ -141,8 +162,9 @@ test("work attempts survive generations and lease rebinds while terminal payload
   const env = await fixture();
   let tick = 0;
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:0${tick++}.000Z`, env.root);
-    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: join(env.root, "workspace") });
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:0${tick++}.000Z`, join(env.root, "worktrees"));
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     await store.checkpoint(attempt.work_attempt_id, { room_cursor: "msg_12", provider_continuation_id: "provider-1" });
     const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
     const terminal = { ended_at: "2026-01-01T00:00:09.000Z", exit_code: 137, signal: "SIGKILL", stdio_archive_ref: "stdio.log.1.archive", stdio_tail: "last line", terminal_cause: "crash", actor: "daemon", generation: 1, provider_continuation_id: "provider-1" };
@@ -151,7 +173,7 @@ test("work attempts survive generations and lease rebinds while terminal payload
     await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, terminal), ImmutableExecutionError);
     await store.rebindAttempt(attempt.work_attempt_id, "lease-2", 2);
     const resumed = await store.startGeneration(attempt.work_attempt_id, "daemon", 2);
-    assert.equal((await store.getAttempt(attempt.work_attempt_id)).workspace_path, join(env.root, "workspace"));
+    assert.equal((await store.getAttempt(attempt.work_attempt_id)).workspace_path, workspace.path);
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).epoch_history.length, 2);
     assert.equal(resumed.generation, 2);
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "reviewed", postmortemDiff: "diff --git a/a b/a" });
@@ -163,11 +185,10 @@ test("stdio rotates append-only and GC protects active, ambiguous, quarantined, 
   const env = await fixture();
   let tick = 0;
   try {
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`, env.root);
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => `2026-01-01T00:00:${String(tick++).padStart(2, "0")}.000Z`, join(env.root, "worktrees"), undefined, fakeGit(env.root));
     const create = async () => {
-      const workspace = join(env.root, `workspace-${tick}`); await mkdir(workspace, { recursive: true });
-      const attempt = await store.createAttempt({ taskId: "task", leaseId: `lease-${tick}`, leaseEpoch: 1, workspacePath: workspace });
-      await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, work_attempt_id: attempt.work_attempt_id, task_id: "task" }));
+      const workspace = await provisionedWorkspace(env.root);
+      const attempt = await store.createAttempt({ taskId: "task", leaseId: `lease-${tick}`, leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
       return attempt;
     };
     const first = await create(); const second = await create(); const latest = await create(); const protectedAttempt = await create();
@@ -194,19 +215,28 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
       commands.push(args);
       if (args.includes("worktree")) await mkdir(args.at(-2)!, { recursive: true });
       else if (args[0] === "clone") await mkdir(args.at(-1)!, { recursive: true });
+      if (args.includes("--is-bare-repository")) return "true";
+      if (args.includes("remote") && args.includes("get-url")) return "https://example.invalid/repo.git";
+      if (args.includes("cat-file")) return "ok";
+      if (args.includes("rev-parse")) {
+        if (args.includes("--git-common-dir")) return join(env.root, "repos", "repo.git");
+        return TEST_OID;
+      }
+      return "";
     });
     assert.throws(() => provisioner.workspacePath("../dev", "attempt"), /Unsafe repository/);
     assert.throws(() => provisioner.workspacePath(".", "attempt"), /Unsafe repository/);
-    const first = await provisioner.provision({ repo: "repo", workAttemptId: "attempt-1", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
-    const second = await provisioner.provision({ repo: "repo", workAttemptId: "attempt-1", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
-    assert.equal(first.reused, false); assert.equal(second.reused, true); assert.equal(commands.length, 2);
-    assert.match(first.path, /worktrees\/repo\/attempt-1$/);
+    const workAttemptId = randomUUID();
+    const first = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
+    const second = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "moved-branch" });
+    assert.equal(first.reused, false); assert.equal(second.reused, true); assert.ok(commands.length > 2);
+    assert.match(first.path, new RegExp(`worktrees/repo/${workAttemptId}$`));
     assert.ok(commands[0]!.includes("--bare"));
-    await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: "attempt-2", remoteUrl: "https://evil.invalid/repo.git", revision: "abc" }), /identity/);
+    await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: randomUUID(), taskId: "task", remoteUrl: "https://evil.invalid/repo.git", revision: "abc" }), /identity/);
     await rm(first.path, { recursive: true });
     const outside = join(env.root, "outside"); await mkdir(outside);
     await symlink(outside, first.path);
-    await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId: "attempt-1", remoteUrl: "https://example.invalid/repo.git", revision: "abc" }), /symlink/);
+    await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" }), /symlink/);
   } finally { await env.cleanup(); }
 });
 
@@ -218,10 +248,9 @@ test("durability store validates destructive identities, serializes GC, and quar
   const gcRelease = new Promise<void>((resolve) => { releaseGc = resolve; });
   try {
     const path = join(env.root, "attempts.json");
-    const store = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", env.root, async () => { reserved(); await gcRelease; });
-    const workspace = join(env.root, "workspace"); await mkdir(workspace);
-    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace });
-    await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, work_attempt_id: attempt.work_attempt_id, task_id: "task" }));
+    const store = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"), async () => { reserved(); await gcRelease; }, fakeGit(env.root));
+    const workspace = await provisionedWorkspace(env.root);
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
     await assert.rejects(() => store.appendStdio("../../outside", "nope"), /UUID/);
     const collecting = store.garbageCollect(0);
@@ -230,36 +259,79 @@ test("durability store validates destructive identities, serializes GC, and quar
     releaseGc();
     assert.deepEqual(await collecting, [attempt.work_attempt_id]);
 
-    const protectedWorkspace = join(env.root, "protected"); await mkdir(protectedWorkspace);
-    const protectedAttempt = await store.createAttempt({ taskId: "task", leaseId: "lease-2", leaseEpoch: 2, workspacePath: protectedWorkspace });
-    await writeFile(join(protectedWorkspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, work_attempt_id: protectedAttempt.work_attempt_id, task_id: "task" }));
+    const protectedWorkspace = await provisionedWorkspace(env.root);
+    const protectedAttempt = await store.createAttempt({ taskId: "task", leaseId: "lease-2", leaseEpoch: 2, workspacePath: protectedWorkspace.path, workAttemptId: protectedWorkspace.id });
     await store.concludeAttempt(protectedAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
     await writeFile(path, "{\"version\":2,\"attempts\":[],\"checksum\":\"tampered\"}");
-    const recovered = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:01.000Z", env.root);
+    const recovered = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:01.000Z", join(env.root, "worktrees"));
     assert.deepEqual(await recovered.garbageCollect(0), []);
-    assert.equal((await stat(protectedWorkspace)).isDirectory(), true);
+    assert.equal((await stat(protectedWorkspace.path)).isDirectory(), true);
     assert.ok((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")));
 
-    const legacyWorkspace = join(env.root, "legacy"); await mkdir(legacyWorkspace);
-    const legacyStore = new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:02.000Z", env.root);
-    const legacyAttempt = await legacyStore.createAttempt({ taskId: "task", leaseId: "lease-3", leaseEpoch: 3, workspacePath: legacyWorkspace });
+    const legacyWorkspace = await provisionedWorkspace(env.root);
+    const legacyStore = new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:02.000Z", join(env.root, "worktrees"));
+    const legacyAttempt = await legacyStore.createAttempt({ taskId: "task", leaseId: "lease-3", leaseEpoch: 3, workspacePath: legacyWorkspace.path, workAttemptId: legacyWorkspace.id });
     await legacyStore.concludeAttempt(legacyAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
     const legacy = JSON.parse(await readFile(join(env.root, "legacy-attempts.json"), "utf8"));
     await writeFile(join(env.root, "legacy-attempts.json"), JSON.stringify({ version: 1, attempts: legacy.attempts }));
-    assert.equal((await (new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:03.000Z", env.root)).getAttempt(legacyAttempt.work_attempt_id)).state, "unreviewed");
+    assert.equal((await (new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:03.000Z", join(env.root, "worktrees"))).getAttempt(legacyAttempt.work_attempt_id)).state, "unreviewed");
   } finally { await env.cleanup(); }
 });
 
 test("execution identities prohibit parallel, duplicate, and laundered terminal generations", async () => {
   const env = await fixture();
   try {
-    const workspace = join(env.root, "workspace"); await mkdir(workspace);
-    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", env.root);
-    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace });
+    const workspace = await provisionedWorkspace(env.root);
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:00.000Z", join(env.root, "worktrees"));
+    const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     const first = await store.startGeneration(attempt.work_attempt_id, "starter", 1);
     await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 2), /one execution generation/);
     await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2025-01-01T00:00:00.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "", actor: "other", generation: 1, provider_continuation_id: null }), /identity/);
     await store.recordTerminal(attempt.work_attempt_id, first.execution_generation_id, { ended_at: "2026-01-01T00:00:01.000Z", exit_code: 1, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crash", actor: "starter", generation: 1, provider_continuation_id: null });
     await assert.rejects(() => store.startGeneration(attempt.work_attempt_id, "starter", 1), /strictly monotonic/);
+  } finally { await env.cleanup(); }
+});
+
+test("attempt creation requires a final provisioned marker and enforces unique exact worktree layout", async () => {
+  const env = await fixture();
+  try {
+    const store = new WorkDurabilityStore(join(env.root, "attempts.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"));
+    const id = randomUUID();
+    const unmarked = join(env.root, "worktrees", "repo", id); await mkdir(unmarked, { recursive: true });
+    await assert.rejects(() => store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: unmarked, workAttemptId: id }), /marker/);
+    const first = await provisionedWorkspace(env.root);
+    await store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: first.path, workAttemptId: first.id });
+    await assert.rejects(() => store.createAttempt({ taskId: "task", leaseId: "lease-2", leaseEpoch: 2, workspacePath: first.path, workAttemptId: first.id }), /already exists/);
+    const duplicatePath = await provisionedWorkspace(env.root, "task", randomUUID());
+    await assert.rejects(() => store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: duplicatePath.path, workAttemptId: first.id }), /marker/);
+    const sibling = join(env.root, "worktrees", "repo", "not-the-attempt"); await mkdir(sibling, { recursive: true });
+    await writeFile(join(sibling, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo", work_attempt_id: id, task_id: "task", remote_url: "https://example.invalid/repo", resolved_revision: TEST_OID, bare_path: join(env.root, "repos", "repo.git") }));
+    await assert.rejects(() => store.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: sibling, workAttemptId: id }), /exact daemon worktree layout/);
+  } finally { await env.cleanup(); }
+});
+
+test("GC replays every pending tombstone and refuses a Git identity mismatch", async () => {
+  const env = await fixture();
+  let release!: () => void;
+  let reserved!: () => void;
+  const entered = new Promise<void>((resolve) => { reserved = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const path = join(env.root, "attempts.json");
+    const workspace = await provisionedWorkspace(env.root);
+    const first = new WorkDurabilityStore(path, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), async () => { reserved(); await blocked; }, fakeGit(env.root));
+    const attempt = await first.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    await first.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
+    const collecting = first.garbageCollect(0); await entered;
+    const recovery = new WorkDurabilityStore(path, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root));
+    assert.deepEqual(await recovery.garbageCollect(99), [attempt.work_attempt_id], "pending GC must not be hidden behind retention");
+    release(); await collecting;
+
+    const mismatch = await provisionedWorkspace(env.root);
+    const guarded = new WorkDurabilityStore(join(env.root, "mismatch.json"), join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, async (args) => args.includes("remote") ? "https://evil.invalid/repo.git" : await fakeGit(env.root)(args));
+    const other = await guarded.createAttempt({ taskId: "task", leaseId: "lease", leaseEpoch: 1, workspacePath: mismatch.path, workAttemptId: mismatch.id });
+    await guarded.concludeAttempt(other.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
+    assert.deepEqual(await guarded.garbageCollect(0), []);
+    assert.equal((await stat(mismatch.path)).isDirectory(), true);
   } finally { await env.cleanup(); }
 });

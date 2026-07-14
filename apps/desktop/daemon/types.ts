@@ -68,6 +68,14 @@ export type ExecutionGeneration = {
   terminal: ExecutionTerminalPayload | null;
 };
 
+/** Immutable Git identity captured by the provisioner before a work attempt exists. */
+export type WorkspaceIdentity = {
+  repo: string;
+  remote_url: string;
+  resolved_revision: string;
+  bare_path: string;
+};
+
 export type TaskWorkAttempt = {
   work_attempt_id: string;
   task_id: string;
@@ -75,6 +83,7 @@ export type TaskWorkAttempt = {
   current_lease_epoch: number;
   epoch_history: LeaseEpoch[];
   workspace_path: string;
+  workspace_identity: WorkspaceIdentity;
   state: WorkAttemptState;
   created_at: string;
   concluded_at: string | null;

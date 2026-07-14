@@ -1,29 +1,44 @@
 import { lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-export type GitCommand = (args: string[]) => Promise<void>;
+/** Action commands return void; identity queries must return stdout. */
+export type GitCommand = (args: string[]) => Promise<string | void>;
 
 type RepositoryMarker = { version: 1; repo: string; remote_url: string };
-type WorkspaceMarker = { version: 1; repo: string; work_attempt_id: string; task_id: string | null; remote_url: string; revision: string };
+export type WorkspaceMarker = {
+  version: 1;
+  repo: string;
+  work_attempt_id: string;
+  task_id: string;
+  remote_url: string;
+  resolved_revision: string;
+  bare_path: string;
+};
 
 const REPOSITORY_MARKER = ".letagents-repository.json";
-const WORKSPACE_MARKER = ".letagents-work-attempt.json";
+export const WORKSPACE_MARKER = ".letagents-work-attempt.json";
 
 function safeSegment(value: string, label: string): string {
   if (value === "." || value === ".." || !/^[A-Za-z0-9._-]+$/.test(value)) throw new Error(`Unsafe ${label}.`);
   return value;
 }
+function isUuid(value: string): boolean { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
+export function normalizeRemote(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  return trimmed.endsWith(".git") ? trimmed.slice(0, -4) : trimmed;
+}
+
 function sameRecord(value: unknown, expected: Record<string, unknown>): boolean {
   return !!value && typeof value === "object" && Object.entries(expected).every(([key, entry]) => (value as Record<string, unknown>)[key] === entry);
 }
 
-/** Keeps supervisor work isolated from any user checkout. */
+/** Keeps supervisor work isolated from any user checkout and pins every worktree to an OID. */
 export class WorkspaceProvisioner {
   constructor(readonly root: string, private readonly git: GitCommand) {}
 
@@ -31,39 +46,78 @@ export class WorkspaceProvisioner {
     return this.insideRoot("worktrees", safeSegment(repo, "repository"), safeSegment(workAttemptId, "work attempt id"));
   }
 
-  async provision(input: { repo: string; workAttemptId: string; taskId?: string; remoteUrl: string; revision: string }): Promise<{ path: string; reused: boolean }> {
+  async provision(input: { repo: string; workAttemptId: string; taskId: string; remoteUrl: string; revision: string }): Promise<{ path: string; reused: boolean; identity: WorkspaceMarker }> {
     const repo = safeSegment(input.repo, "repository");
     const workAttemptId = safeSegment(input.workAttemptId, "work attempt id");
+    if (!isUuid(workAttemptId)) throw new Error("Work attempt IDs must be supervisor-minted UUIDs.");
+    if (!input.taskId.trim()) throw new Error("A task ID is required for a workspace attempt.");
+    const remoteUrl = normalizeRemote(input.remoteUrl);
+    if (!remoteUrl) throw new Error("A remote URL is required for a workspace attempt.");
     const bare = this.insideRoot("repos", `${repo}.git`);
     const workspace = this.workspacePath(repo, workAttemptId);
     const reposRoot = this.insideRoot("repos");
     const worktreesRoot = this.insideRoot("worktrees");
-    await this.ensureDirectory(reposRoot, await this.canonicalRoot());
-    await this.ensureDirectory(worktreesRoot, await this.canonicalRoot());
+    const canonicalRoot = await this.canonicalRoot();
+    await this.ensureDirectory(reposRoot, canonicalRoot);
+    await this.ensureDirectory(worktreesRoot, canonicalRoot);
     const repoWorktrees = this.insideRoot("worktrees", repo);
-    await this.ensureDirectory(repoWorktrees, await this.canonicalRoot());
+    await this.ensureDirectory(repoWorktrees, await realpath(worktreesRoot));
 
-    const workspaceMarker: WorkspaceMarker = { version: 1, repo, work_attempt_id: workAttemptId, task_id: input.taskId ?? null, remote_url: input.remoteUrl, revision: input.revision };
-    if (await this.exists(workspace)) {
-      await this.ensureDirectory(workspace, await realpath(repoWorktrees));
-      await this.assertMarker(join(workspace, WORKSPACE_MARKER), workspaceMarker, "workspace");
-      return { path: workspace, reused: true };
-    }
-
-    const repositoryMarker: RepositoryMarker = { version: 1, repo, remote_url: input.remoteUrl };
+    const repositoryMarker: RepositoryMarker = { version: 1, repo, remote_url: remoteUrl };
     if (await this.exists(bare)) {
       await this.ensureDirectory(bare, await realpath(reposRoot));
       await this.assertMarker(join(bare, REPOSITORY_MARKER), repositoryMarker, "bare repository");
     } else {
-      await this.git(["clone", "--bare", input.remoteUrl, bare]);
+      await this.run(["clone", "--bare", input.remoteUrl, bare]);
       await this.ensureDirectory(bare, await realpath(reposRoot));
       await this.writeMarker(join(bare, REPOSITORY_MARKER), repositoryMarker);
     }
+    const canonicalBare = await realpath(bare);
+    await this.verifyBare(canonicalBare, remoteUrl);
 
-    await this.git(["--git-dir", bare, "worktree", "add", "--detach", workspace, input.revision]);
+    if (await this.exists(workspace)) {
+      await this.ensureDirectory(workspace, await realpath(repoWorktrees));
+      const identity = await this.readWorkspaceMarker(join(workspace, WORKSPACE_MARKER));
+      if (identity.repo !== repo || identity.work_attempt_id !== workAttemptId || identity.task_id !== input.taskId
+        || identity.remote_url !== remoteUrl || identity.bare_path !== canonicalBare) {
+        throw new Error("Workspace identity does not match the requested repository and attempt.");
+      }
+      await this.verifyWorkspace(workspace, identity);
+      return { path: workspace, reused: true, identity };
+    }
+
+    const resolvedRevision = await this.query(["--git-dir", canonicalBare, "rev-parse", "--verify", `${input.revision}^{commit}`]);
+    await this.query(["--git-dir", canonicalBare, "cat-file", "-e", `${resolvedRevision}^{commit}`]);
+    const identity: WorkspaceMarker = { version: 1, repo, work_attempt_id: workAttemptId, task_id: input.taskId, remote_url: remoteUrl, resolved_revision: resolvedRevision, bare_path: canonicalBare };
+
+    await this.run(["--git-dir", canonicalBare, "worktree", "add", "--detach", workspace, resolvedRevision]);
     await this.ensureDirectory(workspace, await realpath(repoWorktrees));
-    await this.writeMarker(join(workspace, WORKSPACE_MARKER), workspaceMarker);
-    return { path: workspace, reused: false };
+    await this.verifyWorkspace(workspace, identity);
+    // The provisioner writes the complete, final marker atomically before the store may persist an attempt.
+    await this.writeMarker(join(workspace, WORKSPACE_MARKER), identity);
+    return { path: workspace, reused: false, identity };
+  }
+
+  private async verifyBare(bare: string, remoteUrl: string): Promise<void> {
+    if ((await this.query(["--git-dir", bare, "rev-parse", "--is-bare-repository"])) !== "true") throw new Error("Expected daemon repository is not bare.");
+    if (normalizeRemote(await this.query(["--git-dir", bare, "remote", "get-url", "origin"])) !== remoteUrl) throw new Error("Bare repository remote identity does not match.");
+  }
+
+  private async verifyWorkspace(workspace: string, identity: WorkspaceMarker): Promise<void> {
+    const common = await this.query(["-C", workspace, "rev-parse", "--git-common-dir"]);
+    const commonPath = isAbsolute(common) ? common : resolve(workspace, common);
+    if ((await realpath(commonPath)) !== identity.bare_path) throw new Error("Workspace Git common directory does not match its daemon bare repository.");
+    if (normalizeRemote(await this.query(["-C", workspace, "remote", "get-url", "origin"])) !== identity.remote_url) throw new Error("Workspace remote identity does not match.");
+    const head = await this.query(["-C", workspace, "rev-parse", "--verify", "HEAD^{commit}"]);
+    if (head !== identity.resolved_revision) throw new Error("Workspace HEAD is not the provisioned commit.");
+    await this.query(["-C", workspace, "cat-file", "-e", `${head}^{commit}`]);
+  }
+
+  private async run(args: string[]): Promise<void> { await this.git(args); }
+  private async query(args: string[]): Promise<string> {
+    const result = await this.git(args);
+    if (typeof result !== "string" || !result.trim()) throw new Error(`Git identity query did not return stdout: ${args.join(" ")}`);
+    return result.trim();
   }
 
   private insideRoot(...parts: string[]): string {
@@ -106,6 +160,19 @@ export class WorkspaceProvisioner {
     let parsed: unknown;
     try { parsed = JSON.parse(await readFile(path, "utf8")); } catch { throw new Error(`Malformed ${label} identity marker.`); }
     if (!sameRecord(parsed, expected)) throw new Error(`${label} identity does not match the requested repository, revision, and attempt.`);
+  }
+
+  private async readWorkspaceMarker(path: string): Promise<WorkspaceMarker> {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Unsafe workspace identity marker.");
+    let parsed: unknown;
+    try { parsed = JSON.parse(await readFile(path, "utf8")); } catch { throw new Error("Malformed workspace identity marker."); }
+    const marker = parsed as Partial<WorkspaceMarker>;
+    if (!marker || marker.version !== 1 || !safeSegment(String(marker.repo ?? ""), "repository")
+      || !safeSegment(String(marker.work_attempt_id ?? ""), "work attempt id") || typeof marker.task_id !== "string" || !marker.task_id.trim()
+      || typeof marker.remote_url !== "string" || !marker.remote_url.trim() || typeof marker.resolved_revision !== "string" || !/^[0-9a-f]{40,64}$/i.test(marker.resolved_revision)
+      || typeof marker.bare_path !== "string" || !isAbsolute(marker.bare_path)) throw new Error("Malformed workspace identity marker.");
+    return { version: 1, repo: marker.repo!, work_attempt_id: marker.work_attempt_id!, task_id: marker.task_id, remote_url: normalizeRemote(marker.remote_url), resolved_revision: marker.resolved_revision, bare_path: resolve(marker.bare_path) };
   }
 
   private async writeMarker(path: string, value: RepositoryMarker | WorkspaceMarker): Promise<void> {

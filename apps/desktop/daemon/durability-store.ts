@@ -1,14 +1,13 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { appendFile, lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, link, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
+import { normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
 
 const STORE_VERSION = 2;
-const WORKSPACE_MARKER = ".letagents-work-attempt.json";
 type StoredAttempts = { version: typeof STORE_VERSION; attempts: TaskWorkAttempt[]; checksum: string };
 type LegacyStoredAttempts = { version: 1; attempts: TaskWorkAttempt[] };
-type WorkspaceMarker = { version: 1; work_attempt_id: string; task_id: string };
 
 export class AttemptNotFoundError extends Error {}
 export class ImmutableExecutionError extends Error {}
@@ -31,6 +30,14 @@ function isInside(root: string, candidate: string): boolean {
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 function isStrictChild(root: string, candidate: string): boolean { return resolve(root) !== resolve(candidate) && isInside(root, candidate); }
+
+function isSafeSegment(value: unknown): value is string { return typeof value === "string" && value !== "." && value !== ".." && /^[A-Za-z0-9._-]+$/.test(value); }
+function isWorkspaceIdentity(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const identity = value as Partial<TaskWorkAttempt["workspace_identity"]>;
+  return isSafeSegment(identity.repo) && typeof identity.remote_url === "string" && identity.remote_url.trim().length > 0
+    && /^[0-9a-f]{40,64}$/i.test(identity.resolved_revision ?? "") && typeof identity.bare_path === "string" && isAbsolute(identity.bare_path);
+}
 
 const attemptStates = new Set<WorkAttemptState>(["active", "ambiguous", "quarantined", "unreviewed", "cleanly_concluded", "abandoned", "gc_pending", "garbage_collected"]);
 
@@ -56,7 +63,7 @@ function isAttempt(value: unknown): value is TaskWorkAttempt {
   if (!value || typeof value !== "object") return false;
   const attempt = value as Partial<TaskWorkAttempt>;
   if (!(isUuid(attempt.work_attempt_id) && typeof attempt.task_id === "string" && attempt.task_id.trim() && typeof attempt.lease_id === "string" && attempt.lease_id.trim()
-    && Number.isInteger(attempt.current_lease_epoch) && (attempt.current_lease_epoch ?? -1) >= 0 && typeof attempt.workspace_path === "string" && isAbsolute(attempt.workspace_path)
+    && Number.isInteger(attempt.current_lease_epoch) && (attempt.current_lease_epoch ?? -1) >= 0 && typeof attempt.workspace_path === "string" && isAbsolute(attempt.workspace_path) && isWorkspaceIdentity(attempt.workspace_identity)
     && typeof attempt.state === "string" && attemptStates.has(attempt.state as WorkAttemptState) && isIsoTime(attempt.created_at) && (attempt.concluded_at === null || isIsoTime(attempt.concluded_at))
     && (attempt.conclusion_cause === null || typeof attempt.conclusion_cause === "string")
     && (attempt.postmortem_diff === null || typeof attempt.postmortem_diff === "string")
@@ -89,27 +96,32 @@ export class WorkDurabilityStore {
   private writes: Promise<void> = Promise.resolve();
   private readonly workspaceRoot: string;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand) {
     this.workspaceRoot = resolve(workspaceRoot);
   }
 
   static mintWorkAttemptId(): string { return randomUUID(); }
-  async createAttempt(input: { taskId: string; leaseId: string; leaseEpoch: number; workspacePath: string; workAttemptId?: string }): Promise<TaskWorkAttempt> {
+  async createAttempt(input: { taskId: string; leaseId: string; leaseEpoch: number; workspacePath: string; workAttemptId: string }): Promise<TaskWorkAttempt> {
     this.assertWorkspacePath(input.workspacePath);
-    const workAttemptId = input.workAttemptId ?? WorkDurabilityStore.mintWorkAttemptId();
+    if (!input.taskId.trim() || !input.leaseId.trim() || !Number.isInteger(input.leaseEpoch) || input.leaseEpoch < 0) throw new ImmutableExecutionError("Task, lease, and non-negative epoch are required.");
+    const workAttemptId = input.workAttemptId;
     this.assertAttemptId(workAttemptId);
+    const identity = await this.verifyProvisionedMarker(input.workspacePath, workAttemptId, input.taskId);
+    await this.assertExactWorkspaceLayout(input.workspacePath, identity.repo, workAttemptId);
     const attempt = await this.mutate((stored) => {
+      if (stored.attempts.some((candidate) => candidate.work_attempt_id === workAttemptId)) throw new ImmutableExecutionError("Work attempt ID already exists.");
+      if (stored.attempts.some((candidate) => resolve(candidate.workspace_path) === resolve(input.workspacePath))) throw new ImmutableExecutionError("Workspace path is already bound to a work attempt.");
       const createdAt = this.now();
       const attempt: TaskWorkAttempt = {
         work_attempt_id: workAttemptId, task_id: input.taskId, lease_id: input.leaseId, current_lease_epoch: input.leaseEpoch,
         epoch_history: [{ lease_id: input.leaseId, epoch: input.leaseEpoch, recorded_at: createdAt }], workspace_path: input.workspacePath,
+        workspace_identity: identity,
         state: "active", created_at: createdAt, concluded_at: null, conclusion_cause: null, postmortem_diff: null,
         checkpoints: [], execution_generations: [],
       };
       stored.attempts.push(attempt);
       return attempt;
     });
-    await this.bindWorkspaceMarker(attempt);
     return attempt;
   }
 
@@ -181,7 +193,7 @@ export class WorkDurabilityStore {
       try {
         const info = await lstat(logPath);
         if (info.isSymbolicLink() || !info.isFile()) throw new ImmutableExecutionError("Stdio log must be a regular daemon-owned file.");
-        if (info.size >= maxBytes) await rename(logPath, `${logPath}.${randomUUID()}.archive`);
+        if (info.size >= maxBytes) await this.archiveWithoutClobber(logPath);
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -214,11 +226,12 @@ export class WorkDurabilityStore {
 
   async garbageCollect(keepCleanlyConcluded: number): Promise<string[]> {
     const reserved = await this.mutate((stored) => {
-      const candidates = stored.attempts.filter((attempt) => (attempt.state === "cleanly_concluded" && attempt.concluded_at && attempt.postmortem_diff !== null) || attempt.state === "gc_pending")
+      const retrying = stored.attempts.filter((attempt) => attempt.state === "gc_pending");
+      const concluded = stored.attempts.filter((attempt) => attempt.state === "cleanly_concluded" && attempt.concluded_at && attempt.postmortem_diff !== null)
         .sort((a, b) => (b.concluded_at ?? "").localeCompare(a.concluded_at ?? ""))
         .slice(Math.max(0, keepCleanlyConcluded));
-      for (const attempt of candidates) attempt.state = "gc_pending";
-      return candidates.map((attempt) => ({ ...attempt }));
+      for (const attempt of concluded) attempt.state = "gc_pending";
+      return [...retrying, ...concluded].map((attempt) => ({ ...attempt }));
     });
     const removed: string[] = [];
     for (const attempt of reserved) {
@@ -227,13 +240,13 @@ export class WorkDurabilityStore {
         try { await lstat(attempt.workspace_path); }
         catch (error: unknown) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          await this.mutate((stored) => { const current = this.required(stored, attempt.work_attempt_id); if (current.state !== "gc_pending") throw new ImmutableExecutionError("GC reservation was lost."); current.state = "garbage_collected"; return current; });
+          await this.finishGarbageCollection(attempt.work_attempt_id);
           removed.push(attempt.work_attempt_id);
           continue;
         }
         await this.verifyWorkspaceForDeletion(attempt);
         await rm(attempt.workspace_path, { recursive: true, force: false });
-        await this.mutate((stored) => { const current = this.required(stored, attempt.work_attempt_id); if (current.state !== "gc_pending") throw new ImmutableExecutionError("GC reservation was lost."); current.state = "garbage_collected"; return current; });
+        await this.finishGarbageCollection(attempt.work_attempt_id);
         removed.push(attempt.work_attempt_id);
       } catch (error) {
         console.error(`Refusing to garbage collect work attempt ${attempt.work_attempt_id}:`, error);
@@ -275,6 +288,8 @@ export class WorkDurabilityStore {
     if (!value || typeof value !== "object") return false;
     const stored = value as Partial<StoredAttempts>;
     if (stored.version !== STORE_VERSION || !Array.isArray(stored.attempts) || typeof stored.checksum !== "string" || !stored.attempts.every(isAttempt)) return false;
+    if (new Set(stored.attempts.map((attempt) => attempt.work_attempt_id)).size !== stored.attempts.length
+      || new Set(stored.attempts.map((attempt) => resolve(attempt.workspace_path))).size !== stored.attempts.length) return false;
     const expected = Buffer.from(checksum(stored.attempts));
     const actual = Buffer.from(stored.checksum);
     return expected.length === actual.length && timingSafeEqual(expected, actual);
@@ -348,24 +363,85 @@ export class WorkDurabilityStore {
     const info = await lstat(attempt.workspace_path);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new ImmutableExecutionError("Refusing to delete a non-directory or symlink workspace.");
     if (!isStrictChild(root, await realpath(attempt.workspace_path))) throw new ImmutableExecutionError("Workspace escaped daemon ownership root.");
-    const markerPath = join(attempt.workspace_path, WORKSPACE_MARKER);
-    const markerInfo = await lstat(markerPath);
-    if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) throw new ImmutableExecutionError("Workspace marker is missing or unsafe.");
-    const marker: unknown = JSON.parse(await readFile(markerPath, "utf8"));
-    const valid = marker && typeof marker === "object" && (marker as Partial<WorkspaceMarker>).version === 1
-      && (marker as Partial<WorkspaceMarker>).work_attempt_id === attempt.work_attempt_id && (marker as Partial<WorkspaceMarker>).task_id === attempt.task_id;
-    if (!valid) throw new ImmutableExecutionError("Workspace marker does not match the durable attempt identity.");
+    await this.assertExactWorkspaceLayout(attempt.workspace_path, attempt.workspace_identity.repo, attempt.work_attempt_id, root);
+    const marker = await this.verifyProvisionedMarker(attempt.workspace_path, attempt.work_attempt_id, attempt.task_id);
+    if (marker.repo !== attempt.workspace_identity.repo || marker.remote_url !== attempt.workspace_identity.remote_url
+      || marker.resolved_revision !== attempt.workspace_identity.resolved_revision || marker.bare_path !== attempt.workspace_identity.bare_path) {
+      throw new ImmutableExecutionError("Workspace marker does not match the durable Git identity.");
+    }
+    await this.verifyWorkspaceGit(attempt);
   }
 
-  private async bindWorkspaceMarker(attempt: TaskWorkAttempt): Promise<void> {
-    const markerPath = join(attempt.workspace_path, WORKSPACE_MARKER);
-    try {
-      const info = await lstat(markerPath);
-      if (!info.isFile() || info.isSymbolicLink()) throw new ImmutableExecutionError("Workspace marker is unsafe.");
-      const marker: unknown = JSON.parse(await readFile(markerPath, "utf8"));
-      if (!marker || typeof marker !== "object" || (marker as { work_attempt_id?: unknown }).work_attempt_id !== attempt.work_attempt_id) throw new ImmutableExecutionError("Workspace marker does not match the supervisor-minted attempt ID.");
-      await writeFile(markerPath, `${JSON.stringify({ ...(marker as Record<string, unknown>), version: 1, task_id: attempt.task_id })}\n`, { mode: 0o600 });
-    } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  private async finishGarbageCollection(workAttemptId: string): Promise<void> {
+    await this.mutate((stored) => {
+      const current = this.required(stored, workAttemptId);
+      if (current.state === "garbage_collected") return current; // a crashed/restarted collector already completed it
+      if (current.state !== "gc_pending") throw new ImmutableExecutionError("GC reservation was lost.");
+      current.state = "garbage_collected";
+      return current;
+    });
+  }
+
+  private async verifyProvisionedMarker(workspacePath: string, workAttemptId: string, taskId: string): Promise<TaskWorkAttempt["workspace_identity"]> {
+    const markerPath = join(workspacePath, WORKSPACE_MARKER);
+    let markerInfo;
+    try { markerInfo = await lstat(markerPath); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new ImmutableExecutionError("Workspace marker is missing or unsafe.");
+      throw error;
+    }
+    if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) throw new ImmutableExecutionError("Workspace marker is missing or unsafe.");
+    const marker: unknown = JSON.parse(await readFile(markerPath, "utf8"));
+    const typed = marker as Partial<WorkspaceMarker>;
+    const valid = marker && typeof marker === "object" && typed.version === 1 && typed.work_attempt_id === workAttemptId && typed.task_id === taskId
+      && isSafeSegment(typed.repo) && typeof typed.remote_url === "string" && typed.remote_url.trim().length > 0
+      && typeof typed.resolved_revision === "string" && /^[0-9a-f]{40,64}$/i.test(typed.resolved_revision)
+      && typeof typed.bare_path === "string" && isAbsolute(typed.bare_path);
+    if (!valid) throw new ImmutableExecutionError("Workspace marker does not match the durable attempt identity.");
+    return { repo: typed.repo!, remote_url: normalizeRemote(typed.remote_url!), resolved_revision: typed.resolved_revision!, bare_path: resolve(typed.bare_path!) };
+  }
+
+  private async assertExactWorkspaceLayout(workspacePath: string, repo: string, workAttemptId: string, root?: string): Promise<void> {
+    const canonicalRoot = root ?? await this.managedRealDirectory(this.workspaceRoot, false);
+    const expectedPath = resolve(canonicalRoot, repo, workAttemptId);
+    if ((await realpath(workspacePath)) !== expectedPath || (await realpath(dirname(workspacePath))) === canonicalRoot) {
+      throw new ImmutableExecutionError("Workspace does not use the exact daemon worktree layout.");
+    }
+  }
+
+  private async verifyWorkspaceGit(attempt: TaskWorkAttempt): Promise<void> {
+    if (!this.git) throw new ImmutableExecutionError("A Git identity verifier is required before garbage collection.");
+    const identity = attempt.workspace_identity;
+    const expectedBare = await realpath(identity.bare_path);
+    const common = await this.queryGit(["-C", attempt.workspace_path, "rev-parse", "--git-common-dir"]);
+    const commonPath = isAbsolute(common) ? common : resolve(attempt.workspace_path, common);
+    if ((await realpath(commonPath)) !== expectedBare) throw new ImmutableExecutionError("Workspace Git common directory does not match durable identity.");
+    if (normalizeRemote(await this.queryGit(["-C", attempt.workspace_path, "remote", "get-url", "origin"])) !== identity.remote_url) throw new ImmutableExecutionError("Workspace Git remote does not match durable identity.");
+    const head = await this.queryGit(["-C", attempt.workspace_path, "rev-parse", "--verify", "HEAD^{commit}"]);
+    if (head !== identity.resolved_revision) throw new ImmutableExecutionError("Workspace Git HEAD does not match durable identity.");
+    await this.queryGit(["-C", attempt.workspace_path, "cat-file", "-e", `${head}^{commit}`]);
+  }
+
+  private async queryGit(args: string[]): Promise<string> {
+    const result = await this.git?.(args);
+    if (typeof result !== "string" || !result.trim()) throw new ImmutableExecutionError(`Git identity query failed: ${args.join(" ")}`);
+    return result.trim();
+  }
+
+  private async archiveWithoutClobber(logPath: string): Promise<void> {
+    for (let tries = 0; tries < 16; tries += 1) {
+      const archive = `${logPath}.${randomUUID()}.archive`;
+      try {
+        // link() is exclusive: EEXIST proves another archive owns this name. Only then remove the old name.
+        await link(logPath, archive);
+        await rm(logPath, { force: false });
+        return;
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw error;
+      }
+    }
+    throw new ImmutableExecutionError("Could not reserve a unique stdio archive name.");
   }
 
   private async write(stored: StoredAttempts): Promise<void> {
