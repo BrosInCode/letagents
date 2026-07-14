@@ -1,7 +1,7 @@
 import type { TaskStatus } from "../db.js";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 
-type RequestAuthKind = "session" | "owner_token" | "agent_session" | null | undefined;
+type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | null | undefined;
 
 const AGENT_OWNED_TASK_STATUSES = new Set<TaskStatus>([
   "assigned",

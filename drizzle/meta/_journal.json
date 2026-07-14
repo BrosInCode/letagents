@@ -484,6 +484,13 @@
       "when": 1784246400000,
       "tag": "0068_agent_session_bearers",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1784332800000,
+      "tag": "0069_supervisor_host_grants",
+      "breakpoints": true
     }
   ]
 }

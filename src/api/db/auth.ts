@@ -2,10 +2,10 @@ import crypto from "crypto";
 import { and, asc, desc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_session_bearers, room_agent_sessions } from "./schema.js";
+import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_session_bearers, room_agent_sessions, supervisor_host_grants } from "./schema.js";
 import { AUTH_STATE_TTL_MS, hashToken, nextPrefixedId } from "./utils.js";
 import { toRoomAgentSession } from "./mappers.js";
-import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionBearer, RoomAgentSessionRow, Session, SessionAccount } from "./types.js";
+import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionBearer, RoomAgentSessionRow, Session, SessionAccount, SupervisorHostGrant } from "./types.js";
 import type { RoomAgentSessionKind } from "../../shared/agent-presence.js";
 import { DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES, getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, type AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 
@@ -314,6 +314,25 @@ export function makeAgentSessionBearerToken(): string {
   return `lasb_${crypto.randomBytes(32).toString("base64url")}`;
 }
 
+export function makeSupervisorGrantToken(): string {
+  return `lashg_${crypto.randomBytes(32).toString("base64url")}`;
+}
+
+function toSupervisorHostGrant(row: typeof supervisor_host_grants.$inferSelect): SupervisorHostGrant {
+  return {
+    grant_id: row.grant_id,
+    owner_account_id: row.owner_account_id,
+    host_id: row.host_id,
+    installation_id: row.installation_id,
+    allowed_room_ids: row.allowed_room_ids,
+    allowed_agent_keys: row.allowed_agent_keys,
+    current_generation: row.current_generation,
+    issued_at: row.issued_at,
+    expires_at: row.expires_at,
+    revoked_at: row.revoked_at,
+  };
+}
+
 function toRoomAgentSessionBearer(row: typeof room_agent_session_bearers.$inferSelect): RoomAgentSessionBearer {
   return {
     bearer_id: row.bearer_id,
@@ -325,6 +344,7 @@ function toRoomAgentSessionBearer(row: typeof room_agent_session_bearers.$inferS
     expires_at: row.expires_at,
     revoked_at: row.revoked_at,
     rotated_from_bearer_id: row.rotated_from_bearer_id,
+    supervisor_grant_id: row.supervisor_grant_id,
   };
 }
 
@@ -345,6 +365,8 @@ export async function createRoomAgentSession(input: {
   owner_account_id: string;
   owner_label: string;
   ide_label: string;
+  supervisor_grant_id?: string | null;
+  worker_bearer_expires_at?: string | null;
 }): Promise<CreatedRoomAgentSession> {
   const nowDate = new Date();
   const now = nowDate.toISOString();
@@ -369,6 +391,7 @@ export async function createRoomAgentSession(input: {
     agent_instance_id: input.agent_instance_id ?? null,
     display_name: input.display_name,
     owner_account_id: input.owner_account_id,
+    supervisor_grant_id: input.supervisor_grant_id ?? null,
     owner_label: input.owner_label,
     ide_label: input.ide_label,
     created_at: now,
@@ -383,17 +406,110 @@ export async function createRoomAgentSession(input: {
       bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
       session_id: session.session_id,
       room_id: session.room_id,
+      supervisor_grant_id: input.supervisor_grant_id ?? null,
       token_hash: hashToken(workerBearer),
       generation: 1,
       capabilities: DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES,
       issued_at: now,
-      expires_at: newBearerExpiry(nowDate),
+      expires_at: input.worker_bearer_expires_at ?? newBearerExpiry(nowDate),
       revoked_at: null,
       rotated_from_bearer_id: null,
       created_at: now,
     });
     return { ...toRoomAgentSession(created as RoomAgentSessionRow), session_token: sessionToken, worker_bearer: workerBearer };
   });
+}
+
+export async function createSupervisorHostGrant(input: {
+  owner_account_id: string;
+  host_id: string;
+  installation_id: string;
+  allowed_room_ids: string[];
+  allowed_agent_keys: string[];
+  expires_at: string;
+}): Promise<{ grant: SupervisorHostGrant; token: string }> {
+  const now = new Date().toISOString();
+  const token = makeSupervisorGrantToken();
+  const record = {
+    grant_id: await nextPrefixedId("supervisor_host_grants", "supervisor_grant"),
+    owner_account_id: input.owner_account_id,
+    host_id: input.host_id,
+    installation_id: input.installation_id,
+    token_hash: hashToken(token),
+    allowed_room_ids: input.allowed_room_ids,
+    allowed_agent_keys: input.allowed_agent_keys,
+    current_generation: 1,
+    issued_at: now,
+    expires_at: input.expires_at,
+    revoked_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+  const [created] = await db.insert(supervisor_host_grants).values(record).returning();
+  return { grant: toSupervisorHostGrant(created), token };
+}
+
+export async function getSupervisorHostGrantByToken(token: string): Promise<SupervisorHostGrant | null> {
+  const [row] = await db.select().from(supervisor_host_grants).where(and(
+    eq(supervisor_host_grants.token_hash, hashToken(token)),
+    isNull(supervisor_host_grants.revoked_at),
+    gt(supervisor_host_grants.expires_at, new Date().toISOString()),
+  )).limit(1);
+  return row ? toSupervisorHostGrant(row) : null;
+}
+
+export async function getSupervisorHostGrantById(grantId: string): Promise<SupervisorHostGrant | null> {
+  const [row] = await db.select().from(supervisor_host_grants)
+    .where(eq(supervisor_host_grants.grant_id, grantId)).limit(1);
+  return row ? toSupervisorHostGrant(row) : null;
+}
+
+export async function rotateSupervisorHostGrant(input: {
+  grant_id: string;
+  expected_generation: number;
+  expires_at: string;
+}): Promise<{ grant: SupervisorHostGrant; token: string } | null> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${input.grant_id}`}, 0))`);
+    const [current] = await tx.select().from(supervisor_host_grants).where(and(
+      eq(supervisor_host_grants.grant_id, input.grant_id),
+      eq(supervisor_host_grants.current_generation, input.expected_generation),
+      isNull(supervisor_host_grants.revoked_at),
+      gt(supervisor_host_grants.expires_at, new Date().toISOString()),
+    )).limit(1);
+    if (!current) return null;
+    const token = makeSupervisorGrantToken();
+    const now = new Date().toISOString();
+    const [updated] = await tx.update(supervisor_host_grants).set({
+      token_hash: hashToken(token), expires_at: input.expires_at, updated_at: now,
+    }).where(eq(supervisor_host_grants.grant_id, input.grant_id)).returning();
+    return { grant: toSupervisorHostGrant(updated), token };
+  });
+}
+
+// This is intentionally a CAS rather than a property of the credential.  A
+// successor may take a host over only by proving the exact generation it saw.
+export async function advanceSupervisorHostGrantGeneration(input: {
+  grant_id: string;
+  expected_generation: number;
+}): Promise<SupervisorHostGrant | null> {
+  const now = new Date().toISOString();
+  const [updated] = await db.update(supervisor_host_grants).set({
+    current_generation: input.expected_generation + 1, updated_at: now,
+  }).where(and(
+    eq(supervisor_host_grants.grant_id, input.grant_id),
+    eq(supervisor_host_grants.current_generation, input.expected_generation),
+    isNull(supervisor_host_grants.revoked_at),
+    gt(supervisor_host_grants.expires_at, now),
+  )).returning();
+  return updated ? toSupervisorHostGrant(updated) : null;
+}
+
+export async function revokeSupervisorHostGrant(input: { grant_id: string; owner_account_id: string }): Promise<SupervisorHostGrant | null> {
+  const [updated] = await db.update(supervisor_host_grants).set({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .where(and(eq(supervisor_host_grants.grant_id, input.grant_id), eq(supervisor_host_grants.owner_account_id, input.owner_account_id), isNull(supervisor_host_grants.revoked_at)))
+    .returning();
+  return updated ? toSupervisorHostGrant(updated) : null;
 }
 
 export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
@@ -469,6 +585,19 @@ export async function getRoomAgentSessionByCredentials(input: {
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
 }
 
+export async function getSupervisorRoomAgentSession(input: {
+  session_id: string;
+  supervisor_grant_id: string;
+}): Promise<RoomAgentSession | null> {
+  const [row] = await db.select().from(room_agent_sessions).where(and(
+    eq(room_agent_sessions.session_id, input.session_id),
+    eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
+    eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+    isNull(room_agent_sessions.ended_at),
+  )).limit(1);
+  return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
+}
+
 export interface ResolvedRoomAgentSessionBearer {
   bearer: RoomAgentSessionBearer;
   session: RoomAgentSession;
@@ -518,6 +647,8 @@ export async function revokeRoomAgentSessionBearer(input: {
 export async function rotateRoomAgentSessionBearer(input: {
   bearer_id: string;
   capabilities?: AgentSessionBearerCapability[];
+  expires_at?: string;
+  supervisor_grant_id?: string;
 }): Promise<{ bearer: RoomAgentSessionBearer; token: string } | null> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_bearer:${input.bearer_id}`}, 0))`);
@@ -527,6 +658,7 @@ export async function rotateRoomAgentSessionBearer(input: {
       .where(and(
         eq(room_agent_session_bearers.bearer_id, input.bearer_id),
         isNull(room_agent_session_bearers.revoked_at),
+        ...(input.supervisor_grant_id ? [eq(room_agent_session_bearers.supervisor_grant_id, input.supervisor_grant_id)] : []),
       ))
       .limit(1);
     if (!current) return null;
@@ -542,11 +674,12 @@ export async function rotateRoomAgentSessionBearer(input: {
       bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
       session_id: current.session_id,
       room_id: current.room_id,
+      supervisor_grant_id: current.supervisor_grant_id,
       token_hash: hashToken(token),
       generation: current.generation + 1,
       capabilities: input.capabilities ?? current.capabilities,
       issued_at: now,
-      expires_at: newBearerExpiry(nowDate),
+      expires_at: input.expires_at ?? newBearerExpiry(nowDate),
       revoked_at: null,
       rotated_from_bearer_id: current.bearer_id,
       created_at: now,

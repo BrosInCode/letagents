@@ -99,6 +99,7 @@ export interface RoomAgentSession {
   agent_instance_id: string | null;
   display_name: string;
   owner_account_id: string;
+  supervisor_grant_id: string | null;
   owner_label: string;
   ide_label: string;
   repo_branch?: string | null;
@@ -123,6 +124,20 @@ export interface RoomAgentSessionBearer {
   expires_at: string;
   revoked_at: string | null;
   rotated_from_bearer_id: string | null;
+  supervisor_grant_id: string | null;
+}
+
+export interface SupervisorHostGrant {
+  grant_id: string;
+  owner_account_id: string;
+  host_id: string;
+  installation_id: string;
+  allowed_room_ids: string[];
+  allowed_agent_keys: string[];
+  current_generation: number;
+  issued_at: string;
+  expires_at: string;
+  revoked_at: string | null;
 }
 
 export interface RoomParticipant {
@@ -225,6 +240,7 @@ export interface RoomAgentSessionRow {
   agent_instance_id: string | null;
   display_name: string;
   owner_account_id: string;
+  supervisor_grant_id: string | null;
   owner_label: string;
   ide_label: string;
   repo_branch: string | null;

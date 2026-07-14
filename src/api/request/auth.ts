@@ -4,6 +4,7 @@ import {
   getOwnerTokenAccountByToken,
   getRoomAgentSessionBearerByToken,
   getSessionAccountByToken,
+  getSupervisorHostGrantByToken,
 } from "../db.js";
 import {
   parseCookies,
@@ -46,6 +47,11 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
       account: ownerTokenAccount,
       authKind: "owner_token",
     };
+  }
+
+  const supervisorGrant = await getSupervisorHostGrantByToken(providerToken);
+  if (supervisorGrant) {
+    return { account: null, authKind: "supervisor_grant", supervisorGrant };
   }
 
   if (isAgentSessionBearerFeatureEnabled()) {

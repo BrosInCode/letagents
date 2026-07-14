@@ -7,5 +7,6 @@ export type * from "./ipc-types/core.js";
 export type * from "./ipc-types/rental.js";
 export type * from "./ipc-types/room.js";
 export type * from "./ipc-types/setup.js";
+export type * from "./ipc-types/supervisor-grant.js";
 export type * from "./ipc-types/tasks.js";
 export type * from "./ipc-types/board-governance.js";
