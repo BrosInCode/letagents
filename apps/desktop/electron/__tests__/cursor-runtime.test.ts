@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createElectronTestEnv } from "./harness.js";
+import { createElectronTestEnv, installNoProdNetworkGuard } from "./harness.js";
 
 const { tempDir, resetState } = createElectronTestEnv({
   prefix: "letagents-cursor-runtime-",
@@ -14,6 +14,12 @@ const cursorSourceHome = join(tempDir, "cursor-source-home");
 mkdirSync(join(cursorSourceHome, ".cursor"), { recursive: true });
 writeFileSync(join(cursorSourceHome, ".cursor", "mcp.json"), '{"mcpServers":{"filesystem":{"command":"npx"}}}\n');
 process.env.LETAGENTS_CURSOR_SOURCE_HOME = cursorSourceHome;
+
+// The managed-worker desktop-heartbeat/desktop-pause timer fires background
+// `apiFetch` calls that these fixture-seeded sessions never await. Without this
+// guard those calls resolve against `LETAGENTS_API_URL` — which defaults to the
+// PRODUCTION host when unset — so intercept them for the whole suite.
+const netGuard = installNoProdNetworkGuard({ autoRestore: false });
 
 const {
   createDesktopCursorRuntime,
@@ -830,4 +836,11 @@ test("Cursor usage-limit errors block immediately and publish one visible failur
     { text: "Reply after quota recovery.", eventId: "msg_1" },
     { text: "Reply after quota recovery.", eventId: "msg_after_limit" },
   ]);
+});
+
+test("no runtime network call escapes to the real API during this suite", () => {
+  // The only outbound fetch these fixture-seeded sessions may make is the
+  // managed-worker heartbeat/pause timer, which the guard intercepts locally.
+  // Anything else (a real prod call) would be recorded here.
+  assert.deepEqual(netGuard.escapedUrls(), []);
 });
