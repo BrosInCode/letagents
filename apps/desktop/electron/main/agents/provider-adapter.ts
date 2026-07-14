@@ -144,3 +144,41 @@ export interface ProviderAdapter {
    */
   onExit(handle: ProviderHandle, listener: (payload: ProviderTerminalPayload) => void): () => void;
 }
+
+// task_28 cell (d): a raw SIGKILL leaves NO native terminal payload in the
+// provider's transcript, and cell (c)/(d) show the outer process just exits.
+// So the adapter SYNTHESIZES the terminal payload from the OBSERVED OS exit
+// (code/signal) rather than trusting the harness (or model prose) to emit one.
+// `stopRequested` disambiguates a stop WE initiated from an unexpected death:
+// the same SIGTERM/SIGKILL is a clean "stopped"/"killed" when we asked for it,
+// but a "crashed" when it came from outside (OOM, external kill, dev restart).
+export function synthesizeTerminalPayload(input: {
+  exitCode: number | null;
+  signal: string | null;
+  providerContinuationId: string | null;
+  endedAt: string;
+  stopRequested?: boolean;
+}): ProviderTerminalPayload {
+  const { exitCode, signal, stopRequested = false } = input;
+  let terminalCause: ProviderTerminalCause;
+  if (signal === "SIGKILL" || signal === "SIGABRT") {
+    terminalCause = stopRequested ? "killed" : "crashed";
+  } else if (signal === "SIGTERM" || signal === "SIGINT" || signal === "SIGHUP") {
+    terminalCause = stopRequested ? "stopped" : "crashed";
+  } else if (signal) {
+    // any other terminating signal we didn't send
+    terminalCause = "crashed";
+  } else if (exitCode === 0) {
+    terminalCause = stopRequested ? "stopped" : "exited";
+  } else {
+    // nonzero or null exit code with no signal: clean only if we asked to stop
+    terminalCause = stopRequested ? "stopped" : "crashed";
+  }
+  return {
+    endedAt: input.endedAt,
+    exitCode,
+    signal,
+    terminalCause,
+    providerContinuationId: input.providerContinuationId,
+  };
+}
