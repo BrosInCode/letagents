@@ -1,4 +1,5 @@
 import { lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { withWorkspaceFence } from "./workspace-fence.js";
 
@@ -110,9 +111,15 @@ export class WorkspaceProvisioner {
         // A crash after worktree-add is recoverable: prove the exact expected
         // Git identity, then finish the final marker rather than orphaning it.
         const recovered = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision);
-        await this.verifyWorkspace(workspace, recovered);
-        await this.writeMarker(markerPath, recovered);
-        return { path: workspace, reused: true, identity: recovered };
+        try {
+          await this.verifyWorkspace(workspace, recovered);
+          await this.writeMarker(markerPath, recovered);
+          return { path: workspace, reused: true, identity: recovered };
+        } catch {
+          // It is daemon-owned (exact layout + held fence) but cannot prove it
+          // is this attempt. Keep it for inspection and make the retry usable.
+          await this.quarantineWorkspace(workspace);
+        }
       }
 
       const identity = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision);
@@ -129,6 +136,10 @@ export class WorkspaceProvisioner {
     const resolvedRevision = await this.query(["--git-dir", barePath, "rev-parse", "--verify", `${revision}^{commit}`]);
     await this.query(["--git-dir", barePath, "cat-file", "-e", `${resolvedRevision}^{commit}`]);
     return { version: 1, repo, work_attempt_id: workAttemptId, task_id: taskId, remote_url: remoteUrl, resolved_revision: resolvedRevision, bare_path: barePath };
+  }
+
+  private async quarantineWorkspace(workspace: string): Promise<void> {
+    await rename(workspace, `${workspace}.quarantine.${randomUUID()}`);
   }
 
   private async verifyBare(bare: string, remoteUrl: string): Promise<void> {
