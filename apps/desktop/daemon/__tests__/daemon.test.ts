@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +36,13 @@ test("singleton fences a second daemon and detects a newer generation", async ()
     await writeFile(`${lock}.generation`, "2\n");
     await assert.rejects(() => first.assertCurrent(), DaemonFenceLostError);
     await first.release();
+    assert.equal((await stat(lock)).isFile(), true, "persistent inode prevents post-release unlink races");
+    await writeFile(`${lock}.generation`, "partial");
+    const second = new DaemonSingleton(join(env.root, "second.lock"), "darwin");
+    await second.acquire();
+    await writeFile(`${join(env.root, "second.lock")}.generation`, "partial");
+    await assert.rejects(() => second.assertCurrent(), /malformed/);
+    await second.release();
   } finally { await env.cleanup(); }
 });
 
@@ -47,6 +54,9 @@ test("manifest writes CAS, fsync/rename payloads, and quarantines corruption", a
     const saved = await store.write(0, [entry]);
     assert.equal(saved.generation, 1);
     await assert.rejects(() => store.write(0, []), ManifestConflictError);
+    const concurrent = await Promise.allSettled([store.write(1, [{ ...entry, id: "left" }]), store.write(1, [{ ...entry, id: "right" }])]);
+    assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(concurrent.filter((result) => result.status === "rejected" && result.reason instanceof ManifestConflictError).length, 1);
     await writeFile(path, '{"manifest":{"generation":7},"checksum":"bad"}');
     assert.deepEqual(await store.load(), { generation: 0, entries: [] });
     assert.ok((await readdir(env.root)).some((name) => name.startsWith("manifest.json.corrupt-")));
@@ -71,7 +81,10 @@ test("control socket rejects protocol mismatch explicitly", async () => {
   try {
     const socketPath = join(env.root, "daemon.sock");
     const socket = new DaemonControlSocket(socketPath, () => ({ healthy: true }));
+    await chmod(env.root, 0o755);
     await socket.start();
+    assert.equal((await stat(env.root)).mode & 0o777, 0o700);
+    assert.equal((await stat(socketPath)).mode & 0o777, 0o600);
     const response = await new Promise<string>((resolve, reject) => {
       const client = createConnection(socketPath);
       let received = "";
@@ -81,6 +94,41 @@ test("control socket rejects protocol mismatch explicitly", async () => {
       client.on("connect", () => client.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION + 1, id: "bad", method: "manifest.list" }) + "\n"));
     });
     assert.match(response, /Protocol version mismatch/);
+    await socket.stop();
+  } finally { await env.cleanup(); }
+});
+
+test("fence loss fatally stops the control endpoint", async () => {
+  const env = await fixture();
+  try {
+    const socketPath = join(env.root, "fatal.sock");
+    let socket!: DaemonControlSocket;
+    const fatal = new Error("fence lost"); fatal.name = "DaemonFenceLostError";
+    socket = new DaemonControlSocket(socketPath, () => { throw fatal; }, () => { setTimeout(() => { void socket.stop(); }, 0); }, 32);
+    await socket.start();
+    await new Promise<void>((resolve, reject) => {
+      const client = createConnection(socketPath); client.once("error", reject);
+      client.on("connect", () => client.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, method: "fatal" }) + "\n"));
+      client.on("close", () => resolve());
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await assert.rejects(() => new Promise<void>((resolve, reject) => {
+      const client = createConnection(socketPath); client.once("connect", () => resolve()); client.once("error", reject);
+    }));
+  } finally { await env.cleanup(); }
+});
+
+test("control socket bounds an oversized JSON-lines frame", async () => {
+  const env = await fixture();
+  try {
+    const socketPath = join(env.root, "bounded.sock");
+    const socket = new DaemonControlSocket(socketPath, () => ({ ok: true }), undefined, 16);
+    await socket.start();
+    await new Promise<void>((resolve, reject) => {
+      const client = createConnection(socketPath); client.once("error", reject);
+      client.on("connect", () => client.write("x".repeat(17)));
+      client.on("close", () => resolve());
+    });
     await socket.stop();
   } finally { await env.cleanup(); }
 });

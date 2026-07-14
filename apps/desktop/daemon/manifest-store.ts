@@ -13,6 +13,7 @@ function checksum(manifest: DaemonManifest): string {
 }
 
 export class ManifestStore {
+  private writes: Promise<void> = Promise.resolve();
   constructor(readonly path: string) {}
 
   async load(): Promise<DaemonManifest> {
@@ -28,25 +29,30 @@ export class ManifestStore {
   }
 
   async write(expectedGeneration: number, entries: DaemonManifest["entries"]): Promise<DaemonManifest> {
-    const current = await this.load();
-    if (current.generation !== expectedGeneration) {
-      throw new ManifestConflictError(`Manifest generation ${current.generation} does not match expected ${expectedGeneration}.`);
-    }
-    const manifest: DaemonManifest = { generation: expectedGeneration + 1, entries };
-    const serialized = `${JSON.stringify({ manifest, checksum: checksum(manifest) })}\n`;
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.${Date.now()}.tmp`;
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.writeFile(serialized, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, this.path);
-    const directory = await open(dirname(this.path), "r");
-    try { await directory.sync(); } finally { await directory.close(); }
-    return manifest;
+    return this.serialize(async () => {
+      const current = await this.load();
+      if (current.generation !== expectedGeneration) {
+        throw new ManifestConflictError(`Manifest generation ${current.generation} does not match expected ${expectedGeneration}.`);
+      }
+      const manifest: DaemonManifest = { generation: expectedGeneration + 1, entries };
+      const serialized = `${JSON.stringify({ manifest, checksum: checksum(manifest) })}\n`;
+      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+      const temporary = `${this.path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+      const handle = await open(temporary, "wx", 0o600);
+      try { await handle.writeFile(serialized, "utf8"); await handle.sync(); } finally { await handle.close(); }
+      await rename(temporary, this.path);
+      const directory = await open(dirname(this.path), "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+      return manifest;
+    });
+  }
+
+  private async serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.writes;
+    let release!: () => void;
+    this.writes = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
   }
 
   private async quarantine(): Promise<void> {

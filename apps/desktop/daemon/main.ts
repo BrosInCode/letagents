@@ -2,7 +2,7 @@ import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
-import { DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
+import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import type { DaemonManifestEntry, ObservedState, PolicyCondition } from "./types.js";
 
 export class SupervisorDaemon {
@@ -20,7 +20,7 @@ export class SupervisorDaemon {
       await this.singleton.assertCurrent();
       if (request.method === "manifest.list") return (await this.store.load()).entries;
       throw new Error(`Unsupported daemon method: ${request.method}`);
-    });
+    }, async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); });
   }
 
   async start(): Promise<void> {
