@@ -9,6 +9,7 @@ const {
   WorkerBearerRuntimeConfigurationError,
 } = await import("../server/runtime/worker-bearer.js");
 const { apiCall } = await import("../server/runtime/api.js");
+const { agentSessionCredentials } = await import("../server/runtime/agent-sessions.js");
 
 function withAuthEnv<T>(
   values: { bearer?: string | undefined; owner?: string | undefined },
@@ -57,5 +58,14 @@ test("worker bearer mode rejects dual owner credentials before an API request", 
 test("blank worker bearer does not activate worker mode", async () => {
   await withAuthEnv({ bearer: "  ", owner: undefined }, async () => {
     assert.deepEqual(getWorkerBearerRuntime(), { mode: "owner" });
+  });
+});
+
+test("worker bearer mode omits persisted session credentials from room payloads", async () => {
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+    assert.deepEqual(agentSessionCredentials({
+      session_id: "agent_session_owner",
+      session_token: "owner-session-secret",
+    } as never), {});
   });
 });
