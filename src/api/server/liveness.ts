@@ -41,6 +41,7 @@ import { createRoomStallSweeper } from "../rooms/room-stall-sweep.js";
 import {
   createLivenessSweeper,
   LIVENESS_SWEEP_INTERVAL_MS,
+  resolveOfflineAnnounceAfterMs,
   type LivenessAnnouncementInput,
 } from "../rooms/liveness-sweep.js";
 import { isReachableRoomAgentActivityState } from "../../shared/room-agent-activity.js";
@@ -89,6 +90,9 @@ const livenessSweeper = createLivenessSweeper({
     (await getActiveBoardManager(roomId))?.agent_session_id ?? null,
   announceOffline,
   announceRecovery,
+  offlineAnnounceAfterMs: resolveOfflineAnnounceAfterMs(
+    process.env.LETAGENTS_LIVENESS_NOTICE_AFTER_MS
+  ),
   onError: (roomId, error) => {
     console.error(`Liveness sweep failed for room ${roomId}:`, error);
   },
