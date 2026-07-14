@@ -4,9 +4,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerMessageTools, registerStatusTools } from "../server/tools/messages.js";
 import { buildSendMessageRequestBody } from "../server/tools/messages/send-tool.js";
 import {
+  DEFAULT_WAIT_CATCHUP_LIMIT,
   buildWaitForMessagesHistoryPageRequest,
   buildWaitForMessagesRequestOptions,
   filterSilentActivationMessages,
+  planWaitForMessagesFetch,
   resolveEffectiveAfterMessageId,
 } from "../server/tools/messages/wait-tool.js";
 import {
@@ -199,6 +201,40 @@ test("wait_for_messages filters silent activation messages without losing cursor
   assert.deepEqual(result.messages.map((message) => message.id), ["msg_2"]);
   assert.deepEqual(result.skipped_message_ids, ["msg_1", "msg_3"]);
   assert.equal(result.last_observed_message_id, "msg_3");
+});
+
+test("wait_for_messages catches up on a bounded recent tail when no cursor is given", () => {
+  const plan = planWaitForMessagesFetch({ effectiveAfterMessageId: undefined });
+
+  assert.deepEqual(plan, { mode: "catch_up_tail", limit: DEFAULT_WAIT_CATCHUP_LIMIT });
+  // The bound must be finite and small so a no-cursor call never replays the
+  // entire room history (the multi-MB busy-room bug this fix addresses).
+  assert.ok(plan.mode === "catch_up_tail" && plan.limit > 0 && plan.limit <= 500);
+});
+
+test("wait_for_messages respects an explicit catch-up limit override", () => {
+  const plan = planWaitForMessagesFetch({ effectiveAfterMessageId: undefined, catchupLimit: 25 });
+
+  assert.deepEqual(plan, { mode: "catch_up_tail", limit: 25 });
+});
+
+test("wait_for_messages keeps unbounded after-cursor behavior when a cursor is present", () => {
+  const plan = planWaitForMessagesFetch({ effectiveAfterMessageId: "msg_42" });
+
+  // With a cursor the tool must still return everything after it (genuine
+  // "new since I last polled"), so no tail cap is applied.
+  assert.deepEqual(plan, { mode: "after_cursor", after: "msg_42" });
+});
+
+test("wait_for_messages description no longer promises the full history on a no-cursor call", () => {
+  const registrations = collectMessageToolRegistrations();
+  const wait = registrations.find((registration) => registration.name === "wait_for_messages");
+
+  assert.ok(wait, "wait_for_messages should be registered");
+  const afterField = (wait.schema as { after_message_id?: { description?: string } }).after_message_id;
+  const description = afterField?.description ?? "";
+  assert.doesNotMatch(description, /all existing messages/i);
+  assert.match(description, /most recent/i);
 });
 
 test("wait_for_messages honors explicit cursors instead of forcing stored progress", () => {

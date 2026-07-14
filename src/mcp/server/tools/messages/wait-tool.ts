@@ -8,6 +8,7 @@ import {
   currentRoom,
   ensureAgentIdentity,
   getFallbackProjectId,
+  getLatestLocalChatMessages,
   getLocalChatMessages,
   getLastMessageId,
   getRememberedRoomPresence,
@@ -28,9 +29,36 @@ import {
 import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
 import { attachAgentMessageActivations } from "../../../../shared/activation-routing.js";
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
+import { fetchRecentRemoteMessages } from "./read-tool.js";
 import { jsonToolResponse } from "./response.js";
 
 const DEFAULT_POLL_TIMEOUT_MS = 30000;
+
+// When wait_for_messages is called WITHOUT an after_message_id cursor, it must
+// catch up on only the most RECENT messages instead of replaying the entire
+// room history (busy rooms archive millions of characters, which blows the
+// tool's token budget). This bounds that no-cursor catch-up to a recent tail.
+export const DEFAULT_WAIT_CATCHUP_LIMIT = 100;
+
+export type WaitForMessagesFetchPlan =
+  | { mode: "catch_up_tail"; limit: number }
+  | { mode: "after_cursor"; after: string };
+
+// Decide how the initial fetch should behave. With a cursor we return
+// everything after it (genuine "new since I last polled", already bounded);
+// without one we fetch only the bounded recent tail.
+export function planWaitForMessagesFetch(input: {
+  effectiveAfterMessageId?: string;
+  catchupLimit?: number;
+}): WaitForMessagesFetchPlan {
+  if (input.effectiveAfterMessageId) {
+    return { mode: "after_cursor", after: input.effectiveAfterMessageId };
+  }
+  return {
+    mode: "catch_up_tail",
+    limit: input.catchupLimit ?? DEFAULT_WAIT_CATCHUP_LIMIT,
+  };
+}
 
 type MessageRecord = Record<string, unknown>;
 
@@ -323,7 +351,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       after_message_id: z
         .string()
         .optional()
-        .describe("Only return messages after this message ID (e.g. 'msg_3'). If omitted, returns all existing messages immediately."),
+        .describe(`Only return messages after this message ID (e.g. 'msg_3'). If omitted, returns just the most recent ${DEFAULT_WAIT_CATCHUP_LIMIT} messages (bounded recent tail) instead of the full room history, and advances the session cursor to the newest message.`),
       timeout: z
         .number()
         .optional()
@@ -353,10 +381,19 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         const effectiveAfterMessageId = resolveEffectiveAfterMessageId({
           requestedAfterMessageId: after_message_id,
         });
-        const existing = await getLocalChatMessages(effectiveLocalRoomId, {
-          after: effectiveAfterMessageId,
-          include_prompt_only: true,
-        });
+        const fetchPlan = planWaitForMessagesFetch({ effectiveAfterMessageId });
+        // Without a cursor, page BACKWARDS from the tail (getLatest…) so we
+        // return the most-recent messages, not the oldest N; with a cursor we
+        // keep the unchanged forward "everything after the cursor" behavior.
+        const existing = fetchPlan.mode === "catch_up_tail"
+          ? await getLatestLocalChatMessages(effectiveLocalRoomId, {
+              limit: fetchPlan.limit,
+              include_prompt_only: true,
+            })
+          : await getLocalChatMessages(effectiveLocalRoomId, {
+              after: effectiveAfterMessageId,
+              include_prompt_only: true,
+            });
         const replayingExistingMessages = existing.messages.length > 0;
         const result = replayingExistingMessages
           ? existing
@@ -393,60 +430,97 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const clientTimeout =
         serverTimeout + (serverTimeout > 120_000 ? 120_000 : 5_000);
 
-      const params = new URLSearchParams();
       const effectiveAfterMessageId = resolveEffectiveAfterMessageId({
         requestedAfterMessageId: after_message_id,
       });
-      if (effectiveAfterMessageId) params.set("after", effectiveAfterMessageId);
-      params.set("timeout", String(serverTimeout));
-
-      const queryString = params.toString();
+      const fetchPlan = planWaitForMessagesFetch({ effectiveAfterMessageId });
       const deliveryHeaders = buildAgentDeliveryHeaders(agentSession);
-      const firstResult = await roomScopedApiCall<{
-        messages?: Array<{ id?: string }>;
-        has_more?: boolean;
-        room_id?: string;
-        project_id?: string;
-      }>({
-        room_id: targetRoomId,
-        project_id: targetProjectId,
-        room_path: (targetRoomId) =>
-          appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
-        project_path: (targetProjectId) =>
-          appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
-        options: buildWaitForMessagesRequestOptions({
-          deliveryHeaders,
-          signal: AbortSignal.timeout(clientTimeout),
-        }),
-      });
 
-      const allMessages: unknown[] = [...(firstResult.messages ?? [])];
-      const roomIdFromResponse = firstResult.room_id || firstResult.project_id;
+      const allMessages: unknown[] = [];
+      let roomIdFromResponse: string | undefined;
 
-      if (firstResult.has_more && allMessages.length > 0) {
-        let afterCursor = (allMessages[allMessages.length - 1] as { id?: string })?.id;
+      // Long-poll the server (blocks up to serverTimeout for new messages),
+      // optionally seeded with a cursor. Shared by the cursor path and by the
+      // no-cursor empty-tail fallback so a quiet room still blocks instead of
+      // busy-spinning. When `after` is provided this also catches up any backlog
+      // after the cursor via forward pagination.
+      const longPollFromCursor = async (after?: string): Promise<void> => {
+        const params = new URLSearchParams();
+        if (after) params.set("after", after);
+        params.set("timeout", String(serverTimeout));
 
-        while (afterCursor) {
-          const pageParams = new URLSearchParams();
-          pageParams.set("after", afterCursor);
-          const qs = pageParams.toString();
-
-          const page = await roomScopedApiCall<{
-            messages?: Array<{ id?: string }>;
-            has_more?: boolean;
-          }>(buildWaitForMessagesHistoryPageRequest({
-            targetRoomId,
-            targetProjectId,
-            queryString: qs,
+        const queryString = params.toString();
+        const firstResult = await roomScopedApiCall<{
+          messages?: Array<{ id?: string }>;
+          has_more?: boolean;
+          room_id?: string;
+          project_id?: string;
+        }>({
+          room_id: targetRoomId,
+          project_id: targetProjectId,
+          room_path: (targetRoomId) =>
+            appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
+          project_path: (targetProjectId) =>
+            appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
+          options: buildWaitForMessagesRequestOptions({
             deliveryHeaders,
-          }));
+            signal: AbortSignal.timeout(clientTimeout),
+          }),
+        });
 
-          const msgs = page.messages ?? [];
-          allMessages.push(...msgs);
+        allMessages.push(...(firstResult.messages ?? []));
+        roomIdFromResponse = roomIdFromResponse || firstResult.room_id || firstResult.project_id;
 
-          if (!page.has_more || msgs.length === 0) break;
-          afterCursor = (msgs[msgs.length - 1] as { id?: string })?.id;
+        if (firstResult.has_more && allMessages.length > 0) {
+          let afterCursor = (allMessages[allMessages.length - 1] as { id?: string })?.id;
+
+          while (afterCursor) {
+            const pageParams = new URLSearchParams();
+            pageParams.set("after", afterCursor);
+            const qs = pageParams.toString();
+
+            const page = await roomScopedApiCall<{
+              messages?: Array<{ id?: string }>;
+              has_more?: boolean;
+            }>(buildWaitForMessagesHistoryPageRequest({
+              targetRoomId,
+              targetProjectId,
+              queryString: qs,
+              deliveryHeaders,
+            }));
+
+            const msgs = page.messages ?? [];
+            allMessages.push(...msgs);
+
+            if (!page.has_more || msgs.length === 0) break;
+            afterCursor = (msgs[msgs.length - 1] as { id?: string })?.id;
+          }
         }
+      };
+
+      if (fetchPlan.mode === "catch_up_tail") {
+        // No cursor: catch up on only the bounded recent tail. Mirror
+        // read_messages by paging BACKWARDS from the tail (before=latest) so we
+        // return the newest N and never walk the full room history. This also
+        // advances the session cursor to the newest message returned.
+        const recent = await fetchRecentRemoteMessages({
+          targetRoomId,
+          targetProjectId,
+          limit: fetchPlan.limit,
+        });
+        if (recent.messages.length > 0) {
+          allMessages.push(...recent.messages);
+          roomIdFromResponse = recent.roomIdFromResponse;
+        } else {
+          // Empty tail => the room is effectively empty, so there is nothing to
+          // dump. Fall through to the long-poll (no cursor) so a worker looping
+          // in a quiet room blocks up to the timeout instead of busy-spinning,
+          // exactly as the local path does via waitForLocalChatMessages.
+          roomIdFromResponse = recent.roomIdFromResponse;
+          await longPollFromCursor();
+        }
+      } else {
+        await longPollFromCursor(fetchPlan.after);
       }
 
       const routing = filterSilentActivationMessages(allMessages);

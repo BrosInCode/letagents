@@ -219,6 +219,11 @@ test("worker bearer startup binds its configured room locally for omitted-room t
         }
         if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
         if (requestUrl.includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+        // No-cursor wait_for_messages now reads the bounded recent tail
+        // (GET /messages?before=…&limit=…) instead of long-polling /messages/poll.
+        if (requestUrl.includes("/messages?") && requestUrl.includes("before=")) {
+          return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+        }
         return new Response(JSON.stringify({ id: "msg_autobind", text: "hello" }), { status: 200 });
       };
       await autoJoinFromContext();
@@ -236,7 +241,11 @@ test("worker bearer startup binds its configured room locally for omitted-room t
       );
     });
     assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages")));
-    assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages/poll")));
+    // No-cursor wait autobinds to the configured room and reads its bounded
+    // recent tail (before=/limit=), not the long-poll endpoint.
+    assert.ok(requests.some((url) =>
+      url.includes("/rooms/room_autobind/messages?") && url.includes("before=") && url.includes("limit=")
+    ));
   } finally {
     globalThis.fetch = originalFetch;
     process.chdir(originalCwd);
@@ -260,6 +269,11 @@ test("worker bearer mode runs the room register, send, and wait loop without ses
       if (String(url).endsWith("/agent-sessions")) assert.fail("worker bearer registration must not call the owner registration route");
       if (String(url).endsWith("/presence")) return new Response(null, { status: 204 });
       if (String(url).includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      // No-cursor wait_for_messages now reads the bounded recent tail
+      // (GET /messages?before=…&limit=…) instead of long-polling /messages/poll.
+      if (String(url).includes("/messages?") && String(url).includes("before=")) {
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      }
       return new Response(JSON.stringify({ id: "msg_1", text: "hello" }), { status: 200 });
     };
 
@@ -276,14 +290,75 @@ test("worker bearer mode runs the room register, send, and wait loop without ses
     assert.match(sendResult.content[0]!.text, /msg_1/);
     assert.match(waitResult.content[0]!.text, /messages/);
     const messageRequest = requests.find((request) => request.url.endsWith("/rooms/room_1/messages"));
-    const pollRequest = requests.find((request) => request.url.includes("/rooms/room_1/messages/poll"));
+    // No-cursor wait reads the bounded recent tail (before=/limit=) instead of
+    // long-polling /messages/poll.
+    const tailRequest = requests.find((request) =>
+      request.url.includes("/rooms/room_1/messages?") &&
+      request.url.includes("before=") &&
+      request.url.includes("limit=")
+    );
     assert.ok(messageRequest);
-    assert.ok(pollRequest);
-    for (const request of [messageRequest, pollRequest]) {
+    assert.ok(tailRequest);
+    for (const request of [messageRequest, tailRequest]) {
       assert.equal(request.headers.authorization, "Bearer worker-secret");
       assert.equal(request.body?.agent_session_id, undefined);
       assert.equal(request.body?.agent_session_token, undefined);
     }
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("no-cursor wait returns a non-empty tail immediately but long-polls an empty tail", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+    const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+
+    // Non-empty tail: return the bounded recent tail immediately and NEVER hit
+    // the long-poll endpoint (this is the dump-bug fix).
+    const tailRequests: string[] = [];
+    globalThis.fetch = async (url) => {
+      const requestUrl = String(url);
+      tailRequests.push(requestUrl);
+      if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
+      if (requestUrl.includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      if (requestUrl.includes("/messages?") && requestUrl.includes("before=")) {
+        return new Response(JSON.stringify({ messages: [{ id: "msg_recent", text: "recent" }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+    };
+    const tailResult = await wait({ room_id: "room_tail", timeout: 1 });
+    assert.match(tailResult.content[0]!.text, /msg_recent/);
+    assert.ok(
+      tailRequests.some((url) => url.includes("/rooms/room_tail/messages?") && url.includes("before=")),
+      "non-empty tail must probe the bounded tail endpoint",
+    );
+    assert.ok(
+      !tailRequests.some((url) => url.includes("/messages/poll")),
+      "non-empty tail must NOT long-poll",
+    );
+
+    // Empty tail: fall through to the /messages/poll long-poll so a worker
+    // looping in a quiet room blocks instead of busy-spinning.
+    const emptyRequests: string[] = [];
+    globalThis.fetch = async (url) => {
+      const requestUrl = String(url);
+      emptyRequests.push(requestUrl);
+      if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
+      if (requestUrl.includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      if (requestUrl.includes("/messages?") && requestUrl.includes("before=")) {
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+    };
+    await wait({ room_id: "room_quiet", timeout: 1 });
+    assert.ok(
+      emptyRequests.some((url) => url.includes("/rooms/room_quiet/messages?") && url.includes("before=")),
+      "empty tail still probes the tail endpoint first",
+    );
+    assert.ok(
+      emptyRequests.some((url) => url.includes("/rooms/room_quiet/messages/poll")),
+      "empty tail must fall through to the long-poll endpoint",
+    );
   });
   globalThis.fetch = originalFetch;
 });
