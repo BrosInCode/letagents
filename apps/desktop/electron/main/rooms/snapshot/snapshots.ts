@@ -3,6 +3,7 @@ import type {
   DesktopLocalRoomInfo,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
+  DesktopSnapshotSourceStates,
   DesktopTaskSummary,
 } from "../../../ipc-types.js";
 import type { DesktopApiError } from "../../auth.js";
@@ -34,6 +35,7 @@ const emptySnapshotCollections = {
   boardSettings: defaultBoardSettings(),
   messages: [],
   githubEvents: null,
+  sourceStates: readySourceStates(),
 };
 
 function defaultBoardSettings(): DesktopBoardSettingsSummary {
@@ -41,6 +43,27 @@ function defaultBoardSettings(): DesktopBoardSettingsSummary {
     managerMode: "manager_optional",
     activeManager: null,
     pendingIntentCount: 0,
+  };
+}
+
+/**
+ * All-ready source states, used for snapshots that are not built from a live
+ * fetch (missing/error/unavailable placeholders and local rooms). Consumers
+ * treat these as "nothing failed to load".
+ */
+export function readySourceStates(): DesktopSnapshotSourceStates {
+  const ready = () => ({ status: "ready" as const, error: null });
+  return {
+    focusRooms: ready(),
+    tasks: ready(),
+    participants: ready(),
+    presence: ready(),
+    reasoning: ready(),
+    activityHistory: ready(),
+    roomArtifacts: ready(),
+    boardSettings: ready(),
+    messages: ready(),
+    githubEvents: ready(),
   };
 }
 
@@ -130,6 +153,7 @@ export function createLocalReadyRoomSnapshot(input: {
       )
       .map(mapRoomMessagePayload),
     githubEvents: null,
+    sourceStates: readySourceStates(),
   };
 }
 

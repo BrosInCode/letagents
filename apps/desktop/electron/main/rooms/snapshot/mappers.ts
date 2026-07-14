@@ -46,6 +46,7 @@ export function mapSnapshotData(data: RoomSnapshotData) {
     boardSettings: mapBoardSettings(data.boardSettingsData),
     messages: mapMessages(data.messagesData),
     githubEvents: mapGitHubEvents(data.githubEventsData),
+    sourceStates: data.sourceStates,
   };
 }
 

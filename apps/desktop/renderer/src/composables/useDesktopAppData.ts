@@ -601,5 +601,8 @@ function createOptimisticSelectedSnapshot(
     boardSettings: baseRootSnapshot.boardSettings,
     messages: [],
     githubEvents: null,
+    // Optimistic placeholder while the focus room loads; inherit the root's
+    // known source health until the real snapshot replaces it.
+    sourceStates: baseRootSnapshot.sourceStates,
   };
 }
