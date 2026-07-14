@@ -36,6 +36,7 @@ const revokeRoomAgentSessionBearer = dbModule?.revokeRoomAgentSessionBearer;
 const rotateRoomAgentSessionBearer = dbModule?.rotateRoomAgentSessionBearer;
 const createTask = dbModule?.createTask;
 const createTaskLease = dbModule?.createTaskLease;
+let seedOrdinal = 0;
 
 async function resetDatabase(): Promise<void> {
   if (!db || !pool) throw new Error("DB-backed worker bearer tests require TEST_DB_URL");
@@ -56,6 +57,7 @@ function responseRecorder() {
 
 async function seed(expectBearer = true) {
   if (!db || !accounts || !createProjectWithName || !createRoomAgentSession) throw new Error("missing DB harness");
+  const identity = ++seedOrdinal;
   const owner = {
     id: "acct_bearer_test",
     provider: "github",
@@ -73,10 +75,10 @@ async function seed(expectBearer = true) {
     room_id: room.id,
     session_kind: "worker",
     runtime: "codex",
-    actor_label: "BearerWorker | Worker Owner's agent | Agent",
-    agent_key: "WorkerOwner/bearerworker",
-    agent_instance_id: "instance_bearer",
-    display_name: "BearerWorker",
+    actor_label: `BearerWorker${identity} | Worker Owner's agent | Agent`,
+    agent_key: `WorkerOwner/bearerworker-${identity}`,
+    agent_instance_id: `instance_bearer_${identity}`,
+    display_name: `BearerWorker${identity}`,
     owner_account_id: owner.id,
     owner_label: "Worker Owner",
     ide_label: "Agent",
@@ -248,7 +250,19 @@ test("bearer cannot hand off or release another worker's lease", { skip: require
   const { room, session } = await seed();
   const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
   const task = await createTask!(room.id, "leased", "Other");
-  await createTaskLease!({ room_id: room.id, task_id: task.id, kind: "work", agent_key: "owner/other", agent_session_id: "agent_session_other", actor_label: "Other", created_by: "Other" });
+  const otherSession = await createRoomAgentSession!({
+    room_id: room.id,
+    session_kind: "worker",
+    runtime: "codex",
+    actor_label: "Other | Worker Owner's agent | Agent",
+    agent_key: "WorkerOwner/other",
+    agent_instance_id: "instance_other",
+    display_name: "Other",
+    owner_account_id: "acct_bearer_test",
+    owner_label: "Worker Owner",
+    ide_label: "Agent",
+  });
+  await createTaskLease!({ room_id: room.id, task_id: task.id, kind: "work", agent_key: otherSession.agent_key, agent_session_id: otherSession.session_id, actor_label: otherSession.actor_label, created_by: otherSession.actor_label });
   let handler: ((...args: any[]) => Promise<void>) | null = null;
   registerTaskLeaseActionRoute({ post(_path: RegExp, callback: any) { handler = callback; } } as never, {
     resolveCanonicalRoomRequestId: async () => room.id, resolveRoomOrReply: async () => room, requireParticipant: async () => true, requireAdmin: async (_req: unknown, res: any) => { res.status(403).json({ error: "admin" }); return false; },
