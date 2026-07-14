@@ -127,13 +127,20 @@ test("HTTP middleware denies unknown routes and missing semantic capabilities", 
 test("bearer route handlers enforce self scope for reasoning and session control", async () => {
   const principal = { bearer_id: "agent_bearer_1", bearer_generation: 1, capabilities: ["coordination.self_write"], room_id: "room_1", agent_session_id: "agent_session_1", actor_label: "Worker", agent_key: "owner/worker", agent_instance_id: null, session_kind: "worker" as const, runtime: "codex", display_name: "Worker", owner_label: "Owner", ide_label: "Agent", repo_branch: null, expires_at: new Date(Date.now() + 60_000).toISOString() };
   const reasoningHandlers = new Map<string, (...args: any[]) => Promise<void>>();
-  registerRoomReasoningRoutes({ get() {}, post(path: RegExp, handler: any) { reasoningHandlers.set(path.source, handler); }, patch(path: RegExp, handler: any) { reasoningHandlers.set(path.source, handler); } } as never, {
+  const reasoningPatchHandlers: Array<(...args: any[]) => Promise<void>> = [];
+  registerRoomReasoningRoutes({ get() {}, post(path: RegExp, handler: any) { reasoningHandlers.set(path.source, handler); }, patch(_path: RegExp, handler: any) { reasoningPatchHandlers.push(handler); } } as never, {
     reasoningEvents: { emit() {} }, resolveCanonicalRoomRequestId: async () => "room_1", resolveRoomOrReply: async () => ({ id: "room_1" }), requireParticipant: async () => true,
     reasoningStore: { getReasoningSessionById: async () => ({ actor_label: "Other" }) },
   } as never);
-  const reasoningRes = responseRecorder();
-  await [...reasoningHandlers.values()].find((handler, index) => index === 2)!({ params: { 0: "room_1", 1: "reasoning_1" }, body: {}, authKind: "agent_session", agentSession: principal }, reasoningRes);
-  assert.equal(reasoningRes.statusCode, 403);
+  const patchReasoning = reasoningPatchHandlers[0];
+  const appendReasoning = [...reasoningHandlers.entries()].find(([source]) => source.includes("updates"))?.[1];
+  assert.ok(patchReasoning);
+  assert.ok(appendReasoning);
+  for (const handler of [patchReasoning, appendReasoning]) {
+    const reasoningRes = responseRecorder();
+    await handler!({ params: { 0: "room_1", 1: "reasoning_1" }, body: {}, authKind: "agent_session", agentSession: principal }, reasoningRes);
+    assert.equal(reasoningRes.statusCode, 403);
+  }
 
   const presenceHandlers = new Map<string, (...args: any[]) => Promise<void>>();
   registerRoomPresenceRoutes({ get() {}, post(path: RegExp, handler: any) { presenceHandlers.set(path.source, handler); } } as never, {
