@@ -30,6 +30,17 @@ export class ProviderReconciler {
     // P1.5 does not yet expose a daemon-verifiable receipt to this process.
     // Until it does, active-lease restart is hard-off; stop remains permitted.
     const policyDecision = decideReconciliation({ ...input, capabilities, fencedRebindProven: input.activeLease ? false : input.fencedRebindProven }, watchdogThresholdMs);
+    if (input.forcedAction && (input.desiredState === "stopped" || input.condition === "quarantined" || (input.activeLease && !input.fencedRebindProven))) {
+      return {
+        decision: {
+          action: input.condition === "quarantined" ? "quarantine" : "hold_coordination",
+          observedState: input.observedState,
+          condition: input.condition === "quarantined" ? "quarantined" : "coordination_blocked",
+          reason: "durable pending action is no longer authorized by current policy",
+        },
+        disposition: "held",
+      };
+    }
     const decision = input.forcedAction ? { ...policyDecision, action: input.forcedAction, reason: `redispatching durable ${input.forcedAction} intent` } : policyDecision;
     let replacementHandle: ProviderActionHandle | undefined;
     try {

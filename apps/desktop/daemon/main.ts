@@ -112,9 +112,27 @@ export class SupervisorDaemon {
         return { decision: { action: "hold_coordination" as const, observedState: "recovering" as const, condition: "coordination_blocked" as const, reason: `pending provider action ambiguous: ${attachment.reason}` }, disposition: "held" as const };
       }
       if (attachment.state === "attached") return {
-        decision: { action: "hold_coordination" as const, observedState: attachment.handle.observedState, condition: "coordination_blocked" as const, reason: "pending provider action attached; await next convergence tick" },
+        decision: { action: "hold_coordination" as const, observedState: attachment.handle.observedState, condition: entry.condition, reason: "pending provider action attached; await next convergence tick" },
         disposition: "held" as const,
       };
+    }
+
+    if (redispatchPending && entry.desired_state === "stopped") {
+      reconciliation = completeReconciliationAction(reconciliation, redispatchActionId);
+      redispatchPending = false;
+      redispatchKind = undefined;
+      redispatchActionId = input.reconciliationActionId;
+      redispatchActionSequence = input.reconciliationActionSequence;
+      await this.transitionOnce(entryId, entry.observed_state, entry.condition, "cancelled pending provider action because desired state is stopped", actor, reconciliation);
+    }
+    if (redispatchPending && entry.condition === "quarantined") {
+      reconciliation = completeReconciliationAction(reconciliation, redispatchActionId);
+      await this.transitionOnce(entryId, entry.observed_state, "quarantined", "cancelled pending provider action because entry is quarantined", actor, reconciliation);
+      return { decision: { action: "quarantine" as const, observedState: entry.observed_state, condition: "quarantined" as const, reason: "quarantined entry cannot redispatch pending provider action" }, disposition: "held" as const };
+    }
+    if (redispatchPending && input.activeLease && !input.fencedRebindProven) {
+      await this.transitionOnce(entryId, "recovering", "coordination_blocked", "pending provider action awaits fenced lease rebind", actor, reconciliation);
+      return { decision: { action: "hold_coordination" as const, observedState: "recovering" as const, condition: "coordination_blocked" as const, reason: "pending provider action awaits fenced lease rebind" }, disposition: "held" as const };
     }
 
     const result = await new ProviderReconciler(this.providerPort).reconcile({
@@ -194,6 +212,7 @@ export class SupervisorDaemon {
     try {
       let stopped = false;
       let currentHandle = handle;
+      let currentHandleGeneration = 0;
       let listenerInstallTail: Promise<void> = Promise.resolve();
       const activeCallbacks = new Set<Promise<void>>();
       const trackCallback = (operation: Promise<void>) => {
@@ -201,10 +220,24 @@ export class SupervisorDaemon {
         void operation.then(() => activeCallbacks.delete(operation), () => activeCallbacks.delete(operation));
       };
       const recordError = async (error: unknown) => this.recordSchedulerFailure(entryId, error, actor);
-      const installExitListener = async (nextHandle: ProviderActionHandle) => {
+      const sameHandle = (left: ProviderActionHandle, right: ProviderActionHandle) => left.workAttemptId === right.workAttemptId && left.pid === right.pid && left.providerContinuationId === right.providerContinuationId;
+      const recordStaleExit = async (staleHandle: ProviderActionHandle, terminal: ProviderActionTerminal) => {
+        const payload = this.terminalPayload(terminal, actor);
+        await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
+          const manifest = await this.store.load();
+          const entry = manifest.entries.find((candidate) => candidate.id === entryId);
+          if (!entry) return;
+          await this.transitionOnce(entryId, entry.observed_state, entry.condition, `stale terminal from superseded provider handle pid=${staleHandle.pid ?? "unknown"}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, Date.now()), last_terminal: payload }, "coordination_escalation", payload);
+        }));
+      };
+      const installExitListener = async (nextHandle: ProviderActionHandle, generation: number) => {
         const nextUnsubscribe = await providerPort.onExit(nextHandle, (terminal) => {
           const operation = (async () => {
             try {
+              if (generation !== currentHandleGeneration || !sameHandle(nextHandle, currentHandle)) {
+                await recordStaleExit(nextHandle, terminal);
+                return;
+              }
               await this.observeProviderExit(entryId, terminal, actor);
               await tick();
             } catch (error) {
@@ -213,14 +246,18 @@ export class SupervisorDaemon {
           })();
           trackCallback(operation);
         });
-        if (stopped) { nextUnsubscribe(); return; }
+        if (stopped || generation !== currentHandleGeneration || !sameHandle(nextHandle, currentHandle)) { nextUnsubscribe(); return; }
         const previousUnsubscribe = unsubscribe;
         unsubscribe = nextUnsubscribe;
-        currentHandle = nextHandle;
         previousUnsubscribe();
       };
       const queueExitListenerInstall = (nextHandle: ProviderActionHandle) => {
-        const operation = listenerInstallTail.then(() => installExitListener(nextHandle));
+        // Promotion is intentionally before the await inside `onExit`: a late
+        // terminal from the superseded child is evidence, never a new restart.
+        currentHandle = nextHandle;
+        currentHandleGeneration += 1;
+        const generation = currentHandleGeneration;
+        const operation = listenerInstallTail.then(() => installExitListener(nextHandle, generation));
         // Do not let a failed registration poison later recovery registrations.
         listenerInstallTail = operation.catch(() => undefined);
         return operation;

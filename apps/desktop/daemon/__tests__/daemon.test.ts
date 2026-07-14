@@ -163,6 +163,16 @@ test("reconciler dispatches fresh, poke, and stop safely and reports port faults
   assert.deepEqual(calls, ["spawn", "poke", "stop"]);
   assert.equal((await runner.reconcile({ ...base, observedState: "working", lastPollAtMs: 0, addressedMessagesWaiting: 1, handle: null }, 100)).disposition, "held");
   assert.equal((await runner.reconcile({ ...base, desiredState: "stopped", observedState: "working", handle: null }, 100)).disposition, "held");
+  for (const unsafe of [
+    { desiredState: "stopped" as const },
+    { condition: "quarantined" as const },
+    { activeLease: true, fencedRebindProven: false },
+  ]) {
+    const before = calls.length;
+    const held = await runner.reconcile({ ...base, forcedAction: "restart_fresh", ...unsafe }, 100);
+    assert.equal(held.disposition, "held", "a durable pending restart must revalidate current stop/quarantine/lease gates");
+    assert.equal(calls.length, before, "an unsafe durable restart is never dispatched");
+  }
   const broken = new ProviderReconciler({ ...port, spawn: async () => { throw new Error("child failed"); } });
   const result = await broken.reconcile(base, 100);
   assert.equal(result.disposition, "failed");
@@ -389,19 +399,14 @@ test("a slow old replacement registration cannot overwrite a newer child listene
     const secondRegistration = new Promise<void>((resolve) => { releaseSecondRegistration = resolve; });
     let signalSecondRegistration!: () => void;
     const waitingForSecondRegistration = new Promise<void>((resolve) => { signalSecondRegistration = resolve; });
-    let signalThirdInstalled!: () => void;
-    const thirdInstalled = new Promise<void>((resolve) => { signalThirdInstalled = resolve; });
-    let signalSecondSpawn!: () => void;
-    const secondSpawned = new Promise<void>((resolve) => { signalSecondSpawn = resolve; });
     let spawnCount = 0;
     const port: ProviderActionPort = {
       capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
-      spawn: async () => { spawnCount += 1; if (spawnCount === 2) signalSecondSpawn(); return { workAttemptId: "attempt", pid: spawnCount + 1, providerContinuationId: null, observedState: "starting" }; },
+      spawn: async () => { spawnCount += 1; return { workAttemptId: "attempt", pid: 2, providerContinuationId: null, observedState: "starting" }; },
       attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
       onExit: async (handle, listener) => {
         if (handle.pid === 2) { signalSecondRegistration(); await secondRegistration; }
         listeners.set(handle.pid ?? -1, listener);
-        if (handle.pid === 3) signalThirdInstalled();
         return () => { listeners.delete(handle.pid ?? -1); };
       },
     };
@@ -412,14 +417,12 @@ test("a slow old replacement registration cannot overwrite a newer child listene
     const scheduled = daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "failed" }, input, 100, 60_000);
     await within(waitingForSecondRegistration, "the blocked second listener registration");
     listeners.get(1)?.({ endedAt: "early", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
-    // The callback tick is deliberately queued behind the blocked first tick;
-    // unblock it before waiting for the callback's successor spawn.
     releaseSecondRegistration();
     const stop = await within(scheduled, "the first scheduled convergence");
-    await within(secondSpawned, "the callback successor spawn");
-    await within(thirdInstalled, "the newest child listener");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual([...listeners.keys()], [3], "serialized installs leave only the newest replacement subscribed");
+    assert.equal(spawnCount, 1, "a superseded child terminal cannot launch a second replacement");
+    assert.deepEqual([...listeners.keys()], [2], "the promoted replacement is the only subscribed child");
+    await eventually(async () => ((await new ManifestStore(manifestPath).load()).entries[0]?.reconciliation_notices ?? []).some((notice) => notice.cause.includes("stale terminal from superseded")), "durable stale-terminal evidence");
     await stop(); await daemon.stop();
   } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
 });
