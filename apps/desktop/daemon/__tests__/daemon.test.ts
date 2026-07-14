@@ -16,6 +16,7 @@ import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
+import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
@@ -50,6 +51,34 @@ const entry: DaemonManifestEntry = {
 
 test("daemon is visibly gated to macOS", () => {
   assert.throws(() => assertMacOS("linux"), /macOS only/);
+});
+
+test("reconciler policy uses the addressed-message watchdog rather than turn duration", () => {
+  const base = {
+    desiredState: "running" as const, observedState: "working" as const, condition: "none" as const,
+    capabilities: { resume: true, midTurnInjection: true }, nowMs: 10_000, lastPollAtMs: 0,
+    addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, exitsInWindow: 0,
+  };
+  assert.equal(watchdogShouldEscalate({ ...base, addressedMessagesWaiting: 0, pokeIgnored: true }, 1_000), false, "long work with an empty inbox is never touched");
+  assert.equal(watchdogShouldEscalate({ ...base, lastPollAtMs: 9_999, addressedMessagesWaiting: 1, pokeIgnored: true }, 1_000), false, "quiet but polling is never touched");
+  assert.equal(decideReconciliation({ ...base, addressedMessagesWaiting: 1 }, 1_000).action, "poke");
+  assert.equal(watchdogShouldEscalate({ ...base, addressedMessagesWaiting: 1, pokeIgnored: true }, 1_000), true);
+});
+
+test("reconciler policy fences recovery, gates resume, quarantines crash loops, and backs off", () => {
+  const base = {
+    desiredState: "running" as const, observedState: "failed" as const, condition: "none" as const,
+    capabilities: { resume: true, midTurnInjection: false }, nowMs: 0, lastPollAtMs: null,
+    addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: true, fencedRebindProven: false, exitsInWindow: 0,
+  };
+  assert.deepEqual(decideReconciliation(base, 1_000), {
+    action: "hold_coordination", observedState: "recovering", condition: "coordination_blocked", reason: "active lease requires fenced rebind before restart",
+  });
+  assert.equal(decideReconciliation({ ...base, fencedRebindProven: true }, 1_000).action, "restart_with_resume");
+  assert.equal(decideReconciliation({ ...base, activeLease: false, capabilities: { resume: false, midTurnInjection: false } }, 1_000).action, "restart_fresh");
+  assert.equal(decideReconciliation({ ...base, exitsInWindow: CRASH_LOOP_EXIT_LIMIT }, 1_000).action, "quarantine");
+  assert.equal(restartBackoffMs(1), 1_000);
+  assert.equal(restartBackoffMs(20), 5 * 60 * 1_000);
 });
 
 test("singleton fences a second daemon and detects a newer generation", async () => {
