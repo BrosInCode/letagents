@@ -5,9 +5,11 @@ import type { LivenessAnnouncementCandidate, RoomAgentDeliverySession } from "..
 import {
   buildOfflineAnnouncementText,
   buildRecoveryAnnouncementText,
+  CHANNEL_STALE_AFTER_MS,
   createLivenessSweeper,
   OFFLINE_ANNOUNCE_AFTER_MS,
   OFFLINE_ANNOUNCE_MAX_AGE_MS,
+  resolveOfflineAnnounceAfterMs,
   selectLivenessTransitions,
   type LivenessSweeperDeps,
 } from "../rooms/liveness-sweep.js";
@@ -36,17 +38,17 @@ function buildSession(overrides: Partial<RoomAgentDeliverySession> = {}): RoomAg
     active_connection_count: overrides.active_connection_count ?? 0,
     last_connected_at: overrides.last_connected_at ?? isoMinutesAgo(30),
     last_disconnected_at:
-      overrides.last_disconnected_at === undefined ? isoMinutesAgo(3) : overrides.last_disconnected_at,
+      overrides.last_disconnected_at === undefined ? isoMinutesAgo(6) : overrides.last_disconnected_at,
     reconnect_grace_expires_at:
       overrides.reconnect_grace_expires_at === undefined
-        ? isoMinutesAgo(3)
+        ? isoMinutesAgo(6)
         : overrides.reconnect_grace_expires_at,
     offline_announced_at:
       overrides.offline_announced_at === undefined ? null : overrides.offline_announced_at,
     recovery_announced_at:
       overrides.recovery_announced_at === undefined ? null : overrides.recovery_announced_at,
     created_at: overrides.created_at ?? isoMinutesAgo(120),
-    updated_at: overrides.updated_at ?? isoMinutesAgo(3),
+    updated_at: overrides.updated_at ?? isoMinutesAgo(6),
   };
 }
 
@@ -94,11 +96,51 @@ test("stays quiet inside the announce threshold and reconnect grace", () => {
     reconnect_grace_expires_at: new Date(NOW + 5_000).toISOString(),
     updated_at: new Date(NOW - 5_000).toISOString(),
   });
+  const staleButInsideVisibleGrace = buildSession({
+    last_disconnected_at: isoMinutesAgo(3),
+    reconnect_grace_expires_at: isoMinutesAgo(3),
+    updated_at: isoMinutesAgo(3),
+  });
 
   assert.deepEqual(
-    selectLivenessTransitions({ candidates: [candidate(stillFresh), candidate(inGrace)], now: NOW }),
+    selectLivenessTransitions({
+      candidates: [
+        candidate(stillFresh),
+        candidate(inGrace),
+        candidate(staleButInsideVisibleGrace),
+      ],
+      now: NOW,
+    }),
     []
   );
+  assert.equal(CHANNEL_STALE_AFTER_MS, 2 * 60_000);
+  assert.equal(OFFLINE_ANNOUNCE_AFTER_MS, 5 * 60_000);
+});
+
+test("visible notice grace is configurable without changing channel staleness", () => {
+  const threeMinuteOutage = candidate(buildSession({
+    last_disconnected_at: isoMinutesAgo(3),
+    reconnect_grace_expires_at: isoMinutesAgo(3),
+    updated_at: isoMinutesAgo(3),
+  }));
+
+  assert.deepEqual(
+    selectLivenessTransitions({ candidates: [threeMinuteOutage], now: NOW }),
+    []
+  );
+  assert.equal(
+    selectLivenessTransitions({
+      candidates: [threeMinuteOutage],
+      now: NOW,
+      offlineAnnounceAfterMs: 3 * 60_000,
+    })[0]?.kind,
+    "offline"
+  );
+
+  assert.equal(resolveOfflineAnnounceAfterMs(undefined), OFFLINE_ANNOUNCE_AFTER_MS);
+  assert.equal(resolveOfflineAnnounceAfterMs("420000"), 7 * 60_000);
+  assert.equal(resolveOfflineAnnounceAfterMs("not-a-number"), OFFLINE_ANNOUNCE_AFTER_MS);
+  assert.equal(resolveOfflineAnnounceAfterMs("60000"), OFFLINE_ANNOUNCE_AFTER_MS);
 });
 
 test("skips reachable, controller, suppressed, cleanly ended, and ancient sessions", () => {
@@ -136,7 +178,7 @@ test("announces once per outage epoch and re-announces after a later clean disco
 
   const diedAgain = buildSession({
     offline_announced_at: isoMinutesAgo(20),
-    last_disconnected_at: isoMinutesAgo(3),
+    last_disconnected_at: isoMinutesAgo(6),
   });
   const transitions = selectLivenessTransitions({ candidates: [candidate(diedAgain)], now: NOW });
   assert.equal(transitions.length, 1);
@@ -208,14 +250,15 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
   const session = buildSession();
   const unknown = buildOfflineAnnouncementText({
     session,
-    offline_for_ms: 3 * 60_000,
+    offline_for_ms: 6 * 60_000,
     is_board_manager: false,
     runtime_evidence: "none",
     runtime_inactive_for_ms: null,
   });
-  assert.ok(unknown.includes("message channel has been unreachable for 3m"));
+  assert.ok(unknown.includes("message channel has been unreachable for 6m"));
   assert.ok(unknown.includes("runtime activity unknown"));
-  assert.ok(unknown.includes("work leases remain valid"));
+  assert.ok(unknown.includes("does not authorize taking over"));
+  assert.ok(unknown.includes("runtime loss is confirmed"));
   assert.ok(!unknown.includes("appears to be offline"));
   assert.ok(!unknown.includes("Board Manager"));
 
@@ -223,7 +266,7 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
   // default last_tool_call_at, so it only adds the last-seen datapoint.
   const stale = buildOfflineAnnouncementText({
     session,
-    offline_for_ms: 3 * 60_000,
+    offline_for_ms: 6 * 60_000,
     is_board_manager: false,
     runtime_evidence: "stale",
     runtime_inactive_for_ms: 7 * 60_000,
@@ -231,11 +274,11 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
   assert.ok(!stale.includes("appears to be offline"));
   assert.ok(stale.includes("runtime activity unknown"));
   assert.ok(stale.includes("Last recorded runtime activity was 7m ago"));
-  assert.ok(stale.includes("lease expires, is handed off"));
+  assert.ok(stale.includes("work lease expires or is handed off"));
 
   const manager = buildOfflineAnnouncementText({
     session,
-    offline_for_ms: 3 * 60_000,
+    offline_for_ms: 6 * 60_000,
     is_board_manager: true,
     runtime_evidence: "none",
     runtime_inactive_for_ms: null,
@@ -249,7 +292,7 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
 });
 
 test("a silent channel with an active runtime is never announced", () => {
-  // The channel dropped 3 minutes ago, but the runtime made a tool call
+  // The channel dropped 6 minutes ago, but the runtime made a tool call
   // 1 minute ago — the agent is busy working, not dead.
   const busyWorker = candidate(buildSession(), null, isoMinutesAgo(1));
   assert.deepEqual(selectLivenessTransitions({ candidates: [busyWorker], now: NOW }), []);
@@ -272,6 +315,7 @@ interface FakeDepsOptions {
   candidates: LivenessAnnouncementCandidate[];
   /** Per-delivery-key fresh rows returned by getCandidate; defaults to the listed candidate. */
   freshCandidates?: Map<string, LivenessAnnouncementCandidate | null>;
+  offlineAnnounceAfterMs?: number;
   managerSessionId?: string | null;
   suppressedFailsForRoom?: string;
   announceFails?: boolean;
@@ -327,6 +371,7 @@ function buildFakeDeps(options: FakeDepsOptions) {
       }
       announcedRecovered.push(record(input));
     },
+    offlineAnnounceAfterMs: options.offlineAnnounceAfterMs,
     now: () => NOW,
   };
   return {
@@ -338,6 +383,23 @@ function buildFakeDeps(options: FakeDepsOptions) {
     },
   };
 }
+
+test("sweepOnce uses the configured visible grace for selection and revalidation", async () => {
+  const threeMinuteSession = buildSession({
+    last_disconnected_at: isoMinutesAgo(3),
+    reconnect_grace_expires_at: isoMinutesAgo(3),
+    updated_at: isoMinutesAgo(3),
+  });
+  const { deps, announcedOffline } = buildFakeDeps({
+    candidates: [candidate(threeMinuteSession)],
+    offlineAnnounceAfterMs: 3 * 60_000,
+  });
+
+  const summary = await createLivenessSweeper(deps).sweepOnce();
+
+  assert.equal(summary.announced_offline, 1);
+  assert.equal(announcedOffline.length, 1);
+});
 
 test("sweepOnce announces offline workers with an epoch-stable client message id", async () => {
   const session = buildSession();

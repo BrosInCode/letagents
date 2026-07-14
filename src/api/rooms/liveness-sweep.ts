@@ -8,11 +8,19 @@ import {
 } from "../db/presence/helpers.js";
 
 /**
- * A worker must be unreachable for this long before the room hears about it.
- * Longer than the 90s delivery freshness window plus the 10s reconnect grace,
- * so ordinary poll rollover never announces.
+ * Internal transport-staleness window. This remains deliberately close to
+ * the 90s delivery freshness window plus reconnect grace so the runtime can
+ * classify a channel as stale without immediately alarming the room.
  */
-export const OFFLINE_ANNOUNCE_AFTER_MS = 2 * 60 * 1000;
+export const CHANNEL_STALE_AFTER_MS = 2 * 60 * 1000;
+
+/**
+ * A worker must be unreachable for this long before the room hears about it.
+ * Keeping the visible grace separate from CHANNEL_STALE_AFTER_MS prevents an
+ * ordinary tool/test gap from looking like a death while preserving internal
+ * reachability state for routing and diagnostics.
+ */
+export const OFFLINE_ANNOUNCE_AFTER_MS = 5 * 60 * 1000;
 
 /**
  * Never announce sessions whose last activity is older than this. Bounds
@@ -21,6 +29,20 @@ export const OFFLINE_ANNOUNCE_AFTER_MS = 2 * 60 * 1000;
 export const OFFLINE_ANNOUNCE_MAX_AGE_MS = 60 * 60 * 1000;
 
 export const LIVENESS_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/** Resolve the API's optional visible-notice override, falling back safely. */
+export function resolveOfflineAnnounceAfterMs(value: string | undefined): number {
+  const parsed = Number(value);
+  if (
+    !Number.isFinite(parsed)
+    || parsed < CHANNEL_STALE_AFTER_MS
+    || parsed > OFFLINE_ANNOUNCE_MAX_AGE_MS
+  ) {
+    return OFFLINE_ANNOUNCE_AFTER_MS;
+  }
+
+  return Math.floor(parsed);
+}
 
 export type LivenessRuntimeEvidence = "none" | "stale";
 
@@ -68,8 +90,10 @@ export function selectLivenessTransitions(input: {
   candidates: readonly LivenessAnnouncementCandidate[];
   suppressedActors?: ReadonlySet<string>;
   now?: number;
+  offlineAnnounceAfterMs?: number;
 }): LivenessTransition[] {
   const now = input.now ?? Date.now();
+  const offlineAnnounceAfterMs = input.offlineAnnounceAfterMs ?? OFFLINE_ANNOUNCE_AFTER_MS;
   const transitions: LivenessTransition[] = [];
 
   for (const candidate of input.candidates) {
@@ -114,14 +138,14 @@ export function selectLivenessTransitions(input: {
     }
 
     const offlineForMs = now - lastSeenAt;
-    if (offlineForMs < OFFLINE_ANNOUNCE_AFTER_MS || offlineForMs > OFFLINE_ANNOUNCE_MAX_AGE_MS) {
+    if (offlineForMs < offlineAnnounceAfterMs || offlineForMs > OFFLINE_ANNOUNCE_MAX_AGE_MS) {
       continue;
     }
 
     // Transport silence with a recently active runtime is an agent busy
     // working outside the room, not a death — say nothing.
     const runtimeLastActiveAt = parseTime(candidate.runtime_last_active_at);
-    if (runtimeLastActiveAt !== null && now - runtimeLastActiveAt < OFFLINE_ANNOUNCE_AFTER_MS) {
+    if (runtimeLastActiveAt !== null && now - runtimeLastActiveAt < CHANNEL_STALE_AFTER_MS) {
       continue;
     }
 
@@ -165,7 +189,7 @@ export function buildOfflineAnnouncementText(input: {
     input.runtime_evidence === "stale"
       ? ` Last recorded runtime activity was ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)} ago.`
       : "";
-  const base = `[status] ${label}'s message channel has been unreachable for ${offlineFor} — runtime activity unknown; it may still be working outside the room.${staleNote} Its work leases remain valid. Only pick up its work if a lease expires, is handed off, or a human confirms the loss.`;
+  const base = `[status] ${label}'s message channel has been unreachable for ${offlineFor} — runtime activity unknown; it may still be working outside the room.${staleNote} This notice does not authorize taking over its work. Reassign only after runtime loss is confirmed and its work lease expires or is handed off, or when a human explicitly directs the handoff.`;
   if (!input.is_board_manager) {
     return base;
   }
@@ -204,6 +228,8 @@ export interface LivenessSweeperDeps {
    */
   announceOffline(input: LivenessAnnouncementInput): Promise<void>;
   announceRecovery(input: LivenessAnnouncementInput): Promise<void>;
+  /** Visible room-notice grace; internal channel staleness remains 2 minutes. */
+  offlineAnnounceAfterMs?: number;
   now?(): number;
   onError?(roomId: string, error: unknown): void;
 }
@@ -226,6 +252,8 @@ export interface LivenessSweepSummary {
  * than announced with stale state.
  */
 export function createLivenessSweeper(deps: LivenessSweeperDeps) {
+  const offlineAnnounceAfterMs = deps.offlineAnnounceAfterMs ?? OFFLINE_ANNOUNCE_AFTER_MS;
+
   async function processTransition(
     roomId: string,
     selected: LivenessTransition,
@@ -246,6 +274,7 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
       candidates: [fresh],
       suppressedActors,
       now,
+      offlineAnnounceAfterMs,
     });
     if (!transition || transition.kind !== selected.kind) {
       return;
@@ -292,7 +321,12 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
     summary: LivenessSweepSummary
   ): Promise<void> {
     const suppressedActors = await deps.getSuppressedActorLabels(roomId);
-    const transitions = selectLivenessTransitions({ candidates, suppressedActors, now });
+    const transitions = selectLivenessTransitions({
+      candidates,
+      suppressedActors,
+      now,
+      offlineAnnounceAfterMs,
+    });
     if (transitions.length === 0) {
       return;
     }

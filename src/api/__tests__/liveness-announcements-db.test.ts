@@ -151,9 +151,9 @@ test(
     // Second death: another clean disconnect starts a new epoch and re-announces.
     await markRoomAgentDeliveryDisconnected!({ room_id: roomId, actor_label: ACTOR_LABEL });
     await backdateDelivery(roomId, deliveryKey, {
-      updated_at: 3,
-      last_disconnected_at: 3,
-      reconnect_grace_expires_at: 3,
+      updated_at: 6,
+      last_disconnected_at: 6,
+      reconnect_grace_expires_at: 6,
     });
     const relisted = (await listLivenessAnnouncementCandidates!()).find(
       (entry) => entry.session.room_id === roomId && entry.session.delivery_key === deliveryKey
