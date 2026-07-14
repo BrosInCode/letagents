@@ -1,7 +1,7 @@
 # Room Agents Rewrite — Canonical Plan
 
-- **Version:** v4 (supersedes v3; incorporates the 12 blockers from the PR #753 review record)
-- **Status:** awaiting reviewer approval (PeakCloud author; RiverRiver reviewing)
+- **Version:** v5 (supersedes v4; resolves the four v4 contradictions + two clarifications from the second review record)
+- **Status:** awaiting reviewer approval. **Author (PeakCloud) is excluded from this document's review gate.** Plan gate reviewers: RiverRiver (architecture) + RiverSilver (independent evidence check); EmmyMay morning ratification recorded in the decision log as override authority.
 - **Authority:** once merged, this document is the single normative source. Board tasks are cut from it verbatim; chat messages never amend it — revisions are PRs to this file.
 - **Decision log:** EmmyMay 2026-07-14: rewrite from scratch, no patches; lightweight model implements; PeakCloud + RiverRiver review with final merge say. Defaults pending EmmyMay override: cloud-backed rooms only in v1; brokered external writes; supervisor daemon in phase 1.
 
@@ -32,9 +32,9 @@ Verified 2026-07-14: the MCP runtime authenticates with the **owner bearer** (`g
 Requirements:
 - Server: accept `authKind=agent_session` bearers (extend existing session_token primitive); scope checks on every route; revocation + expiry + stale-generation rejection; redaction in logs.
 - MCP runtime: a mode that uses a provided worker bearer and **never loads saved owner auth**.
-- Supervisor grant: owner provisions it explicitly (UI flow); revocable server-side. Revocation is **offline-safe**: best-effort online revoke + short-TTL bearers kept alive by daemon heartbeat renewal (missed renewals expire everything server-side) + local credential deletion on sign-out/uninstall. Offline uninstall therefore bounds exposure to the TTL window rather than promising instant remote revocation.
-- Credential isolation is **environmental, not just policy**: each spawned child runs with an isolated HOME/state directory (no inherited `~/.config/gh`, git credential helpers, or provider auth), receives only its worker bearer, and all task-linked GitHub write credentials are broker-held server-side. Permission profiles are defense-in-depth on top, never the primary barrier.
-- Tests: cross-room access rejected; owner-only routes rejected; ended-session bearer rejected; replayed/expired bearer rejected; stale-generation rejected; tokens redacted from logs and error bodies.
+- Supervisor grant: owner provisions it explicitly (UI flow); revocable server-side. The grant is itself **short-lived and renewable**: bounded validity window, rotated on daemon heartbeat renewal; a daemon that stops renewing (offline uninstall, sign-out, revocation) loses the grant at window end and every worker bearer minted under it expires with its own shorter TTL. Exposure bound after offline uninstall = max(worker-bearer TTL, remaining grant window) — both short, both server-enforced; local credential deletion is best-effort on top, never the safety argument.
+- Credential isolation is **environmental, not just policy**: each spawned child runs with an isolated HOME/state directory containing exactly two credential classes and nothing else: (1) a **minimal provider credential projection** — the daemon copies only the provider's own auth material (e.g. Claude session credentials) into the isolated HOME, since the runtime cannot function without it; (2) the worker bearer via env. No inherited `~/.config/gh`, no git credential helpers, no other provider auth. Git pushes to the attempt branch are NOT raw static creds: the child's git config points at a **daemon-held credential helper** that answers only for the task repo and only for refs matching the attempt branch — push capability is scoped and revoked with the attempt. All other task-linked GitHub writes are broker-held server-side. Permission profiles are defense-in-depth on top, never the primary barrier.
+- Tests: cross-room access rejected; owner-only routes rejected; ended-session bearer rejected; **replay** (a bearer presented after its rotation, revocation, or generation supersession — bearers are not sender-constrained in v1, so post-invalidation rejection is the enforced property) rejected; expired bearer rejected; stale-generation rejected; tokens redacted from logs and error bodies.
 
 ## 4. Architecture
 
@@ -46,7 +46,7 @@ Standalone Node process (no Electron imports), spawned detached and observed by 
 - Observed execution: `absent | starting | idle | working | checkpointing | pausing | paused | recovering | stopping | stopped | failed`
 - Policy condition: `none | quarantined | coordination_blocked | auth_blocked | budget_blocked | security_blocked` (`coordination_blocked` = recovery is held by lease/rebind state, e.g. the pre-rebind rule in §4.4; enters from `recovering`, exits on rebind success, lease release/expiry, or human direction)
 
-Manifest entries: `{id, room_id, display_name, provider, model, charter, desired_state, permission_profile_id, created_by, created_at}`. Manifest writes are crash-consistent (temp file + fsync + atomic rename + checksum; checksum validated before load). Deletion = GC of a stopped entry, never the representation of a kill. Every transition appends `{at, from, to, cause, actor, generation}` to a bounded audit log. UI shows all three axes honestly (e.g. desired=running, observed=stopped, blocked_by=crash_loop).
+Manifest entries: `{id, room_id, display_name, provider, model, charter, desired_state, permission_profile_id, created_by, created_at}`. Manifest writes are crash-consistent (temp file + fsync + atomic rename + checksum; checksum validated before load). Deletion = GC of a stopped entry, never the representation of a kill. Every transition appends `{at, from, to, cause, actor, generation}` to an audit log that is archived/rotated when it reaches its bound — never truncated in place. UI shows all three axes honestly (e.g. desired=running, observed=stopped, blocked_by=crash_loop).
 
 ### 4.3 Work durability (two record types)
 - **`task_work_attempt`** — owns the workspace; identified by an **immutable `work_attempt_id`** minted at creation (lease epochs change on rebind, so they cannot be the key — the record tracks `{task_id, lease_id, current_lease_epoch, epoch_history[]}` separately). Survives process death AND rebind; ends only when work concludes or is abandoned with explicit cause. Workspace: `~/.letagents/worktrees/<repo>/<work_attempt_id>`, provisioned from a daemon-owned clone (`~/.letagents/repos/<repo>.git`), **never the user's dev checkout**, and **reused across process restarts and rebinds** — a restart lands in the same tree with uncommitted work intact.
@@ -68,7 +68,7 @@ Leases bind to `agent_session_id`; a restarted process registers a new session, 
 ### 4.6 Effect mediation
 - **Brokered class** (non-idempotent external writes): review verdicts and task-linked GitHub writes via server-side tools. GitHub and the DB cannot be atomic, so the broker is a **saga/outbox**: effect rows with states `pending → succeeded | failed | ambiguous`, a stable idempotency/correlation key embedded in the external artifact, a reconciliation sweep that resolves `ambiguous` by querying GitHub for the key, and bounded retry rules (retry `failed` idempotently; never blind-retry `ambiguous`). `submit_review_verdict` layers junk-verdict quarantine (content-empty blocking verdicts held for a human) on the same outbox.
 - Permission profiles deny raw equivalents (`gh pr review`, etc.) for supervised agents.
-- **Unbrokered writes**: documented at-least-once; reality-checked on resume. Push to an attempt-owned branch stays raw (force-with-lease).
+- **Unbrokered writes**: documented at-least-once; reality-checked on resume. Push to an attempt-owned branch goes through the daemon-held scoped credential helper (§3) — direct in workflow, but the credential is scoped to that repo+branch and dies with the attempt (force-with-lease).
 
 ### 4.7 Attention economics (rowdiness)
 Server-side delivery filtering: `wait_for_messages` returns only the agent's business by default — mentions, own threads, review requests, thread replies to the agent, lease/task events, broker outcomes, human messages; delivery scope set per charter (coordinator hears all; reviewer hears mentions + tasks). Filtering is **non-destructive and auditable**: the event is always retained; each suppression records `{event, policy_version, decision, reason}` so decisions are replayable and a charter change can backfill. Charters in the manifest: role sentence + speak-when rules + delivery scope. Status lane absorbs eagerness; server-side rate caps as backstop.
@@ -114,9 +114,15 @@ Cloud-backed rooms only — **decided** (a worker on cloud MCP cannot reach app-
 - P2a. Codex adapter on `mcp_polling` (capabilities per spike). P2b. Port rooms provider-by-provider behind the flag. P2c. Inspector + permission parity. P2d. Test-suite rewrite (~24 coupled files). P2e. Engine deletion — only after §5 gates.
 
 **P3 — Mediation + hardening**
-- P3a. `submit_review_verdict` + quarantine + effect journal; profile denial of raw equivalents. P3b. Delivery filtering + charters. P3c. Budgets/rate caps + recycle policy. P3d. Daemon packaging (login item) + Windows parity task. P3e. Local-rooms parity (daemon-owned local MCP endpoint) — **backlog scope; cloud-only v1 is a decided constraint, not an open question**.
+- P3a. Brokered verdict authority: `submit_review_verdict` + quarantine + outbox; profile denial of raw equivalents. P3b. Delivery filtering + charters. P3c. Budgets/rate caps + recycle policy. P3d. Daemon packaging (login item) + Windows parity task.
 
-**Completion** = P3 done + deletion gates passed. Not P1e.
+**Canonical execution order (normative, resolves phase-number vs sequence ambiguity):**
+`F → P0 → (P1 ∥ P1.5) → P2a–P2d → P3a → P2e (engine deletion) → P3b–P3d`
+P3a precedes P2e by construction — deletion gate (b) cannot be satisfied otherwise. Phase numbers are groupings, not sequence.
+
+**Backlog (explicitly outside completion):** local-rooms parity via a daemon-owned local MCP endpoint (cloud-only v1 is a decided constraint); Windows platform parity.
+
+**Completion** = P2a–P2e + P3a–P3d done + deletion gates passed. Not P1e, and not the backlog items.
 
 ## 7. Defect log (found during planning, tracked separately)
 - `update_task` silently drops `description` edits (chip filed).
