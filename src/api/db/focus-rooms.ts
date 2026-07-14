@@ -225,7 +225,12 @@ export async function concludeFocusRoom(
   parentRoomId: string,
   focusKey: string,
   summary: string,
-  details: FocusRoomConclusionDetails | null = null
+  details: FocusRoomConclusionDetails | null = null,
+  // Work-lease fence (plan §4.5): concluding a task-backed focus room is a
+  // lease-authorized mutation. When the caller holds the task's work lease, the
+  // active→concluded UPDATE runs inside the fence tx so a rebound-away
+  // predecessor cannot conclude the room after its lease has moved.
+  leaseFence?: LeaseFence | null
 ): Promise<{ room: Project; task: Task | undefined; updated: boolean } | null> {
   const normalizedSummary = summary.trim();
   if (!normalizedSummary) {
@@ -245,16 +250,26 @@ export async function concludeFocusRoom(
     return { room: focusRoom, task, updated: false };
   }
 
-  const [updated] = await db
-    .update(rooms)
-    .set({
-      focus_status: "concluded",
-      concluded_at: new Date().toISOString(),
-      conclusion_summary: normalizedSummary,
-      conclusion_details: details,
-    })
-    .where(and(eq(rooms.id, focusRoom.id), eq(rooms.focus_status, "active")))
-    .returning();
+  const applyConclude = async (executor: Pick<typeof db, "update">) => {
+    const [row] = await executor
+      .update(rooms)
+      .set({
+        focus_status: "concluded",
+        concluded_at: new Date().toISOString(),
+        conclusion_summary: normalizedSummary,
+        conclusion_details: details,
+      })
+      .where(and(eq(rooms.id, focusRoom.id), eq(rooms.focus_status, "active")))
+      .returning();
+    return row;
+  };
+
+  const updated = leaseFence
+    ? await db.transaction(async (tx) => {
+        if (!(await acquireLeaseFenceTx(tx, leaseFence))) throw new LeaseFenceStaleError();
+        return applyConclude(tx);
+      })
+    : await applyConclude(db);
 
   if (updated) {
     return { room: toProject(updated), task, updated: true };
