@@ -8,6 +8,7 @@ import test from "node:test";
 import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
+import { SupervisorDaemon } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
@@ -101,23 +102,21 @@ test("control socket rejects protocol mismatch explicitly", async () => {
 test("fence loss fatally stops the control endpoint", async () => {
   const env = await fixture();
   try {
+    const lockPath = join(env.root, "fatal.lock");
     const socketPath = join(env.root, "fatal.sock");
-    const singleton = new DaemonSingleton(join(env.root, "fatal.lock"), "darwin");
-    await singleton.acquire();
-    await writeFile(`${join(env.root, "fatal.lock")}.generation`, "2\n");
-    let socket!: DaemonControlSocket;
-    socket = new DaemonControlSocket(socketPath, () => singleton.assertCurrent(), () => { setTimeout(() => { void socket.stop(); }, 0); }, 32);
-    await socket.start();
+    const daemon = new SupervisorDaemon({ lockPath, socketPath, manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") }, "darwin");
+    await daemon.start();
+    await writeFile(`${lockPath}.generation`, "2\n");
     await new Promise<void>((resolve, reject) => {
       const client = createConnection(socketPath); client.once("error", reject);
-      client.on("connect", () => client.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, method: "fatal" }) + "\n"));
+      client.on("connect", () => client.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, method: "manifest.list" }) + "\n"));
       client.on("close", () => resolve());
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
     await assert.rejects(() => new Promise<void>((resolve, reject) => {
       const client = createConnection(socketPath); client.once("connect", () => resolve()); client.once("error", reject);
     }));
-    await singleton.release();
+    await daemon.stop();
   } finally { await env.cleanup(); }
 });
 

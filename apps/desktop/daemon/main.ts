@@ -12,7 +12,7 @@ export class SupervisorDaemon {
   private readonly audit: AuditLog;
   private readonly socket: DaemonControlSocket;
 
-  constructor(paths = defaultDaemonPaths(), platform = process.platform) {
+  constructor(paths = defaultDaemonPaths(), private readonly platform = process.platform) {
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
     this.store = new ManifestStore(paths.manifestPath);
     this.audit = new AuditLog(paths.auditPath);
@@ -24,7 +24,7 @@ export class SupervisorDaemon {
   }
 
   async start(): Promise<void> {
-    assertMacOS();
+    assertMacOS(this.platform);
     await this.singleton.acquire();
     this.manifestGeneration = (await this.store.load()).generation;
     await this.socket.start();
