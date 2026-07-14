@@ -30,6 +30,13 @@ export function getWorkerBearerRuntime(): WorkerBearerRuntime {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("unsupported protocol");
     }
+    const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+    if (parsed.protocol === "http:" && !loopbackHosts.has(parsed.hostname.toLowerCase())) {
+      return {
+        mode: "invalid",
+        error: "Worker bearer mode requires HTTPS unless LETAGENTS_API_URL uses an exact loopback host.",
+      };
+    }
   } catch {
     return {
       mode: "invalid",

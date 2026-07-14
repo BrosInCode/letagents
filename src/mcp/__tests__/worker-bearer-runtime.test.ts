@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -18,6 +21,7 @@ const {
   setRoomInspectionOwnerAuthStoreLoaderForTest,
 } = await import("../server/tools/rooms/inspection-tools.js");
 const { rememberRoom, toRoomState } = await import("../server/runtime/room-state.js");
+const { autoJoinFromContext } = await import("../server/runtime/rooms.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
@@ -115,6 +119,12 @@ test("worker bearer mode requires an explicit valid API URL", async () => {
       error: "Worker bearer mode requires an explicit LETAGENTS_API_URL.",
     });
   });
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, apiUrl: "http://example.test" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), {
+      mode: "invalid",
+      error: "Worker bearer mode requires HTTPS unless LETAGENTS_API_URL uses an exact loopback host.",
+    });
+  });
   await withAuthEnv({ bearer: "worker-secret", owner: undefined, apiUrl: "not a URL" }, async () => {
     assert.deepEqual(getWorkerBearerRuntime(), {
       mode: "invalid",
@@ -187,6 +197,53 @@ test("worker bearer mode disables local Codex session orchestration", async () =
       message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
     });
   });
+});
+
+test("worker bearer startup binds its configured room locally for omitted-room tools", async () => {
+  const originalCwd = process.cwd();
+  const originalFetch = globalThis.fetch;
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-worker-bearer-"));
+  const requests: string[] = [];
+  try {
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "room_autobind" }));
+    process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+    process.chdir(tempDir);
+    await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
+      globalThis.fetch = async (url) => {
+        const requestUrl = String(url);
+        requests.push(requestUrl);
+        assert.doesNotMatch(requestUrl, /\/(?:join|projects)(?:\/|$)/, "worker auto-bind must not join or create");
+        if (requestUrl.includes("room_outside_scope")) {
+          return new Response(JSON.stringify({ error: "worker bearer room scope mismatch" }), { status: 403 });
+        }
+        if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
+        if (requestUrl.includes("/messages/poll")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+        return new Response(JSON.stringify({ id: "msg_autobind", text: "hello" }), { status: 200 });
+      };
+      await autoJoinFromContext();
+
+      const register = toolHandler(registerAgentSessionTools, "register_agent_session");
+      const send = toolHandler(registerSendMessageTool, "send_message");
+      const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+      const registration = JSON.parse((await register({})).content[0]!.text);
+      assert.equal(registration.success, true);
+      await send({ text: "hello", agent_session_id: registration.agent_session_id });
+      await wait({ timeout: 1, agent_session_id: registration.agent_session_id });
+      await assert.rejects(
+        () => send({ room_id: "room_outside_scope", text: "outside", agent_session_id: registration.agent_session_id }),
+        (error: unknown) => error instanceof ApiError && error.status === 403,
+      );
+    });
+    assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages")));
+    assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages/poll")));
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.chdir(originalCwd);
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("worker bearer mode runs the room register, send, and wait loop without session credentials", async () => {
