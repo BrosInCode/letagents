@@ -630,7 +630,7 @@ const inboxActionableFingerprints = computed(() =>
 );
 const inboxHasMore = computed(() => Boolean(threadInboxPage.value?.hasMore));
 const inboxDegradation = computed(() =>
-  deriveInboxDegradation(props.sourceStates ?? null, Boolean(inboxError.value))
+  deriveInboxDegradation(props.sourceStates ?? null)
 );
 
 watch(() => props.githubEvents, (nextPage) => {
@@ -1067,14 +1067,11 @@ function loadOlderInboxThreads(): void {
 }
 
 function handleInboxRefresh(): void {
-  // Always reload the thread inbox. If snapshot-backed sources (tasks, GitHub
-  // events, agent sessions) are degraded, also ask the app to re-fetch the room
-  // snapshot so a retry can recover them, not just the threads.
+  // Always reload the thread inbox. If snapshot-backed inbox sources (tasks,
+  // GitHub events, agent sessions, presence) are degraded, also ask the app to
+  // re-fetch the room snapshot so a retry can recover them, not just the threads.
   void loadInboxThreads().catch(() => undefined);
-  const snapshotSourceDegraded = inboxDegradation.value.sources.some(
-    (label) => label !== "Threads",
-  );
-  if (snapshotSourceDegraded) {
+  if (inboxDegradation.value.degraded) {
     emit("refresh-room");
   }
 }

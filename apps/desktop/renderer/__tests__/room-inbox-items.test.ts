@@ -31,35 +31,41 @@ describe("deriveInboxDegradation", () => {
     githubEvents: ready(),
   });
 
-  it("reports not degraded when everything is ready and threads loaded", () => {
-    assert.deepEqual(deriveInboxDegradation(readyStates(), false), { degraded: false, sources: [] });
-    assert.deepEqual(deriveInboxDegradation(null, false), { degraded: false, sources: [] });
+  it("reports not degraded when everything is ready", () => {
+    assert.deepEqual(deriveInboxDegradation(readyStates()), { degraded: false, sources: [] });
+    assert.deepEqual(deriveInboxDegradation(null), { degraded: false, sources: [] });
   });
 
-  it("flags inbox-relevant source failures with readable labels in order", () => {
+  it("flags every inbox-feeding source failure with readable labels in order", () => {
     const states: DesktopSnapshotSourceStates = {
       ...readyStates(),
       tasks: { status: "error", error: "500" },
       githubEvents: { status: "error", error: "500" },
       reasoning: { status: "error", error: "500" },
+      presence: { status: "error", error: "500" },
     };
-    const result = deriveInboxDegradation(states, false);
+    const result = deriveInboxDegradation(states);
     assert.equal(result.degraded, true);
-    assert.deepEqual(result.sources, ["Tasks", "GitHub checks", "Agent sessions"]);
+    assert.deepEqual(result.sources, ["Tasks", "GitHub checks", "Agent sessions", "Agents"]);
   });
 
-  it("counts a thread-load failure as degraded", () => {
-    assert.deepEqual(deriveInboxDegradation(readyStates(), true), { degraded: true, sources: ["Threads"] });
-  });
-
-  it("ignores failures in sources the inbox does not use", () => {
+  it("flags presence failures (offline-agent rows feed the inbox)", () => {
     const states: DesktopSnapshotSourceStates = {
       ...readyStates(),
       presence: { status: "error", error: "500" },
+    };
+    assert.deepEqual(deriveInboxDegradation(states), { degraded: true, sources: ["Agents"] });
+  });
+
+  it("ignores failures in sources the inbox does not use (messages, participants, boardSettings)", () => {
+    const states: DesktopSnapshotSourceStates = {
+      ...readyStates(),
+      messages: { status: "error", error: "500" },
       participants: { status: "error", error: "500" },
       boardSettings: { status: "error", error: "500" },
+      focusRooms: { status: "error", error: "500" },
     };
-    assert.deepEqual(deriveInboxDegradation(states, false), { degraded: false, sources: [] });
+    assert.deepEqual(deriveInboxDegradation(states), { degraded: false, sources: [] });
   });
 });
 
