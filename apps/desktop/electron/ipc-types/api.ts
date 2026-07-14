@@ -239,6 +239,7 @@ export interface DesktopApi {
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;
     provision: (input: DesktopProvisionSupervisorGrantInput) => Promise<DesktopSupervisorGrantMetadata>;
+    revoke: () => Promise<void>;
   };
   setup: {
     getMcpInstallState: () => Promise<DesktopMcpInstallState>;

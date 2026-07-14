@@ -82,10 +82,17 @@ export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSup
     body: JSON.stringify({ host_id: input.hostId, installation_id: input.installationId, allowed_room_ids: input.allowedRoomIds, allowed_agent_keys: input.allowedAgentKeys, ttl_ms: input.ttlMs }),
   });
   const metadata = toMetadata(response);
-  const stored: StoredGrant = { ...metadata, encryptedToken: encryptSupervisorGrantForStorage(response.supervisor_grant) };
-  await mkdir(dirname(storePath()), { recursive: true });
-  await writeFile(storePath(), `${JSON.stringify(stored)}\n`, "utf8");
-  return metadata;
+  try {
+    const stored: StoredGrant = { ...metadata, encryptedToken: encryptSupervisorGrantForStorage(response.supervisor_grant) };
+    await mkdir(dirname(storePath()), { recursive: true });
+    await writeFile(storePath(), `${JSON.stringify(stored)}\n`, "utf8");
+    return metadata;
+  } catch (error) {
+    // Do not leave an unusable, owner-scoped server grant behind when the
+    // desktop cannot durably protect its credential.
+    await apiFetch(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+    throw error;
+  }
 }
 
 export async function getDesktopSupervisorGrantMetadata(): Promise<DesktopSupervisorGrantMetadata | null> {
@@ -105,4 +112,11 @@ export async function readDesktopSupervisorGrantToken(): Promise<string | null> 
 
 export async function clearDesktopSupervisorGrant(): Promise<void> {
   await rm(storePath(), { force: true });
+}
+
+export async function revokeDesktopSupervisorGrant(): Promise<void> {
+  const stored = await getDesktopSupervisorGrantMetadata();
+  if (!stored) return;
+  await apiFetch(`/supervisor-host-grants/${encodeURIComponent(stored.grantId)}`, { method: "DELETE" });
+  await clearDesktopSupervisorGrant();
 }

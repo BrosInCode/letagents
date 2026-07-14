@@ -111,7 +111,7 @@ import {
   setAuthInvalidatedHandler,
   startDeviceAuthFlow,
 } from "./auth.js";
-import { getDesktopSupervisorGrantMetadata, provisionDesktopSupervisorGrant } from "./supervisor-grant.js";
+import { getDesktopSupervisorGrantMetadata, provisionDesktopSupervisorGrant, revokeDesktopSupervisorGrant } from "./supervisor-grant.js";
 import {
   buildMcpInstallState,
   completeMcpOnboarding,
@@ -243,6 +243,7 @@ export function registerDesktopIpcHandlers(
       apiUrl,
     }),
   );
+  targetIpcMain.handle("desktop:supervisor-grant:revoke", async (): Promise<void> => revokeDesktopSupervisorGrant());
   targetIpcMain.handle(
     "desktop:app:open-github-url",
     async (_event, url: string): Promise<void> => {

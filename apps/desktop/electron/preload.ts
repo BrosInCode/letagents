@@ -176,6 +176,7 @@ const api: DesktopApi = {
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
     provision: (input) => ipcRenderer.invoke("desktop:supervisor-grant:provision", input),
+    revoke: () => ipcRenderer.invoke("desktop:supervisor-grant:revoke"),
   },
   setup: {
     getMcpInstallState: () => ipcRenderer.invoke("desktop:setup:get-mcp-install-state"),

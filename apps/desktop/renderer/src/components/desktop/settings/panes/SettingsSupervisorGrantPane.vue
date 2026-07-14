@@ -13,7 +13,8 @@
       <label>Allowed rooms <small>Comma-separated canonical room IDs</small><textarea v-model="rooms" required /></label>
       <label>Allowed agent identities <small>Comma-separated canonical keys</small><textarea v-model="agents" required /></label>
       <p v-if="feedback" class="surface-subtitle">{{ feedback }}</p>
-      <button class="primary-button" :disabled="busy || !hostId || !installationId" type="submit">{{ busy ? "Provisioning" : "Provision host grant" }}</button>
+      <button v-if="!metadata" class="primary-button" :disabled="busy || !hostId || !installationId" type="submit">{{ busy ? "Provisioning" : "Provision host grant" }}</button>
+      <button v-else class="ghost-button" :disabled="busy" type="button" @click="revoke">{{ busy ? "Revoking" : "Revoke and clear host grant" }}</button>
     </form>
   </section>
 </template>
@@ -33,6 +34,12 @@ async function provision() {
     metadata.value = await window.letagentsDesktop.supervisorGrant.provision({ hostId: hostId.value, installationId: installationId.value, allowedRoomIds: split(rooms.value), allowedAgentKeys: split(agents.value) });
     feedback.value = "Host grant stored in Keychain.";
   } catch (error) { feedback.value = error instanceof Error ? error.message : "Host grant could not be provisioned."; }
+  finally { busy.value = false; }
+}
+async function revoke() {
+  busy.value = true; feedback.value = "";
+  try { await window.letagentsDesktop.supervisorGrant.revoke(); metadata.value = null; feedback.value = "Host grant revoked and removed from Keychain."; }
+  catch (error) { feedback.value = error instanceof Error ? error.message : "Host grant could not be revoked."; }
   finally { busy.value = false; }
 }
 </script>
