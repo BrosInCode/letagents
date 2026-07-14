@@ -135,6 +135,17 @@
   color: #fecaca;
 }
 
+/* Degraded-source notice: a softer warning tone than the hard error banner. */
+.desktop-inbox-degraded {
+  border-color: rgba(250, 204, 21, 0.28);
+  color: #fde68a;
+  background: rgba(120, 90, 10, 0.22);
+}
+
+.desktop-inbox-degraded button {
+  color: #fde68a;
+}
+
 .desktop-inbox-undo {
   display: flex;
   align-items: center;

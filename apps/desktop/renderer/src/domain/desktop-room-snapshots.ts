@@ -133,10 +133,42 @@ export function mergeRoomSnapshotMessages(
     };
   }
   if (!snapshotStorageNamespacesMatch(current, incoming)) return incoming;
-  return {
+  return preserveErroredSnapshotSources(current, {
     ...incoming,
     messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
     githubEvents: mergeDesktopGitHubEventsPage(current.githubEvents, incoming.githubEvents),
+  });
+}
+
+/**
+ * When a refreshed snapshot reports a source as failed (`sourceStates[k].status
+ * === "error"`), keep the previously loaded data for that source instead of
+ * letting the fetch's empty fallback clobber it — so a transient outage does
+ * not blank the room. Messages and GitHub events are already unioned upstream,
+ * so they are left untouched here. A source that recovers to "ready" is
+ * replaced normally. `incoming.sourceStates` is preserved verbatim so the UI
+ * still knows which sources are currently degraded.
+ */
+export function preserveErroredSnapshotSources(
+  current: DesktopRoomSnapshot,
+  incoming: DesktopRoomSnapshot,
+): DesktopRoomSnapshot {
+  const states = incoming.sourceStates;
+  if (!states) return incoming;
+  const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  return {
+    ...incoming,
+    tasks: errored("tasks") ? current.tasks : incoming.tasks,
+    focusRooms: errored("focusRooms") ? current.focusRooms : incoming.focusRooms,
+    participants: errored("participants") ? current.participants : incoming.participants,
+    participantHiddenCount: errored("participants")
+      ? current.participantHiddenCount
+      : incoming.participantHiddenCount,
+    presence: errored("presence") ? current.presence : incoming.presence,
+    reasoningSessions: errored("reasoning") ? current.reasoningSessions : incoming.reasoningSessions,
+    recentActivity: errored("activityHistory") ? current.recentActivity : incoming.recentActivity,
+    roomArtifacts: errored("roomArtifacts") ? current.roomArtifacts : incoming.roomArtifacts,
+    boardSettings: errored("boardSettings") ? current.boardSettings : incoming.boardSettings,
   };
 }
 

@@ -166,6 +166,7 @@
           :board-settings="selectedSnapshot?.boardSettings || null"
           :messages="selectedSnapshot?.messages || []"
           :github-events="selectedSnapshot?.githubEvents || null"
+          :source-states="selectedSnapshot?.sourceStates || null"
           :repo-status="repoStatusValue"
           :git-room-matches-active-repo="selectedGitRoomMatchesActiveRepo"
           :workers="workers"

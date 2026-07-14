@@ -9,10 +9,59 @@ import type {
   DesktopRoomThreadInboxPage,
   DesktopTaskSummary,
 } from "../../electron/ipc-types";
+import type { DesktopSnapshotSourceStates } from "../../electron/ipc-types";
 import {
   buildDesktopInboxItems,
+  deriveInboxDegradation,
   desktopInboxItemFingerprint,
 } from "../src/components/desktop/content/room-inbox/items";
+
+describe("deriveInboxDegradation", () => {
+  const ready = () => ({ status: "ready" as const, error: null });
+  const readyStates = (): DesktopSnapshotSourceStates => ({
+    focusRooms: ready(),
+    tasks: ready(),
+    participants: ready(),
+    presence: ready(),
+    reasoning: ready(),
+    activityHistory: ready(),
+    roomArtifacts: ready(),
+    boardSettings: ready(),
+    messages: ready(),
+    githubEvents: ready(),
+  });
+
+  it("reports not degraded when everything is ready and threads loaded", () => {
+    assert.deepEqual(deriveInboxDegradation(readyStates(), false), { degraded: false, sources: [] });
+    assert.deepEqual(deriveInboxDegradation(null, false), { degraded: false, sources: [] });
+  });
+
+  it("flags inbox-relevant source failures with readable labels in order", () => {
+    const states: DesktopSnapshotSourceStates = {
+      ...readyStates(),
+      tasks: { status: "error", error: "500" },
+      githubEvents: { status: "error", error: "500" },
+      reasoning: { status: "error", error: "500" },
+    };
+    const result = deriveInboxDegradation(states, false);
+    assert.equal(result.degraded, true);
+    assert.deepEqual(result.sources, ["Tasks", "GitHub checks", "Agent sessions"]);
+  });
+
+  it("counts a thread-load failure as degraded", () => {
+    assert.deepEqual(deriveInboxDegradation(readyStates(), true), { degraded: true, sources: ["Threads"] });
+  });
+
+  it("ignores failures in sources the inbox does not use", () => {
+    const states: DesktopSnapshotSourceStates = {
+      ...readyStates(),
+      presence: { status: "error", error: "500" },
+      participants: { status: "error", error: "500" },
+      boardSettings: { status: "error", error: "500" },
+    };
+    assert.deepEqual(deriveInboxDegradation(states, false), { degraded: false, sources: [] });
+  });
+});
 
 describe("desktop room inbox items", () => {
   it("derives actionable inbox rows from threads, tasks, GitHub failures, and blocked agents", () => {
