@@ -1,8 +1,15 @@
-import {
-  clearStoredAuth,
-  getStoredAuth,
-} from "../../local-state.js";
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
+import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+
+type OwnerAuthStore = Pick<typeof import("../../local-state.js"), "clearStoredAuth" | "getStoredAuth">;
+
+let ownerAuthStoreLoader: () => Promise<OwnerAuthStore> = () => import("../../local-state.js");
+
+export function setOwnerAuthStoreLoaderForTest(
+  loader: (() => Promise<OwnerAuthStore>) | null,
+): void {
+  ownerAuthStoreLoader = loader ?? (() => import("../../local-state.js"));
+}
 
 export const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 
@@ -18,12 +25,23 @@ export class ApiError extends Error {
   }
 }
 
-export function getLetagentsToken(): string {
-  return process.env.LETAGENTS_TOKEN || getStoredAuth()?.token || "";
+export async function getLetagentsToken(): Promise<string> {
+  const runtime = requireValidWorkerBearerRuntime();
+  if (runtime.mode === "worker") {
+    return runtime.bearer;
+  }
+
+  const envToken = process.env.LETAGENTS_TOKEN?.trim();
+  if (envToken) {
+    return envToken;
+  }
+
+  const { getStoredAuth } = await ownerAuthStoreLoader();
+  return getStoredAuth()?.token || "";
 }
 
-export function getAuthorizationHeader(): string | null {
-  const letagentsToken = getLetagentsToken();
+export async function getAuthorizationHeader(): Promise<string | null> {
+  const letagentsToken = await getLetagentsToken();
   return letagentsToken ? `Bearer ${letagentsToken}` : null;
 }
 
@@ -67,14 +85,21 @@ export function resolveApiPath(urlOrPath: string | undefined): string {
 }
 
 export async function apiCall<T = unknown>(path: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(options?.headers as Record<string, string> | undefined),
-  };
+  const headers = new Headers(options?.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
 
-  const authorizationHeader = getAuthorizationHeader();
-  if (authorizationHeader && !headers.Authorization) {
-    headers.Authorization = authorizationHeader;
+  const runtime = requireValidWorkerBearerRuntime();
+  if (runtime.mode === "worker") {
+    // The bearer is the complete worker credential. Normalize headers first so
+    // every caller spelling of Authorization is overwritten.
+    headers.set("Authorization", `Bearer ${runtime.bearer}`);
+  } else {
+    const authorizationHeader = await getAuthorizationHeader();
+    if (authorizationHeader && !headers.has("Authorization")) {
+      headers.set("Authorization", authorizationHeader);
+    }
   }
 
   const res = await fetch(`${API_URL}${path}`, {
@@ -84,9 +109,10 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
 
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 401) {
+    if (res.status === 401 && requireValidWorkerBearerRuntime().mode !== "worker") {
       // Only clear on 401 (invalid/expired credential), NOT on 403
       // (valid credential but insufficient permissions, e.g., private repo access)
+      const { clearStoredAuth } = await ownerAuthStoreLoader();
       clearStoredAuth();
       clearAuthenticatedAccountCache();
     }

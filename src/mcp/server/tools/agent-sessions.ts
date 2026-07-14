@@ -31,7 +31,12 @@ import {
   toPublicRoomState,
   toRepoRoomAuthRequiredResult,
   withAgentIdentity,
+  resolveWorkerToolIdentity,
 } from "../runtime.js";
+import {
+  requireValidWorkerBearerRuntime,
+  workerModeDisabledToolResult,
+} from "../runtime/worker-bearer.js";
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
@@ -112,6 +117,33 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
+      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
+      const apiRoomId = cloudRoomId || targetRoomId;
+      if (requireValidWorkerBearerRuntime().mode === "worker") {
+        // The supplied bearer is issued for an existing server-side agent
+        // session. Do not call the owner-only registration endpoint or write
+        // any session credential to local storage.
+        const { agentSession } = await resolveWorkerToolIdentity({ roomId: apiRoomId });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  worker_bearer_mode: true,
+                  agent_session: toPublicAgentSession(agentSession),
+                  agent_session_id: agentSession.session_id,
+                  use_agent_session_id: "This local worker-bearer session marker may be passed to room tools. The supplied bearer remains the only server credential.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
       const identity = await ensureAgentIdentity();
       if (!identity.canonical_key) {
         return {
@@ -131,8 +163,6 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
-      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
-      const apiRoomId = cloudRoomId || targetRoomId;
       const created = await apiCall<Record<string, unknown>>(
         `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
         {
@@ -367,6 +397,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("Optional hard stop in minutes. Defaults to 0, which means run until stopped."),
     },
     async ({ room, cwd, stop_phrase, max_minutes }) => {
+      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
+      if (disabled) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
+        };
+      }
       const joinedVia: JoinedVia = looksLikeInviteCode(room) ? "join_code" : "join_room";
 
       try {
@@ -426,6 +462,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("Optional session id. Defaults to the current local Codex live session."),
     },
     async ({ session_id }) => {
+      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
+      if (disabled) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
+        };
+      }
       const provider = getManagedAgentProvider("codex");
       const status = await provider.inspectLocalSession(session_id, currentRoom?.room_id);
       if (!status) {
@@ -475,6 +517,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("If true, also terminate the spawned codex app-server process when possible."),
     },
     async ({ session_id, shutdown_server }) => {
+      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
+      if (disabled) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
+        };
+      }
       const provider = getManagedAgentProvider("codex");
       const stopped = await provider.stopLocalSession({
         session_id,

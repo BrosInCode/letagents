@@ -21,9 +21,11 @@ import {
   syncRoomPresence,
   toAgentReadableMessages,
   touchRoomSession,
+  WORKER_BEARER_AGENT_SESSION_ID,
   waitForLocalChatMessages,
   type StoredAgentSessionState,
 } from "../../runtime.js";
+import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
 import { attachAgentMessageActivations } from "../../../../shared/activation-routing.js";
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { jsonToolResponse } from "./response.js";
@@ -156,6 +158,12 @@ export function resolveWaitAgentSession(
   roomId: string | null,
   agentSessionId?: string | null,
 ): StoredAgentSessionState | null {
+  if (
+    requireValidWorkerBearerRuntime().mode === "worker" &&
+    (!agentSessionId?.trim() || agentSessionId === WORKER_BEARER_AGENT_SESSION_ID)
+  ) {
+    return null;
+  }
   if (!agentSessionId?.trim()) {
     return null;
   }
