@@ -1,4 +1,8 @@
-import type { DesktopReasoningSession, DesktopRoomSharedArtifactDetail } from "../../../ipc-types.js";
+import type {
+  DesktopReasoningSession,
+  DesktopRoomSharedArtifactDetail,
+  DesktopSnapshotSourceStates,
+} from "../../../ipc-types.js";
 import type { GitHubEventsResponse } from "../events.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import type { DesktopTaskSummaryPayload } from "../tasks/mappers.js";
@@ -228,4 +232,5 @@ export interface RoomSnapshotData {
   boardSettingsData: BoardSettingsResponse;
   messagesData: MessagesResponse;
   githubEventsData: GitHubEventsResponse | null;
+  sourceStates: DesktopSnapshotSourceStates;
 }

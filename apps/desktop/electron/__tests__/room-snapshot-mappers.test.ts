@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { mapRoomArtifactPayload, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
+import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
 
 const emptySnapshotData: RoomSnapshotData = {
@@ -20,6 +21,7 @@ const emptySnapshotData: RoomSnapshotData = {
   },
   messagesData: { messages: [] },
   githubEventsData: null,
+  sourceStates: readySourceStates(),
 };
 
 test("mapDesktopGitRoomPayload accepts locally persisted desktop Git metadata", () => {
@@ -319,4 +321,23 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
     app_name: "GitHub Actions",
     head_branch: "codex/desktop-events",
   });
+});
+
+test("mapSnapshotData carries per-source states through unchanged", () => {
+  const data: RoomSnapshotData = {
+    ...emptySnapshotData,
+    sourceStates: {
+      ...readySourceStates(),
+      tasks: { status: "error", error: "API request failed: 500" },
+      githubEvents: { status: "error", error: "network down" },
+    },
+  };
+
+  const snapshot = mapSnapshotData(data);
+
+  assert.equal(snapshot.sourceStates.tasks.status, "error");
+  assert.equal(snapshot.sourceStates.tasks.error, "API request failed: 500");
+  assert.equal(snapshot.sourceStates.githubEvents.status, "error");
+  assert.equal(snapshot.sourceStates.messages.status, "ready");
+  assert.equal(snapshot.sourceStates.messages.error, null);
 });

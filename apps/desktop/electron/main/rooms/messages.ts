@@ -257,11 +257,26 @@ export async function getDesktopRoomThreads(
     );
     return mapThreadInboxPayload(page);
   } catch (error) {
-    if (error instanceof DesktopApiError && error.status === 404) {
+    if (isMissingThreadRouteError(error)) {
       return emptyThreadInboxPage();
     }
     throw error;
   }
+}
+
+/**
+ * A bare 404 (no machine-readable `code`) means an older server that does not
+ * expose the thread-inbox route yet — treat that as "no thread inbox" and
+ * render an empty inbox. A 404 that carries a code (e.g. ROOM_NOT_FOUND) is a
+ * real error about a specific room and must surface rather than be masked as an
+ * empty inbox, along with every non-404 error (auth, 5xx, malformed).
+ */
+export function isMissingThreadRouteError(error: unknown): boolean {
+  return (
+    error instanceof DesktopApiError &&
+    error.status === 404 &&
+    !error.payload?.code
+  );
 }
 
 function emptyThreadInboxPage(): DesktopRoomThreadInboxPage {

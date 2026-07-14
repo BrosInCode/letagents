@@ -333,6 +333,34 @@ export interface DesktopBoardSettingsSummary {
   pendingIntentCount: number;
 }
 
+/**
+ * Which room snapshot source a per-source status refers to. These mirror the
+ * fields loaded by the snapshot fetcher so the UI can tell "genuinely empty"
+ * apart from "this source failed to load".
+ */
+export type DesktopSnapshotSourceKey =
+  | "focusRooms"
+  | "tasks"
+  | "participants"
+  | "presence"
+  | "reasoning"
+  | "activityHistory"
+  | "roomArtifacts"
+  | "boardSettings"
+  | "messages"
+  | "githubEvents";
+
+export interface DesktopSnapshotSourceState {
+  status: "ready" | "error";
+  /** Human-readable failure detail when status is "error"; null when ready. */
+  error: string | null;
+}
+
+export type DesktopSnapshotSourceStates = Record<
+  DesktopSnapshotSourceKey,
+  DesktopSnapshotSourceState
+>;
+
 export interface DesktopRoomSnapshot {
   roomIdentifier: string | null;
   access: DesktopRoomAccess;
@@ -349,6 +377,12 @@ export interface DesktopRoomSnapshot {
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
   boardSettings: DesktopBoardSettingsSummary;
+  /**
+   * Per-source load status for this snapshot. A source that failed to load is
+   * marked "error" (with its data falling back to empty) so consumers can show
+   * a degraded state instead of a false-empty view. Defaults to all-ready.
+   */
+  sourceStates: DesktopSnapshotSourceStates;
 }
 
 export interface DesktopSendRoomMessageResult {

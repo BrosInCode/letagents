@@ -13,6 +13,7 @@ import {
   localChatDatabasePath,
   localFilesPath,
 } from "./chat-storage/settings.js";
+import { readySourceStates } from "./rooms/snapshot/snapshots.js";
 
 const smokeRoomIdentifier = "smoke-room";
 const smokeCodexWorkerSessionId = "worker_smoke_codex";
@@ -334,6 +335,7 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
       },
     ],
     githubEvents: null,
+    sourceStates: readySourceStates(),
   };
 }
 
