@@ -23,6 +23,7 @@ const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.
 const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/index.js");
 const { registerRoomArtifactRoutes } = await import("../routes/rooms/artifacts.js");
 const { requireWorkerRequestAgentIdentity } = await import("../request/agent-identity.js");
+const { registerTaskLeaseActionRoute } = await import("../routes/rooms/tasks/lease-action.js");
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -234,6 +235,21 @@ test("bearer artifact publishing requires exactly one caller-held work lease", {
   assert.equal((await invoke({ ...base, task_id: first.id })).statusCode, 403);
   await createTaskLease!({ room_id: room.id, task_id: first.id, kind: "work", agent_key: auth.agentSession!.agent_key, agent_session_id: auth.agentSession!.agent_session_id, actor_label: auth.agentSession!.actor_label, created_by: auth.agentSession!.actor_label });
   assert.equal((await invoke({ ...base, task_id: first.id })).statusCode, 200);
+});
+
+test("bearer cannot hand off or release another worker's lease", { skip: requiresDatabase }, async () => {
+  const { room, session } = await seed();
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  const task = await createTask!(room.id, "leased", "Other");
+  await createTaskLease!({ room_id: room.id, task_id: task.id, kind: "work", agent_key: "owner/other", agent_session_id: "agent_session_other", actor_label: "Other", created_by: "Other" });
+  let handler: ((...args: any[]) => Promise<void>) | null = null;
+  registerTaskLeaseActionRoute({ post(_path: RegExp, callback: any) { handler = callback; } } as never, {
+    resolveCanonicalRoomRequestId: async () => room.id, resolveRoomOrReply: async () => room, requireParticipant: async () => true, requireAdmin: async (_req: unknown, res: any) => { res.status(403).json({ error: "admin" }); return false; },
+    enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" }), normalizeOptionalString: (value: unknown) => typeof value === "string" ? value : null,
+  } as never);
+  const invoke = async (body: Record<string, unknown>) => { const res = responseRecorder(); await handler!({ params: { 0: room.id, 1: task.id }, body, ...auth }, res); return res; };
+  assert.equal((await invoke({ action: "handoff" })).statusCode, 403);
+  assert.equal((await invoke({ action: "release" })).statusCode, 403);
 });
 
 test("bearer and body credentials must identify the same worker session", { skip: requiresDatabase }, async () => {
