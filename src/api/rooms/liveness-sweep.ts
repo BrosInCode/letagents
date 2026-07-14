@@ -156,13 +156,16 @@ export function buildOfflineAnnouncementText(input: {
 }): string {
   const label = getAgentPrimaryLabel(input.session.actor_label) || input.session.display_name;
   const offlineFor = formatOfflineDuration(input.offline_for_ms);
-  // Transport loss stays visible, but its meaning depends on the runtime
-  // evidence available — and taking over someone's work is a lease decision,
+  // Transport loss stays visible, but it is never claimed as death: the
+  // ledger's generic presence writes default last_tool_call_at, so even
+  // "stale" evidence cannot prove a stopped runtime — it only adds the
+  // last-seen datapoint. Taking over someone's work is a lease decision,
   // not a reflex.
-  const base =
+  const staleNote =
     input.runtime_evidence === "stale"
-      ? `[status] ${label} appears to be offline — no room connection for ${offlineFor} and no runtime activity for ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)}. Pick up its unfinished work only once its work lease expires or is handed off, or a human confirms it is gone.`
-      : `[status] ${label}'s message channel has been unreachable for ${offlineFor} — runtime activity unknown; it may still be working outside the room. Its work leases remain valid. Only pick up its work if a lease expires, is handed off, or a human confirms the loss.`;
+      ? ` Last recorded runtime activity was ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)} ago.`
+      : "";
+  const base = `[status] ${label}'s message channel has been unreachable for ${offlineFor} — runtime activity unknown; it may still be working outside the room.${staleNote} Its work leases remain valid. Only pick up its work if a lease expires, is handed off, or a human confirms the loss.`;
   if (!input.is_board_manager) {
     return base;
   }

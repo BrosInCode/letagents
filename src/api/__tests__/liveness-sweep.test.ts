@@ -219,6 +219,8 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
   assert.ok(!unknown.includes("appears to be offline"));
   assert.ok(!unknown.includes("Board Manager"));
 
+  // Stale ledger evidence never claims death — generic presence writes
+  // default last_tool_call_at, so it only adds the last-seen datapoint.
   const stale = buildOfflineAnnouncementText({
     session,
     offline_for_ms: 3 * 60_000,
@@ -226,9 +228,10 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
     runtime_evidence: "stale",
     runtime_inactive_for_ms: 7 * 60_000,
   });
-  assert.ok(stale.includes("appears to be offline"));
-  assert.ok(stale.includes("no runtime activity for 7m"));
-  assert.ok(stale.includes("work lease expires or is handed off"));
+  assert.ok(!stale.includes("appears to be offline"));
+  assert.ok(stale.includes("runtime activity unknown"));
+  assert.ok(stale.includes("Last recorded runtime activity was 7m ago"));
+  assert.ok(stale.includes("lease expires, is handed off"));
 
   const manager = buildOfflineAnnouncementText({
     session,

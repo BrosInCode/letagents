@@ -147,8 +147,13 @@ export function registerAgentSessionRoutes(
           agent_key: agent.canonical_key,
           agent_instance_id: priorInstanceId,
         });
+        // Resume only when the caller expressed no contrary intent: a
+        // generic/absent requested name, or an explicit request for the
+        // same name. An explicit DIFFERENT name is a deliberate rename and
+        // wins over resumption.
         if (
           resumableName
+          && (isGenericName || resumableName === baseDisplayName)
           && !activeSessionsForIdentity.some((session) => session.display_name === resumableName)
         ) {
           usedDisplayNames.delete(resumableName);

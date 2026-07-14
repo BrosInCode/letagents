@@ -750,5 +750,39 @@ test(
     assert.equal(third.statusCode, 201, JSON.stringify(third.body));
     const thirdSession = third.body as { display_name?: string };
     assert.notEqual(thirdSession.display_name, "MistyMorrow");
+
+    // An explicit DIFFERENT name is a deliberate rename: resumption must not
+    // overwrite it.
+    await endRoomAgentSession!({ session_id: secondSession.session_id! });
+    const renamed = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        { ...registrationBody, display_name: "MorningGlory" },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(renamed.statusCode, 201, JSON.stringify(renamed.body));
+    const renamedSession = renamed.body as { session_id?: string; display_name?: string };
+    assert.equal(
+      renamedSession.display_name,
+      "MorningGlory",
+      "an explicit new name wins over resuming the old one"
+    );
+
+    // And an explicit request for the SAME prior name resumes it cleanly.
+    await endRoomAgentSession!({ session_id: renamedSession.session_id! });
+    const explicitSame = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        { ...registrationBody, display_name: "MorningGlory" },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(explicitSame.statusCode, 201, JSON.stringify(explicitSame.body));
+    assert.equal(
+      (explicitSame.body as { display_name?: string }).display_name,
+      "MorningGlory",
+      "an explicit same-name request resumes without numbering"
+    );
   }
 );
