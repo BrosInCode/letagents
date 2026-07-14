@@ -35,6 +35,11 @@ export class SupervisorDaemon {
     await this.singleton.release();
   }
 
+  /** Identity P1b/P1d must pass into work-durability fencing. */
+  supervisorFenceIdentity(): { supervisor_id: string; supervisor_generation: number } {
+    return { supervisor_id: this.singleton.lockPath, supervisor_generation: this.singleton.currentGeneration };
+  }
+
   async transition(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string): Promise<void> {
     await this.singleton.assertCurrent();
     const manifest = await this.store.load();

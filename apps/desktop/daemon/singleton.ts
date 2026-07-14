@@ -23,6 +23,12 @@ export class DaemonSingleton {
     this.generationPath = `${lockPath}.generation`;
   }
 
+  /** Durable P1a generation to inject into every retained work fence. */
+  get currentGeneration(): number {
+    if (!this.lockHeld || this.generation < 1) throw new DaemonFenceLostError("Supervisor generation is unavailable before the daemon owns its fence.");
+    return this.generation;
+  }
+
   async acquire(): Promise<number> {
     assertMacOS(this.platform);
     await mkdir(dirname(this.lockPath), { recursive: true, mode: 0o700 });
