@@ -102,9 +102,11 @@ test("fence loss fatally stops the control endpoint", async () => {
   const env = await fixture();
   try {
     const socketPath = join(env.root, "fatal.sock");
+    const singleton = new DaemonSingleton(join(env.root, "fatal.lock"), "darwin");
+    await singleton.acquire();
+    await writeFile(`${join(env.root, "fatal.lock")}.generation`, "2\n");
     let socket!: DaemonControlSocket;
-    const fatal = new Error("fence lost"); fatal.name = "DaemonFenceLostError";
-    socket = new DaemonControlSocket(socketPath, () => { throw fatal; }, () => { setTimeout(() => { void socket.stop(); }, 0); }, 32);
+    socket = new DaemonControlSocket(socketPath, () => singleton.assertCurrent(), () => { setTimeout(() => { void socket.stop(); }, 0); }, 32);
     await socket.start();
     await new Promise<void>((resolve, reject) => {
       const client = createConnection(socketPath); client.once("error", reject);
@@ -115,6 +117,7 @@ test("fence loss fatally stops the control endpoint", async () => {
     await assert.rejects(() => new Promise<void>((resolve, reject) => {
       const client = createConnection(socketPath); client.once("connect", () => resolve()); client.once("error", reject);
     }));
+    await singleton.release();
   } finally { await env.cleanup(); }
 });
 

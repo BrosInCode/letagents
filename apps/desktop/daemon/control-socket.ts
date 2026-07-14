@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { createServer, type Server } from "node:net";
 
 import { DAEMON_PROTOCOL_VERSION, type DaemonRequest, type DaemonResponse } from "./types.js";
+import { DaemonFenceLostError } from "./singleton.js";
 
 export type RequestHandler = (request: DaemonRequest) => Promise<unknown> | unknown;
 
@@ -46,7 +47,7 @@ export class DaemonControlSocket {
       const result = await this.handle(request);
       this.write(socket, { version: DAEMON_PROTOCOL_VERSION, id: request.id, ok: true, result });
     } catch (error) {
-      if (error instanceof Error && error.name === "DaemonFenceLostError") {
+      if (error instanceof DaemonFenceLostError) {
         socket.destroy();
         await this.onFatal?.(error);
         return;
