@@ -213,6 +213,7 @@ export class SupervisorDaemon {
       let stopped = false;
       let currentHandle = handle;
       let currentHandleGeneration = 0;
+      let listenerInstalledGeneration = 0;
       let listenerInstallTail: Promise<void> = Promise.resolve();
       const activeCallbacks = new Set<Promise<void>>();
       const trackCallback = (operation: Promise<void>) => {
@@ -249,7 +250,13 @@ export class SupervisorDaemon {
         if (stopped || generation !== currentHandleGeneration || !sameHandle(nextHandle, currentHandle)) { nextUnsubscribe(); return; }
         const previousUnsubscribe = unsubscribe;
         unsubscribe = nextUnsubscribe;
+        listenerInstalledGeneration = generation;
         previousUnsubscribe();
+      };
+      const enqueueExitListenerInstall = (nextHandle: ProviderActionHandle, generation: number) => {
+        const operation = listenerInstallTail.then(() => installExitListener(nextHandle, generation));
+        listenerInstallTail = operation.catch(() => undefined);
+        return operation;
       };
       const queueExitListenerInstall = (nextHandle: ProviderActionHandle) => {
         // Promotion is intentionally before the await inside `onExit`: a late
@@ -257,15 +264,13 @@ export class SupervisorDaemon {
         currentHandle = nextHandle;
         currentHandleGeneration += 1;
         const generation = currentHandleGeneration;
-        const operation = listenerInstallTail.then(() => installExitListener(nextHandle, generation));
-        // Do not let a failed registration poison later recovery registrations.
-        listenerInstallTail = operation.catch(() => undefined);
-        return operation;
+        return enqueueExitListenerInstall(nextHandle, generation);
       };
       let tickTail: Promise<void> = Promise.resolve();
       const tick = () => {
         const operation = tickTail.then(async () => {
           if (stopped) return;
+          if (listenerInstalledGeneration !== currentHandleGeneration) await enqueueExitListenerInstall(currentHandle, currentHandleGeneration);
           const result = await this.reconcile(entryId, { ...input(), handle: currentHandle }, watchdogThresholdMs, actor);
           if (!stopped && result.replacementHandle) await queueExitListenerInstall(result.replacementHandle);
         });
