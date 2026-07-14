@@ -146,7 +146,8 @@ test("work attempts survive generations and lease rebinds while terminal payload
     await store.checkpoint(attempt.work_attempt_id, { room_cursor: "msg_12", provider_continuation_id: "provider-1" });
     const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
     const terminal = { ended_at: "2026-01-01T00:00:09.000Z", exit_code: 137, signal: "SIGKILL", stdio_archive_ref: "stdio.log.1.archive", stdio_tail: "last line", terminal_cause: "crash", actor: "daemon", generation: 1, provider_continuation_id: "provider-1" };
-    await store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, terminal);
+    const storedTerminal = await store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, { ...terminal, stdio_tail: "x".repeat(20) }, 8);
+    assert.equal(storedTerminal.terminal?.stdio_tail, "x".repeat(8));
     await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, terminal), ImmutableExecutionError);
     await store.rebindAttempt(attempt.work_attempt_id, "lease-2", 2);
     const resumed = await store.startGeneration(attempt.work_attempt_id, "daemon", 2);

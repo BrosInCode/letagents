@@ -70,13 +70,13 @@ export class WorkDurabilityStore {
     });
   }
 
-  async recordTerminal(workAttemptId: string, executionGenerationId: string, terminal: ExecutionTerminalPayload): Promise<ExecutionGeneration> {
+  async recordTerminal(workAttemptId: string, executionGenerationId: string, terminal: ExecutionTerminalPayload, maxStdioTailBytes = 64 * 1024): Promise<ExecutionGeneration> {
     return this.mutate((stored) => {
       const execution = this.required(stored, workAttemptId).execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
       if (!execution) throw new AttemptNotFoundError(`Unknown execution generation: ${executionGenerationId}`);
       if (execution.terminal) throw new ImmutableExecutionError("Execution terminal payloads are append-only and immutable.");
       if (terminal.generation !== execution.generation) throw new ImmutableExecutionError("Terminal generation does not match its execution record.");
-      execution.terminal = terminal;
+      execution.terminal = { ...terminal, stdio_tail: Buffer.from(terminal.stdio_tail).subarray(-maxStdioTailBytes).toString("utf8") };
       return execution;
     });
   }
@@ -98,6 +98,7 @@ export class WorkDurabilityStore {
     return this.mutate((stored) => {
       const attempt = this.required(stored, workAttemptId);
       if (attempt.concluded_at) throw new ImmutableExecutionError("Work attempts can conclude only once.");
+      if (!input.cause.trim()) throw new ImmutableExecutionError("Work attempts require an explicit conclusion cause.");
       attempt.state = input.state;
       attempt.concluded_at = this.now();
       attempt.conclusion_cause = input.cause;
