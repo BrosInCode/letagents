@@ -1,47 +1,64 @@
 import { CRASH_LOOP_WINDOW_MS, restartBackoffMs } from "./reconciler-policy.js";
 import type { ObservedState, ReconciliationState } from "./types.js";
 
+const MAX_ACTION_IDS = 32;
+
+function liveExits(previous: ReconciliationState | undefined, nowMs: number): number[] {
+  return (previous?.exit_timestamps_ms ?? []).filter((at) => at >= nowMs - CRASH_LOOP_WINDOW_MS);
+}
+
+function completed(previous: ReconciliationState | undefined, actionId?: string): string[] {
+  const ids = previous?.completed_action_ids ?? [];
+  return actionId ? [...ids.filter((id) => id !== actionId), actionId].slice(-MAX_ACTION_IDS) : ids;
+}
+
 /**
- * Advances crash-loop bookkeeping exactly once per observed-state transition.
- * The value belongs in the manifest, never only in the reconciler process.
+ * Updates observation bookkeeping. Only terminal failed edges enter the
+ * quarantine window; recovery/health observations never erase that history.
  */
 export function advanceReconciliationState(
   previous: ReconciliationState | undefined,
   observedState: ObservedState,
   nowMs: number,
 ): ReconciliationState {
-  const failureTimestamps = (previous?.failure_timestamps_ms ?? []).filter((at) => at >= nowMs - CRASH_LOOP_WINDOW_MS);
-  // Stable useful work is the only success signal that clears a crash window.
-  // Recovery/starting are transients and must retain preceding failures.
+  const exits = liveExits(previous, nowMs);
   if (observedState === "idle" || observedState === "working") {
-    return { failure_timestamps_ms: [], last_observed_state: observedState, next_restart_at_ms: null, last_failed_action_id: null };
+    return { exit_timestamps_ms: exits, consecutive_action_failures: 0, last_observed_state: observedState, next_restart_at_ms: null, completed_action_ids: completed(previous), pending_action: previous?.pending_action ?? null };
   }
   if (observedState !== "failed" || previous?.last_observed_state === "failed") {
-    return {
-      failure_timestamps_ms: failureTimestamps,
-      last_observed_state: observedState,
-      next_restart_at_ms: observedState === "failed" ? previous?.next_restart_at_ms ?? null : null,
-      last_failed_action_id: previous?.last_failed_action_id ?? null,
-    };
+    return { exit_timestamps_ms: exits, consecutive_action_failures: previous?.consecutive_action_failures ?? 0, last_observed_state: observedState, next_restart_at_ms: previous?.next_restart_at_ms ?? null, completed_action_ids: completed(previous), pending_action: previous?.pending_action ?? null };
   }
-  const nextFailures = [...failureTimestamps, nowMs];
+  const failures = (previous?.consecutive_action_failures ?? 0) + 1;
   return {
-    failure_timestamps_ms: nextFailures,
+    exit_timestamps_ms: [...exits, nowMs],
+    consecutive_action_failures: failures,
     last_observed_state: "failed",
-    next_restart_at_ms: nowMs + restartBackoffMs(nextFailures.length),
-    last_failed_action_id: null,
+    next_restart_at_ms: nowMs + restartBackoffMs(failures),
+    completed_action_ids: completed(previous),
+    pending_action: previous?.pending_action ?? null,
   };
 }
 
-/** Records a failed provider action exactly once, even if its tick is retried. */
+export function beginReconciliationAction(previous: ReconciliationState, action: NonNullable<ReconciliationState["pending_action"]>): ReconciliationState {
+  if (previous.completed_action_ids.includes(action.id)) throw new Error(`replayed reconciliation action: ${action.id}`);
+  if (previous.pending_action && previous.pending_action.id !== action.id) throw new Error(`unresolved reconciliation action: ${previous.pending_action.id}`);
+  return { ...previous, pending_action: action };
+}
+
+/** Records a failed provider action exactly once, with bounded replay memory. */
 export function recordReconciliationActionFailure(previous: ReconciliationState, actionId: string, nowMs: number): ReconciliationState {
-  if (previous.last_failed_action_id === actionId) return previous;
-  const failureTimestamps = previous.failure_timestamps_ms.filter((at) => at >= nowMs - CRASH_LOOP_WINDOW_MS);
-  const nextFailures = [...failureTimestamps, nowMs];
+  if (previous.completed_action_ids.includes(actionId)) return previous;
+  const failures = previous.consecutive_action_failures + 1;
   return {
-    failure_timestamps_ms: nextFailures,
+    ...previous,
     last_observed_state: "failed",
-    next_restart_at_ms: nowMs + restartBackoffMs(nextFailures.length),
-    last_failed_action_id: actionId,
+    consecutive_action_failures: failures,
+    next_restart_at_ms: nowMs + restartBackoffMs(failures),
+    completed_action_ids: completed(previous, actionId),
+    pending_action: null,
   };
+}
+
+export function completeReconciliationAction(previous: ReconciliationState, actionId: string): ReconciliationState {
+  return { ...previous, consecutive_action_failures: 0, next_restart_at_ms: null, completed_action_ids: completed(previous, actionId), pending_action: null };
 }

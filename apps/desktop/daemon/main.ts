@@ -4,7 +4,7 @@ import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
 import type { ProviderActionPort } from "./provider-action-port.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
-import { advanceReconciliationState, recordReconciliationActionFailure } from "./reconciler-state.js";
+import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import type { DaemonManifestEntry, ObservedState, PolicyCondition } from "./types.js";
 
@@ -20,6 +20,7 @@ export class SupervisorDaemon {
   private readonly audit: AuditLog;
   private readonly socket: DaemonControlSocket;
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
+  private manifestMutation: Promise<void> = Promise.resolve();
 
   constructor(paths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort) {
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
@@ -50,6 +51,10 @@ export class SupervisorDaemon {
   }
 
   async transition(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"]): Promise<void> {
+    return this.serializeManifestMutation(() => this.transitionOnce(entryId, to, condition, cause, actor, reconciliation));
+  }
+
+  private async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"]): Promise<void> {
     await this.singleton.assertCurrent();
     const manifest = await this.store.load();
     const entry = manifest.entries.find((candidate) => candidate.id === entryId);
@@ -66,7 +71,7 @@ export class SupervisorDaemon {
    * the real control-socket port; tests may inject a fake port directly.
    */
   async reconcile(entryId: string, input: DaemonReconcileInput, watchdogThresholdMs: number, actor = "reconciler") {
-    return this.serializeEntryTick(entryId, () => this.reconcileOnce(entryId, input, watchdogThresholdMs, actor));
+    return this.serializeEntryTick(entryId, () => this.serializeManifestMutation(() => this.reconcileOnce(entryId, input, watchdogThresholdMs, actor)));
   }
 
   private async reconcileOnce(entryId: string, input: DaemonReconcileInput, watchdogThresholdMs: number, actor: string) {
@@ -76,29 +81,49 @@ export class SupervisorDaemon {
     const entry = manifest.entries.find((candidate) => candidate.id === entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
 
-    const reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, input.nowMs);
+    let reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, input.nowMs);
     if (JSON.stringify(reconciliation) !== JSON.stringify(entry.reconciliation)) {
       const persisted = { ...entry, reconciliation };
       const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? persisted : candidate));
       this.manifestGeneration = next.generation;
     }
 
+    if (reconciliation.pending_action) {
+      const attached = await this.providerPort.attachAction?.(reconciliation.pending_action.id, input.workAttemptId);
+      if (attached) {
+        reconciliation = completeReconciliationAction(reconciliation, reconciliation.pending_action.id);
+        await this.transitionOnce(entryId, attached.observedState, entry.condition, "reconciled pending provider action", actor, reconciliation);
+      }
+      return {
+        decision: { action: "hold_coordination" as const, observedState: attached?.observedState ?? "recovering", condition: "coordination_blocked" as const, reason: attached ? "pending provider action attached; await next convergence tick" : "pending provider action requires attach reconciliation" },
+        disposition: "held" as const,
+      };
+    }
+
     const result = await new ProviderReconciler(this.providerPort).reconcile({
       ...input,
+      actionId: input.reconciliationActionId,
       desiredState: entry.desired_state,
       observedState: entry.observed_state,
       condition: entry.condition,
-      exitsInWindow: reconciliation.failure_timestamps_ms.length,
+      exitsInWindow: reconciliation.exit_timestamps_ms.length,
       nextRestartAtMs: reconciliation.next_restart_at_ms,
-    }, watchdogThresholdMs);
+    }, watchdogThresholdMs, {
+      beforeAction: async (kind) => {
+        reconciliation = beginReconciliationAction(reconciliation, { id: input.reconciliationActionId, kind, recorded_at_ms: input.nowMs });
+        await this.transitionOnce(entryId, entry.observed_state, entry.condition, `persisted ${kind} action intent`, actor, reconciliation);
+      },
+    });
     const finalReconciliation = result.disposition === "failed"
       ? recordReconciliationActionFailure(reconciliation, input.reconciliationActionId, input.nowMs)
-      : reconciliation;
+      : result.disposition === "executed"
+        ? completeReconciliationAction(reconciliation, input.reconciliationActionId)
+        : reconciliation;
     const target = result.disposition === "failed"
       ? { observedState: "failed" as const, condition: "none" as const }
       : { observedState: result.decision.observedState, condition: result.decision.condition };
     if (target.observedState !== entry.observed_state || target.condition !== entry.condition || JSON.stringify(finalReconciliation) !== JSON.stringify(reconciliation)) {
-      await this.transition(entryId, target.observedState, target.condition, result.decision.reason, actor, finalReconciliation);
+      await this.transitionOnce(entryId, target.observedState, target.condition, result.decision.reason, actor, finalReconciliation);
     }
     return result;
   }
@@ -114,6 +139,14 @@ export class SupervisorDaemon {
       release();
       if (this.reconciliationTicks.get(entryId) === tail) this.reconciliationTicks.delete(entryId);
     }
+  }
+
+  private async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.manifestMutation;
+    let release!: () => void;
+    this.manifestMutation = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
   }
 }
 

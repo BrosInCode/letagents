@@ -6,11 +6,15 @@ export type PolicyCondition = "none" | "quarantined" | "coordination_blocked" | 
 
 /** Persisted by the daemon so a restart cannot erase crash-loop/backoff state. */
 export type ReconciliationState = {
-  failure_timestamps_ms: number[];
+  /** Terminal process exits only; this rolling window determines quarantine. */
+  exit_timestamps_ms: number[];
+  /** Consecutive failed recovery actions only; this determines retry backoff. */
+  consecutive_action_failures: number;
   last_observed_state: ObservedState;
   next_restart_at_ms: number | null;
-  /** Prevents a retried tick from recording the same provider action twice. */
-  last_failed_action_id: string | null;
+  /** Bounded action journal: rejects replayed or out-of-order provider calls. */
+  completed_action_ids: string[];
+  pending_action: { id: string; kind: "poke" | "restart_fresh" | "restart_with_resume" | "stop"; recorded_at_ms: number } | null;
 };
 
 export type DaemonManifestEntry = {
