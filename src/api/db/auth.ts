@@ -334,6 +334,24 @@ function toSupervisorHostGrant(row: typeof supervisor_host_grants.$inferSelect):
   };
 }
 
+export interface SupervisorGrantFence {
+  grant_id: string;
+  generation: number;
+  token_version: number;
+}
+
+async function assertSupervisorGrantFenceTx(tx: any, fence: SupervisorGrantFence): Promise<boolean> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${fence.grant_id}`}, 0))`);
+  const [grant] = await tx.select({ grant_id: supervisor_host_grants.grant_id }).from(supervisor_host_grants).where(and(
+    eq(supervisor_host_grants.grant_id, fence.grant_id),
+    eq(supervisor_host_grants.current_generation, fence.generation),
+    eq(supervisor_host_grants.token_version, fence.token_version),
+    isNull(supervisor_host_grants.revoked_at),
+    gt(supervisor_host_grants.expires_at, new Date().toISOString()),
+  )).limit(1);
+  return Boolean(grant);
+}
+
 function toRoomAgentSessionBearer(row: typeof room_agent_session_bearers.$inferSelect): RoomAgentSessionBearer {
   return {
     bearer_id: row.bearer_id,
@@ -368,6 +386,7 @@ export async function createRoomAgentSession(input: {
   ide_label: string;
   supervisor_grant_id?: string | null;
   worker_bearer_expires_at?: string | null;
+  supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<CreatedRoomAgentSession> {
   const nowDate = new Date();
   const now = nowDate.toISOString();
@@ -402,6 +421,9 @@ export async function createRoomAgentSession(input: {
   };
 
   return db.transaction(async (tx) => {
+    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+      throw new Error("Supervisor grant fence is stale.");
+    }
     const [created] = await tx.insert(room_agent_sessions).values(session).returning();
     if (workerBearer) await tx.insert(room_agent_session_bearers).values({
       bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
@@ -496,17 +518,22 @@ export async function rotateSupervisorHostGrant(input: {
 export async function advanceSupervisorHostGrantGeneration(input: {
   grant_id: string;
   expected_generation: number;
+  expected_token_version: number;
 }): Promise<SupervisorHostGrant | null> {
+  return db.transaction(async (tx) => {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${input.grant_id}`}, 0))`);
   const now = new Date().toISOString();
-  const [updated] = await db.update(supervisor_host_grants).set({
+  const [updated] = await tx.update(supervisor_host_grants).set({
     current_generation: input.expected_generation + 1, updated_at: now,
   }).where(and(
     eq(supervisor_host_grants.grant_id, input.grant_id),
     eq(supervisor_host_grants.current_generation, input.expected_generation),
+    eq(supervisor_host_grants.token_version, input.expected_token_version),
     isNull(supervisor_host_grants.revoked_at),
     gt(supervisor_host_grants.expires_at, now),
   )).returning();
   return updated ? toSupervisorHostGrant(updated) : null;
+  });
 }
 
 export async function revokeSupervisorHostGrant(input: { grant_id: string; owner_account_id: string }): Promise<SupervisorHostGrant | null> {
@@ -654,8 +681,10 @@ export async function rotateRoomAgentSessionBearer(input: {
   capabilities?: AgentSessionBearerCapability[];
   expires_at?: string;
   supervisor_grant_id?: string;
+  supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<{ bearer: RoomAgentSessionBearer; token: string } | null> {
   return db.transaction(async (tx) => {
+    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) return null;
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_bearer:${input.bearer_id}`}, 0))`);
     const [current] = await tx
       .select()
@@ -710,7 +739,10 @@ export async function endRoomAgentSession(input: {
   session_id: string;
   room_id?: string | null;
   owner_account_id?: string | null;
+  supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<RoomAgentSession | null> {
+  return db.transaction(async (tx) => {
+  if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) return null;
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
   if (input.room_id) {
@@ -720,7 +752,7 @@ export async function endRoomAgentSession(input: {
     conditions.push(eq(room_agent_sessions.owner_account_id, input.owner_account_id));
   }
 
-  const [row] = await db
+  const [row] = await tx
     .update(room_agent_sessions)
     .set({
       ended_at: now,
@@ -731,7 +763,7 @@ export async function endRoomAgentSession(input: {
     .returning();
 
   if (row) {
-    await db.update(room_agent_session_bearers)
+    await tx.update(room_agent_session_bearers)
       .set({ revoked_at: now })
       .where(and(
         eq(room_agent_session_bearers.session_id, row.session_id),
@@ -740,6 +772,7 @@ export async function endRoomAgentSession(input: {
   }
 
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
+  });
 }
 
 export async function assignProjectAdmin(projectId: string, accountId: string): Promise<void> {

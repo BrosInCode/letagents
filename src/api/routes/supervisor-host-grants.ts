@@ -60,6 +60,10 @@ function cappedExpiry(grantExpiry: string): string {
   return new Date(Math.min(Date.now() + getAgentSessionBearerTtlMs(), new Date(grantExpiry).getTime())).toISOString();
 }
 
+function fence(grant: { grant_id: string; current_generation: number; token_version: number }) {
+  return { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version };
+}
+
 /** Default-deny route registry: only these lifecycle endpoints accept a supervisor grant. */
 export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolverDeps): void {
   // Register no privileged grant surface unless the staged rollout is enabled.
@@ -130,7 +134,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   app.post("/supervisor-host-grants/:grantId/handoff", async (req: AuthenticatedRequest, res) => {
     const grant = await requireCurrentSupervisorGrant(req, res);
     if (!grant || grant.grant_id !== String(req.params.grantId ?? "").trim()) return;
-    const advanced = await advanceSupervisorHostGrantGeneration({ grant_id: grant.grant_id, expected_generation: grant.current_generation });
+    const advanced = await advanceSupervisorHostGrantGeneration({ grant_id: grant.grant_id, expected_generation: grant.current_generation, expected_token_version: grant.token_version });
     if (!advanced) {
       res.status(409).json({ error: "Host handoff lost its generation fence." });
       return;
@@ -181,6 +185,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
         agent_key: agent.canonical_key, agent_instance_id: typeof body.agent_instance_id === "string" ? body.agent_instance_id.slice(0, 255) : null,
         display_name: displayName, owner_account_id: grant.owner_account_id, owner_label: agent.owner_label, ide_label: ideLabel,
         supervisor_grant_id: grant.grant_id, worker_bearer_expires_at: cappedExpiry(grant.expires_at),
+        supervisor_grant_fence: fence(grant),
       });
       // Never hand the supervisor an owner-capable session token.
       res.status(201).json({ ...session, session_token: undefined });
@@ -201,7 +206,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     const body = req.body as { bearer_id?: unknown };
     const bearerId = typeof body.bearer_id === "string" ? body.bearer_id.trim() : "";
     if (!bearerId) { res.status(400).json({ error: "bearer_id is required." }); return; }
-    const rotated = await rotateRoomAgentSessionBearer({ bearer_id: bearerId, session_id: sessionId, supervisor_grant_id: grant.grant_id, expires_at: cappedExpiry(grant.expires_at) });
+    const rotated = await rotateRoomAgentSessionBearer({ bearer_id: bearerId, session_id: sessionId, supervisor_grant_id: grant.grant_id, supervisor_grant_fence: fence(grant), expires_at: cappedExpiry(grant.expires_at) });
     if (!rotated) {
       res.status(403).json({ error: "Grant does not authorize that worker bearer." });
       return;
@@ -220,7 +225,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       res.status(403).json({ error: "Grant does not authorize that worker session." });
       return;
     }
-    const ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id });
+    const ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id, supervisor_grant_fence: fence(grant) });
     res.json(ended);
   });
 }
