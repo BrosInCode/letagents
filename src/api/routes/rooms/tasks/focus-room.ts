@@ -5,6 +5,7 @@ import {
   createFocusRoomForTask,
   getTaskById,
   getTaskOwnershipState,
+  LeaseFenceStaleError,
 } from "../../../db.js";
 import {
   respondWithBadRequest,
@@ -78,6 +79,7 @@ export function registerTaskFocusRoomRoute(
 
       const result = await createFocusRoomForTask(project.id, taskId, {
         displayName: display_name,
+        leaseFence: coordination.leaseFence ?? null,
       });
       if (!result) {
         res.status(404).json({ error: "Task not found" });
@@ -115,6 +117,10 @@ export function registerTaskFocusRoomRoute(
         }),
       });
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "POST /rooms/:room_id/tasks/:task_id/focus-room",

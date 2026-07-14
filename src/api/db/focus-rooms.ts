@@ -10,6 +10,7 @@ import { getRoomScopedSequenceNames, isUniqueConstraintError, nextPrefixedId } f
 import { toProject } from "./mappers.js";
 import { getProjectById } from "./rooms.js";
 import { getTaskById } from "./tasks.js";
+import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import type { Project, Task } from "./types.js";
 
 export async function buildFocusRoomId(): Promise<string> {
@@ -361,7 +362,7 @@ export async function createFocusRoomFromIntent(
 export async function createFocusRoomForTask(
   parentRoomId: string,
   taskId: string,
-  options?: { displayName?: string }
+  options?: { displayName?: string; leaseFence?: LeaseFence | null }
 ): Promise<{ room: Project; task: Task; created: boolean } | null> {
   const parent = await getProjectById(parentRoomId);
   if (!parent) {
@@ -389,6 +390,12 @@ export async function createFocusRoomForTask(
 
     try {
       await db.transaction(async (tx) => {
+        // Fence the create on the caller's held work lease (plan §4.5): a
+        // rebound-away predecessor cannot open a focus room for a task whose
+        // lease has moved. Runs inside the same tx as the room insert.
+        if (options?.leaseFence && !(await acquireLeaseFenceTx(tx, options.leaseFence))) {
+          throw new LeaseFenceStaleError();
+        }
         await tx.insert(rooms).values({
           id,
           display_name,

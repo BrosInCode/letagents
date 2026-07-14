@@ -18,6 +18,8 @@ const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { rebindTaskLease, assertLeaseEpochCurrentTx } = await import("../db/coordination/lease-rebind.js");
 const { applyTaskWorkLeaseAction } = await import("../db/coordination/work-lease-actions.js");
 const { releaseTaskLease } = await import("../db/coordination/task-leases.js");
+const { upsertStaleTaskPromptMute, getStaleTaskPromptMutes } = await import("../db/coordination/stale-task-prompt-mutes.js");
+const { createFocusRoomForTask, getActiveFocusRoomForTask } = await import("../db/focus-rooms.js");
 
 async function reset(): Promise<void> {
   if (!client) throw new Error("DB-backed rebind tests require TEST_DB_URL");
@@ -297,6 +299,32 @@ test("publishWorkerArtifactFenced aborts atomically when a rebind commits first 
     room_id: room.id, artifact, linked_task_id: task.id,
   });
   assert.ok(ok.identity_key, "successor at the current epoch publishes");
+});
+
+test("stale-prompt mute + focus-room open honor the work-lease fence (stale tuple aborts with no write)", { skip: requiresDatabase }, async () => {
+  const { room, from } = await seed();
+  const task = await db!.createTask(room.id, "fenced surface task", from.actor_label);
+  await db!.createTaskLease({
+    room_id: room.id, task_id: task.id, kind: "work", agent_key: from.agent_key,
+    actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
+  const staleFence = { lease_id: "tl_missing", room_id: room.id, task_id: task.id, kind: "work" as const, expected_epoch: 9, agent_session_id: from.session_id };
+  const current = async () => {
+    const [lease] = await db!.getActiveTaskLeases(room.id, task.id);
+    return { lease_id: lease.id, room_id: room.id, task_id: task.id, kind: "work" as const, expected_epoch: lease.epoch, agent_session_id: from.session_id };
+  };
+
+  // stale-prompt mute
+  await assert.rejects(upsertStaleTaskPromptMute({ room_id: room.id, task_id: task.id, task_updated_at: task.updated_at, muted_by: from.actor_label }, staleFence), (e: Error) => e.name === "LeaseFenceStaleError");
+  assert.equal((await getStaleTaskPromptMutes(room.id, [task.id])).length, 0, "no mute row from the aborted write");
+  await upsertStaleTaskPromptMute({ room_id: room.id, task_id: task.id, task_updated_at: task.updated_at, muted_by: from.actor_label }, await current());
+  assert.equal((await getStaleTaskPromptMutes(room.id, [task.id])).length, 1, "current fence writes the mute");
+
+  // focus-room open
+  await assert.rejects(createFocusRoomForTask(room.id, task.id, { leaseFence: staleFence }), (e: Error) => e.name === "LeaseFenceStaleError");
+  assert.equal(await getActiveFocusRoomForTask(room.id, task.id), undefined, "no focus room from the aborted open");
+  const opened = await createFocusRoomForTask(room.id, task.id, { leaseFence: await current() });
+  assert.equal(opened?.created, true, "current fence opens the focus room");
 });
 
 test("releaseTaskLease fence: only the current active holder tuple releases; stale/mismatch is a no-op", { skip: requiresDatabase }, async () => {
