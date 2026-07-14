@@ -102,6 +102,9 @@ test("(A) a predecessor whose work lease was rebound away is denied at enforceme
   assert.equal(auth.authKind, "agent_session");
   const callerSession = auth.agentSession!.agent_session_id;
 
+  // rebindTaskLease refuses a live predecessor (predecessor_live), so end the
+  // from-session first — its bearer/principal was already captured above.
+  await db!.endRoomAgentSession({ session_id: from.session_id });
   // A real rebind moves the lease to the successor BEFORE the predecessor's write.
   const rebind = await db!.rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: grantFence });
   assert.equal(rebind.ok, true);
@@ -144,6 +147,9 @@ test("(B) enforcement captures the current tuple, then a rebind makes the in-tx 
   assert.equal(decision.kind, "allow");
   assert.ok(decision.leaseFence, "a held work lease yields a fence tuple");
 
+  // Tuple captured while the predecessor was live+holding; now end it (rebind
+  // refuses a live predecessor) and rebind so the captured tuple goes stale.
+  await db!.endRoomAgentSession({ session_id: from.session_id });
   // A real rebind advances the lease epoch/session after the tuple was captured.
   const rebind = await db!.rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: grantFence });
   assert.equal(rebind.ok, true);
