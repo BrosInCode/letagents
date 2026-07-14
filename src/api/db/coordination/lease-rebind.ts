@@ -9,7 +9,7 @@ import {
 } from "../schema.js";
 import { toTaskLease } from "../mappers.js";
 import { assertSupervisorGrantFenceTx, type SupervisorGrantFence } from "../auth.js";
-import type { TaskLease, TaskLeaseRow, TaskLeaseStatus } from "../types.js";
+import type { TaskLease, TaskLeaseKind, TaskLeaseRow, TaskLeaseStatus } from "../types.js";
 
 // Why rebind exists (plan §4.5): a supervised worker that dies and restarts
 // registers a NEW agent session, but its in-flight lease is bound to the OLD
@@ -25,7 +25,8 @@ export type RebindTaskLeaseFailure =
   | "grant_fence_stale"  // supervisor grant generation/token_version/expiry invalid
   | "grant_scope"        // grant does not authorize this room + agent identity
   | "session_mismatch"   // sessions missing, cross-room, wrong key/kind/owner, or successor not under this grant
-  | "predecessor_live";  // the from-session is not ended (not terminal)
+  | "predecessor_live"   // the from-session is not ended (not terminal)
+  | "kind_not_rebindable"; // only work leases are rebindable; review leases must be released
 
 export interface RebindTaskLeaseInput {
   lease_id: string;
@@ -62,6 +63,15 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
       ))
       .limit(1);
     if (!lease) return { ok: false, reason: "lost_race" as const };
+
+    // Only WORK leases are rebindable. A review lease's authority cannot be
+    // proven by the work-attempt/execution-generation terminal attestation the
+    // rebind consumes (§4.5), so the generic route must not silently move one —
+    // a dead reviewer's review lease is released, not rebound. Guard here so no
+    // caller can slip a non-work kind past the attestation model.
+    if (lease.kind !== ("work" as TaskLeaseKind)) {
+      return { ok: false, reason: "kind_not_rebindable" as const };
+    }
 
     // Grant scope: the grant must explicitly cover this lease's room and agent
     // identity — a valid grant for a different room/agent may not move it.
@@ -159,14 +169,73 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
   });
 }
 
+// Thrown by a lease-guarded write when its fence is stale — the lease moved to
+// another session, advanced past the observed epoch, or is no longer active.
+// Routes map this to 409 `coordination_lease_fence_stale`.
+export class LeaseFenceStaleError extends Error {
+  readonly code = "coordination_lease_fence_stale";
+  constructor(message = "The work lease advanced or moved before this write committed.") {
+    super(message);
+    this.name = "LeaseFenceStaleError";
+  }
+}
+
+// The full identity a lease-guarded write must still hold at commit time. epoch
+// and agent_session_id are REQUIRED, never optional (plan §4.5): a write whose
+// authority derives from holding a lease must prove it holds the CURRENT lease.
+export interface LeaseFence {
+  lease_id: string;
+  room_id: string;
+  task_id: string;
+  kind: TaskLeaseKind;
+  expected_epoch: number;
+  agent_session_id: string;
+}
+
+// Canonical lease fence. Must be called INSIDE the same transaction as the
+// guarded side effect. A plain SELECT assertion at READ COMMITTED is TOCTOU: a
+// rebind (or another lease action) can commit between the validating read and
+// the guarded write. Taking the SAME `task_lease:<id>` xact advisory lock that
+// rebindTaskLease uses linearizes the two — whichever acquires the lock first
+// runs to commit and the loser observes its state. Returns the still-valid
+// lease row, or null when the fence is stale (moved session / advanced epoch /
+// wrong room-task-kind / no longer active). Callers throw LeaseFenceStaleError
+// on null AFTER releasing to the route (or let a wrapper do so).
+export async function acquireLeaseFenceTx(
+  tx: any,
+  fence: LeaseFence,
+): Promise<TaskLeaseRow | null> {
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`task_lease:${fence.lease_id}`}, 0))`,
+  );
+  const [row] = await tx
+    .select()
+    .from(task_leases)
+    .where(and(
+      eq(task_leases.id, fence.lease_id),
+      eq(task_leases.room_id, fence.room_id),
+      eq(task_leases.task_id, fence.task_id),
+      eq(task_leases.kind, fence.kind),
+      eq(task_leases.status, "active" as TaskLeaseStatus),
+      eq(task_leases.epoch, fence.expected_epoch),
+      eq(task_leases.agent_session_id, fence.agent_session_id),
+    ))
+    .limit(1);
+  return (row as TaskLeaseRow) ?? null;
+}
+
 // A lease-guarded write may re-verify that the caller still holds the exact
 // lease epoch it last observed. After a rebind the epoch has advanced, so a
 // partitioned-but-live predecessor that somehow still authenticates is rejected
-// here even before actor/session identity is considered.
+// here even before actor/session identity is considered. Takes the same xact
+// advisory lock as rebind so the check is not TOCTOU under READ COMMITTED.
 export async function assertLeaseEpochCurrentTx(
   tx: any,
   input: { lease_id: string; expected_epoch: number; agent_session_id: string },
 ): Promise<boolean> {
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`task_lease:${input.lease_id}`}, 0))`,
+  );
   const [row] = await tx
     .select({ id: task_leases.id })
     .from(task_leases)

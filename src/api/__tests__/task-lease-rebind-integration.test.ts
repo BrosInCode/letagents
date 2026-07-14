@@ -156,6 +156,40 @@ test("concurrent rebinds resolve to exactly one winner", { skip: requiresDatabas
   assert.equal((await leaseRow(lease.id)).epoch, 1);
 });
 
+test("a review lease is not rebindable — the generic route rejects the non-work kind", { skip: requiresDatabase }, async () => {
+  // A review lease's authority cannot be proven by the work-attempt terminal
+  // attestation the rebind consumes (§4.5). The rebind must refuse it outright
+  // so a dead reviewer's review lease is released, never silently moved.
+  const { room, from, to, fence } = await seed();
+  const reviewLease = await db!.createTaskLease({
+    room_id: room.id, task_id: `task_review_${ordinal}`, kind: "review", agent_key: from.agent_key,
+    actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
+  });
+  const result = await rebindTaskLease({ lease_id: reviewLease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  assert.equal(result.ok, false);
+  assert.equal((result as { reason: string }).reason, "kind_not_rebindable");
+  assert.equal((await leaseRow(reviewLease.id)).agent_session_id, from.session_id, "review lease stayed put");
+});
+
+test("acquireLeaseFenceTx accepts the current tuple and rejects a rebound-away predecessor", { skip: requiresDatabase }, async () => {
+  const { room, from, to, lease, fence } = await seed();
+  const { acquireLeaseFenceTx } = await import("../db/coordination/lease-rebind.js");
+  // Before rebind: the predecessor's full tuple at epoch 0 is valid.
+  await client!.db.transaction(async (tx) => {
+    const row = await acquireLeaseFenceTx(tx, { lease_id: lease.id, room_id: room.id, task_id: lease.task_id, kind: "work", expected_epoch: 0, agent_session_id: from.session_id });
+    assert.ok(row, "current holder's tuple is accepted");
+  });
+  await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });
+  await client!.db.transaction(async (tx) => {
+    // Predecessor tuple (old session, epoch 0) is now stale → null.
+    const stale = await acquireLeaseFenceTx(tx, { lease_id: lease.id, room_id: room.id, task_id: lease.task_id, kind: "work", expected_epoch: 0, agent_session_id: from.session_id });
+    assert.equal(stale, null, "rebound-away predecessor is rejected");
+    // Successor tuple (new session, epoch 1) is valid.
+    const current = await acquireLeaseFenceTx(tx, { lease_id: lease.id, room_id: room.id, task_id: lease.task_id, kind: "work", expected_epoch: 1, agent_session_id: to.session_id });
+    assert.ok(current, "successor's current tuple is accepted");
+  });
+});
+
 test("the epoch guard rejects a partitioned predecessor's stale epoch after rebind", { skip: requiresDatabase }, async () => {
   const { from, to, lease, fence } = await seed();
   await rebindTaskLease({ lease_id: lease.id, expected_epoch: 0, from_agent_session_id: from.session_id, to_agent_session_id: to.session_id, supervisor_grant_fence: fence });

@@ -12,8 +12,8 @@ export {
   upsertStaleTaskPromptMute,
 } from "./coordination/stale-task-prompt-mutes.js";
 export { applyTaskWorkLeaseAction } from "./coordination/work-lease-actions.js";
-export { rebindTaskLease, assertLeaseEpochCurrentTx } from "./coordination/lease-rebind.js";
-export type { RebindTaskLeaseInput, RebindTaskLeaseResult, RebindTaskLeaseFailure } from "./coordination/lease-rebind.js";
+export { rebindTaskLease, assertLeaseEpochCurrentTx, acquireLeaseFenceTx, LeaseFenceStaleError } from "./coordination/lease-rebind.js";
+export type { RebindTaskLeaseInput, RebindTaskLeaseResult, RebindTaskLeaseFailure, LeaseFence } from "./coordination/lease-rebind.js";
 export {
   clearTaskLock,
   createTaskLock,
