@@ -795,7 +795,7 @@ export class SupervisorDaemon {
     if (terminalBinding) {
       await this.workerBindings.unbind(entryId, terminalBinding.agentSessionId, terminalBinding.executionGenerationId);
     }
-    await this.observeProviderExit(entryId, terminal, "daemon-provider");
+    await this.observeProviderExit(entryId, terminal, "daemon-provider", executionGenerationId, handle);
     this.requestConvergence(entryId);
   }
 
@@ -961,11 +961,14 @@ export class SupervisorDaemon {
   }
 
   /** Provider terminal callback: records an actual exit edge before the next tick. */
-  async observeProviderExit(entryId: string, terminal: ProviderActionTerminal, actor = "provider"): Promise<void> {
+  async observeProviderExit(entryId: string, terminal: ProviderActionTerminal, actor = "provider", expectedExecutionGenerationId?: string, expectedHandle?: ProviderActionHandle): Promise<void> {
     await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
       const manifest = await this.store.load();
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+      if (expectedExecutionGenerationId && entry.provider_ref?.execution_generation_id !== expectedExecutionGenerationId) return;
+      const currentHandle = this.liveHandles.get(entryId);
+      if (expectedHandle && currentHandle && currentHandle !== expectedHandle) return;
       const payload = this.terminalPayload(terminal, actor);
       if (entry.condition === "quarantined") {
         // A stale child cannot unquarantine the entry, but its immutable death

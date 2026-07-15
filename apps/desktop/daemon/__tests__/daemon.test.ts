@@ -866,6 +866,13 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       }
     })(), "replacement daemon while an old control socket is open", 1_000);
     await within(heldClosed, "old control connection destruction", 1_000);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "binding_race", room_id: "focus_37", observed_state: "working", work_attempt_id: null,
+      provider_ref: {
+        work_attempt_id: "attempt_old", provider_continuation_id: "continuation_successor",
+        provider_connection: null, execution_generation_id: "execution_old",
+      },
+    } })).ok, true);
     const replacementBindings = (second as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
     const predecessorBinding = await replacementBindings.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_old",
@@ -876,6 +883,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       workAttemptId: "attempt_old", pid: null, providerContinuationId: "continuation_old",
       providerConnection: null, observedState: "working" as const,
     };
+    const successorHandle = { ...staleHandle, providerContinuationId: "continuation_successor" };
     let releaseTerminalLoad!: () => void;
     const terminalLoadGate = new Promise<void>((resolve) => { releaseTerminalLoad = resolve; });
     let reachedTerminalLoad!: () => void;
@@ -907,13 +915,24 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "continuation_old",
     }).catch(() => undefined);
     await terminalLoadReached;
-    await replacementBindings.bind({
+    const successorBinding = await replacementBindings.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_new",
       execution_generation_id: "execution_old", agent_session_id: "session_new",
       agent_session_token: "new-secret", api_url: "https://letagents.chat",
     });
+    replacementInternals.liveHandles.set("binding_race", successorHandle);
+    replacementInternals.liveBindingIdentities.set("binding_race", {
+      agentSessionId: successorBinding.agent_session_id,
+      executionGenerationId: successorBinding.execution_generation_id,
+      updatedAt: successorBinding.updated_at,
+    });
     releaseTerminalLoad();
     await staleTerminal;
+    const afterStaleTerminal = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+      .find((candidate) => candidate.id === "binding_race")!;
+    assert.equal(afterStaleTerminal.observed_state, "working", "a stale terminal callback cannot transition the successor manifest entry");
+    assert.equal(afterStaleTerminal.provider_ref?.provider_continuation_id, "continuation_successor");
+    assert.equal(replacementInternals.liveHandles.get("binding_race"), successorHandle, "the successor provider handle remains live");
 
     releaseCommit();
     releaseBindingCommit();
