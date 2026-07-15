@@ -196,6 +196,64 @@ export function exactSupervisorEntriesForManagedSessions(
 }
 
 /**
+ * Prefer the daemon's durable worker binding over every display-name fallback.
+ * A room worker may be renamed when it re-registers, while same-provider peers
+ * may intentionally share one manifest label.
+ */
+export function exactSupervisorEntriesForTarget(
+  entries: readonly DesktopSupervisorManifestEntry[],
+  sessions: readonly Pick<DesktopManagedAgentSession, "supervisorEntryId">[],
+  targetAgentSessionId: string | null | undefined,
+): DesktopSupervisorManifestEntry[] | null {
+  const sessionId = targetAgentSessionId?.trim() || null;
+  if (sessionId) {
+    const bound = entries.filter((entry) => entry.agentSessionId === sessionId);
+    if (bound.length) return bound;
+  }
+  const sessionEntries = exactSupervisorEntriesForManagedSessions(entries, sessions);
+  if (sessionEntries) return sessionEntries;
+  // A specific room worker must never widen to a same-label peer merely
+  // because its daemon projection is still loading.
+  return sessionId ? [] : null;
+}
+
+/**
+ * Project bounded native activity into the existing chat work indicator. This
+ * is observable lifecycle evidence, never hidden reasoning text.
+ */
+export function supervisedAgentWorkIndicators(
+  entries: readonly DesktopSupervisorManifestEntry[],
+  presence: readonly Pick<DesktopAgentPresence, "agentSessionId" | "displayName" | "actorLabel">[],
+  roomIdentifier: string | null | undefined,
+): ManagedAgentWorkIndicator[] {
+  const room = normalizeManagedAgentRoomIdentifier(roomIdentifier);
+  return entries
+    .filter((entry) =>
+      normalizeManagedAgentRoomIdentifier(entry.roomId) === room &&
+      entry.desiredState === "running" &&
+      entry.observedState === "working" &&
+      entry.condition === "none" &&
+      entry.nativeLiveness.state === "active"
+    )
+    .flatMap((entry) => {
+      const latest = [...entry.activity]
+        .sort((left, right) => right.sequence - left.sequence)
+        .find((event) => event.status === "working" || event.status === "reviewing");
+      if (!latest) return [];
+      const boundPresence = entry.agentSessionId
+        ? presence.find((candidate) => candidate.agentSessionId === entry.agentSessionId)
+        : null;
+      return [{
+        id: `${entry.id}:${latest.sequence}`,
+        displayName: boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
+        summary: latest.summary.trim() || "Working in the room.",
+        startedAt: latest.observedAt,
+      }];
+    })
+    .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+}
+
+/**
  * Managed session lists are re-fetched on 4s polls from both the room shell
  * and the Add Agent modal. Assigning a freshly-allocated but content-equal
  * array into reactive state re-renders every dependent surface each tick,

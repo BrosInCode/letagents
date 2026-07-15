@@ -126,6 +126,25 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const second = await client.create({ ...createInput, creationRequestId: "request_bravo", displayName: "Second durable Codex" });
     assert.notEqual(second.id, created.id, "a new Start request creates an independent same-provider agent");
     assert.equal(wire.entries.length, 2);
+    Object.assign(wire.entries[0], {
+      work_attempt_id: "attempt_alpha",
+      provider_ref: {
+        provider_continuation_id: "continuation_alpha",
+        execution_generation_id: "generation_alpha",
+        provider_connection: { kind: "codex_app_server", pid: 4242 },
+      },
+      worker_binding: {
+        agent_session_id: "agent_session_rebound",
+        work_attempt_id: "attempt_alpha",
+        execution_generation_id: "generation_alpha",
+        updated_at: "2026-07-15T18:00:00.000Z",
+      },
+    });
+    const rebound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
+    assert.equal(rebound.agentSessionId, "agent_session_rebound");
+    assert.equal(rebound.executionGenerationId, "generation_alpha");
+    assert.equal(rebound.providerContinuationId, "continuation_alpha");
+    assert.equal(rebound.providerPid, 4242);
     await assert.rejects(
       () => client.assertLegacyStartAllowed(created.roomId, "codex"),
       /already owns the codex lane through the supervised engine/,

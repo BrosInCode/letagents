@@ -31,6 +31,10 @@ export class WorkerBindingStore {
     return (await this.load()).bindings[entryId] ?? null;
   }
 
+  async list(): Promise<WorkerSessionBinding[]> {
+    return Object.values((await this.load()).bindings);
+  }
+
   async bind(input: WorkerSessionBindingInput): Promise<WorkerSessionBinding> {
     this.validate(input);
     return this.serialize(async () => {

@@ -295,6 +295,7 @@ import type {
   DesktopRoomThreadInboxPage,
   DesktopReasoningSession,
   DesktopSnapshotSourceStates,
+  DesktopSupervisorManifestEntry,
   DesktopTaskSummary,
   RepoStatus,
   WorkerSnapshot,
@@ -315,6 +316,7 @@ import {
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   pendingManagedAgentPermissionApprovals,
+  supervisedAgentWorkIndicators,
   managedAgentRootPathForRoom,
   type ManagedAgentPermissionApproval,
   managedAgentSessionListsEqual,
@@ -455,6 +457,7 @@ const composerGitHubEventPreviews = ref<ComposerEventPreview[]>([]);
 const eventsUnseenCount = ref(0);
 const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
+const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
 const composerPermissionError = ref<string | null>(null);
 const resolvingComposerPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let githubEventsRefreshTimer: number | null = null;
@@ -609,7 +612,13 @@ const roomParticipants = computed(() =>
   )
 );
 const localAgentWork = computed(() =>
-  activeManagedAgentWorkIndicators(roomManagedAgentSessions.value, props.room.identifier)
+  [
+    ...activeManagedAgentWorkIndicators(
+      roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
+      props.room.identifier,
+    ),
+    ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier),
+  ]
 );
 const pendingPermissionApprovals = computed(() =>
   pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)
@@ -656,6 +665,7 @@ watch(() => props.room.identifier, () => {
   eventsPage.value = props.githubEvents;
   refreshedEnvironmentRepoStatus.value = null;
   managedAgentSessions.value = [];
+  supervisorEntries.value = [];
   composerPermissionError.value = null;
   resolvingComposerPermissionIds.value = {};
   eventsTaskFilterId.value = null;
@@ -1481,25 +1491,33 @@ function openAddAgentModal(): void {
 }
 
 async function refreshManagedAgentSessions(): Promise<void> {
-  if (!desktopIpc.workers?.listManagedAgentSessions || !props.room.identifier) return;
+  if (!props.room.identifier) return;
   const roomIdentifier = props.room.identifier;
-  try {
-    const sessions = await desktopIpc.workers.listManagedAgentSessions(roomIdentifier);
-    if (props.room.identifier !== roomIdentifier) return;
+  const [sessions, entries] = await Promise.all([
+    desktopIpc.workers?.listManagedAgentSessions
+      ? desktopIpc.workers.listManagedAgentSessions(roomIdentifier).catch(() => null)
+      : Promise.resolve(null),
+    desktopIpc.supervisor?.listAgents
+      ? desktopIpc.supervisor.listAgents(roomIdentifier).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+  if (props.room.identifier !== roomIdentifier) return;
+  if (sessions) {
     if (!managedAgentSessionListsEqual(managedAgentSessions.value, sessions)) {
       managedAgentSessions.value = sessions;
     }
-  } catch {
-    if (props.room.identifier === roomIdentifier) {
-      const scoped = managedAgentSessions.value.filter((session) =>
-        managedAgentSessionMatchesRoom(session, roomIdentifier)
-      );
-      // Identity-stable like the success path: repeated poll errors must not
-      // re-render the shell every tick.
-      if (scoped.length !== managedAgentSessions.value.length) {
-        managedAgentSessions.value = scoped;
-      }
+  } else {
+    const scoped = managedAgentSessions.value.filter((session) =>
+      managedAgentSessionMatchesRoom(session, roomIdentifier)
+    );
+    // Identity-stable like the success path: repeated poll errors must not
+    // re-render the shell every tick.
+    if (scoped.length !== managedAgentSessions.value.length) {
+      managedAgentSessions.value = scoped;
     }
+  }
+  if (entries && JSON.stringify(entries) !== JSON.stringify(supervisorEntries.value)) {
+    supervisorEntries.value = entries;
   }
 }
 
@@ -1569,10 +1587,10 @@ function agentTargetForManagedSession(session: DesktopManagedAgentSession): Agen
 
 function restartManagedAgentSessionsRefreshTimer(): void {
   stopManagedAgentSessionsRefreshTimer();
-  if (!props.room.identifier || !desktopIpc.workers?.listManagedAgentSessions) return;
+  if (!props.room.identifier || (!desktopIpc.workers?.listManagedAgentSessions && !desktopIpc.supervisor?.listAgents)) return;
   managedAgentSessionsRefreshTimer = window.setInterval(() => {
     void refreshManagedAgentSessions();
-  }, 4_000);
+  }, 2_000);
 }
 
 function stopManagedAgentSessionsRefreshTimer(): void {

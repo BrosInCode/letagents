@@ -12,9 +12,9 @@ import type { ProviderActionHandle, ProviderActionPort, ProviderActionRef, Provi
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
-import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
-import { WorkerBindingStore } from "./worker-binding-store.js";
+import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 
@@ -77,7 +77,8 @@ export class SupervisorDaemon {
       if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
       if (request.method === "manifest.set_desired_state") {
         const params = this.paramsRecord(request.params);
-        return this.setDesiredState(String(params.id ?? ""), String(params.desired_state ?? "") as DesiredState);
+        const updated = await this.setDesiredState(String(params.id ?? ""), String(params.desired_state ?? "") as DesiredState);
+        return this.entryWithDerivedLiveness(updated);
       }
       if (request.method === "lane.reserve_legacy") {
         const params = this.paramsRecord(request.params);
@@ -426,7 +427,15 @@ export class SupervisorDaemon {
     });
   }
 
-  private entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): DaemonManifestEntry[] {
+  private async entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): Promise<DaemonManifestEntryView[]> {
+    const bindings = new Map((await this.workerBindings.list()).map((binding) => [binding.entry_id, binding]));
+    return Promise.all(entries.map((entry) => this.entryWithDerivedLiveness(entry, bindings.get(entry.id) ?? null)));
+  }
+
+  private async entryWithDerivedLiveness(
+    entry: DaemonManifestEntry,
+    projectedBinding?: WorkerSessionBinding | null,
+  ): Promise<DaemonManifestEntryView> {
     const now = Date.now();
     const staleAfterMs = 90_000;
     const derive = <T extends string>(axis: { state: T; observed_at: string | null; detail: string | null } | undefined, staleStates: string[]) => {
@@ -436,11 +445,24 @@ export class SupervisorDaemon {
         ? { ...axis, state: "stale" }
         : axis;
     };
-    return entries.map((entry) => ({
+    const binding = projectedBinding === undefined ? await this.workerBindings.get(entry.id) : projectedBinding;
+    const bindingMatchesCurrentGeneration = Boolean(
+      binding &&
+      binding.room_id === entry.room_id &&
+      binding.work_attempt_id === entry.work_attempt_id &&
+      binding.execution_generation_id === entry.provider_ref?.execution_generation_id,
+    );
+    return {
       ...entry,
       workplace_liveness: derive(entry.workplace_liveness, ["reachable"]) as DaemonManifestEntry["workplace_liveness"],
       native_liveness: derive(entry.native_liveness, ["active", "idle"]) as DaemonManifestEntry["native_liveness"],
-    }));
+      worker_binding: bindingMatchesCurrentGeneration && binding ? {
+        agent_session_id: binding.agent_session_id,
+        work_attempt_id: binding.work_attempt_id,
+        execution_generation_id: binding.execution_generation_id,
+        updated_at: binding.updated_at,
+      } : null,
+    };
   }
 
   private async readAttempt(id: string) {

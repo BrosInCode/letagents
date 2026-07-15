@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.5";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.6";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -83,6 +83,22 @@ export type DaemonManifestEntry = {
   activity?: DaemonActivityEvent[];
   reconciliation?: ReconciliationState;
   reconciliation_notices?: ReconciliationNotice[];
+};
+
+/**
+ * Renderer-safe projection of the daemon-private worker binding. Credentials
+ * and API authority never leave WorkerBindingStore; this identity-only view
+ * lets UI controls resolve a room worker to one exact supervisor entry.
+ */
+export type DaemonWorkerBindingProjection = {
+  agent_session_id: string;
+  work_attempt_id: string;
+  execution_generation_id: string;
+  updated_at: string;
+};
+
+export type DaemonManifestEntryView = DaemonManifestEntry & {
+  worker_binding?: DaemonWorkerBindingProjection | null;
 };
 
 /** Durable mixed-engine fence for a legacy Electron-owned provider lane. */

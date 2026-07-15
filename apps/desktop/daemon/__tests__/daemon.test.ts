@@ -16,7 +16,7 @@ import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { SupervisorDaemon } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonRequest } from "../types.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
@@ -1223,6 +1223,11 @@ test("generation handoff reattaches the same provider and publishes its supervis
       api_url: apiUrl,
     });
     assert.equal(bound.ok, true, bound.error);
+    const boundProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(boundProjection.worker_binding?.agent_session_id, "agent_session_exact");
+    assert.equal(boundProjection.worker_binding?.work_attempt_id, workAttemptId);
+    assert.equal(boundProjection.worker_binding?.execution_generation_id, executionGenerationId);
+    assert.doesNotMatch(JSON.stringify(boundProjection), /session-secret|api_url/, "renderer projection never exposes worker authority");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.bound"), "initial daemon worker binding activity");
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "tool_lifecycle", method: "item/toolCall/started", payload: { tool: "test" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 1), "first native stream event");
@@ -1266,6 +1271,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     const after = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(after.provider_ref?.provider_connection?.pid, originalPid);
     assert.equal(after.provider_ref?.provider_continuation_id, continuation);
+    assert.equal((after as DaemonManifestEntryView).worker_binding?.agent_session_id, "agent_session_exact", "daemon handoff preserves the public exact-session projection");
     sequence = 0; // A freshly attached adapter has a fresh local counter.
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/completed", payload: {}, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 5), "reattached stream event");
@@ -1314,6 +1320,17 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(resumed.provider_ref?.provider_continuation_id, continuation, "resume preserves provider continuation identity");
     assert.notEqual(resumed.provider_ref?.provider_connection?.pid, stoppedPid, "resume installs the replacement provider process");
     assert.equal(resumeCount, 1);
+    const resumedGenerationId = resumed.provider_ref!.execution_generation_id;
+    const rebound = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
+      entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_rebound",
+      work_attempt_id: workAttemptId, execution_generation_id: resumedGenerationId,
+      agent_session_token: "rebound-secret", api_url: apiUrl,
+    });
+    assert.equal(rebound.ok, true, rebound.error);
+    const reboundProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(reboundProjection.worker_binding?.agent_session_id, "agent_session_rebound", "a successor room session immediately replaces the public binding projection");
+    assert.equal(reboundProjection.worker_binding?.execution_generation_id, resumedGenerationId);
+    assert.doesNotMatch(JSON.stringify(reboundProjection), /rebound-secret/);
     const staleBind = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
       entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_stale",
       work_attempt_id: workAttemptId, execution_generation_id: stoppedGenerationId,

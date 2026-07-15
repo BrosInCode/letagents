@@ -401,6 +401,12 @@ export interface DesktopSupervisorManifestEntry {
   createdAt: string;
   workspacePath: string | null;
   workAttemptId: string | null;
+  /** Exact room worker currently bound to this execution generation. */
+  agentSessionId: string | null;
+  bindingUpdatedAt: string | null;
+  executionGenerationId: string | null;
+  providerContinuationId: string | null;
+  providerPid: number | null;
   workplaceLiveness: DesktopSupervisorLivenessAxis;
   nativeLiveness: DesktopSupervisorLivenessAxis;
   restartCount: number;
