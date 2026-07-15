@@ -135,6 +135,7 @@ export class CodexRpcClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Codex app-server request timed out: ${method}`));
+        this.notifyDisconnect();
         this.close();
       }, this.requestTimeoutMs);
       this.pending.set(id, {

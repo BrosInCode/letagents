@@ -275,6 +275,12 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
   }
 }
 
+function rpcDisconnectExit(client: CodexAdapterRpc): Promise<CodexAppServerExit> {
+  return new Promise((resolve) => {
+    client.onDisconnect(() => resolve({ type: "exit", code: null, signal: null }));
+  });
+}
+
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
   launchServer: (serverUrl, codexBin, options) =>
@@ -482,6 +488,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
       }
       this.consumeNotification(handle, notification);
     });
+    const observedLaunch: CodexAppServerLaunch = {
+      pid: launch.pid,
+      exited: Promise.race([launch.exited, rpcDisconnectExit(client)]),
+    };
 
     try {
       await client.connect();
@@ -517,10 +527,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         threadId,
         { kind: "codex_app_server", url: serverUrl, pid: launch.pid },
         client,
-        launch,
+        observedLaunch,
       );
       this.handles.set(req.workAttemptId, handle);
-      const exitPromise = launch.exited.then((exit) => this.observeExit(handle!, exit));
+      const exitPromise = observedLaunch.exited.then((exit) => this.observeExit(handle!, exit));
       this.exitPromises.set(handle, exitPromise);
       for (const notification of pendingNotifications.splice(0)) {
         this.consumeNotification(handle, notification);
@@ -591,9 +601,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (read.thread?.id !== ref.providerContinuationId) {
         throw new Error("Codex app-server did not verify the exact durable continuation thread.");
       }
-      const rpcDisconnected = new Promise<CodexAppServerExit>((resolve) => {
-        client.onDisconnect(() => resolve({ type: "exit", code: null, signal: null }));
-      });
+      const rpcDisconnected = rpcDisconnectExit(client);
       const exitEvidence = connection.pid !== null
         ? Promise.race([rpcDisconnected, this.deps.observeProcessExit(connection.pid)])
         : rpcDisconnected;

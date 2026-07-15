@@ -446,6 +446,22 @@ test("observed crash emits one synthesized terminal payload and makes attach abs
   }), null);
 });
 
+test("spawned RPC disconnect is terminal even before the child pid exit is observable", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const terminals: ProviderTerminalPayload[] = [];
+  adapter.onExit(handle, (terminal) => terminals.push(terminal));
+
+  harness.clients[0]!.disconnect();
+  await flush();
+
+  assert.equal(harness.launches[0]?.alive, true);
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.terminalCause, "crashed");
+  assert.equal(handle.observedState(), "failed");
+});
+
 test("stop orders SIGTERM before observed terminal and escalates to SIGKILL after grace", async () => {
   const gracefulHarness = createHarness();
   const gracefulAdapter = new CodexProviderAdapter({ dependencies: gracefulHarness.dependencies });
