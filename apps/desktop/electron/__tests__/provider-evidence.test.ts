@@ -5,6 +5,8 @@ import { safeStreamPayload } from "../main/agents/provider-evidence.js";
 
 test("provider evidence recursively redacts credential-shaped keys and embedded tool output", () => {
   const canary = "canary-not-a-real-credential-123456789";
+  const workerBearer = `lasb_${"A".repeat(43)}`;
+  const hostGrant = `lashg_${"b".repeat(43)}`;
   const safe = safeStreamPayload({
     nested: [{ LETAGENTS_TOKEN: canary }, { api_key: canary }, { clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }],
     json: JSON.stringify({ LETAGENTS_TOKEN: canary }),
@@ -14,10 +16,14 @@ test("provider evidence recursively redacts credential-shaped keys and embedded 
     arbitraryAuthorization: `Authorization: ${canary}`,
     stringifiedHeaders: JSON.stringify({ bearer: `Authorization: Bearer ${canary}`, basic: `Authorization: Basic ${canary}`, arbitrary: `Authorization: ${canary}` }),
     stringifiedCamelCase: JSON.stringify({ clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }),
+    standaloneOwnedTokens: `worker=${workerBearer} host=${hostGrant}`,
+    stringifiedOwnedTokens: JSON.stringify({ message: `${workerBearer} ${hostGrant}` }),
   });
   assert.equal(safe.payloadRedacted, true);
   assert.equal(safe.payloadTruncated, false);
   assert.doesNotMatch(JSON.stringify(safe.payload), new RegExp(canary));
+  assert.doesNotMatch(JSON.stringify(safe.payload), new RegExp(workerBearer));
+  assert.doesNotMatch(JSON.stringify(safe.payload), new RegExp(hostGrant));
   assert.match(JSON.stringify(safe.payload), /REDACTED/);
 });
 

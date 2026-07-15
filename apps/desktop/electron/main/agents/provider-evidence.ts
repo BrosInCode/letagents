@@ -13,7 +13,7 @@ const SENSITIVE_PAYLOAD_KEY = /(?:authorization|cookie|credential|password|secre
 const AUTHORIZATION_SECRET_ASSIGNMENT = /((?:\\?["']?)\bauthorization(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!(?:bearer|basic)\b)([^\\\s"',}\]]{4,})/gi;
 const EMBEDDED_SECRET_ASSIGNMENT = /((?:\\?["']?)\b(?:[a-z0-9_.-]*(?:cookie|setCookie|credential|password|secret|clientSecret|dbPassword|apiKey|api[_-]?key|privateKey|private[_-]?key|token|accessToken|refreshToken|authToken|bearerToken|sessionToken|letagentsToken|(?:access|refresh|auth|bearer|session|letagents)[_-]?token))(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!\[REDACTED\]|<redacted>|\*{3,})([^\\\s"',}\]]{4,})/gi;
 const AUTHORIZATION_SCHEME_SECRET = /(\b(?:bearer|basic)\s+)([a-z0-9._~+\/-]{8,}={0,2})/gi;
-const KNOWN_SECRET = /\b(?:github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gi;
+const KNOWN_SECRET = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gi;
 
 export function redactCredentialText(value: string): { value: string; redacted: boolean } {
   let redacted = false;

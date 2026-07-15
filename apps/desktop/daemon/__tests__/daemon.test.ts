@@ -1423,6 +1423,8 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   const canary = "canary-not-a-real-credential-123456789";
+  const workerBearer = `lasb_${"A".repeat(43)}`;
+  const hostGrant = `lashg_${"b".repeat(43)}`;
   try {
     await daemon.start();
     await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, id: "credential_firewall" } });
@@ -1444,6 +1446,8 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
           arbitraryAuthorization: `Authorization: ${canary}`,
           stringifiedHeaders: JSON.stringify({ bearer: `Authorization: Bearer ${canary}`, basic: `Authorization: Basic ${canary}`, arbitrary: `Authorization: ${canary}` }),
           stringifiedCamelCase: JSON.stringify({ clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }),
+          standaloneOwnedTokens: `worker=${workerBearer} host=${hostGrant}`,
+          stringifiedOwnedTokens: JSON.stringify({ message: `${workerBearer} ${hostGrant}` }),
         },
         payload_truncated: false,
         payload_redacted: false,
@@ -1454,7 +1458,12 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
     const dto = response.result as DaemonManifestEntry;
     assert.equal(dto.activity?.[0]?.payload_redacted, true);
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(canary));
-    assert.doesNotMatch(await readFile(paths.manifestPath, "utf8"), new RegExp(canary));
+    assert.doesNotMatch(JSON.stringify(dto), new RegExp(workerBearer));
+    assert.doesNotMatch(JSON.stringify(dto), new RegExp(hostGrant));
+    const persistedActivity = await readFile(paths.manifestPath, "utf8");
+    assert.doesNotMatch(persistedActivity, new RegExp(canary));
+    assert.doesNotMatch(persistedActivity, new RegExp(workerBearer));
+    assert.doesNotMatch(persistedActivity, new RegExp(hostGrant));
 
     await daemon.transition("credential_firewall", "failed", "coordination_blocked", `Authorization: Bearer ${canary}`, `LETAGENTS_TOKEN=${canary}`, {
       exit_timestamps_ms: [],
