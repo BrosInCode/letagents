@@ -867,12 +867,53 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     })(), "replacement daemon while an old control socket is open", 1_000);
     await within(heldClosed, "old control connection destruction", 1_000);
     const replacementBindings = (second as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
+    const predecessorBinding = await replacementBindings.bind({
+      entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_old",
+      execution_generation_id: "execution_old", agent_session_id: "session_old",
+      agent_session_token: "old-secret", api_url: "https://letagents.chat",
+    });
+    const staleHandle = {
+      workAttemptId: "attempt_old", pid: null, providerContinuationId: "continuation_old",
+      providerConnection: null, observedState: "working" as const,
+    };
+    let releaseTerminalLoad!: () => void;
+    const terminalLoadGate = new Promise<void>((resolve) => { releaseTerminalLoad = resolve; });
+    let reachedTerminalLoad!: () => void;
+    const terminalLoadReached = new Promise<void>((resolve) => { reachedTerminalLoad = resolve; });
+    const replacementInternals = second as unknown as {
+      liveHandles: Map<string, typeof staleHandle>;
+      liveBindingIdentities: Map<string, { agentSessionId: string; executionGenerationId: string; updatedAt: string }>;
+      store: ManifestStore;
+      handleProviderTerminal: (entryId: string, handle: typeof staleHandle, executionGenerationId: string, binding: { agentSessionId: string; executionGenerationId: string; updatedAt: string }, terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "stopped"; providerContinuationId: string }) => Promise<void>;
+    };
+    replacementInternals.liveHandles.set("binding_race", staleHandle);
+    const predecessorIdentity = {
+      agentSessionId: predecessorBinding.agent_session_id,
+      executionGenerationId: predecessorBinding.execution_generation_id,
+      updatedAt: predecessorBinding.updated_at,
+    };
+    replacementInternals.liveBindingIdentities.set("binding_race", predecessorIdentity);
+    const originalReplacementLoad = replacementInternals.store.load.bind(replacementInternals.store);
+    let gateNextLoad = true;
+    replacementInternals.store.load = async () => {
+      if (gateNextLoad) {
+        gateNextLoad = false;
+        reachedTerminalLoad();
+        await terminalLoadGate;
+      }
+      return originalReplacementLoad();
+    };
+    const staleTerminal = replacementInternals.handleProviderTerminal("binding_race", staleHandle, "execution_old", predecessorIdentity, {
+      endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "continuation_old",
+    }).catch(() => undefined);
+    await terminalLoadReached;
     await replacementBindings.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_new",
       execution_generation_id: "execution_old", agent_session_id: "session_new",
       agent_session_token: "new-secret", api_url: "https://letagents.chat",
     });
-    assert.equal(await replacementBindings.unbind("binding_race", "session_old", "execution_old"), false, "a predecessor terminal cannot unbind a replacement session on the same execution");
+    releaseTerminalLoad();
+    await staleTerminal;
 
     releaseCommit();
     releaseBindingCommit();

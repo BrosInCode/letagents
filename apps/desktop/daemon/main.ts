@@ -17,6 +17,7 @@ import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitC
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
+type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
@@ -45,7 +46,7 @@ export class SupervisorDaemon {
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
-  private readonly liveBindingIdentities = new Map<string, { agentSessionId: string; executionGenerationId: string; updatedAt: string }>();
+  private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private handoffScheduled = false;
@@ -670,7 +671,8 @@ export class SupervisorDaemon {
       this.liveBindingIdentities.delete(entryId);
     }
     const disposeExit = await this.providerPort!.onExit(handle, (terminal) => {
-      this.trackProviderCallback(this.handleProviderTerminal(entryId, handle, terminal));
+      const bindingIdentity = this.liveBindingIdentities.get(entryId);
+      this.trackProviderCallback(this.handleProviderTerminal(entryId, handle, executionGenerationId, bindingIdentity, terminal));
     });
     const disposeStream = this.providerPort!.onStream
       ? await this.providerPort!.onStream!(handle, (event) => { this.trackProviderCallback(this.enqueueProviderStream(entryId, handle, event)); })
@@ -773,17 +775,16 @@ export class SupervisorDaemon {
     return true;
   }
 
-  private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, terminal: ProviderActionTerminal): Promise<void> {
+  private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, executionGenerationId: string, terminalBinding: LiveBindingIdentity | undefined, terminal: ProviderActionTerminal): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
-    const terminalBinding = this.liveBindingIdentities.get(entryId);
     this.liveHandles.delete(entryId);
     this.liveBindingIdentities.delete(entryId);
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveDisposers.delete(entryId);
     const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
-    if (entry?.work_attempt_id && entry.provider_ref?.execution_generation_id) {
+    if (entry?.work_attempt_id) {
       const attempt = await this.durability.getAttempt(entry.work_attempt_id);
-      const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === entry.provider_ref!.execution_generation_id);
+      const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
       if (execution && !execution.terminal) {
         await this.durability.recordTerminal(entry.work_attempt_id, execution.execution_generation_id, {
           ...this.terminalPayload(terminal, execution.actor),
