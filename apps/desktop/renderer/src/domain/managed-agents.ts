@@ -13,6 +13,7 @@ import type {
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomInfo,
+  DesktopSupervisorManifestEntry,
   RepoStatus,
   RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
@@ -148,6 +149,30 @@ export function canStopManagedAgentTurn(
 
 export function normalizeManagedAgentRoomIdentifier(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
+}
+
+/**
+ * A supervisor-owned runtime can fail before it publishes an MCP participant.
+ * In that case the room presence list cannot expose a recovery affordance, but
+ * the Add Agent conflict still needs to identify the one fenced lane the user
+ * may stop. Prefer unhealthy entries so a stale blocked startup is never
+ * hidden behind a healthy-looking entry from an older manifest.
+ */
+export function supervisedProviderLaneEntry(
+  entries: readonly DesktopSupervisorManifestEntry[],
+  roomIdentifier: string | null | undefined,
+  providerId: string | null | undefined,
+): DesktopSupervisorManifestEntry | null {
+  const room = normalizeManagedAgentRoomIdentifier(roomIdentifier);
+  const provider = String(providerId || "").trim().toLowerCase();
+  if (!room || !provider) return null;
+
+  const matching = entries.filter((entry) =>
+    normalizeManagedAgentRoomIdentifier(entry.roomId) === room &&
+    entry.provider.trim().toLowerCase() === provider &&
+    entry.desiredState !== "stopped"
+  );
+  return matching.find((entry) => entry.condition !== "none") ?? matching[0] ?? null;
 }
 
 /**

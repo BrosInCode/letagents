@@ -416,6 +416,37 @@
               </article>
             </section>
 
+            <section
+              v-if="supervisedConflict"
+              class="desktop-add-agent-managed-sessions"
+              data-testid="desktop-add-agent-supervised-conflict"
+              aria-label="Supervised agent recovery"
+            >
+              <article class="desktop-add-agent-managed-session" data-state="blocked">
+                <span>Supervised runtime needs recovery</span>
+                <strong>{{ supervisedConflict.displayName }}</strong>
+                <small>
+                  {{ supervisedConflict.observedState }} · {{ supervisedConflict.condition }}
+                </small>
+                <p v-if="supervisedConflictDetail">{{ supervisedConflictDetail }}</p>
+                <div class="desktop-add-agent-managed-session-actions">
+                  <button
+                    type="button"
+                    class="desktop-add-agent-managed-session-danger"
+                    data-testid="desktop-add-agent-stop-supervised-conflict"
+                    :disabled="Boolean(stoppingSupervisorEntryId)"
+                    @click="stopSupervisedConflict"
+                  >
+                    {{ stoppingSupervisorEntryId === supervisedConflict.id ? "Stopping..." : "Stop this supervised agent" }}
+                  </button>
+                </div>
+              </article>
+            </section>
+
+            <p v-if="supervisedConflictLookupError" class="desktop-add-agent-feedback">
+              {{ supervisedConflictLookupError }}
+            </p>
+
             <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
 
             <div class="desktop-add-agent-actions">
@@ -535,6 +566,7 @@ import type {
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
   DesktopOpenModelSettingsStatus,
+  DesktopSupervisorManifestEntry,
   RepoStatus,
 } from "../../../../../electron/ipc-types";
 import {
@@ -571,6 +603,11 @@ import {
   visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
+import {
+  loadSupervisedProviderLane,
+  stopSupervisedProviderLane,
+  supervisedRecoveryDetail,
+} from "../../../domain/supervised-recovery";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
@@ -611,6 +648,9 @@ const setupBusy = ref(false);
 const startingAgent = ref(false);
 const creatingWorktree = ref(false);
 const stoppingSessionId = ref<string | null>(null);
+const stoppingSupervisorEntryId = ref<string | null>(null);
+const supervisedConflict = ref<DesktopSupervisorManifestEntry | null>(null);
+const supervisedConflictLookupError = ref<string | null>(null);
 const copyingAuthCommand = ref(false);
 const copyingExternalPrompt = ref(false);
 const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
@@ -647,6 +687,9 @@ let modelPreflightTimer: number | null = null;
 
 const selectedProvider = computed(() =>
   providers.value.find((provider) => provider.id === selectedProviderId.value) || null
+);
+const supervisedConflictDetail = computed(() =>
+  supervisedConflict.value ? supervisedRecoveryDetail(supervisedConflict.value) : null
 );
 
 const activeManagedSessions = computed(() =>
@@ -1090,6 +1133,8 @@ async function startManagedAgent(): Promise<void> {
         model: selectedModel.value,
       });
       if (!isCurrentModalState(requestVersion)) return;
+      supervisedConflict.value = null;
+      supervisedConflictLookupError.value = null;
       setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
       await loadManagedSessions();
       return;
@@ -1115,11 +1160,51 @@ async function startManagedAgent(): Promise<void> {
     await runPreflight();
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
+    if (launchMode.value === "supervised") {
+      const conflict = await loadSupervisedConflict(requestVersion);
+      if (!isCurrentModalState(requestVersion)) return;
+      supervisedConflict.value = conflict.entry;
+      supervisedConflictLookupError.value = conflict.error;
+    }
     setupMessage.value = error instanceof Error ? error.message : "Could not start this agent.";
   } finally {
     if (isCurrentModalState(requestVersion)) {
       startingAgent.value = false;
       startManagedSessionRefreshTimer();
+    }
+  }
+}
+
+async function loadSupervisedConflict(
+  requestVersion = modalStateVersion,
+): Promise<{ entry: DesktopSupervisorManifestEntry | null; error: string | null }> {
+  if (!selectedProviderId.value || !props.roomIdentifier) return { entry: null, error: null };
+  const recovery = await loadSupervisedProviderLane(
+    desktopIpc.supervisor,
+    props.roomIdentifier,
+    selectedProviderId.value,
+  );
+  if (!isCurrentModalState(requestVersion)) return { entry: null, error: null };
+  return recovery;
+}
+
+async function stopSupervisedConflict(): Promise<void> {
+  const entry = supervisedConflict.value;
+  if (!entry || stoppingSupervisorEntryId.value) return;
+  const requestVersion = modalStateVersion;
+  stoppingSupervisorEntryId.value = entry.id;
+  setupMessage.value = `Stopping ${entry.displayName}...`;
+  try {
+    const updated = await stopSupervisedProviderLane(desktopIpc.supervisor, entry.id);
+    if (!isCurrentModalState(requestVersion)) return;
+    supervisedConflict.value = updated.desiredState === "stopped" ? null : updated;
+    setupMessage.value = `${updated.displayName} is stopped. Start once to create its replacement.`;
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    setupMessage.value = error instanceof Error ? error.message : "Could not stop the supervised agent.";
+  } finally {
+    if (isCurrentModalState(requestVersion)) {
+      stoppingSupervisorEntryId.value = null;
     }
   }
 }
@@ -1329,6 +1414,9 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   setupBusy.value = false;
   startingAgent.value = false;
   stoppingSessionId.value = null;
+  stoppingSupervisorEntryId.value = null;
+  supervisedConflict.value = null;
+  supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
@@ -1487,6 +1575,9 @@ function resetTransientState(): void {
   setupBusy.value = false;
   startingAgent.value = false;
   stoppingSessionId.value = null;
+  stoppingSupervisorEntryId.value = null;
+  supervisedConflict.value = null;
+  supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;

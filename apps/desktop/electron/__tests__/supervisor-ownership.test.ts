@@ -16,7 +16,7 @@ test("lane conflict distinguishes a blocked startup from a healthy existing owne
       condition: "coordination_blocked",
       lastError: "provider restart_fresh failed: invalid placeholder continuation",
     }),
-    "Codex supervised agent already reserved this room's supervised codex lane, but startup is recovering (coordination_blocked). Cause: provider restart_fresh failed: invalid placeholder continuation. Open the existing agent in Inspector and choose Stop before creating a replacement.",
+    "Codex supervised agent already reserved this room's supervised codex lane, but startup is recovering (coordination_blocked). Cause: provider restart_fresh failed: invalid placeholder continuation. If the supervised runtime recovery card appears below, choose Stop before creating a replacement.",
   );
   assert.equal(
     describeSupervisorLaneConflict({
