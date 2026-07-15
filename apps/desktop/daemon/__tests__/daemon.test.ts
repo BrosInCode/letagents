@@ -269,6 +269,154 @@ test("terminal native failure is sticky for one provider execution", async () =>
   }
 });
 
+test("direct manifest convergence shares the per-entry reconciliation lane", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "serialized_direct_convergence");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "serialized_direct_convergence", leaseId: "serialized_direct_convergence", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  let spawnCount = 0;
+  const handle = { workAttemptId: attempt.work_attempt_id, pid: 4201, providerContinuationId: "serialized-continuation", observedState: "working" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawnCount += 1; return handle; },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { spawnCount += 1; return handle; },
+    poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  let releaseTick!: () => void;
+  let tickEntered!: () => void;
+  const tickStarted = new Promise<void>((resolve) => { tickEntered = resolve; });
+  const tickHold = new Promise<void>((resolve) => { releaseTick = resolve; });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { serializeEntryTick: <T>(entryId: string, operation: () => Promise<T>) => Promise<T> };
+    const heldTick = internals.serializeEntryTick("serialized_direct_convergence", async () => { tickEntered(); await tickHold; });
+    await tickStarted;
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "serialized_direct_convergence", provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(spawnCount, 0, "manifest convergence cannot pass an in-flight reconciliation tick");
+    releaseTick();
+    await heldTick;
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "serialized provider launch");
+    assert.equal(spawnCount, 1);
+  } finally {
+    releaseTick?.();
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("an unattached live durable generation blocks a duplicate provider start", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "unattached_live_generation");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"), undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR);
+  const attempt = await durability.createAttempt({ taskId: "unattached_live_generation", leaseId: "unattached_live_generation", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  let spawnCount = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawnCount += 1; throw new Error("must not mint a duplicate generation"); },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { spawnCount += 1; throw new Error("must not mint a duplicate generation"); },
+    poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "live-continuation" }),
+    onExit: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "unattached_live_generation", provider: "claude-code", observed_state: "recovering",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id,
+        provider_continuation_id: "live-continuation",
+        provider_connection: null,
+        execution_generation_id: execution.execution_generation_id,
+      },
+    } })).ok, true);
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return current.condition === "coordination_blocked" && /remains live/.test(current.last_error ?? "");
+    }, "ambiguous live generation hold");
+    assert.equal(spawnCount, 0);
+    const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "unattached_live_generation" })).result as { execution_generations: Array<{ terminal: unknown }> };
+    assert.equal(detail.execution_generations.length, 1);
+    assert.equal(detail.execution_generations[0]?.terminal, null);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("a failed provider launch terminalizes its generation and releases the shared workspace fence", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "failed_launch_cleanup");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "failed_launch_cleanup", leaseId: "failed_launch_cleanup", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  let launchCount = 0;
+  const recovered = { workAttemptId: attempt.work_attempt_id, pid: 4202, providerContinuationId: "recovered-continuation", observedState: "working" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { launchCount += 1; if (launchCount === 1) throw new Error("injected launch failure"); return recovered; },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => recovered,
+    poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: recovered.providerContinuationId }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "failed_launch_cleanup", provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return current.condition === "coordination_blocked" && /injected launch failure/.test(current.last_error ?? "");
+    }, "failed launch persistence");
+    const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "failed_launch_cleanup" })).result as { execution_generations: Array<{ terminal: unknown }> };
+    assert.ok(detail.execution_generations[0]?.terminal, "failed launch generation is durably terminal");
+    const fenceDirectory = join(env.root, "worktrees", "repo", ".letagents-supervisor-workspace.fences");
+    assert.equal((await readdir(fenceDirectory)).some((name) => name.startsWith("shared-")), false, "failed launch releases retained workspace authority");
+
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "failed_launch_cleanup", desired_state: "running" })).ok, true);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "provider retry without daemon restart");
+    assert.equal(launchCount, 2);
+    assert.equal((await readdir(fenceDirectory)).filter((name) => name.startsWith("shared-")).length, 1, "successful retry reacquires one shared fence");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("a provider handle returned already terminal is fenced and resumes under a successor generation", async () => {
   const env = await fixture();
   const paths = {
@@ -2009,6 +2157,17 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(nativeRequests.length, requestsAfterFence, "successor rejection fences later native publications");
 
+    const generationsBeforeBindingRecovery = ((await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { execution_generations: unknown[] }).execution_generations.length;
+    const recoveryInternals = second as unknown as {
+      transition: (entryId: string, observed: "recovering", condition: "coordination_blocked", cause: string, actor: string) => Promise<void>;
+    };
+    await recoveryInternals.transition("supervised_handoff", "recovering", "coordination_blocked", "lost current worker binding during exact-generation recovery", "test-recovery");
+    const latchedProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(latchedProjection.worker_binding, null);
+    assert.equal(latchedProjection.last_worker_binding?.agent_session_id, "agent_session_exact");
+    assert.equal(latchedProjection.condition, "coordination_blocked");
+    assert.equal(latchedProjection.reconciliation?.pending_action, null);
+
     rejectNativeActivity = false;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
       entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
@@ -2020,6 +2179,16 @@ test("generation handoff reattaches the same provider and publishes its supervis
       execution_generation_id: executionGenerationId, agent_session_id: "agent_session_exact",
       room_cursor: "msg_cursor_exact",
     })).ok, true);
+    const recoveredProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(recoveredProjection.observed_state, "working");
+    assert.equal(recoveredProjection.condition, "none", "exact worker rebind clears the coordination latch");
+    assert.equal(recoveredProjection.last_error, null);
+    assert.equal(recoveredProjection.worker_binding?.agent_session_id, "agent_session_exact");
+    assert.equal(recoveredProjection.worker_binding?.execution_generation_id, executionGenerationId);
+    assert.equal(recoveredProjection.last_worker_binding?.agent_session_id, "agent_session_exact");
+    const generationsAfterBindingRecovery = ((await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { execution_generations: unknown[] }).execution_generations.length;
+    assert.equal(generationsAfterBindingRecovery, generationsBeforeBindingRecovery, "binding recovery cannot mint a duplicate execution generation");
+    assert.equal(resumeCount, 0, "binding recovery reuses the same worker before a later intentional pause/resume");
     const checkpointsBeforeNoop = ((await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: unknown[] }).checkpoints.length;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
       entry_id: "supervised_handoff", work_attempt_id: workAttemptId,

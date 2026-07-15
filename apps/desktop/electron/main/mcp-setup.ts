@@ -187,7 +187,7 @@ function stringRecord(value: unknown): Record<string, string> {
   );
 }
 
-function withRefreshedAuthEnv(
+export function withRefreshedRuntimeAndAuth(
   current: LetAgentsMcpServerConfig,
   expected: LetAgentsMcpServerConfig,
 ): LetAgentsMcpServerConfig {
@@ -206,6 +206,8 @@ function withRefreshedAuthEnv(
   const { cwd: _legacyCwd, ...server } = current;
   return {
     ...server,
+    command: expected.command || "npx",
+    args: expected.args ? [...expected.args] : undefined,
     env,
   };
 }
@@ -488,7 +490,7 @@ async function refreshLetAgentsMcpServerAuthForLocation(
       location.path,
       buildCodexTomlLetAgentsMcpConfig(
         currentConfig,
-        withRefreshedAuthEnv(currentServer, expected),
+        withRefreshedRuntimeAndAuth(currentServer, expected),
       ),
       "utf8",
     );
@@ -507,7 +509,7 @@ async function refreshLetAgentsMcpServerAuthForLocation(
     ...currentConfig,
     mcpServers: {
       ...(currentConfig.mcpServers || {}),
-      letagents: withRefreshedAuthEnv(currentServer, expected),
+      letagents: withRefreshedRuntimeAndAuth(currentServer, expected),
     },
   };
   await writeMcpJsonConfig(location.path, nextConfig);

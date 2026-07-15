@@ -579,7 +579,12 @@ export class SupervisorDaemon {
     const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.convergeManifestEntry(entryId))
+      // Direct manifest convergence and the legacy reconciliation scheduler
+      // both mutate provider authority for this entry. They must share one
+      // serialization lane; otherwise a pause/resume edge can observe the
+      // durable generation before its provider handle is installed and mint a
+      // second live generation.
+      .then(() => this.serializeEntryTick(entryId, () => this.convergeManifestEntry(entryId)))
       .catch(async (error) => {
         await this.recordSchedulerFailure(entryId, error, "daemon-convergence").catch(() => undefined);
       })
@@ -635,8 +640,19 @@ export class SupervisorDaemon {
         return;
       }
 
-      await this.transition(entry.id, entry.provider_ref ? "recovering" : "starting", "none", entry.provider_ref ? "recovering durable provider continuation" : "starting daemon-owned provider", "daemon-convergence");
       const attempt = await this.durability.getAttempt(entry.work_attempt_id!);
+      const activeExecution = attempt.execution_generations.find((candidate) => candidate.terminal === null);
+      if (activeExecution) {
+        await this.transition(
+          entry.id,
+          "recovering",
+          "coordination_blocked",
+          "durable execution generation remains live without an attachable provider handle",
+          "daemon-convergence",
+        );
+        return;
+      }
+      await this.transition(entry.id, entry.provider_ref ? "recovering" : "starting", "none", entry.provider_ref ? "recovering durable provider continuation" : "starting daemon-owned provider", "daemon-convergence");
       const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
       const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
       const priorBinding = entry.provider_ref ? await this.workerBindings.get(entry.id) : null;
@@ -689,7 +705,14 @@ export class SupervisorDaemon {
           endedAt: new Date().toISOString(), exitCode: null, signal: null,
           terminalCause: "protocol_error", providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
         }, "daemon-provider");
-        await this.durability.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, { ...terminal, generation: generationNumber, actor: "daemon-provider" }).catch(() => undefined);
+        try {
+          await this.durability.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, { ...terminal, generation: generationNumber, actor: "daemon-provider" });
+          await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id);
+        } catch (cleanupError) {
+          const launchMessage = error instanceof Error ? error.message : "unknown provider launch failure";
+          const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : "unknown failed-launch cleanup failure";
+          throw new Error(`Provider launch failed (${launchMessage}) and durable cleanup failed (${cleanupMessage}).`, { cause: error });
+        }
         throw error;
       }
       return;
@@ -922,6 +945,21 @@ export class SupervisorDaemon {
     });
     await this.updateManifestEntry(input.entry_id, (current) => ({
       ...current,
+      // A successful exact-generation bind proves that an ambiguous live
+      // provider regained its MCP control route. Clear only this coordination
+      // latch; quarantine and native terminal failures stay authoritative.
+      ...(current.desired_state === "running" && current.condition === "coordination_blocked"
+        ? {
+          observed_state: "working" as const,
+          condition: "none" as const,
+          last_error: null,
+          workplace_liveness: {
+            state: "reachable" as const,
+            observed_at: binding.updated_at,
+            detail: "exact supervised worker session rebound",
+          },
+        }
+        : {}),
       last_worker_binding: {
         agent_session_id: binding.agent_session_id,
         work_attempt_id: binding.work_attempt_id,
@@ -1009,6 +1047,9 @@ export class SupervisorDaemon {
             ...this.terminalPayload(terminal, execution.actor),
             generation: execution.generation,
           });
+        }
+        if (entry.desired_state === "stopped") {
+          await this.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId);
         }
       }
       if (this.liveHandles.get(entryId)) return;

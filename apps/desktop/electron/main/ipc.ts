@@ -835,6 +835,11 @@ export function registerDesktopIpcHandlers(
       if (input.providerId === "claude-code" && input.permissionProfileId === "ask_before_write") {
         throw new Error("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged into the desktop or room. Choose Read-only or Full access.");
       }
+      if (input.providerId === "claude-code") {
+        // Repair legacy `npx -y letagents` configs before the daemon launches
+        // inside a pristine managed checkout named `letagents`.
+        await refreshInstalledLetAgentsMcpServerAuth();
+      }
       // Claim the lane durably first. Every legacy start consults this daemon
       // fence, so no new legacy owner may appear while transfer is in flight.
       return transferSupervisorOwnership({
@@ -852,6 +857,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
+      if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
       return updated;
     },

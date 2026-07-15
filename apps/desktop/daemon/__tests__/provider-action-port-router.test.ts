@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -239,8 +239,10 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.equal(first.provider_ref?.provider_connection?.kind, "claude_cli");
     assert.ok(first.work_attempt_id);
     const firstGeneration = first.provider_ref?.execution_generation_id;
+    const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "Claude router stop");
+    assert.equal((await readdir(fenceDirectory)).some((name) => name.startsWith("shared-")), false, "intentional Stop releases terminal workspace authority");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "running" })).ok, true);
     await eventually(async () => {
       const resumed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
@@ -249,6 +251,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     const resumed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(resumed.work_attempt_id, first.work_attempt_id);
     assert.equal(resumed.provider_ref?.provider_continuation_id, continuation);
+    assert.equal((await readdir(fenceDirectory)).filter((name) => name.startsWith("shared-")).length, 1, "same-attempt resume reacquires exactly one shared fence");
     assert.ok(calls.some((call) => call.startsWith("spawn:")));
     assert.ok(calls.some((call) => call.startsWith("stop:")));
     assert.ok(calls.some((call) => call.startsWith("resume:")));

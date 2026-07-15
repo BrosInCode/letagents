@@ -230,6 +230,22 @@ export class WorkDurabilityStore {
     });
   }
 
+  /**
+   * Drop retained workspace authority only after the caller has proved the
+   * exact generation terminal and knows no provider process can still write.
+   * Failed launches and an intentional desired=stopped terminal use this path;
+   * pause/resume and reattachable successor handoffs deliberately retain it.
+   */
+  async releaseTerminalExecutionFence(workAttemptId: string, executionGenerationId: string): Promise<void> {
+    const attempt = await this.getAttempt(workAttemptId);
+    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
+    if (!execution?.terminal) throw new ImmutableExecutionError("An execution fence can be released only after durable terminal attestation.");
+    if (attempt.execution_generations.some((candidate) => candidate.terminal === null)) {
+      throw new ImmutableExecutionError("An execution fence cannot be released while another execution generation is live.");
+    }
+    await this.releaseExecutionFence(workAttemptId);
+  }
+
   async appendStdio(workAttemptId: string, line: string, maxBytes = 1024 * 1024): Promise<string> {
     this.assertAttemptId(workAttemptId);
     return this.exclusive(async () => {
