@@ -8,7 +8,22 @@ import { execFileSync } from "node:child_process";
 
 export const DEFAULT_STOP_GRACE_MS = 5_000;
 export const MAX_STREAM_PAYLOAD_BYTES = 32 * 1024;
-const SENSITIVE_PAYLOAD_KEY = /(?:authorization|cookie|credential|password|secret|api[_-]?key|(?:access|refresh|auth|bearer|session)[_-]?token|^token$)/i;
+const MAX_STREAM_COLLECTION_ENTRIES = 100;
+const SENSITIVE_PAYLOAD_KEY = /(?:authorization|cookie|credential|password|secret|api[_-]?key|private[_-]?key|(?:access|refresh|auth|bearer|session|letagents)[_-]?token|(?:^|[_-])token$)/i;
+const AUTHORIZATION_SECRET_ASSIGNMENT = /((?:\\?["']?)\bauthorization(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!(?:bearer|basic)\b)([^\\\s"',}\]]{4,})/gi;
+const EMBEDDED_SECRET_ASSIGNMENT = /((?:\\?["']?)\b(?:[a-z0-9_.-]*(?:cookie|setCookie|credential|password|secret|clientSecret|dbPassword|apiKey|api[_-]?key|privateKey|private[_-]?key|token|accessToken|refreshToken|authToken|bearerToken|sessionToken|letagentsToken|(?:access|refresh|auth|bearer|session|letagents)[_-]?token))(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!\[REDACTED\]|<redacted>|\*{3,})([^\\\s"',}\]]{4,})/gi;
+const AUTHORIZATION_SCHEME_SECRET = /(\b(?:bearer|basic)\s+)([a-z0-9._~+\/-]{8,}={0,2})/gi;
+const KNOWN_SECRET = /\b(?:github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gi;
+
+export function redactCredentialText(value: string): { value: string; redacted: boolean } {
+  let redacted = false;
+  const safe = value
+    .replace(AUTHORIZATION_SCHEME_SECRET, (_match, prefix: string) => { redacted = true; return `${prefix}[REDACTED]`; })
+    .replace(AUTHORIZATION_SECRET_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}[REDACTED]`; })
+    .replace(EMBEDDED_SECRET_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}[REDACTED]`; })
+    .replace(KNOWN_SECRET, () => { redacted = true; return "[REDACTED]"; });
+  return { value: safe, redacted };
+}
 
 /**
  * The minimal observed-exit shape the evidence primitives operate on. Provider
@@ -91,7 +106,7 @@ export async function defaultObserveProcessExit(
 
 function redactPayload(
   value: unknown,
-  state: { redacted: boolean; truncated: boolean },
+  state: { redacted: boolean; truncated: boolean; seen: WeakSet<object> },
   key = "",
   depth = 0,
 ): unknown {
@@ -103,14 +118,29 @@ function redactPayload(
     state.truncated = true;
     return "[MAX_DEPTH]";
   }
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactPayload(entry, state, "", depth + 1));
-  }
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([entryKey, entry]) => [
-      entryKey,
-      redactPayload(entry, state, entryKey, depth + 1),
-    ]));
+    if (state.seen.has(value)) { state.truncated = true; return "[CIRCULAR]"; }
+    state.seen.add(value);
+    if (Array.isArray(value)) {
+      if (value.length > MAX_STREAM_COLLECTION_ENTRIES) state.truncated = true;
+      return value.slice(0, MAX_STREAM_COLLECTION_ENTRIES).map((entry) => redactPayload(entry, state, "", depth + 1));
+    }
+    const record = value as Record<string, unknown>;
+    const sanitized: Record<string, unknown> = {};
+    let count = 0;
+    for (const entryKey in record) {
+      if (!Object.prototype.hasOwnProperty.call(record, entryKey)) continue;
+      if (count >= MAX_STREAM_COLLECTION_ENTRIES) { state.truncated = true; break; }
+      count += 1;
+      try { sanitized[entryKey] = redactPayload(record[entryKey], state, entryKey, depth + 1); }
+      catch { state.truncated = true; sanitized[entryKey] = "[UNREADABLE]"; }
+    }
+    return sanitized;
+  }
+  if (typeof value === "string") {
+    const safe = redactCredentialText(value);
+    state.redacted ||= safe.redacted;
+    return safe.value;
   }
   return value;
 }
@@ -120,7 +150,7 @@ export function safeStreamPayload(value: unknown): {
   payloadTruncated: boolean;
   payloadRedacted: boolean;
 } {
-  const state = { redacted: false, truncated: false };
+  const state = { redacted: false, truncated: false, seen: new WeakSet<object>() };
   const payload = redactPayload(value, state);
   let serialized: string;
   try {

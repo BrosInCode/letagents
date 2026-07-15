@@ -3,6 +3,7 @@ import { appendFile, link, lstat, mkdir, open, readFile, realpath, rename, rm } 
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
+import { redactCredentialText } from "./credential-redaction.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
 import { acquireWorkspaceFence, WorkspaceFenceError, type WorkspaceFenceHandle } from "./workspace-fence.js";
 
@@ -217,7 +218,14 @@ export class WorkDurabilityStore {
       if (!terminal.terminal_cause.trim() || !isIsoTime(terminal.ended_at) || Date.parse(terminal.ended_at) < Date.parse(execution.started_at)) {
         throw new ImmutableExecutionError("Terminal cause and a non-regressing end time are required.");
       }
-      execution.terminal = { ...terminal, stdio_tail: Buffer.from(terminal.stdio_tail).subarray(-maxStdioTailBytes).toString("utf8") };
+      execution.terminal = {
+        ...terminal,
+        stdio_archive_ref: terminal.stdio_archive_ref === null ? null : redactCredentialText(terminal.stdio_archive_ref).value,
+        stdio_tail: Buffer.from(redactCredentialText(terminal.stdio_tail, Number.MAX_SAFE_INTEGER).value).subarray(-maxStdioTailBytes).toString("utf8"),
+        terminal_cause: redactCredentialText(terminal.terminal_cause).value,
+        actor: redactCredentialText(terminal.actor).value,
+        provider_continuation_id: terminal.provider_continuation_id === null ? null : redactCredentialText(terminal.provider_continuation_id).value,
+      };
       return execution;
     });
   }
@@ -227,17 +235,22 @@ export class WorkDurabilityStore {
     return this.exclusive(async () => {
       const stored = await this.load();
       this.required(stored, workAttemptId);
+      line = redactCredentialText(line, Number.MAX_SAFE_INTEGER).value;
       const root = await this.managedRealDirectory(this.attemptsRoot, true);
       const directory = join(root, workAttemptId);
       await this.ensureManagedDirectory(directory, root, true);
       const logPath = join(directory, "stdio.log");
+      let followsCredentialPrefix = false;
       try {
         const info = await lstat(logPath);
         if (info.isSymbolicLink() || !info.isFile()) throw new ImmutableExecutionError("Stdio log must be a regular daemon-owned file.");
+        const tail = (await readFile(logPath, "utf8")).slice(-512);
+        followsCredentialPrefix = /(?:authorization|proxy[_-]?authorization)\s*[:=]\s*(?:bearer|basic)?\s*$|(?:cookie|credential|password|secret|api[_-]?key|(?:[a-z0-9_.-]*[_-])?token)\s*[:=]\s*$/i.test(tail);
         if (info.size >= maxBytes) await this.archiveWithoutClobber(logPath);
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+      if (followsCredentialPrefix && line.trim()) line = "[REDACTED]";
       await appendFile(logPath, `${line}\n`, { encoding: "utf8", mode: 0o600 });
       return logPath;
     });

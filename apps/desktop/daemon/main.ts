@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
+import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { WorkDurabilityStore } from "./durability-store.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
@@ -480,18 +481,19 @@ export class SupervisorDaemon {
 
   private async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
     if (!event || typeof event !== "object" || !event.observed_at) throw new Error("A bounded activity event is required.");
+    const sanitizedEvent = sanitizeDaemonActivityEvent(event);
     return this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
       const manifest = await this.store.load();
       const entry = manifest.entries.find((candidate) => candidate.id === id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       const lastSequence = entry.activity?.at(-1)?.sequence ?? -1;
-      if (event.sequence <= lastSequence) throw new Error(`Native activity sequence ${event.sequence} is not newer than ${lastSequence}.`);
+      if (sanitizedEvent.sequence <= lastSequence) throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
       const updated: DaemonManifestEntry = {
         ...entry,
-        observed_state: event.status === "working" || event.status === "reviewing" ? "working" : event.status === "blocked" ? entry.observed_state : "idle",
-        native_liveness: { state: event.status === "idle" ? "idle" : "active", observed_at: event.observed_at, detail: event.summary },
-        activity: [...(entry.activity ?? []), event].slice(-200),
+        observed_state: sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing" ? "working" : sanitizedEvent.status === "blocked" ? entry.observed_state : "idle",
+        native_liveness: { state: sanitizedEvent.status === "idle" ? "idle" : "active", observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary },
+        activity: [...(entry.activity ?? []), sanitizedEvent].slice(-200),
       };
       const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
       this.manifestGeneration = next.generation;
@@ -819,7 +821,7 @@ export class SupervisorDaemon {
     const status: DaemonActivityEvent["status"] = lifecycle === "failed"
       ? "blocked"
       : lifecycle === "terminal" ? "idle" : lifecycle;
-    await this.appendActivity(entryId, {
+    const sanitizedEvent = sanitizeDaemonActivityEvent({
       observed_at: event.observedAt,
       sequence,
       provider: event.provider,
@@ -832,10 +834,11 @@ export class SupervisorDaemon {
       payload_redacted: event.payloadRedacted,
       durable_payload_ref: event.durablePayloadRef,
     });
+    await this.appendActivity(entryId, sanitizedEvent);
     if (lifecycle === "failed" && entry.observed_state !== "failed") {
-      await this.transition(entryId, "failed", entry.condition, `provider stream terminal failure: ${event.method}`, "daemon-provider-stream");
+      await this.transition(entryId, "failed", entry.condition, `provider stream terminal failure: ${sanitizedEvent.method}`, "daemon-provider-stream");
     }
-    await this.publishNativeActivity(entryId, event.method, lifecycle === "working" ? "working" : "idle", event.observedAt).catch(() => undefined);
+    await this.publishNativeActivity(entryId, sanitizedEvent.method, lifecycle === "working" ? "working" : "idle", event.observedAt).catch(() => undefined);
     if ((lifecycle === "failed" || lifecycle === "terminal")
       && this.liveHandles.get(entryId) === handle
       && !["stopping", "stopped"].includes(handle.observedState)) {
@@ -960,6 +963,7 @@ export class SupervisorDaemon {
   }
 
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
+    const safeMethod = redactCredentialText(method, 160).value;
     const observedMs = Date.parse(observedAt);
     const publication = await this.workerBindings.publish(entryId, observedMs, async ({ binding, sequence, observed_at }) => {
       const roomPath = binding.room_id.split("/").map(encodeURIComponent).join("/");
@@ -972,7 +976,7 @@ export class SupervisorDaemon {
           agent_session_token: binding.agent_session_token,
           observed_at,
           sequence,
-          method: method.slice(0, 160),
+          method: safeMethod,
           status,
         }),
         signal: AbortSignal.timeout(10_000),
@@ -1048,13 +1052,33 @@ export class SupervisorDaemon {
     const manifest = await this.store.load();
     const entry = manifest.entries.find((candidate) => candidate.id === entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
-    const nextReconciliation = reconciliation ?? advanceReconciliationState(entry.reconciliation, to, this.nowMs());
+    const safeCause = redactCredentialText(cause).value;
+    const safeActor = redactCredentialText(actor).value;
+    const sanitizeTerminal = (value: ExecutionTerminalPayload | undefined): ExecutionTerminalPayload | undefined => value ? {
+      ...value,
+      signal: value.signal === null ? null : redactCredentialText(value.signal).value,
+      stdio_archive_ref: value.stdio_archive_ref === null ? null : redactCredentialText(value.stdio_archive_ref).value,
+      stdio_tail: redactCredentialText(value.stdio_tail, 64 * 1024).value,
+      terminal_cause: redactCredentialText(value.terminal_cause).value,
+      actor: redactCredentialText(value.actor).value,
+      provider_continuation_id: value.provider_continuation_id === null ? null : redactCredentialText(value.provider_continuation_id).value,
+    } : undefined;
+    const candidateReconciliation = reconciliation ?? advanceReconciliationState(entry.reconciliation, to, this.nowMs());
+    const nextReconciliation = {
+      ...candidateReconciliation,
+      last_terminal: sanitizeTerminal(candidateReconciliation.last_terminal),
+    };
+    const safeTerminal = sanitizeTerminal(terminal);
     const noticeKind = notice ?? (condition === "quarantined" ? "quarantine_death" : condition === "coordination_blocked" ? "coordination_escalation" : undefined);
-    const notices = [...(entry.reconciliation_notices ?? [])];
-    if (noticeKind) notices.push({ at: new Date().toISOString(), kind: noticeKind, cause, terminal: terminal ?? nextReconciliation.last_terminal ?? undefined });
+    const notices = (entry.reconciliation_notices ?? []).map((candidate) => ({
+      ...candidate,
+      cause: redactCredentialText(candidate.cause).value,
+      terminal: sanitizeTerminal(candidate.terminal),
+    }));
+    if (noticeKind) notices.push({ at: new Date().toISOString(), kind: noticeKind, cause: safeCause, terminal: safeTerminal ?? nextReconciliation.last_terminal ?? undefined });
     const lastError = to === "failed" || condition !== "none"
-      ? cause
-      : (["working", "idle", "stopped"].includes(to) ? null : entry.last_error ?? null);
+      ? safeCause
+      : (["working", "idle", "stopped"].includes(to) ? null : entry.last_error === null || entry.last_error === undefined ? null : redactCredentialText(entry.last_error).value);
     const updated: DaemonManifestEntry = {
       ...entry,
       observed_state: to,
@@ -1067,7 +1091,7 @@ export class SupervisorDaemon {
     this.manifestGeneration = next.generation;
     await this.serializeManifestCommit(async () => {
       await this.singleton.assertCurrent();
-      await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });
+      await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause: safeCause, actor: safeActor, generation: next.generation });
     });
   }
 

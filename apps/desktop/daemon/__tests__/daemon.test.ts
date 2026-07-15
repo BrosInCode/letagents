@@ -1126,10 +1126,13 @@ test("audit transitions append and rotate instead of truncating", async () => {
     const path = join(env.root, "audit.jsonl");
     const log = new AuditLog(path, 1);
     await log.append({ at: "2026-01-01T00:00:00.000Z", entry_id: "agent", from: "idle", to: "recovering", cause: "test", actor: "test", generation: 1 });
-    await log.append({ at: "2026-01-01T00:00:01.000Z", entry_id: "agent", from: "recovering", to: "idle", cause: "test", actor: "test", generation: 2 });
+    const canary = "canary-not-a-real-audit-secret-123456789";
+    await log.append({ at: "2026-01-01T00:00:01.000Z", entry_id: "agent", from: "recovering", to: "idle", cause: `Authorization: Bearer ${canary}`, actor: "test", generation: 2 });
     const names = await readdir(env.root);
     assert.ok(names.some((name) => name.startsWith("audit.jsonl.") && name.endsWith(".archive")));
     assert.match(await readFile(path, "utf8"), /"generation":2/);
+    assert.doesNotMatch(await readFile(path, "utf8"), new RegExp(canary));
+    assert.match(await readFile(path, "utf8"), /REDACTED/);
   } finally { await env.cleanup(); }
 });
 
@@ -1409,6 +1412,74 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     const detail = await daemonRequest(paths.socketPath, "attempt.read", { id: entry.id });
     assert.equal((detail.result as { workspace_path: string | null }).workspace_path, null, "attempt.read never launders a manifest placeholder into durability authority");
     assert.equal((detail.result as { activity: unknown[] }).activity.length, 1);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("daemon ingress redacts provider credentials before manifest, DTO, and audit persistence", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const canary = "canary-not-a-real-credential-123456789";
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, id: "credential_firewall" } });
+    const response = await daemonRequest(paths.socketPath, "manifest.append_activity", {
+      id: "credential_firewall",
+      event: {
+        observed_at: "2026-01-01T00:00:01.000Z",
+        sequence: 1,
+        provider: "claude-code",
+        kind: "tool_result",
+        method: `tool/result Authorization: Bearer ${canary}`,
+        summary: `LETAGENTS_TOKEN=${canary}`,
+        status: "working",
+        payload: {
+          nested: [{ LETAGENTS_TOKEN: canary }, { api_key: canary }, { clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }],
+          json: JSON.stringify({ LETAGENTS_TOKEN: canary }),
+          header: `Authorization: Bearer ${canary}`,
+          basic: `Authorization: Basic ${canary}`,
+          arbitraryAuthorization: `Authorization: ${canary}`,
+          stringifiedHeaders: JSON.stringify({ bearer: `Authorization: Bearer ${canary}`, basic: `Authorization: Basic ${canary}`, arbitrary: `Authorization: ${canary}` }),
+          stringifiedCamelCase: JSON.stringify({ clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }),
+        },
+        payload_truncated: false,
+        payload_redacted: false,
+        durable_payload_ref: `Authorization: Bearer ${canary}`,
+      },
+    });
+    assert.equal(response.ok, true, response.error);
+    const dto = response.result as DaemonManifestEntry;
+    assert.equal(dto.activity?.[0]?.payload_redacted, true);
+    assert.doesNotMatch(JSON.stringify(dto), new RegExp(canary));
+    assert.doesNotMatch(await readFile(paths.manifestPath, "utf8"), new RegExp(canary));
+
+    await daemon.transition("credential_firewall", "failed", "coordination_blocked", `Authorization: Bearer ${canary}`, `LETAGENTS_TOKEN=${canary}`, {
+      exit_timestamps_ms: [],
+      consecutive_action_failures: 0,
+      last_observed_state: "failed",
+      next_restart_at_ms: null,
+      completed_action_ids: [],
+      last_action_sequence: 0,
+      pending_action: null,
+      last_terminal: {
+        ended_at: "2026-01-01T00:00:02.000Z",
+        exit_code: 1,
+        signal: null,
+        stdio_archive_ref: `LETAGENTS_TOKEN=${canary}`,
+        stdio_tail: `Authorization: Bearer ${canary}`,
+        terminal_cause: `OPENAI_API_KEY=${canary}`,
+        actor: `LETAGENTS_TOKEN=${canary}`,
+        generation: 1,
+        provider_continuation_id: `Authorization: Bearer ${canary}`,
+      },
+    });
+    assert.doesNotMatch(await readFile(paths.manifestPath, "utf8"), new RegExp(canary));
+    assert.match(await readFile(paths.manifestPath, "utf8"), /REDACTED/);
+    assert.doesNotMatch(await readFile(paths.auditPath, "utf8"), new RegExp(canary));
+    assert.match(await readFile(paths.auditPath, "utf8"), /REDACTED/);
   } finally {
     await daemon.stop();
     await env.cleanup();
@@ -1873,6 +1944,12 @@ test("generation handoff reattaches the same provider and publishes its supervis
     const bindingFile = await readFile(paths.workerBindingsPath, "utf8");
     assert.doesNotMatch(bindingFile, /authorization|Bearer|scoped-worker-bearer/, "binding store carries no owner or optional bearer authority");
     assert.doesNotMatch(await readFile(paths.manifestPath, "utf8"), /session-secret/);
+    const nativeCanary = "canary-not-a-real-native-secret-123456789";
+    const nativeInternals = first as unknown as { publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean> };
+    await nativeInternals.publishNativeActivity("supervised_handoff", `tool Authorization: Bearer ${nativeCanary}`, "working");
+    const canaryPublication = nativeRequests.at(-1)!;
+    assert.doesNotMatch(JSON.stringify(canaryPublication.body), new RegExp(nativeCanary));
+    assert.match(canaryPublication.body.method, /REDACTED/);
 
     const sameObservedAt = new Date().toISOString();
     for (const [method, eventObservedAt] of [
@@ -2111,7 +2188,11 @@ test("work attempts survive generations and lease rebinds while terminal payload
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).workspace_path, workspace.path);
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).epoch_history.length, 2);
     assert.equal(resumed.generation, 2);
-    await store.recordTerminal(attempt.work_attempt_id, resumed.execution_generation_id, { ended_at: "2026-01-01T00:00:10.000Z", exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "done", terminal_cause: "completed", actor: "daemon", generation: 2, provider_continuation_id: null });
+    const terminalCanary = "canary-not-a-real-terminal-secret-123456789";
+    const resumedTerminal = await store.recordTerminal(attempt.work_attempt_id, resumed.execution_generation_id, { ended_at: "2026-01-01T00:00:10.000Z", exit_code: 0, signal: null, stdio_archive_ref: `LETAGENTS_TOKEN=${terminalCanary}`, stdio_tail: `Authorization: Bearer ${terminalCanary}`, terminal_cause: `OPENAI_API_KEY=${terminalCanary}`, actor: "daemon", generation: 2, provider_continuation_id: null });
+    assert.doesNotMatch(JSON.stringify(resumedTerminal.terminal), new RegExp(terminalCanary));
+    assert.doesNotMatch(await readFile(store.path, "utf8"), new RegExp(terminalCanary));
+    assert.match(JSON.stringify(resumedTerminal.terminal), /REDACTED/);
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "reviewed", postmortemDiff: "diff --git a/a b/a" });
     await assert.rejects(() => store.rebindAttempt(attempt.work_attempt_id, "lease-3", 3), ImmutableExecutionError);
   } finally { await env.cleanup(); }
@@ -2134,6 +2215,11 @@ test("stdio rotates append-only and GC protects active, ambiguous, quarantined, 
     await store.markState(protectedAttempt.work_attempt_id, "quarantined");
     const log = await store.appendStdio(first.work_attempt_id, "x".repeat(8), 8);
     await store.appendStdio(first.work_attempt_id, "next", 8);
+    const stdioCanary = "canary-not-a-real-stdio-secret-123456789";
+    const credentialLog = await store.appendStdio(protectedAttempt.work_attempt_id, "Authorization: Bearer ", 1_024);
+    await store.appendStdio(protectedAttempt.work_attempt_id, stdioCanary, 1_024);
+    assert.doesNotMatch(await readFile(credentialLog, "utf8"), new RegExp(stdioCanary));
+    assert.match(await readFile(credentialLog, "utf8"), /REDACTED/);
     assert.ok((await readdir(dirname(log))).some((name) => name.includes("stdio.log.") && name.endsWith(".archive")));
     const removed = await store.garbageCollect(1);
     assert.deepEqual(new Set(removed), new Set([first.work_attempt_id, second.work_attempt_id]));
