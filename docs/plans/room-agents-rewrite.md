@@ -89,6 +89,29 @@ Server-side delivery filtering: `wait_for_messages` returns only the agent's bus
 ### 4.8 Provider adapters (tiered floor)
 Interface: `spawn / resume / poke / stop / capabilities`. Required floor: native-harness launch/attach + LetAgents MCP configuration + observable exit. Every adapter receives the existing provider launch policy from the desktop and must preserve it unchanged. Progressive capabilities (each backed by a passing spike cell): resume, mid-turn injection, transcript access, permission-prompt bridging. The reconciler consumes the negotiated set — e.g. no poke ⇒ attention ladder skips rung 2. Codex is first because the current app-server path can run as a durable background process; Claude Code and Cursor follow through their native harnesses without pretending they share Codex's process model. For a no-resume provider the promise is **bounded recovery, not survival**: on process death or daemon restart, in-context state since the last checkpoint is lost; the work attempt, workspace, scratchpad, and outbox bound that loss and a fresh session resumes from them. Adapters must state this bound in `capabilities()` and the UI must surface it.
 
+#### Provider evidence matrix (task 35)
+
+The adapter must expose only evidence that its native harness can prove. "No" means the
+capability is intentionally unavailable, not silently emulated by the reconciler. An
+unproven cell keeps execution visibility capability-gated in the UI.
+
+| Provider | Current launch shape | Durable process / birth identity | Observable terminal | Continuation | Stream evidence | Current decision |
+| --- | --- | --- | --- | --- | --- | --- |
+| Codex | Dedicated app-server child | Yes: PID plus recorded birth/command identity | Yes: child exit plus fenced RPC-close handling | Exact app-server thread resume | Native RPC/stream events | Full P1c floor; reference implementation. |
+| Open Model | Dedicated Codex app-server with provider config and API-key environment override | Expected to match Codex | Expected to match Codex | Expected to match Codex | Expected to match Codex | Validation cell only: prove the Codex process/identity, resume, stream, terminal, quiet-turn, and latency cells with an OpenAI-compatible endpoint before advertising parity. |
+| Claude Code | In-process `@anthropic-ai/claude-agent-sdk` `query()` in Electron main | No independent OS child or birth identity | Turn iterator/result only; app exit ends it | SDK `session_id` resumes a later query, but it does not survive the Electron process | SDK messages while Electron is alive | Capability-gate is the current state: stream evidence while the app is alive, `survivesRestart=false`, and execution visibility unavailable after app restart. Task 36 is the accepted/in-progress daemon-owned headless Claude CLI adapter; its spike cells must prove the resume/injection claims before it upgrades any capability. |
+| Cursor | `cursor-agent` child per delivered turn (`--resume <session_id>`) | Yes during a turn; no persistent generation between turns | Child close code/signal per turn | Session id is passed to the next turn | Stream-json items and transcript tail per turn | Model idle-between-turns honestly: last-turn terminal/transcript evidence, never a claimed live process. |
+
+Required spike cells for every non-Codex provider are: (1) launch shape and native
+permission-policy passthrough, (2) process identity where a process exists, (3) terminal
+ordering, (4) continuation/resume, (5) bounded public stream, (6) long quiet turn, and
+(7) slow-but-alive request. A cell may enable only the matching `capabilities()` bit.
+The concrete evidence seams at the time of this matrix are
+`claude-code-runner.ts` and its runtime tests, `cursor-runner.ts` and its stream/runtime
+tests, and `open-model-launch.ts` plus the Codex app-server lifecycle tests. A provider
+with no independently observable process must never be used as terminal evidence for
+replacement; it reports bounded recovery instead.
+
 ### 4.9 v1 scope gates
 Cloud-backed rooms only — **decided** (a worker on cloud MCP cannot reach app-local sqlite storage); local rooms fail with a precise capability-gate error; transport abstracted so the backlogged daemon-owned local MCP endpoint (P3e) can add parity; Electron never becomes the local storage owner. Inspector parity via transcript tail / provider thread events. Provider-native permission prompts and selected launch modes must round-trip through the desktop before GA; LetAgents does not define an additional permission profile.
 
