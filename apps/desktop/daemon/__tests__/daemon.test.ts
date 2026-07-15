@@ -17,7 +17,7 @@ import { SupervisorDaemon } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonRequest } from "../types.js";
-import { WorkspaceProvisioner } from "../workspace-provisioner.js";
+import { createGitCommand, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
@@ -1398,6 +1398,55 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
     await symlink(outside, first.path);
     await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" }), /symlink/);
   } finally { await env.cleanup(); }
+});
+
+test("workspace provisioning survives deletion of the daemon's inherited launch cwd", async () => {
+  const env = await fixture();
+  try {
+    const source = join(env.root, "source");
+    const launchCwd = join(env.root, "ephemeral-launch-cwd");
+    const daemonRoot = join(env.root, "stable-daemon-root");
+    await mkdir(source);
+    await mkdir(launchCwd);
+    await mkdir(daemonRoot);
+    await execFileAsync("git", ["init", source]);
+    await execFileAsync("git", ["-C", source, "config", "user.email", "daemon@example.invalid"]);
+    await execFileAsync("git", ["-C", source, "config", "user.name", "Daemon Test"]);
+    await writeFile(join(source, "README.md"), "stable cwd\n");
+    await execFileAsync("git", ["-C", source, "add", "README.md"]);
+    await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
+
+    const moduleUrl = new URL("../workspace-provisioner.ts", import.meta.url).href;
+    const tsxImport = import.meta.resolve("tsx");
+    const workAttemptId = randomUUID();
+    const script = [
+      `import { rm } from "node:fs/promises";`,
+      `import { createGitCommand, WorkspaceProvisioner } from ${JSON.stringify(moduleUrl)};`,
+      `const git = createGitCommand(${JSON.stringify(daemonRoot)});`,
+      `process.chdir(${JSON.stringify(launchCwd)});`,
+      `await rm(${JSON.stringify(launchCwd)}, { recursive: true });`,
+      `const provisioner = new WorkspaceProvisioner(${JSON.stringify(daemonRoot)}, git);`,
+      `const result = await provisioner.provision(${JSON.stringify({
+        repo: "repo",
+        workAttemptId,
+        taskId: "task_deleted_cwd",
+        remoteUrl: source,
+        revision: "HEAD",
+      })});`,
+      `process.stdout.write(JSON.stringify({ path: result.path, reused: result.reused }));`,
+    ].join("\n");
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ["--import", tsxImport, "--input-type=module", "-e", script],
+      { cwd: launchCwd, maxBuffer: 8 * 1024 * 1024 },
+    );
+    const result = JSON.parse(stdout) as { path: string; reused: boolean };
+    assert.equal(result.reused, false);
+    assert.equal(result.path, join(daemonRoot, "worktrees", "repo", workAttemptId));
+    assert.equal((await stat(result.path)).isDirectory(), true);
+  } finally {
+    await env.cleanup();
+  }
 });
 
 test("durability store validates destructive identities, serializes GC, and quarantines tampering", async () => {

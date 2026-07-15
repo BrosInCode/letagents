@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, unlink } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, unlink } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type { ChildProcess } from "node:child_process";
 
-import { SUPERVISOR_DAEMON_PROTOCOL_VERSION, SupervisorDaemonClient } from "../main/supervisor-daemon.js";
+import {
+  SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+  SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+  SupervisorDaemonClient,
+} from "../main/supervisor-daemon.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 
@@ -21,7 +25,13 @@ function fakeChild(): ChildProcess {
   return child as unknown as ChildProcess;
 }
 
-async function startWireDaemon(socketPath: string, version: number, generation: number, onPrepare?: () => void) {
+async function startWireDaemon(
+  socketPath: string,
+  version: number,
+  generation: number,
+  onPrepare?: () => void,
+  implementationVersion = SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
   const server = createServer((socket) => {
@@ -33,7 +43,7 @@ async function startWireDaemon(socketPath: string, version: number, generation: 
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as { id: string; method: string; params?: Record<string, any> };
       let result: unknown;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: `${version}.0.0`, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         setTimeout(() => onPrepare?.(), 5);
@@ -151,6 +161,47 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
     assert.equal(spawns, 1);
     assert.equal(status.protocolVersion, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
     assert.equal(status.generation, 8);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("desktop replaces a stale same-protocol daemon and launches the replacement from a stable cwd", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let spawnedCwd: string | null = null;
+  const stableCwd = join(env.root, "stable-daemon-cwd");
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    11,
+    () => { void closeServer(oldServer, env.socketPath); },
+    "2.0.0-stale",
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      daemonWorkingDirectory: stableCwd,
+      spawnDaemon: (_scriptPath, cwd) => {
+        spawnedCwd = cwd;
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 12)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    const status = await client.ensureRunning();
+    assert.equal(status.generation, 12);
+    assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.equal(spawnedCwd, stableCwd);
+    assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
     await closeServer(replacementServer, env.socketPath);
     await closeServer(oldServer, env.socketPath);

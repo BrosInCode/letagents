@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -3448,6 +3448,23 @@ test("Codex app-server launcher captures spawn errors for the supervisor", async
     assert.fail("Expected a spawn error from the missing Codex binary.");
   }
   assert.match(exit.error.message, /letagents-codex-missing-bin-for-test|ENOENT|spawn/i);
+});
+
+test("Codex app-server launcher uses the trusted worktree as its process cwd", async () => {
+  const bin = join(tempDir, "codex-reporting-app-server-cwd");
+  writeFileSync(
+    bin,
+    "#!/usr/bin/env node\nprocess.stdout.write(process.cwd());\n",
+    { mode: 0o755 },
+  );
+
+  const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+    trustedProjectPath: tempDir,
+  });
+  const exit = await waitForCodexLaunchExitForTest(launch);
+
+  assert.equal(exit.type, "exit");
+  assert.equal(exit.output?.stdout, realpathSync(tempDir));
 });
 
 test("Codex app-server launcher captures early process output without leaking env secrets", async () => {
