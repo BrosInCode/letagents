@@ -428,7 +428,7 @@
                 <small>
                   {{ supervisedConflict.observedState }} · {{ supervisedConflict.condition }}
                 </small>
-                <p v-if="supervisedConflict.lastError">{{ supervisedConflict.lastError }}</p>
+                <p v-if="supervisedConflictDetail">{{ supervisedConflictDetail }}</p>
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
                     type="button"
@@ -442,6 +442,10 @@
                 </div>
               </article>
             </section>
+
+            <p v-if="supervisedConflictLookupError" class="desktop-add-agent-feedback">
+              {{ supervisedConflictLookupError }}
+            </p>
 
             <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
 
@@ -596,10 +600,14 @@ import {
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
-  supervisedProviderLaneEntry,
   visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
+import {
+  loadSupervisedProviderLane,
+  stopSupervisedProviderLane,
+  supervisedRecoveryDetail,
+} from "../../../domain/supervised-recovery";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
@@ -642,6 +650,7 @@ const creatingWorktree = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const stoppingSupervisorEntryId = ref<string | null>(null);
 const supervisedConflict = ref<DesktopSupervisorManifestEntry | null>(null);
+const supervisedConflictLookupError = ref<string | null>(null);
 const copyingAuthCommand = ref(false);
 const copyingExternalPrompt = ref(false);
 const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
@@ -678,6 +687,9 @@ let modelPreflightTimer: number | null = null;
 
 const selectedProvider = computed(() =>
   providers.value.find((provider) => provider.id === selectedProviderId.value) || null
+);
+const supervisedConflictDetail = computed(() =>
+  supervisedConflict.value ? supervisedRecoveryDetail(supervisedConflict.value) : null
 );
 
 const activeManagedSessions = computed(() =>
@@ -1122,6 +1134,7 @@ async function startManagedAgent(): Promise<void> {
       });
       if (!isCurrentModalState(requestVersion)) return;
       supervisedConflict.value = null;
+      supervisedConflictLookupError.value = null;
       setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
       await loadManagedSessions();
       return;
@@ -1150,7 +1163,8 @@ async function startManagedAgent(): Promise<void> {
     if (launchMode.value === "supervised") {
       const conflict = await loadSupervisedConflict(requestVersion);
       if (!isCurrentModalState(requestVersion)) return;
-      supervisedConflict.value = conflict;
+      supervisedConflict.value = conflict.entry;
+      supervisedConflictLookupError.value = conflict.error;
     }
     setupMessage.value = error instanceof Error ? error.message : "Could not start this agent.";
   } finally {
@@ -1161,15 +1175,17 @@ async function startManagedAgent(): Promise<void> {
   }
 }
 
-async function loadSupervisedConflict(requestVersion = modalStateVersion): Promise<DesktopSupervisorManifestEntry | null> {
-  if (!selectedProviderId.value || !props.roomIdentifier) return null;
-  try {
-    const entries = await desktopIpc.supervisor.listAgents(props.roomIdentifier);
-    if (!isCurrentModalState(requestVersion)) return null;
-    return supervisedProviderLaneEntry(entries, props.roomIdentifier, selectedProviderId.value);
-  } catch {
-    return null;
-  }
+async function loadSupervisedConflict(
+  requestVersion = modalStateVersion,
+): Promise<{ entry: DesktopSupervisorManifestEntry | null; error: string | null }> {
+  if (!selectedProviderId.value || !props.roomIdentifier) return { entry: null, error: null };
+  const recovery = await loadSupervisedProviderLane(
+    desktopIpc.supervisor,
+    props.roomIdentifier,
+    selectedProviderId.value,
+  );
+  if (!isCurrentModalState(requestVersion)) return { entry: null, error: null };
+  return recovery;
 }
 
 async function stopSupervisedConflict(): Promise<void> {
@@ -1179,7 +1195,7 @@ async function stopSupervisedConflict(): Promise<void> {
   stoppingSupervisorEntryId.value = entry.id;
   setupMessage.value = `Stopping ${entry.displayName}...`;
   try {
-    const updated = await desktopIpc.supervisor.setDesiredState(entry.id, "stopped");
+    const updated = await stopSupervisedProviderLane(desktopIpc.supervisor, entry.id);
     if (!isCurrentModalState(requestVersion)) return;
     supervisedConflict.value = updated.desiredState === "stopped" ? null : updated;
     setupMessage.value = `${updated.displayName} is stopped. Start once to create its replacement.`;
@@ -1400,6 +1416,7 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
   supervisedConflict.value = null;
+  supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
@@ -1560,6 +1577,7 @@ function resetTransientState(): void {
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
   supervisedConflict.value = null;
+  supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;

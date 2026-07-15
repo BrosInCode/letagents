@@ -60,6 +60,11 @@ import {
   supervisedProviderLaneEntry,
   visibleDesktopAgentProviders,
 } from "../src/domain/managed-agents";
+import {
+  loadSupervisedProviderLane,
+  stopSupervisedProviderLane,
+  supervisedRecoveryDetail,
+} from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
 
 function provider(
@@ -361,6 +366,72 @@ test("supervised recovery selects the blocked provider lane even without an MCP 
     ], "room_1", "codex"),
     null,
   );
+});
+
+test("supervised recovery flow finds an orphaned lane, stops only it, then permits one retry", async () => {
+  const orphaned = supervisorEntry({ id: "orphaned" });
+  const calls: Array<{ method: string; id?: string; desiredState?: string }> = [];
+  let createAttempts = 0;
+  const client = {
+    async createAgent() {
+      createAttempts += 1;
+      calls.push({ method: "create" });
+      if (createAttempts === 1) {
+        throw new Error("the provider lane is already reserved");
+      }
+      return supervisorEntry({ id: "replacement", condition: "none", observedState: "starting" });
+    },
+    async listAgents() {
+      calls.push({ method: "list" });
+      return [orphaned];
+    },
+    async setDesiredState(id: string, desiredState: "stopped") {
+      calls.push({ method: "set", id, desiredState });
+      return { ...orphaned, id, desiredState };
+    },
+  };
+
+  await assert.rejects(client.createAgent(), /already reserved/);
+  const recovery = await loadSupervisedProviderLane(client, "room_1", "codex");
+  assert.equal(recovery.error, null);
+  assert.equal(recovery.entry?.id, "orphaned");
+  await stopSupervisedProviderLane(client, recovery.entry!.id);
+  assert.equal((await client.createAgent()).id, "replacement");
+  assert.deepEqual(calls, [
+    { method: "create" },
+    { method: "list" },
+    { method: "set", id: "orphaned", desiredState: "stopped" },
+    { method: "create" },
+  ]);
+});
+
+test("supervised recovery keeps an honest fallback and surfaces the latest durable notice", async () => {
+  const lookup = await loadSupervisedProviderLane({
+    async listAgents() {
+      throw new Error("daemon unavailable");
+    },
+    async setDesiredState() {
+      throw new Error("unreachable");
+    },
+  }, "room_1", "codex");
+  assert.equal(lookup.entry, null);
+  assert.match(lookup.error || "", /Could not load the supervisor recovery entry/);
+  assert.equal(supervisedRecoveryDetail(supervisorEntry({
+    lastError: null,
+    activity: [{
+      observedAt: "2026-07-15T12:00:00.000Z",
+      sequence: 9,
+      provider: "codex",
+      kind: "reconcile",
+      method: "restart_fresh",
+      summary: "provider restart failed before MCP registration",
+      status: "blocked",
+      payload: null,
+      payloadTruncated: false,
+      payloadRedacted: false,
+      durablePayloadRef: null,
+    }],
+  })), "provider restart failed before MCP registration");
 });
 
 test("delivery mode selector only shows for managed Codex", () => {
