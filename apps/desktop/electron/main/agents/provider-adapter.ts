@@ -112,6 +112,10 @@ export interface ProviderSpawnRequest {
   launchPolicy: unknown;
   /** Present when this spawn continues a prior session (requires capabilities.resume). */
   resumeFrom?: ProviderContinuationRef | null;
+  /** Explicit daemon bridge identity inherited by the provider's MCP child. */
+  supervisorEntryId?: string;
+  supervisorSocketPath?: string;
+  supervisorExecutionGenerationId?: string;
 }
 
 export interface ProviderHandle {

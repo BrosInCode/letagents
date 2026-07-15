@@ -134,7 +134,7 @@ export class WorkspaceProvisioner {
 
   private async resolveIdentity(repo: string, workAttemptId: string, taskId: string, remoteUrl: string, barePath: string, revision: string): Promise<WorkspaceMarker> {
     const resolvedRevision = await this.query(["--git-dir", barePath, "rev-parse", "--verify", `${revision}^{commit}`]);
-    await this.query(["--git-dir", barePath, "cat-file", "-e", `${resolvedRevision}^{commit}`]);
+    await this.run(["--git-dir", barePath, "cat-file", "-e", `${resolvedRevision}^{commit}`]);
     return { version: 1, repo, work_attempt_id: workAttemptId, task_id: taskId, remote_url: remoteUrl, resolved_revision: resolvedRevision, bare_path: barePath };
   }
 
@@ -159,7 +159,7 @@ export class WorkspaceProvisioner {
     if (normalizeRemote(await this.query(["-C", workspace, "remote", "get-url", "origin"])) !== identity.remote_url) throw new Error("Workspace remote identity does not match.");
     const head = await this.query(["-C", workspace, "rev-parse", "--verify", "HEAD^{commit}"]);
     if (head !== identity.resolved_revision) throw new Error("Workspace HEAD is not the provisioned commit.");
-    await this.query(["-C", workspace, "cat-file", "-e", `${head}^{commit}`]);
+    await this.run(["-C", workspace, "cat-file", "-e", `${head}^{commit}`]);
   }
 
   private async run(args: string[]): Promise<void> { await this.git(args); }

@@ -61,6 +61,18 @@ export interface LivenessTransition {
   runtime_inactive_for_ms: number | null;
 }
 
+export type DualAxisLiveness = "healthy" | "working_room_quiet" | "suspect";
+
+/** Liveness alone never returns terminal; replacement needs fenced terminal evidence. */
+export function classifyDualAxisLiveness(input: {
+  workplace_fresh: boolean;
+  native_fresh: boolean;
+}): DualAxisLiveness {
+  if (input.workplace_fresh) return "healthy";
+  if (input.native_fresh) return "working_room_quiet";
+  return "suspect";
+}
+
 function parseTime(value: string | null | undefined): number | null {
   const parsed = Date.parse(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : null;
@@ -144,7 +156,7 @@ export function selectLivenessTransitions(input: {
 
     // Transport silence with a recently active runtime is an agent busy
     // working outside the room, not a death — say nothing.
-    const runtimeLastActiveAt = parseTime(candidate.runtime_last_active_at);
+    const runtimeLastActiveAt = parseTime(candidate.native_last_active_at ?? candidate.runtime_last_active_at);
     if (runtimeLastActiveAt !== null && now - runtimeLastActiveAt < offlineAnnounceAfterMs) {
       continue;
     }
@@ -187,9 +199,9 @@ export function buildOfflineAnnouncementText(input: {
   // not a reflex.
   const staleNote =
     input.runtime_evidence === "stale"
-      ? ` Last recorded runtime activity was ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)} ago.`
+      ? ` The native execution-activity axis has also been quiet for ${formatOfflineDuration(input.runtime_inactive_for_ms ?? input.offline_for_ms)}, so the agent is suspect while the reconnect/probe grace runs; this is not terminal evidence.`
       : "";
-  const base = `[status] ${label}'s message channel has been unreachable for ${offlineFor} — runtime activity unknown; it may still be working outside the room.${staleNote} This notice does not authorize taking over its work. Reassign only after runtime loss is confirmed and its work lease expires or is handed off, or when a human explicitly directs the handoff.`;
+  const base = `[status] ${label}'s workplace-reachability axis has been stale for ${offlineFor}; it may still be working outside the room.${staleNote} This notice does not authorize taking over its work. Reassign only after a terminal payload or fenced supervisor verdict and lease handoff, or when a human explicitly directs the handoff.`;
   if (!input.is_board_manager) {
     return base;
   }
@@ -201,7 +213,7 @@ export function buildRecoveryAnnouncementText(input: {
   session: Pick<RoomAgentDeliverySession, "actor_label" | "display_name">;
 }): string {
   const label = getAgentPrimaryLabel(input.session.actor_label) || input.session.display_name;
-  return `[status] ${label} is back online and reachable again.`;
+  return `[status] ${label}'s workplace-reachability axis is fresh again.`;
 }
 
 export interface LivenessAnnouncementInput {

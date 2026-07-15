@@ -16,6 +16,8 @@ export interface LivenessAnnouncementCandidate {
    * working, not a death.
    */
   runtime_last_active_at: string | null;
+  /** Native harness axis only; never inferred from MCP/tool traffic. */
+  native_last_active_at?: string | null;
 }
 
 const runtimeLastActiveAt = sql<string | null>`(
@@ -23,23 +25,27 @@ const runtimeLastActiveAt = sql<string | null>`(
   FROM room_agent_liveness_observations o
   WHERE o.room_id = ${room_agent_delivery_sessions.room_id}
     AND o.agent_session_id = ${room_agent_delivery_sessions.agent_session_id}
+    AND o.source = 'native_harness'
 )`;
 
 const candidateSelection = {
   session: room_agent_delivery_sessions,
   agent_session_ended_at: room_agent_sessions.ended_at,
   runtime_last_active_at: runtimeLastActiveAt,
+  native_last_active_at: runtimeLastActiveAt,
 };
 
 function toCandidate(row: {
   session: typeof room_agent_delivery_sessions.$inferSelect;
   agent_session_ended_at: string | null;
   runtime_last_active_at: string | null;
+  native_last_active_at: string | null;
 }): LivenessAnnouncementCandidate {
   return {
     session: toRoomAgentDeliverySession(row.session as RoomAgentDeliverySessionRow),
     agent_session_ended_at: row.agent_session_ended_at ?? null,
     runtime_last_active_at: row.runtime_last_active_at ?? null,
+    native_last_active_at: row.native_last_active_at ?? null,
   };
 }
 

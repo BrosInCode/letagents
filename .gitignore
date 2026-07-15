@@ -3,6 +3,7 @@ dist/
 apps/desktop/dist-electron/
 apps/desktop/dist-renderer/
 apps/desktop/dist-daemon/
+apps/desktop/release/
 *.log
 .DS_Store
 SCR-*.png

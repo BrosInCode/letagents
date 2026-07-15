@@ -43,7 +43,12 @@ export class DaemonControlSocket {
     let request: DaemonRequest | null = null;
     try {
       request = JSON.parse(line) as DaemonRequest;
-      if (request.version !== DAEMON_PROTOCOL_VERSION) throw new Error(`Protocol version mismatch: expected ${DAEMON_PROTOCOL_VERSION}, received ${request.version}.`);
+      // Negotiation is intentionally version-agnostic: a vN+1 desktop must be
+      // able to identify and hand off a healthy vN daemon without blind-killing
+      // it or its provider children.
+      if (request.version !== DAEMON_PROTOCOL_VERSION && request.method !== "daemon.negotiate") {
+        throw new Error(`Protocol version mismatch: expected ${DAEMON_PROTOCOL_VERSION}, received ${request.version}.`);
+      }
       const result = await this.handle(request);
       this.write(socket, { version: DAEMON_PROTOCOL_VERSION, id: request.id, ok: true, result });
     } catch (error) {

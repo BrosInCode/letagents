@@ -57,6 +57,7 @@ export interface DesktopManagedLiveSessionBase {
   delivery_mode?: DesktopManagedAgentDeliveryMode;
   permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
   desktop_managed?: boolean;
+  supervisor_entry_id?: string | null;
   deadline_utc?: string | null;
   token: string;
   agent_session_id?: string | null;
@@ -577,6 +578,12 @@ export function listCodexDisplayNamesForRoom(roomId: string): string[] {
     .filter(Boolean);
 }
 
+export function supervisorEntryIdForAgentSession(agentSessionId: string): string | null {
+  return listStoredCodexLiveSessions()
+    .find((session) => session.agent_session_id === agentSessionId)
+    ?.supervisor_entry_id ?? null;
+}
+
 export function isCodexAgentSession(session: StoredAgentSessionState): boolean {
   const runtime = String(session.runtime ?? "").trim().toLowerCase();
   const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
@@ -903,7 +910,7 @@ export function toPublicManagedAgentSession(
     deliveryMode: managedAgentDeliveryMode(session),
     permissionProfileId: permissionProfile.id,
     permissionProfile,
-    canStop: Boolean(activeWorkerSessionId) &&
+    canStop: !session.supervisor_entry_id && Boolean(activeWorkerSessionId) &&
       (
         session.status === "starting" ||
         session.status === "running" ||
@@ -933,6 +940,7 @@ export function toPublicManagedAgentSession(
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
     failure: session.failure ?? null,
+    supervisorEntryId: session.supervisor_entry_id ?? null,
   };
 }
 

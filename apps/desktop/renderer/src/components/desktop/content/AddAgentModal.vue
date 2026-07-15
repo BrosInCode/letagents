@@ -257,7 +257,43 @@
             </section>
 
             <section
-              v-if="showDeliverySelector"
+              v-if="selectedProvider?.capabilities.includes('desktop_managed_runtime')"
+              class="desktop-add-agent-delivery"
+              aria-label="Agent lifecycle"
+              data-testid="desktop-add-agent-lifecycle"
+            >
+              <span>Lifecycle</span>
+              <div class="desktop-add-agent-segmented">
+                <button
+                  type="button"
+                  :data-selected="launchMode === 'legacy'"
+                  data-testid="desktop-add-agent-lifecycle-legacy"
+                  @click="launchMode = 'legacy'"
+                >
+                  This app
+                </button>
+                <button
+                  type="button"
+                  :data-selected="launchMode === 'supervised'"
+                  data-testid="desktop-add-agent-lifecycle-supervised"
+                  @click="launchMode = 'supervised'"
+                >
+                  Supervised
+                </button>
+              </div>
+              <p>{{ lifecycleDescription }}</p>
+              <label v-if="launchMode === 'supervised'" class="desktop-add-agent-model-custom-input">
+                <small>Charter</small>
+                <textarea
+                  v-model="supervisedCharter"
+                  rows="3"
+                  data-testid="desktop-add-agent-supervised-charter"
+                />
+              </label>
+            </section>
+
+            <section
+              v-if="showDeliverySelector && launchMode === 'legacy'"
               class="desktop-add-agent-delivery"
               aria-label="Agent delivery mode"
             >
@@ -580,6 +616,8 @@ const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
 const loadError = ref<string | null>(null);
 const setupMessage = ref<string | null>(null);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
+const launchMode = ref<"legacy" | "supervised">("legacy");
+const supervisedCharter = ref("Work from the room board, coordinate in the room, and keep polling until stopped.");
 const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
 const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
 const openModelBaseUrl = ref("");
@@ -635,6 +673,7 @@ const canStartManagedAgent = computed(() =>
       !selectedPermissionProfiles.value.length ||
       selectedPermissionProfile.value?.status === "available"
     )
+    && (launchMode.value === "legacy" || Boolean(supervisedCharter.value.trim()))
   )
 );
 const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
@@ -739,6 +778,15 @@ const deliveryModeDescription = computed(() =>
     ? "This desktop app sends room updates to the local agent."
     : "The agent app joins the room through its LetAgents connection."
 );
+
+const lifecycleDescription = computed(() => {
+  if (launchMode.value === "legacy") return "The current app-owned path stays unchanged and stops with its normal lifecycle.";
+  if (selectedProviderId.value !== "codex") return "This provider is not yet proven for durable supervision; starting it will show the exact missing capability.";
+  if (/^local[_-]/i.test(props.roomIdentifier) || /^git-room:local:/i.test(props.roomIdentifier)) {
+    return "Supervision needs a cloud room for durable workplace reachability. Local-only rooms keep the existing path.";
+  }
+  return "A detached daemon owns desired state and recovery. Closing this app does not stop the Codex worker.";
+});
 
 const showCursorMcpPolicySelector = computed(() =>
   shouldShowCursorMcpPolicySelector(selectedProvider.value)
@@ -854,6 +902,7 @@ const effortSelectorDescription = computed(() => {
 
 const managedAgentStartButtonLabel = computed(() => {
   if (startingAgent.value) return "Starting...";
+  if (launchMode.value === "supervised") return "Start supervised agent";
   if (!hasDesktopManagedRuntime(selectedProvider.value)) return "Start agent";
   const providerName = selectedProvider.value?.name?.trim() || "agent";
   const profileLabel = selectedPermissionProfile.value?.label?.trim();
@@ -1027,6 +1076,21 @@ async function startManagedAgent(): Promise<void> {
   setupMessage.value = null;
   startManagedSessionRefreshTimer(1_000);
   try {
+    if (launchMode.value === "supervised") {
+      const entry = await desktopIpc.supervisor.createAgent({
+        providerId: selectedProviderId.value,
+        roomIdentifier: props.roomIdentifier,
+        displayName: `${selectedProvider.value?.name ?? "Agent"} supervised agent`,
+        repoRootPath: props.repoRootPath,
+        charter: supervisedCharter.value.trim(),
+        permissionProfileId: selectedPermissionProfile.value?.id ?? null,
+        model: selectedModel.value,
+      });
+      if (!isCurrentModalState(requestVersion)) return;
+      setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
+      await loadManagedSessions();
+      return;
+    }
     const result = await desktopIpc.workers.startManagedAgent({
       providerId: selectedProviderId.value,
       roomIdentifier: props.roomIdentifier,

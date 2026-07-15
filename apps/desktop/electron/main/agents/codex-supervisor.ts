@@ -20,6 +20,8 @@ import { buildRepoStatus } from "../../repo-status.js";
 import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { emitToMainWindow } from "../window.js";
+import { publishSupervisorActivity } from "../supervisor-daemon.js";
+import { launchLegacyWithOwnership } from "../supervisor-ownership.js";
 import {
   cloudRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
@@ -170,7 +172,9 @@ const CODEX_RUNTIME_REASONING_THROTTLE_MS = 750;
 const CODEX_RUNTIME_REASONING_REPEAT_MS = 30_000;
 
 const spawnedServerPids = new Set<number>();
+const daemonOwnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
+const rehydratedDaemonSessionIds = new Set<string>();
 const codexRuntimeReasoningLastPost = new Map<string, { signature: string; postedAt: number }>();
 const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
 type ActiveCodexTurnProgress = {
@@ -367,6 +371,20 @@ function queueCodexRuntimeReasoningSummary(
   summary: CodexRuntimeReasoningSummary,
 ): void {
   updateActiveWorkSummary(session.session_id, summary.summary);
+  if (session.supervisor_entry_id) {
+    void publishSupervisorActivity({
+      entryId: session.supervisor_entry_id,
+      provider: "codex",
+      kind: "provider_event",
+      method: "codex.runtime.activity",
+      summary: summary.summary,
+      status: summary.status,
+      payload: { checking: summary.checking, nextAction: summary.next_action },
+    }).catch(() => {
+      // Daemon activity persistence is retried by later native events. Never
+      // terminate the provider turn because the desktop UI bridge is absent.
+    });
+  }
   const previous = codexRuntimeReasoningPostQueues.get(session.session_id) ?? Promise.resolve();
   const next = previous
     .catch(() => undefined)
@@ -586,6 +604,7 @@ function markSpawnedCodexAppServersOffline(reason: string): void {
     if (!session.launched_server || !session.server_pid || !pids.has(session.server_pid)) {
       continue;
     }
+    if (session.supervisor_entry_id || daemonOwnedServerPids.has(session.server_pid)) continue;
     if (!isTerminalCodexSessionStatus(session.status)) {
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
@@ -612,9 +631,12 @@ function registerProcessCleanup(): void {
     markSpawnedCodexAppServersOffline("LetAgents Desktop stopped the local Codex app-server.");
 
     for (const pid of spawnedServerPids) {
+      if (daemonOwnedServerPids.has(pid)) continue;
       terminateSpawnedProcess(pid);
     }
     spawnedServerPids.clear();
+    daemonOwnedServerPids.clear();
+    rehydratedDaemonSessionIds.clear();
     codexRuntimeReasoningLastPost.clear();
     codexRuntimeReasoningPostQueues.clear();
     clearAllDesktopManagedAgentReplyChangeState();
@@ -631,13 +653,15 @@ function registerProcessCleanup(): void {
   });
 }
 
-function registerLaunchedAppServer(pid: number): void {
+function registerLaunchedAppServer(pid: number, daemonOwned = false): void {
   spawnedServerPids.add(pid);
+  if (daemonOwned) daemonOwnedServerPids.add(pid);
   registerProcessCleanup();
 }
 
 function forgetLaunchedAppServer(pid: number): void {
   spawnedServerPids.delete(pid);
+  daemonOwnedServerPids.delete(pid);
 }
 
 function isProcessAlive(pid: number | null | undefined): boolean {
@@ -731,7 +755,7 @@ function scheduleOwnedSessionMonitor(session: DesktopCodexLiveSessionState): voi
       })
       .catch(() => {
         const latest = getStoredCodexLiveSession(session.session_id);
-        if (latest?.launched_server) {
+        if (latest?.launched_server && !latest.supervisor_entry_id) {
           killOwnedAppServer(latest);
         }
         clearSessionMonitor(session.session_id);
@@ -948,8 +972,22 @@ function listDesktopManagedCodexAgentSessions(
   roomIdentifier?: string | null,
 ): DesktopManagedAgentSession[] {
   return listDesktopManagedCodexLiveSessionsForProvider("codex", roomIdentifier)
+    .map(rehydrateDaemonOwnedCodexSession)
     .map((session) => bindCodexLiveSessionToWorker(session))
     .map(toPublicManagedAgentSession);
+}
+
+function rehydrateDaemonOwnedCodexSession(session: DesktopCodexLiveSessionState): DesktopCodexLiveSessionState {
+  if (!session.supervisor_entry_id || rehydratedDaemonSessionIds.has(session.session_id)) return session;
+  rehydratedDaemonSessionIds.add(session.session_id);
+  if (session.launched_server && session.server_pid && isProcessAlive(session.server_pid)) {
+    registerLaunchedAppServer(session.server_pid, true);
+  }
+  const worker = getStoredAgentSession(session.agent_session_id);
+  if (worker && !worker.ended_at) startDesktopManagedWorkerDeliveryHeartbeat(worker, session.room_identifier);
+  const idleDesktopEventSession = managedAgentDeliveryMode(session) === "desktop_events" && session.status === "completed";
+  if (!isTerminalCodexSessionStatus(session.status) || idleDesktopEventSession) scheduleOwnedSessionMonitor(session);
+  return session;
 }
 
 function listDesktopManagedOpenModelAgentSessions(
@@ -1115,7 +1153,7 @@ async function startDesktopManagedCodexEngineAgent(
       });
       serverPid = launch.pid;
       if (serverPid) {
-        registerLaunchedAppServer(serverPid);
+        registerLaunchedAppServer(serverPid, Boolean(input.supervisorEntryId));
       }
       const ready = await waitForLaunchedCodexAppServer(serverUrl, launch);
       if (!ready) {
@@ -1178,6 +1216,7 @@ async function startDesktopManagedCodexEngineAgent(
       delivery_mode: deliveryMode,
       permission_profile_id: permissionProfile.id,
       desktop_managed: true,
+      supervisor_entry_id: input.supervisorEntryId ?? null,
       deadline_utc: deadline.utc,
       token,
       thread_id: threadId,
@@ -1231,10 +1270,24 @@ async function startDesktopManagedCodexEngineAgent(
   }
 }
 
-export function startDesktopManagedAgent(
+export async function startDesktopManagedAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
-  return desktopManagedAgentRuntimes.start(input);
+  if (input.supervisorEntryId || (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1")) {
+    return desktopManagedAgentRuntimes.start(input);
+  }
+  const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
+  const reservationId = `legacy_${randomUUID()}`;
+  return launchLegacyWithOwnership({
+    reserve: () => supervisorDaemonClient.reserveLegacyLane(input.roomIdentifier, input.providerId, reservationId).then(() => undefined),
+    start: () => desktopManagedAgentRuntimes.start(input),
+    activate: (started) => supervisorDaemonClient.activateLegacyLane(reservationId, started.session.id).then(() => undefined),
+    stop: async (started) => {
+      const stopped = await desktopManagedAgentRuntimes.stop({ sessionId: started.session.id, stopMode: "worker" });
+      if (!stopped) throw new Error("Spawned legacy agent could not be stopped after ownership activation failed.");
+    },
+    release: () => supervisorDaemonClient.releaseLegacyLane({ reservationId }).then(() => undefined),
+  });
 }
 
 async function inspectDesktopManagedCodexAgentSession(
@@ -1262,7 +1315,7 @@ async function inspectDesktopManagedCodexAgentSession(
         last_error: offlineAppServerError(current),
         updated_at: new Date().toISOString(),
       })) ?? session;
-    if (ownedServerExited || updated.launched_server) {
+    if (ownedServerExited || (updated.launched_server && !updated.supervisor_entry_id)) {
       killOwnedAppServer(updated);
       clearSessionMonitor(updated.session_id);
     }
@@ -2206,10 +2259,34 @@ async function stopDesktopManagedCodexAgent(
   return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
 }
 
-export function stopDesktopManagedAgent(
+export async function stopDesktopManagedAgent(
   input: DesktopManagedAgentStopInput = {},
 ): Promise<DesktopManagedAgentSession | null> {
-  return desktopManagedAgentRuntimes.stop(input);
+  const owned = input.sessionId
+    ? listDesktopManagedAgentSessions().find((session) => session.id === input.sessionId)
+    : null;
+  if (owned?.supervisorEntryId) {
+    throw new Error("This agent is daemon-supervised. Change its desired state instead of using legacy stop controls.");
+  }
+  const stopped = await desktopManagedAgentRuntimes.stop(input);
+  if (stopped && (input.stopMode === "worker" || input.shutdownServer === true)
+    && (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1")) {
+    const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
+    await supervisorDaemonClient.releaseLegacyLane({
+      sessionId: stopped.id,
+      roomIdentifier: stopped.roomIdentifier,
+      provider: stopped.providerId,
+    });
+  }
+  return stopped;
+}
+
+export async function stopDaemonOwnedManagedAgent(sessionId: string): Promise<DesktopManagedAgentSession | null> {
+  const owned = listDesktopManagedAgentSessions().find((session) => session.id === sessionId);
+  if (!owned?.supervisorEntryId) throw new Error("Daemon stop bridge requires a supervised session.");
+  const stopped = await desktopManagedAgentRuntimes.stop({ sessionId, stopMode: "worker" });
+  rehydratedDaemonSessionIds.delete(sessionId);
+  return stopped;
 }
 
 async function retryDesktopManagedCodexAgent(
@@ -2222,6 +2299,10 @@ async function retryDesktopManagedCodexAgent(
 export function retryDesktopManagedAgent(
   input: { sessionId: string },
 ): Promise<DesktopManagedAgentSession | null> {
+  const owned = listDesktopManagedAgentSessions().find((session) => session.id === input.sessionId);
+  if (owned?.supervisorEntryId) {
+    throw new Error("This agent is daemon-supervised. Recovery is owned by the supervisor reconciler.");
+  }
   return desktopManagedAgentRuntimes.retry(input);
 }
 

@@ -8,6 +8,7 @@ import {
 } from "../local-state.js";
 import { encodeRoomIdPath } from "../room-id.js";
 import { apiCall } from "../server/runtime/api.js";
+import { agentSessionCredentials } from "../server/runtime/agent-sessions.js";
 import { RpcClient, type RpcNotification } from "./rpc-client.js";
 import {
   isCodexAgentSessionMarker,
@@ -20,6 +21,7 @@ const CODEX_RUNTIME_STREAM_REPEAT_MS = 30_000;
 const CODEX_RUNTIME_STREAM_SNAPSHOT_INTERVAL_MS = 2_000;
 const CODEX_RUNTIME_STREAM_BIND_RETRY_MS = 1_000;
 const CODEX_RUNTIME_STREAM_BIND_RETRY_ATTEMPTS = 30;
+const CODEX_NATIVE_HEARTBEAT_INTERVAL_MS = 15_000;
 
 interface RuntimeBridgeInspection {
   session: CodexLiveSessionState;
@@ -47,6 +49,8 @@ export function createCodexRuntimeBridgeController(input: {
   const snapshotTimers = new Map<string, ReturnType<typeof setInterval>>();
   const bindTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const lastPost = new Map<string, { signature: string; postedAt: number }>();
+  const nativeSequence = new Map<string, number>();
+  const nativeLastPostAt = new Map<string, number>();
 
   async function codexBridgeApiCall<T>(path: string, options?: RequestInit): Promise<T> {
     return apiCall<T>(path, options);
@@ -171,9 +175,38 @@ export function createCodexRuntimeBridgeController(input: {
     session: CodexLiveSessionState,
     notification: RpcNotification
   ): Promise<void> {
-    await postReasoningSummary(
-      session,
-      summarizeCodexRuntimeNotificationForTest(notification)
+    const summary = summarizeCodexRuntimeNotificationForTest(notification);
+    await Promise.all([
+      postReasoningSummary(session, summary),
+      postNativeActivity(session, notification.method, summary.status),
+    ]);
+  }
+
+  async function postNativeActivity(
+    session: CodexLiveSessionState,
+    method: string,
+    status: CodexRuntimeReasoningSummary["status"],
+    force = false,
+  ): Promise<void> {
+    const workerSession = codexWorkerSessionForLiveSession(session);
+    if (!workerSession) return;
+    const now = Date.now();
+    if (!force && now - (nativeLastPostAt.get(session.session_id) ?? 0) < CODEX_RUNTIME_STREAM_THROTTLE_MS) return;
+    nativeLastPostAt.set(session.session_id, now);
+    const sequence = (nativeSequence.get(session.session_id) ?? 0) + 1;
+    nativeSequence.set(session.session_id, sequence);
+    await codexBridgeApiCall(
+      `/rooms/${encodeRoomIdPath(session.room_id)}/agent-sessions/${encodeURIComponent(workerSession.session_id)}/native-activity`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ...agentSessionCredentials(workerSession),
+          observed_at: new Date(now).toISOString(),
+          sequence,
+          method,
+          status,
+        }),
+      },
     );
   }
 
@@ -191,6 +224,11 @@ export function createCodexRuntimeBridgeController(input: {
           input.isTerminalStatus(status.session.status)
         ) {
           stop(session.session_id);
+          return;
+        }
+        const now = Date.now();
+        if (now - (nativeLastPostAt.get(session.session_id) ?? 0) >= CODEX_NATIVE_HEARTBEAT_INTERVAL_MS) {
+          void postNativeActivity(status.session, "native_harness.heartbeat", status.session.status === "completed" ? "idle" : "working", true).catch(() => undefined);
         }
       }).catch(() => {
         stop(session.session_id);
@@ -298,6 +336,8 @@ export function createCodexRuntimeBridgeController(input: {
       snapshotTimers.delete(sessionId);
     }
     lastPost.delete(sessionId);
+    nativeSequence.delete(sessionId);
+    nativeLastPostAt.delete(sessionId);
   }
 
   function cleanup(): void {
@@ -317,6 +357,8 @@ export function createCodexRuntimeBridgeController(input: {
     bindTimers.clear();
 
     lastPost.clear();
+    nativeSequence.clear();
+    nativeLastPostAt.clear();
   }
 
   return {

@@ -6,6 +6,7 @@ import {
   buildOfflineAnnouncementText,
   buildRecoveryAnnouncementText,
   CHANNEL_STALE_AFTER_MS,
+  classifyDualAxisLiveness,
   createLivenessSweeper,
   OFFLINE_ANNOUNCE_AFTER_MS,
   OFFLINE_ANNOUNCE_MAX_AGE_MS,
@@ -15,6 +16,12 @@ import {
 } from "../rooms/liveness-sweep.js";
 
 const NOW = Date.parse("2026-07-13T21:00:00.000Z");
+
+test("dual-axis liveness keeps room-quiet native work non-terminal", () => {
+  assert.equal(classifyDualAxisLiveness({ workplace_fresh: true, native_fresh: true }), "healthy");
+  assert.equal(classifyDualAxisLiveness({ workplace_fresh: false, native_fresh: true }), "working_room_quiet");
+  assert.equal(classifyDualAxisLiveness({ workplace_fresh: false, native_fresh: false }), "suspect");
+});
 
 function isoMinutesAgo(minutes: number): string {
   return new Date(NOW - minutes * 60_000).toISOString();
@@ -255,10 +262,10 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
     runtime_evidence: "none",
     runtime_inactive_for_ms: null,
   });
-  assert.ok(unknown.includes("message channel has been unreachable for 6m"));
-  assert.ok(unknown.includes("runtime activity unknown"));
+  assert.ok(unknown.includes("workplace-reachability axis has been stale for 6m"));
+  assert.ok(unknown.includes("may still be working outside the room"));
   assert.ok(unknown.includes("does not authorize taking over"));
-  assert.ok(unknown.includes("runtime loss is confirmed"));
+  assert.ok(unknown.includes("terminal payload or fenced supervisor verdict"));
   assert.ok(!unknown.includes("appears to be offline"));
   assert.ok(!unknown.includes("Board Manager"));
 
@@ -272,9 +279,9 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
     runtime_inactive_for_ms: 7 * 60_000,
   });
   assert.ok(!stale.includes("appears to be offline"));
-  assert.ok(stale.includes("runtime activity unknown"));
-  assert.ok(stale.includes("Last recorded runtime activity was 7m ago"));
-  assert.ok(stale.includes("work lease expires or is handed off"));
+  assert.ok(stale.includes("native execution-activity axis has also been quiet for 7m"));
+  assert.ok(stale.includes("suspect while the reconnect/probe grace runs"));
+  assert.ok(stale.includes("lease handoff"));
 
   const manager = buildOfflineAnnouncementText({
     session,
@@ -287,7 +294,7 @@ test("announcement text matches the runtime evidence and stays lease-aware", () 
 
   assert.equal(
     buildRecoveryAnnouncementText({ session }),
-    "[status] FieldSignal is back online and reachable again."
+    "[status] FieldSignal's workplace-reachability axis is fresh again."
   );
 });
 
@@ -417,7 +424,7 @@ test("sweepOnce announces offline workers with an epoch-stable client message id
   assert.equal(summary.announced_recovered, 0);
   assert.equal(announcedOffline.length, 1);
   assert.equal(announcedOffline[0]?.roomId, "focus_34");
-  assert.ok(announcedOffline[0]!.text.includes("FieldSignal's message channel has been unreachable"));
+  assert.ok(announcedOffline[0]!.text.includes("FieldSignal's workplace-reachability axis has been stale"));
   assert.equal(
     announcedOffline[0]?.clientMessageId,
     `agent_liveness:offline:${session.delivery_key}:${session.last_disconnected_at}`
@@ -508,7 +515,7 @@ test("sweepOnce announces recoveries with a marker-stable client message id", as
   const summary = await createLivenessSweeper(deps).sweepOnce();
 
   assert.equal(summary.announced_recovered, 1);
-  assert.ok(announcedRecovered[0]!.text.includes("back online"));
+  assert.ok(announcedRecovered[0]!.text.includes("workplace-reachability axis is fresh again"));
   assert.equal(
     announcedRecovered[0]?.clientMessageId,
     `agent_liveness:recovered:${recovered.delivery_key}:${recovered.offline_announced_at}`

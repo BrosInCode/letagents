@@ -28,13 +28,20 @@ export class ManifestStore {
     }
   }
 
-  async write(expectedGeneration: number, entries: DaemonManifest["entries"]): Promise<DaemonManifest> {
+  async write(
+    expectedGeneration: number,
+    entries: DaemonManifest["entries"],
+    legacyLaneOwners?: DaemonManifest["legacy_lane_owners"],
+  ): Promise<DaemonManifest> {
     return this.serialize(async () => {
       const current = await this.load();
       if (current.generation !== expectedGeneration) {
         throw new ManifestConflictError(`Manifest generation ${current.generation} does not match expected ${expectedGeneration}.`);
       }
-      const manifest: DaemonManifest = { generation: expectedGeneration + 1, entries };
+      const owners = legacyLaneOwners ?? current.legacy_lane_owners;
+      const manifest: DaemonManifest = owners?.length
+        ? { generation: expectedGeneration + 1, entries, legacy_lane_owners: owners }
+        : { generation: expectedGeneration + 1, entries };
       const serialized = `${JSON.stringify({ manifest, checksum: checksum(manifest) })}\n`;
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
       const temporary = `${this.path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;

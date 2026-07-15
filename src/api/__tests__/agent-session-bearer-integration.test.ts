@@ -29,6 +29,10 @@ const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const accounts = schemaModule?.accounts;
 const room_agent_session_bearers = schemaModule?.room_agent_session_bearers;
+const room_agent_sessions = schemaModule?.room_agent_sessions;
+const room_agent_liveness_observations = schemaModule?.room_agent_liveness_observations;
+const room_agent_presence = schemaModule?.room_agent_presence;
+const task_leases = schemaModule?.task_leases;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const endRoomAgentSession = dbModule?.endRoomAgentSession;
@@ -103,6 +107,7 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["POST", "/rooms/room_1/tasks/task_1/lease-action", "coordination.self_write"],
     ["PATCH", "/rooms/room_1/reasoning-sessions/session_1", "coordination.self_write"],
     ["POST", "/rooms/room_1/agent-sessions/agent_session_1/disconnect", "coordination.self_write"],
+    ["POST", "/rooms/room_1/agent-sessions/agent_session_1/native-activity", "coordination.self_write"],
   ];
   for (const [method, route, capability] of allowed) assert.equal(requiredAgentSessionRouteCapability(method, route), capability);
   for (const [method, route] of [
@@ -245,6 +250,160 @@ test("bearer artifact publishing requires exactly one caller-held work lease", {
   assert.equal((await invoke({ ...base, task_id: first.id })).statusCode, 403);
   await createTaskLease!({ room_id: room.id, task_id: first.id, kind: "work", agent_key: auth.agentSession!.agent_key, agent_session_id: auth.agentSession!.agent_session_id, actor_label: auth.agentSession!.actor_label, created_by: auth.agentSession!.actor_label });
   assert.equal((await invoke({ ...base, task_id: first.id })).statusCode, 200);
+});
+
+test("native harness session-token self-auth survives flag-off/expired bearers and CAS-heartbeats the exact worker lease", { skip: requiresDatabase }, async () => {
+  const { room, session } = await seed();
+  const task = await createTask!(room.id, "native activity", session.actor_label);
+  const reviewTask = await createTask!(room.id, "native activity review", session.actor_label);
+  const lease = await createTaskLease!({
+    room_id: room.id,
+    task_id: task.id,
+    kind: "work",
+    agent_key: session.agent_key,
+    agent_session_id: session.session_id,
+    actor_label: session.actor_label,
+    created_by: session.actor_label,
+  });
+  const reviewLease = await createTaskLease!({
+    room_id: room.id,
+    task_id: reviewTask.id,
+    kind: "review",
+    agent_key: session.agent_key,
+    agent_session_id: session.session_id,
+    actor_label: session.actor_label,
+    created_by: session.actor_label,
+  });
+  const handlers = new Map<string, (...args: any[]) => Promise<void>>();
+  registerRoomPresenceRoutes({
+    get() {},
+    post(path: RegExp, handler: any) { handlers.set(path.source, handler); },
+  } as never, {
+    resolveCanonicalRoomRequestId: async () => room.id,
+    resolveRoomOrReply: async () => room,
+    requireParticipant: async () => { throw new Error("native worker bearer route must not require an owner participant session"); },
+    requireAdmin: async () => true,
+    rememberAgentRoomParticipant: async () => {},
+    maybeEmitStaleWorkPrompt: async () => {},
+    emitProjectMessage: async () => { throw new Error("native activity must not emit room chat"); },
+  } as never);
+  const handler = [...handlers.entries()].find(([path]) => path.includes("native-activity"))?.[1];
+  assert.ok(handler);
+  const invoke = async (targetSessionId: string, body: Record<string, unknown>) => {
+    const res = responseRecorder();
+    await handler!({
+      params: { 0: room.id, 1: targetSessionId },
+      body: { agent_session_id: session.session_id, agent_session_token: session.session_token, ...body },
+      authKind: null,
+      sessionAccount: null,
+    }, res);
+    return res;
+  };
+  const readLastSeenAt = async () => {
+    const [row] = await db!.select({ last_seen_at: room_agent_sessions!.last_seen_at }).from(room_agent_sessions!)
+      .where(eq(room_agent_sessions!.session_id, session.session_id));
+    return row?.last_seen_at ? new Date(row.last_seen_at).getTime() : null;
+  };
+  const originalLastSeenAt = await readLastSeenAt();
+  process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "false";
+  try {
+    const flagOff = await invoke(session.session_id, { observed_at: new Date(Date.now() - 90_000).toISOString(), sequence: 1, method: "native_harness.bound", status: "working" });
+    assert.equal(flagOff.statusCode, 200, "optional worker-bearer feature cannot gate native activity");
+    assert.equal(await readLastSeenAt(), originalLastSeenAt, "accepted native activity cannot refresh generic session/workplace liveness");
+  } finally {
+    process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
+  }
+  await db!.update(room_agent_session_bearers!).set({ expires_at: new Date(Date.now() - 1_000).toISOString() })
+    .where(eq(room_agent_session_bearers!.session_id, session.session_id));
+  const [reviewBefore] = await db!.select().from(task_leases!).where(eq(task_leases!.id, reviewLease.id));
+  const freshAt = new Date(Date.now() - 60_000).toISOString();
+  const fresh = await invoke(session.session_id, {
+    agent_session_id: session.session_id,
+    agent_session_token: session.session_token,
+    observed_at: freshAt,
+    sequence: 2,
+    method: "turn/started",
+    status: "working",
+  });
+  assert.equal(fresh.statusCode, 200);
+  assert.deepEqual((fresh.body as { lease_heartbeats: unknown[] }).lease_heartbeats, [{ id: lease.id, epoch: lease.epoch }]);
+  assert.equal((fresh.body as { presence: { status: string; status_text: string } }).presence.status, "working");
+  assert.equal((fresh.body as { presence: { status: string; status_text: string } }).presence.status_text, "Working — room channel quiet");
+  assert.equal(await readLastSeenAt(), originalLastSeenAt, "post-TTL accepted native activity leaves session last_seen_at unchanged");
+  const [workAfterFresh] = await db!.select().from(task_leases!).where(eq(task_leases!.id, lease.id));
+
+  const delayedAt = new Date(Date.parse(freshAt) - 60_000).toISOString();
+  const delayed = await invoke(session.session_id, { observed_at: delayedAt, sequence: 1, method: "turn/started", status: "working" });
+  assert.equal(delayed.statusCode, 200);
+  assert.deepEqual((delayed.body as { lease_heartbeats: unknown[] }).lease_heartbeats, []);
+  assert.equal(await readLastSeenAt(), originalLastSeenAt, "out-of-order native activity cannot refresh generic session/workplace liveness");
+
+  const futureAt = new Date(Date.now() + 60_000).toISOString();
+  assert.equal((await invoke(session.session_id, { observed_at: futureAt, sequence: 3, method: "turn/started" })).statusCode, 400);
+  assert.equal(await readLastSeenAt(), originalLastSeenAt, "malformed/future native activity cannot refresh generic session/workplace liveness");
+  assert.equal((await invoke(session.session_id, {
+    agent_session_token: "invalid-native-session-token",
+    observed_at: new Date().toISOString(),
+    sequence: 3,
+    method: "turn/started",
+  })).statusCode, 401);
+  assert.equal(await readLastSeenAt(), originalLastSeenAt, "invalid session credentials cannot refresh generic session/workplace liveness");
+
+  const [observation] = await db!.select().from(room_agent_liveness_observations!).where(eq(room_agent_liveness_observations!.agent_session_id, session.session_id));
+  const [heldLease] = await db!.select().from(task_leases!).where(eq(task_leases!.id, lease.id));
+  const [heldReview] = await db!.select().from(task_leases!).where(eq(task_leases!.id, reviewLease.id));
+  const [presence] = await db!.select().from(room_agent_presence!).where(eq(room_agent_presence!.agent_session_id, session.session_id));
+  assert.equal(observation?.source, "native_harness");
+  assert.equal(new Date(observation!.last_observed_at).getTime(), new Date(freshAt).getTime());
+  assert.equal(heldLease?.last_heartbeat_at, workAfterFresh?.last_heartbeat_at, "delayed/future observations cannot extend lease freshness");
+  assert.ok(Date.parse(heldLease!.last_heartbeat_at!) > Date.parse(freshAt), "work lease freshness uses server-now");
+  assert.equal(heldReview?.last_heartbeat_at, reviewBefore?.last_heartbeat_at, "review lease is not native-heartbeated");
+  assert.equal(presence?.status, "working");
+  assert.equal(presence?.status_text, "Working — room channel quiet");
+
+  const successor = await createRoomAgentSession!({
+    room_id: room.id,
+    session_kind: "worker",
+    runtime: "codex",
+    actor_label: "Successor | Worker Owner's agent | Agent",
+    agent_key: "WorkerOwner/successor",
+    agent_instance_id: "instance_successor",
+    display_name: "Successor",
+    owner_account_id: "acct_bearer_test",
+    owner_label: "Worker Owner",
+    ide_label: "Agent",
+  });
+  const successorHeartbeat = new Date(Date.now() - 30_000).toISOString();
+  await db!.update(task_leases!).set({
+    agent_session_id: successor.session_id,
+    agent_key: successor.agent_key,
+    epoch: lease.epoch + 1,
+    last_heartbeat_at: successorHeartbeat,
+  }).where(eq(task_leases!.id, lease.id));
+  await db!.update(room_agent_presence!).set({
+    agent_session_id: successor.session_id,
+    agent_key: successor.agent_key,
+    status: "idle",
+    status_text: "Successor owns presence",
+  }).where(eq(room_agent_presence!.actor_label, session.actor_label));
+  const successorFenceProbe = await invoke(session.session_id, { observed_at: new Date().toISOString(), sequence: 4, method: "turn/completed" });
+  assert.equal(successorFenceProbe.statusCode, 200);
+  assert.equal((successorFenceProbe.body as { accepted: boolean }).accepted, false);
+  assert.deepEqual((successorFenceProbe.body as { lease_heartbeats: unknown[] }).lease_heartbeats, []);
+  const [successorLease] = await db!.select().from(task_leases!).where(eq(task_leases!.id, lease.id));
+  const [successorPresence] = await db!.select().from(room_agent_presence!).where(eq(room_agent_presence!.actor_label, session.actor_label));
+  const [staleObservation] = await db!.select().from(room_agent_liveness_observations!).where(eq(room_agent_liveness_observations!.agent_session_id, session.session_id));
+  assert.equal(successorLease?.agent_session_id, successor.session_id);
+  assert.equal(successorLease?.epoch, lease.epoch + 1);
+  assert.equal(new Date(successorLease!.last_heartbeat_at!).getTime(), new Date(successorHeartbeat).getTime());
+  assert.equal(successorPresence?.agent_session_id, successor.session_id, "stale native activity cannot reclaim rendered presence");
+  assert.equal(successorPresence?.status_text, "Successor owns presence");
+  assert.equal(new Date(staleObservation!.last_observed_at).getTime(), new Date(freshAt).getTime(), "stale-owner activity transaction rolls native evidence back too");
+  assert.equal(await readLastSeenAt(), originalLastSeenAt, "successor-rejected native activity cannot refresh generic session/workplace liveness");
+  assert.equal((await invoke("another_session", { observed_at: freshAt, sequence: 3, method: "turn/completed" })).statusCode, 403);
+  assert.equal(await readLastSeenAt(), originalLastSeenAt, "cross-session native activity cannot refresh generic session/workplace liveness");
+  await endRoomAgentSession!({ session_id: session.session_id });
+  assert.equal((await invoke(session.session_id, { observed_at: new Date().toISOString(), sequence: 5, method: "turn/started" })).statusCode, 401, "ended session tokens cannot publish native activity");
 });
 
 test("bearer cannot hand off or release another worker's lease", { skip: requiresDatabase }, async () => {

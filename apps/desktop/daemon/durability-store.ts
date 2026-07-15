@@ -110,8 +110,14 @@ export class WorkDurabilityStore {
   // daemon recover after a crash without treating a live predecessor as stale.
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private readonly supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks) {
     this.workspaceRoot = resolve(workspaceRoot);
+  }
+
+  /** Bind the store to the P1a fence after the singleton generation is acquired. */
+  bindSupervisorFence(identity: SupervisorFenceIdentity): void {
+    if (this.executionFences.size > 0) throw new ImmutableExecutionError("Cannot replace the supervisor fence while executions are live.");
+    this.supervisorFence = identity;
   }
 
   static mintWorkAttemptId(): string { return randomUUID(); }
@@ -184,6 +190,20 @@ export class WorkDurabilityStore {
       attempt.execution_generations.push(execution);
       return execution;
     }); } catch (error) { await this.releaseExecutionFence(workAttemptId); throw error; }
+  }
+
+  /**
+   * Re-establish the current supervisor generation's shared workspace fence
+   * when a replacement daemon attaches to an already-live provider. The
+   * execution generation remains the same; only filesystem authority moves
+   * to the replacement supervisor process.
+   */
+  async recoverExecutionFence(workAttemptId: string): Promise<void> {
+    const attempt = await this.getAttempt(workAttemptId);
+    if (!attempt.execution_generations.some((generation) => generation.terminal === null)) {
+      throw new ImmutableExecutionError("Only a live execution generation can recover its workspace fence.");
+    }
+    await this.ensureExecutionFence(attempt);
   }
 
   async recordTerminal(workAttemptId: string, executionGenerationId: string, terminal: ExecutionTerminalPayload, maxStdioTailBytes = 64 * 1024): Promise<ExecutionGeneration> {
