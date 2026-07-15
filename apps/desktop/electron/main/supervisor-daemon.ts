@@ -34,6 +34,7 @@ type WireEntry = {
   desired_state: DesktopSupervisorDesiredState;
   observed_state: DesktopSupervisorManifestEntry["observedState"];
   condition: DesktopSupervisorManifestEntry["condition"];
+  last_error?: string | null;
   permission_profile_id: string | null;
   provider_launch_policy?: unknown;
   created_by: string;
@@ -332,6 +333,7 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     desiredState: entry.desired_state,
     observedState: entry.observed_state,
     condition: entry.condition,
+    lastError: entry.last_error ?? null,
     permissionProfileId: entry.permission_profile_id,
     createdBy: entry.created_by,
     createdAt: entry.created_at,

@@ -32,6 +32,7 @@ class FakeRpc implements CodexAdapterRpc {
     private readonly notify: (notification: RpcNotification) => void,
     private readonly options: {
       resumeSupported: boolean;
+      placeholderResumeIsFatal: boolean;
       workplacePresent: boolean;
       threadReadFails: boolean;
       threadReadTimesOut: boolean;
@@ -56,6 +57,9 @@ class FakeRpc implements CodexAdapterRpc {
       const threadId = (params as { threadId: string }).threadId;
       if (!this.options.resumeSupported) throw new Error("JSON-RPC -32601: method not found");
       if (threadId === "00000000-0000-0000-0000-000000000000") {
+        if (this.options.placeholderResumeIsFatal) {
+          throw new Error("protocol error: invalid placeholder continuation");
+        }
         throw new Error("thread not found");
       }
       return { thread: { id: threadId } } as T;
@@ -111,6 +115,7 @@ type FakeLaunch = CodexAppServerLaunch & {
 
 function createHarness(options: {
   resumeSupported?: boolean;
+  placeholderResumeIsFatal?: boolean;
   workplacePresent?: boolean;
   threadReadFails?: boolean;
   threadReadTimesOut?: boolean;
@@ -153,6 +158,7 @@ function createHarness(options: {
     createRpcClient: (_serverUrl, notify) => {
       const client = new FakeRpc(`thread-${nextThread++}`, notify, {
         resumeSupported: options.resumeSupported ?? true,
+        placeholderResumeIsFatal: options.placeholderResumeIsFatal ?? false,
         workplacePresent: options.workplacePresent ?? true,
         threadReadFails: options.threadReadFails ?? false,
         threadReadTimesOut: options.threadReadTimesOut ?? false,
@@ -253,6 +259,11 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
   assert.equal(threadParams.approvalPolicy, policy.approvalPolicy);
   assert.equal(threadParams.sandboxPolicy, policy.sandboxPolicy, "native sandbox object was forwarded, not remapped");
   assert.equal(threadParams.cwd, "/tmp/letagents-work-attempt");
+  assert.equal(
+    harness.clients[0]!.requests.some((entry) => entry.method === "thread/resume"),
+    false,
+    "a fresh start must never probe resume with a synthetic continuation",
+  );
 
   const turnStart = requestByMethod(harness.clients[0]!, "turn/start");
   const prompt = ((turnStart.params as { input: Array<{ text: string }> }).input[0]?.text) ?? "";
@@ -274,6 +285,21 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     survivesRestart: true,
   });
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
+});
+
+test("Codex fresh spawn does not let a fatal placeholder resume probe block thread/start", async () => {
+  const harness = createHarness({ placeholderResumeIsFatal: true });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+
+  const handle = await adapter.spawn(spawnRequest());
+
+  assert.equal(handle.observedState(), "working");
+  assert.equal(handle.providerContinuationId, "thread-1");
+  assert.deepEqual(
+    harness.clients[0]!.requests.map((entry) => entry.method),
+    ["mcpServerStatus/list", "thread/start", "turn/start", "thread/read"],
+  );
+  assert.deepEqual(harness.signals, []);
 });
 
 test("Codex supervised launch passes only its daemon generation binding to the MCP child", async () => {
@@ -483,7 +509,11 @@ test("resume capability fails honestly when app-server lacks thread/resume", asy
   const request = spawnRequest();
   const first = await adapter.spawn(request);
 
-  assert.equal(adapter.capabilities().resume, false);
+  assert.equal(
+    adapter.capabilities().resume,
+    true,
+    "fresh thread/start cannot safely infer resume support without a real continuation",
+  );
   harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
   await flush();
   await assert.rejects(

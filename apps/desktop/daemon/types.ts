@@ -57,6 +57,8 @@ export type DaemonManifestEntry = {
   desired_state: DesiredState;
   observed_state: ObservedState;
   condition: PolicyCondition;
+  /** Latest actionable lifecycle failure, retained for Inspector/conflict UX. */
+  last_error?: string | null;
   permission_profile_id: string | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;

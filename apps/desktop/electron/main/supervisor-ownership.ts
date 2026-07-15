@@ -6,6 +6,29 @@ export interface SupervisorOwnershipTransfer<TManifest, TLegacy> {
   rollback(manifest: TManifest): Promise<void>;
 }
 
+export interface SupervisorLaneOwnerSummary {
+  displayName: string;
+  provider: string;
+  observedState: string;
+  condition: string;
+  lastError?: string | null;
+}
+
+/**
+ * Explain a durable lane conflict without implying that a blocked manifest is
+ * a healthy duplicate. The existing entry remains the fail-closed owner until
+ * the user inspects and stops it, so a live or ambiguous writer is never
+ * silently unfenced just to make the Start button succeed.
+ */
+export function describeSupervisorLaneConflict(owner: SupervisorLaneOwnerSummary): string {
+  const inspect = "Open the existing agent in Inspector and choose Stop before creating a replacement.";
+  if (owner.observedState === "failed" || owner.condition !== "none") {
+    const cause = owner.lastError ? ` Cause: ${owner.lastError}.` : "";
+    return `${owner.displayName} already reserved this room's supervised ${owner.provider} lane, but startup is ${owner.observedState} (${owner.condition}).${cause} ${inspect}`;
+  }
+  return `${owner.displayName} already owns this room's supervised ${owner.provider} lane. Use that agent, or stop it before creating a replacement.`;
+}
+
 /**
  * Transfer one provider lane with a durable claim as the linearization point.
  * A new legacy start sees the claim before teardown begins; activation happens

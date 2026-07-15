@@ -273,6 +273,50 @@ test("reconciler dispatches fresh, poke, and stop safely and reports port faults
   assert.match(result.decision.reason, /child failed/);
 });
 
+test("an exact resume method failure downgrades capabilities and the next reconcile starts fresh", async () => {
+  const calls: string[] = [];
+  let resumeSupported = true;
+  const handle = { workAttemptId: "attempt", pid: 1, providerContinuationId: "thread", observedState: "failed" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: resumeSupported, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { calls.push("spawn"); return handle; },
+    attach: async () => null,
+    resume: async () => {
+      calls.push("resume");
+      resumeSupported = false;
+      throw new Error("Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.");
+    },
+    poke: async () => {},
+    stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "thread" }),
+    onExit: async () => () => {},
+  };
+  const runner = new ProviderReconciler(port);
+  const input = {
+    workAttemptId: "attempt",
+    desiredState: "running" as const,
+    observedState: "failed" as const,
+    condition: "none" as const,
+    nowMs: 1_000,
+    lastPollAtMs: null,
+    addressedMessagesWaiting: 0,
+    pokeIgnored: false,
+    exitsInWindow: 0,
+    activeLease: false,
+    fencedRebindProven: false,
+    spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} },
+    handle,
+    resumeFrom: { workAttemptId: "attempt", providerContinuationId: "thread" },
+  };
+
+  const failedResume = await runner.reconcile(input, 100);
+  assert.equal(failedResume.disposition, "failed");
+  assert.match(failedResume.decision.reason, /bounded recovery must start a fresh generation/);
+  const freshRetry = await runner.reconcile(input, 100);
+  assert.equal(freshRetry.decision.action, "restart_fresh");
+  assert.equal(freshRetry.disposition, "executed");
+  assert.deepEqual(calls, ["resume", "spawn"]);
+});
+
 test("supervisor convergence persists the retry deadline before it can restart", async () => {
   const env = await fixture();
   try {
@@ -766,6 +810,19 @@ test("concurrent supervised lane claims have exactly one daemon-serialized winne
     assert.equal(results.filter((result) => !result.ok && /already owned/.test(result.error ?? "")).length, 1);
     const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     assert.equal(manifest.filter((candidate) => candidate.room_id === "focus_37" && candidate.provider === "codex" && candidate.desired_state !== "stopped").length, 1);
+
+    const winner = manifest.find((candidate) => candidate.room_id === "focus_37" && candidate.provider === "codex" && candidate.desired_state !== "stopped");
+    assert.ok(winner);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: winner.id,
+      desired_state: "stopped",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: candidate("owner_retry"),
+    })).ok, true, "explicit Stop releases the room/provider claim for one clean retry owner");
+    const retried = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.equal(retried.filter((candidate) => candidate.room_id === "focus_37" && candidate.provider === "codex" && candidate.desired_state !== "stopped").length, 1);
+    assert.equal(retried.find((candidate) => candidate.id === "owner_retry")?.desired_state, "paused");
   } finally {
     await daemon.stop();
     await env.cleanup();

@@ -144,7 +144,10 @@ import {
   supervisorDaemonClient,
 } from "./supervisor-daemon.js";
 import { emitToMainWindow } from "./window.js";
-import { transferSupervisorOwnership } from "./supervisor-ownership.js";
+import {
+  describeSupervisorLaneConflict,
+  transferSupervisorOwnership,
+} from "./supervisor-ownership.js";
 import {
   buildDiagnosticsSnapshot,
   buildWorkerSnapshots,
@@ -832,7 +835,7 @@ export function registerDesktopIpcHandlers(
       }
       const existing = (await supervisorDaemonClient.list(input.roomIdentifier))
         .find((entry) => entry.provider === input.providerId && entry.desiredState !== "stopped");
-      if (existing) throw new Error(`${existing.displayName} already owns the supervised ${input.providerId} lane in this room.`);
+      if (existing) throw new Error(describeSupervisorLaneConflict(existing));
 
       // Claim the lane durably first. Every legacy start consults this daemon
       // fence, so no new legacy owner may appear while transfer is in flight.

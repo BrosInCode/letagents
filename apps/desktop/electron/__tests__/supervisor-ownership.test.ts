@@ -1,7 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { launchLegacyWithOwnership, transferSupervisorOwnership } from "../main/supervisor-ownership.js";
+import {
+  describeSupervisorLaneConflict,
+  launchLegacyWithOwnership,
+  transferSupervisorOwnership,
+} from "../main/supervisor-ownership.js";
+
+test("lane conflict distinguishes a blocked startup from a healthy existing owner", () => {
+  assert.equal(
+    describeSupervisorLaneConflict({
+      displayName: "Codex supervised agent",
+      provider: "codex",
+      observedState: "recovering",
+      condition: "coordination_blocked",
+      lastError: "provider restart_fresh failed: invalid placeholder continuation",
+    }),
+    "Codex supervised agent already reserved this room's supervised codex lane, but startup is recovering (coordination_blocked). Cause: provider restart_fresh failed: invalid placeholder continuation. Open the existing agent in Inspector and choose Stop before creating a replacement.",
+  );
+  assert.equal(
+    describeSupervisorLaneConflict({
+      displayName: "Codex supervised agent",
+      provider: "codex",
+      observedState: "working",
+      condition: "none",
+    }),
+    "Codex supervised agent already owns this room's supervised codex lane. Use that agent, or stop it before creating a replacement.",
+  );
+});
 
 test("supervisor ownership claims before legacy teardown and activates last", async () => {
   const order: string[] = [];
