@@ -105,6 +105,7 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["GET", "/rooms/room_1/tasks", "coordination.read"],
     ["POST", "/rooms/room_1/tasks", "coordination.propose"],
     ["POST", "/rooms/room_1/tasks/task_1/lease-action", "coordination.self_write"],
+    ["POST", "/rooms/room_1/tasks/task_1/review-verdict", "coordination.self_write"],
     ["PATCH", "/rooms/room_1/reasoning-sessions/session_1", "coordination.self_write"],
     ["POST", "/rooms/room_1/agent-sessions/agent_session_1/disconnect", "coordination.self_write"],
     ["POST", "/rooms/room_1/agent-sessions/agent_session_1/native-activity", "coordination.self_write"],

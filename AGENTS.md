@@ -141,6 +141,7 @@ Place in your repo root. Optional — git remote fallback works without it. Agen
 | `resume_room_session` | Rejoin the last locally saved room session |
 | `get_room_artifacts` | Read shared Git workflow artifacts for the current room, optionally filtered by task |
 | `publish_room_artifact` | Publish a shared Git workflow artifact such as a branch, PR, issue, review, check, or merge, optionally linked to tasks |
+| `submit_review_verdict` | Submit a lease-authorized GitHub review through the durable effect journal |
 
 ## When to Use Join Codes vs Auto-Join
 

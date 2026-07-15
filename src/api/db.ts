@@ -14,6 +14,7 @@ export type { RoomAgentPresence, RoomAgentRegistrationLiveness, RoomAgentLivenes
 export type { ReasoningSession, ReasoningSessionUpdate, Message, MessageReplyReference, MessageThreadParticipant, MessageThreadSummary, MessageAttachment, MessageAttachmentData, MessageAttachmentUpload, TaskStatus } from "./db/types.js";
 export type { TaskLeaseKind, TaskLeaseStatus, TaskLockScope, TaskLockReason, CoordinationDecision, Task, TaskStalePromptState, TaskLease, TaskWorkLeaseCreationInput } from "./db/types.js";
 export type { TaskLock, StaleTaskPromptMute, CoordinationEvent, TaskOwnershipState, TaskWorkLeaseActionConflict, GitHubRoomEvent, GitHubRoomEventMetadata, TaskGitHubArtifactStatus } from "./db/types.js";
+export type { WorkflowEffect, WorkflowEffectKind, WorkflowEffectRow, WorkflowEffectState } from "./db/types.js";
 export { createProject, createProjectWithName, getOrCreateProjectByName, getOrCreateCanonicalRoom, getOrCreateGitChildRoom, getGitChildRoom, getProjectByName, getAllProjects, getProjectByCode, getRoomAlias } from "./db/rooms.js";
 export { getProjectById, rotateProjectCode, updateProjectDisplayName, createRoomAlias } from "./db/rooms.js";
 export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, activateFocusRoom, archiveFocusRoom, claimGitRefFocusRoomLifecycleEvent, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
@@ -45,6 +46,23 @@ export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateFo
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
 export { rebindTaskLease, assertLeaseEpochCurrentTx, acquireLeaseFenceTx, recordRebindAttestation, LeaseFenceStaleError, isRebindAttestationCause, isUuidShapedExecutionId, REBIND_ATTESTATION_CAUSES } from "./db/coordination.js";
+export {
+  WorkflowEffectIdempotencyConflictError,
+  WorkflowEffectLeaseStaleError,
+  claimAmbiguousWorkflowEffect,
+  claimFailedWorkflowEffect,
+  getWorkflowEffect,
+  listReconcilableWorkflowEffects,
+  markStalePendingWorkflowEffectAmbiguous,
+  markWorkflowEffectAmbiguous,
+  markWorkflowEffectFailed,
+  markWorkflowEffectSucceeded,
+  pruneSettledWorkflowEffects,
+  releaseWorkflowEffectLookup,
+  reserveWorkflowEffect,
+  workflowEffectCorrelationKey,
+  workflowEffectRequestFingerprint,
+} from "./db/workflow-effects.js";
 export type { RebindTaskLeaseInput, RebindTaskLeaseResult, RebindTaskLeaseFailure, LeaseFence, RecordRebindAttestationInput, RecordRebindAttestationResult, RecordRebindAttestationFailure, RebindAttestationCause } from "./db/coordination.js";
 export {
   assertConsumeBoardIntentApproval,

@@ -50,6 +50,7 @@ test("registerTaskTools preserves the public task tool surface", () => {
     "release_task_review",
     "release_task_lease",
     "handoff_task_lease",
+    "submit_review_verdict",
   ]);
   assert.ok(registrations.every((registration) => typeof registration.handler === "function"));
 });
@@ -72,6 +73,7 @@ test("worker task mutations keep registered worker-session inputs", () => {
     "release_task_review",
     "release_task_lease",
     "handoff_task_lease",
+    "submit_review_verdict",
   ]);
 
   for (const registration of registrations) {
@@ -81,4 +83,17 @@ test("worker task mutations keep registered worker-session inputs", () => {
     assert.ok("conversation_id" in registration.schema, `${registration.name} should accept conversation_id`);
     assert.ok("agent_session_id" in registration.schema, `${registration.name} should accept agent_session_id`);
   }
+});
+
+test("submit_review_verdict requires an exact 40-hex expected head SHA", () => {
+  const verdict = collectTaskToolRegistrations()
+    .find((registration) => registration.name === "submit_review_verdict");
+  assert.ok(verdict);
+  const expectedHead = verdict.schema.expected_head_sha as {
+    safeParse(value: unknown): { success: boolean };
+  };
+  assert.equal(expectedHead.safeParse("a".repeat(40)).success, true);
+  assert.equal(expectedHead.safeParse("a".repeat(39)).success, false);
+  assert.equal(expectedHead.safeParse("HEAD").success, false);
+  assert.equal(expectedHead.safeParse(undefined).success, false);
 });

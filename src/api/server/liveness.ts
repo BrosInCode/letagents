@@ -46,6 +46,7 @@ import {
 } from "../rooms/liveness-sweep.js";
 import { isReachableRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { emitProjectMessage } from "./events.js";
+import { workflowEffectBroker } from "../workflow-effects/runtime.js";
 
 async function announceOffline(input: LivenessAnnouncementInput): Promise<void> {
   await emitProjectMessage(input.room_id, "letagents", input.text, {
@@ -425,6 +426,11 @@ export function startLivenessSweep(): void {
       await roomStallSweeper.sweepOnce();
     } catch (error) {
       console.error("Room stall sweep failed:", error);
+    }
+    try {
+      await workflowEffectBroker.sweepOnce();
+    } catch (error) {
+      console.error("Workflow effect reconciliation sweep failed:", error);
     } finally {
       sweepInFlight = false;
     }

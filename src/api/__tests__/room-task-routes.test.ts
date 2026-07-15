@@ -9,6 +9,7 @@ const {
   isCurrentStalePromptAction,
   registerRoomTaskRoutes,
 } = await import("../routes/rooms/tasks/index.js");
+const { normalizeExpectedHeadSha } = await import("../routes/rooms/tasks/review-verdict.js");
 
 function createDeps() {
   const unused = async () => {
@@ -100,10 +101,19 @@ test("registerRoomTaskRoutes preserves canonical task route order", () => {
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/stale-prompt-mute$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/lease-action$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/review-lease-action$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/review-verdict$/" },
     { method: "get", path: "/^(?:\\/api)?\\/rooms\\/(.+)\\/tasks\\/github-status$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
     { method: "patch", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
   ]);
+});
+
+test("review verdict route accepts only an exact 40-hex expected head SHA", () => {
+  const expected = "a".repeat(40);
+  assert.equal(normalizeExpectedHeadSha(expected.toUpperCase()), expected);
+  for (const value of [undefined, "", "a".repeat(39), "a".repeat(41), `${"a".repeat(39)}g`, "HEAD"]) {
+    assert.equal(normalizeExpectedHeadSha(value), null);
+  }
 });
 
 test("review lease action denies parent board writes from hard-isolated Focus Rooms", async () => {

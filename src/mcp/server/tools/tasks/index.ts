@@ -5,6 +5,7 @@ import { registerTaskBoardTools } from "./board-tools.js";
 import { registerTaskEventTools } from "./event-tools.js";
 import { registerTaskLeaseTools } from "./lease-tools.js";
 import { registerTaskMutationTools } from "./mutation-tools.js";
+import { registerTaskVerdictTools } from "./verdict-tools.js";
 
 export function registerTaskTools(server: McpServer): void {
   registerTaskBoardTools(server);
@@ -13,4 +14,5 @@ export function registerTaskTools(server: McpServer): void {
   registerTaskArtifactTools(server);
   registerTaskMutationTools(server);
   registerTaskLeaseTools(server);
+  registerTaskVerdictTools(server);
 }
