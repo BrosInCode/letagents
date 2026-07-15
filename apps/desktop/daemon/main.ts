@@ -736,7 +736,17 @@ export class SupervisorDaemon {
     const noticeKind = notice ?? (condition === "quarantined" ? "quarantine_death" : condition === "coordination_blocked" ? "coordination_escalation" : undefined);
     const notices = [...(entry.reconciliation_notices ?? [])];
     if (noticeKind) notices.push({ at: new Date().toISOString(), kind: noticeKind, cause, terminal: terminal ?? nextReconciliation.last_terminal ?? undefined });
-    const updated: DaemonManifestEntry = { ...entry, observed_state: to, condition, reconciliation: nextReconciliation, reconciliation_notices: notices.slice(-32) };
+    const lastError = to === "failed" || condition !== "none"
+      ? cause
+      : (["working", "idle", "stopped"].includes(to) ? null : entry.last_error ?? null);
+    const updated: DaemonManifestEntry = {
+      ...entry,
+      observed_state: to,
+      condition,
+      last_error: lastError,
+      reconciliation: nextReconciliation,
+      reconciliation_notices: notices.slice(-32),
+    };
     const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
     this.manifestGeneration = next.generation;
     await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });

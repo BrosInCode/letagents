@@ -394,6 +394,8 @@ export interface DesktopSupervisorManifestEntry {
   desiredState: DesktopSupervisorDesiredState;
   observedState: DesktopSupervisorObservedState;
   condition: DesktopSupervisorCondition;
+  /** Latest actionable daemon lifecycle failure, when one is retained. */
+  lastError?: string | null;
   permissionProfileId: string | null;
   createdBy: string;
   createdAt: string;

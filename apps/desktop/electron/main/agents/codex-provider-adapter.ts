@@ -48,8 +48,6 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-const RESUME_PROBE_THREAD_ID = "00000000-0000-0000-0000-000000000000";
-
 type CodexThreadResult = { thread?: { id?: string } };
 
 export interface CodexAdapterRpc {
@@ -140,27 +138,6 @@ function isMethodNotFound(error: unknown): boolean {
   );
 }
 
-function isMissingProbeThread(error: unknown): boolean {
-  const message = errorMessage(error);
-  return /(?:thread|conversation|session).*(?:not\s+found|does\s+not\s+exist|unknown)|(?:not\s+found|unknown).*(?:thread|conversation|session)/i.test(
-    message,
-  );
-}
-
-async function probeResumeSupport(client: CodexAdapterRpc): Promise<boolean> {
-  try {
-    // app-server has no method-discovery endpoint. Resuming a deliberately
-    // nonexistent thread distinguishes a supported method (thread-not-found)
-    // from JSON-RPC method-not-found without creating a real continuation.
-    await client.request("thread/resume", { threadId: RESUME_PROBE_THREAD_ID });
-    return true;
-  } catch (error) {
-    if (isMethodNotFound(error)) return false;
-    if (isMissingProbeThread(error)) return true;
-    throw new Error(`Unable to probe Codex thread/resume capability: ${errorMessage(error)}`);
-  }
-}
-
 function configuredMcpServerNames(value: unknown): string[] {
   const rows = Array.isArray(value)
     ? value
@@ -242,8 +219,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly pendingAttaches = new Map<string, Promise<CodexProviderHandle | null>>();
   private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
   // P0 proved app-server thread/resume on the supported Codex runtime. Start
-  // optimistic so a fresh reconciler can select resume, then probe every native
-  // process and durably downgrade on method-not-found.
+  // optimistic so a fresh reconciler can select resume, then durably downgrade
+  // if an exact continuation resume returns method-not-found. Do not probe with
+  // a synthetic thread id: some app-server versions treat that as a fatal
+  // protocol error, which must never prevent a genuinely fresh thread/start.
   private resumeSupported = true;
 
   constructor(options: CodexProviderAdapterOptions = {}) {
@@ -426,23 +405,32 @@ export class CodexProviderAdapter implements ProviderAdapter {
     try {
       await client.connect();
       await requireLetAgentsWorkplace(client);
-      const probedResume = await probeResumeSupport(client);
-      if (!probedResume) this.resumeSupported = false;
       if (resumeRef && !this.resumeSupported) {
         throw new Error(
           "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
         );
       }
-      const threadResult = resumeRef
-        ? await client.request<CodexThreadResult>("thread/resume", {
-          threadId: resumeRef.providerContinuationId,
-          cwd: req.cwd,
-          ...policy,
-        })
-        : await client.request<CodexThreadResult>("thread/start", {
+      let threadResult: CodexThreadResult;
+      if (resumeRef) {
+        try {
+          threadResult = await client.request<CodexThreadResult>("thread/resume", {
+            threadId: resumeRef.providerContinuationId,
+            cwd: req.cwd,
+            ...policy,
+          });
+        } catch (error) {
+          if (!isMethodNotFound(error)) throw error;
+          this.resumeSupported = false;
+          throw new Error(
+            "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
+          );
+        }
+      } else {
+        threadResult = await client.request<CodexThreadResult>("thread/start", {
           cwd: req.cwd,
           ...policy,
         });
+      }
       const threadId = threadResult.thread?.id;
       if (!threadId) {
         throw new Error("Codex app-server did not return a thread id.");
@@ -496,12 +484,6 @@ export class CodexProviderAdapter implements ProviderAdapter {
       void this.emitTranscriptTail(handle);
       return handle;
     } catch (error) {
-      if (resumeRef && isMethodNotFound(error)) {
-        this.resumeSupported = false;
-        error = new Error(
-          "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
-        );
-      }
       if (handle) handle.protocolError = true;
       client.close();
       if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
@@ -523,8 +505,6 @@ export class CodexProviderAdapter implements ProviderAdapter {
     try {
       await client.connect();
       await requireLetAgentsWorkplace(client);
-      const probedResume = await probeResumeSupport(client);
-      if (!probedResume) this.resumeSupported = false;
       const read = await client.request<ThreadReadResult>("thread/read", {
         threadId: ref.providerContinuationId,
         includeTurns: true,
