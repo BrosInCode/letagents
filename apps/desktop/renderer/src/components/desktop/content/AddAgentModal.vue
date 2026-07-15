@@ -608,7 +608,6 @@ import {
 } from "../../../domain/managed-agents";
 import {
   isSupervisedRuntimeSettled,
-  loadSupervisedProviderLane,
   refreshSupervisedRuntimeEntry,
   stopSupervisedProviderLane,
   supervisedRecoveryDetail,
@@ -690,6 +689,7 @@ let modelRequestId = 0;
 let modalStateVersion = 0;
 let managedSessionRefreshTimer: number | null = null;
 let supervisedRuntimeRefreshTimer: number | null = null;
+let supervisedCreationRequestId: string | null = null;
 let modelPreflightTimer: number | null = null;
 
 const selectedProvider = computed(() =>
@@ -1135,7 +1135,9 @@ async function startManagedAgent(): Promise<void> {
       if (!hasSupervisedRuntime(selectedProvider.value)) {
         throw new Error("This provider has not passed the durable supervision evidence gate.");
       }
+      supervisedCreationRequestId ||= window.crypto.randomUUID();
       const entry = await desktopIpc.supervisor.createAgent({
+        creationRequestId: supervisedCreationRequestId,
         providerId: selectedProviderId.value,
         roomIdentifier: props.roomIdentifier,
         displayName: `${selectedProvider.value?.name ?? "Agent"} supervised agent`,
@@ -1150,6 +1152,7 @@ async function startManagedAgent(): Promise<void> {
       // the first Start click has a visible result and cannot be mistaken for
       // a no-op that needs a second click.
       supervisedConflict.value = entry;
+      supervisedCreationRequestId = null;
       supervisedConflictLookupError.value = null;
       setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
       startSupervisedRuntimeRefresh(entry.id);
@@ -1178,10 +1181,13 @@ async function startManagedAgent(): Promise<void> {
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
     if (launchMode.value === "supervised") {
-      const conflict = await loadSupervisedConflict(requestVersion);
-      if (!isCurrentModalState(requestVersion)) return;
-      supervisedConflict.value = conflict.entry;
-      supervisedConflictLookupError.value = conflict.error;
+      const entryId = supervisedCreationRequestId ? `supervised_${supervisedCreationRequestId}` : null;
+      if (entryId) {
+        const recovery = await refreshSupervisedRuntimeEntry(desktopIpc.supervisor, props.roomIdentifier, entryId);
+        if (!isCurrentModalState(requestVersion)) return;
+        supervisedConflict.value = recovery.entry?.desiredState === "stopped" ? null : recovery.entry;
+        supervisedConflictLookupError.value = recovery.entry ? null : recovery.error;
+      }
     }
     setupMessage.value = error instanceof Error ? error.message : "Could not start this agent.";
   } finally {
@@ -1190,19 +1196,6 @@ async function startManagedAgent(): Promise<void> {
       startManagedSessionRefreshTimer();
     }
   }
-}
-
-async function loadSupervisedConflict(
-  requestVersion = modalStateVersion,
-): Promise<{ entry: DesktopSupervisorManifestEntry | null; error: string | null }> {
-  if (!selectedProviderId.value || !props.roomIdentifier) return { entry: null, error: null };
-  const recovery = await loadSupervisedProviderLane(
-    desktopIpc.supervisor,
-    props.roomIdentifier,
-    selectedProviderId.value,
-  );
-  if (!isCurrentModalState(requestVersion)) return { entry: null, error: null };
-  return recovery;
 }
 
 async function stopSupervisedConflict(): Promise<void> {
@@ -1436,6 +1429,7 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   stopSupervisedRuntimeRefreshTimer();
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
+  supervisedCreationRequestId = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
@@ -1598,6 +1592,7 @@ function resetTransientState(): void {
   stopSupervisedRuntimeRefreshTimer();
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
+  supervisedCreationRequestId = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;

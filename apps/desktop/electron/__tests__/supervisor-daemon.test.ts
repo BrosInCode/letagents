@@ -51,8 +51,9 @@ async function startWireDaemon(
         result = entries;
       } else if (request.method === "manifest.put") {
         const next = { ...request.params!.entry, workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null }, activity: [] };
-        entries.push(next);
-        result = next;
+        const existing = entries.find((candidate) => candidate.id === next.id);
+        if (!existing) entries.push(next);
+        result = existing ?? next;
       } else if (request.method === "manifest.set_desired_state") {
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         entry.desired_state = request.params!.desired_state;
@@ -117,15 +118,24 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
     const status = await client.ensureRunning();
     assert.equal(status.generation, 3);
-    const created = await client.create({ roomIdentifier: "git-room:github.com:owner/repo", displayName: "Durable Codex", providerId: "codex", charter: "Keep polling.", repoRootPath: "/tmp/work" });
+    const createInput = { creationRequestId: "request_alpha", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Durable Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
+    const created = await client.create(createInput);
     assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
+    const retried = await client.create(createInput);
+    assert.equal(retried.id, created.id, "one Start request is idempotent across retries");
+    const second = await client.create({ ...createInput, creationRequestId: "request_bravo", displayName: "Second durable Codex" });
+    assert.notEqual(second.id, created.id, "a new Start request creates an independent same-provider agent");
+    assert.equal(wire.entries.length, 2);
     await assert.rejects(
       () => client.assertLegacyStartAllowed(created.roomId, "codex"),
       /already owns the codex lane through the supervised engine/,
       "the paused transfer claim fences a concurrent legacy start before activation",
     );
     assert.equal((await client.setDesiredState(created.id, "running")).desiredState, "running");
-    assert.equal((await client.setDesiredState(created.id, "paused")).desiredState, "paused");
+    assert.equal((await client.setDesiredState(second.id, "running")).desiredState, "running");
+    assert.equal((await client.setDesiredState(created.id, "stopped")).desiredState, "stopped");
+    const listed = await client.list(created.roomId);
+    assert.equal(listed.find((entry) => entry.id === second.id)?.desiredState, "running", "stopping one same-provider agent does not affect its peer");
     assert.equal((await client.readAttempt(created.id)).workspacePath, null);
     const reservation = await client.reserveLegacyLane("room_legacy_client", "codex", "legacy_client");
     assert.equal(reservation.owner_pid, process.pid);

@@ -152,27 +152,17 @@ export function normalizeManagedAgentRoomIdentifier(value: string | null | undef
 }
 
 /**
- * A supervisor-owned runtime can fail before it publishes an MCP participant.
- * In that case the room presence list cannot expose a recovery affordance, but
- * the Add Agent conflict still needs to identify the one fenced lane the user
- * may stop. Prefer unhealthy entries so a stale blocked startup is never
- * hidden behind a healthy-looking entry from an older manifest.
+ * Resolve Inspector activity through durable supervisor bindings when they
+ * exist. Returning null (rather than an empty list) tells the caller that a
+ * pre-registration label fallback is still necessary.
  */
-export function supervisedProviderLaneEntry(
+export function exactSupervisorEntriesForManagedSessions(
   entries: readonly DesktopSupervisorManifestEntry[],
-  roomIdentifier: string | null | undefined,
-  providerId: string | null | undefined,
-): DesktopSupervisorManifestEntry | null {
-  const room = normalizeManagedAgentRoomIdentifier(roomIdentifier);
-  const provider = String(providerId || "").trim().toLowerCase();
-  if (!room || !provider) return null;
-
-  const matching = entries.filter((entry) =>
-    normalizeManagedAgentRoomIdentifier(entry.roomId) === room &&
-    entry.provider.trim().toLowerCase() === provider &&
-    entry.desiredState !== "stopped"
-  );
-  return matching.find((entry) => entry.condition !== "none") ?? matching[0] ?? null;
+  sessions: readonly Pick<DesktopManagedAgentSession, "supervisorEntryId">[],
+): DesktopSupervisorManifestEntry[] | null {
+  const ids = new Set(sessions.map((session) => session.supervisorEntryId).filter((id): id is string => Boolean(id)));
+  if (ids.size === 0) return null;
+  return entries.filter((entry) => ids.has(entry.id));
 }
 
 /**

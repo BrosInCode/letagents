@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
@@ -196,6 +197,27 @@ export class SupervisorDaemon {
       const manifest = await this.store.load();
       const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
       const existing = manifest.entries.find((candidate) => candidate.id === entry.id);
+      if (existing) {
+        const creationIdentity = (candidate: DaemonManifestEntry) => ({
+          id: candidate.id,
+          room_id: candidate.room_id,
+          display_name: candidate.display_name,
+          provider: candidate.provider,
+          model: candidate.model,
+          charter: candidate.charter,
+          permission_profile_id: candidate.permission_profile_id,
+          provider_launch_policy: candidate.provider_launch_policy ?? null,
+          created_by: candidate.created_by,
+          source_repo_path: candidate.source_repo_path ?? null,
+        });
+        if (!isDeepStrictEqual(creationIdentity(existing), creationIdentity(entry))) {
+          throw new Error(`Supervised creation request '${entry.id}' is already bound to different agent parameters.`);
+        }
+        // A retry after a lost response must observe the durable entry as it is
+        // now. It must never rewind running lifecycle state back to the paused
+        // creation claim supplied by the retried request.
+        return existing;
+      }
       if (entry.desired_state !== "stopped") {
         // A paused supervised entry may atomically become the pending transfer
         // claim while one legacy engine is still running. It cannot activate
@@ -205,21 +227,14 @@ export class SupervisorDaemon {
         if (legacyOwner && entry.desired_state === "running") {
           throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
         }
-        const owner = manifest.entries.find((candidate) => candidate.id !== entry.id
-          && candidate.room_id === entry.room_id
-          && candidate.provider === entry.provider
-          && candidate.desired_state !== "stopped");
-        if (owner) throw new Error(`Supervised lane '${entry.room_id}/${entry.provider}' is already owned by '${owner.id}'.`);
       }
       const nextEntry: DaemonManifestEntry = {
         ...entry,
-        workplace_liveness: entry.workplace_liveness ?? existing?.workplace_liveness ?? { state: "unknown", observed_at: null, detail: null },
-        native_liveness: entry.native_liveness ?? existing?.native_liveness ?? { state: "unknown", observed_at: null, detail: null },
-        activity: (entry.activity ?? existing?.activity ?? []).slice(-200),
+        workplace_liveness: entry.workplace_liveness ?? { state: "unknown", observed_at: null, detail: null },
+        native_liveness: entry.native_liveness ?? { state: "unknown", observed_at: null, detail: null },
+        activity: (entry.activity ?? []).slice(-200),
       };
-      const entries = existing
-        ? manifest.entries.map((candidate) => candidate.id === entry.id ? nextEntry : candidate)
-        : [...manifest.entries, nextEntry];
+      const entries = [...manifest.entries, nextEntry];
       const next = await this.store.write(this.manifestGeneration, entries, legacyOwners);
       this.manifestGeneration = next.generation;
       return nextEntry;
@@ -243,11 +258,6 @@ export class SupervisorDaemon {
         if (legacyOwner && desiredState === "running") {
           throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
         }
-        const owner = manifest.entries.find((candidate) => candidate.id !== id
-          && candidate.room_id === entry.room_id
-          && candidate.provider === entry.provider
-          && candidate.desired_state !== "stopped");
-        if (owner) throw new Error(`Supervised lane '${entry.room_id}/${entry.provider}' is already owned by '${owner.id}'.`);
       }
       const updated = { ...entry, desired_state: desiredState };
       const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate), legacyOwners);

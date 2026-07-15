@@ -144,10 +144,7 @@ import {
   supervisorDaemonClient,
 } from "./supervisor-daemon.js";
 import { emitToMainWindow } from "./window.js";
-import {
-  describeSupervisorLaneConflict,
-  transferSupervisorOwnership,
-} from "./supervisor-ownership.js";
+import { transferSupervisorOwnership } from "./supervisor-ownership.js";
 import {
   buildDiagnosticsSnapshot,
   buildWorkerSnapshots,
@@ -833,10 +830,6 @@ export function registerDesktopIpcHandlers(
       if (input.providerId !== "codex") {
         throw new Error(`Supervised ${input.providerId} is capability-gated: only the Codex native adapter currently proves durable attach, terminal evidence, and activity streaming.`);
       }
-      const existing = (await supervisorDaemonClient.list(input.roomIdentifier))
-        .find((entry) => entry.provider === input.providerId && entry.desiredState !== "stopped");
-      if (existing) throw new Error(describeSupervisorLaneConflict(existing));
-
       // Claim the lane durably first. Every legacy start consults this daemon
       // fence, so no new legacy owner may appear while transfer is in flight.
       return transferSupervisorOwnership({
