@@ -1,5 +1,6 @@
 import electron from "electron";
 import type { IpcMain } from "electron";
+import { homedir } from "node:os";
 
 import type {
   DesktopActivityEntry,
@@ -255,6 +256,7 @@ export function registerDesktopIpcHandlers(
         node: process.versions.node,
       },
       workspaceRoot,
+      homePath: homedir(),
       apiUrl,
     }),
   );

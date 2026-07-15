@@ -169,6 +169,8 @@
           :source-states="selectedSnapshot?.sourceStates || null"
           :repo-status="repoStatusValue"
           :git-room-matches-active-repo="selectedGitRoomMatchesActiveRepo"
+          :durable-project-root-path="selectedRoomProjectRootPath"
+          :home-path="appInfo?.homePath || null"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
@@ -496,6 +498,8 @@ const selectedGitRoomMatchesActiveRepo = computed(() => {
   return normalizeRoomIdentifier(selectedRoomWithProjectContext.value.identifier)
     === normalizeRoomIdentifier(rootRoomSnapshot.value?.roomIdentifier);
 });
+
+const selectedRoomProjectRootPath = computed(() => activeProjectRootPath());
 
 function gitRoomsShareRepo(
   left: NonNullable<DesktopRoomSnapshot["room"]>["gitRoom"],

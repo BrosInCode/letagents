@@ -62,6 +62,36 @@ export function preferredManagedAgentRepoRootPath(
   return rootPath || null;
 }
 
+/**
+ * Resolve the local cwd from room ownership, not from the transient repo-status
+ * probe. A verified live status still wins so branch rooms select their exact
+ * worktree. When that probe is absent or stale, the durable root recorded when
+ * the project room was opened keeps focus rooms attached to the same project.
+ * Rooms with no project context use the OS home directory deterministically.
+ */
+export function managedAgentRootPathForRoom(input: {
+  room: Pick<DesktopRoomInfo, "gitRoom">;
+  repoStatus: Pick<RepoStatus, "rootPath" | "mainRootPath" | "worktrees" | "defaultBranch"> | null | undefined;
+  gitRoomMatchesActiveRepo: boolean;
+  durableProjectRootPath?: string | null;
+  homePath?: string | null;
+}): string | null {
+  const durableProjectRoot = input.durableProjectRootPath?.trim() || null;
+  const hasProjectContext = Boolean(input.room.gitRoom || durableProjectRoot);
+  const statusRoot = input.repoStatus?.rootPath?.trim() || null;
+  const statusMainRoot = input.repoStatus?.mainRootPath?.trim() || null;
+  const statusMatchesProject = input.room.gitRoom
+    ? input.gitRoomMatchesActiveRepo
+    : Boolean(durableProjectRoot && (statusRoot === durableProjectRoot || statusMainRoot === durableProjectRoot));
+  const verifiedRepoStatus = hasProjectContext && statusMatchesProject ? input.repoStatus : null;
+  const verifiedRoot = preferredManagedAgentRepoRootPath(verifiedRepoStatus, input.room.gitRoom);
+  if (verifiedRoot) return verifiedRoot;
+
+  if (durableProjectRoot) return durableProjectRoot;
+
+  return input.homePath?.trim() || null;
+}
+
 export function branchScopedGitRoomExpectedBranch(
   gitRoom: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null | undefined,
   repoStatus?: Pick<RepoStatus, "defaultBranch"> | null,

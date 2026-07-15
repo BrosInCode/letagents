@@ -7,6 +7,8 @@ export interface DesktopAppInfo {
     node: string;
   };
   workspaceRoot: string;
+  /** OS user home used as the deterministic cwd for rooms without project context. */
+  homePath?: string;
   apiUrl: string | null;
 }
 
