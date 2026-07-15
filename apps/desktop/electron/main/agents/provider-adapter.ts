@@ -79,13 +79,23 @@ export interface ProviderContinuationRef {
   providerConnection?: ProviderConnectionRef | null;
 }
 
-export interface ProviderConnectionRef {
-  kind: "codex_app_server";
-  url: string;
-  pid: number | null;
-  /** Stable process birth/command identity; prevents PID-reuse death laundering. */
-  processIdentity?: string | null;
-}
+export type ProviderConnectionRef =
+  | {
+    kind: "codex_app_server";
+    url: string;
+    pid: number | null;
+    /** Stable process birth/command identity; prevents PID-reuse death laundering. */
+    processIdentity?: string | null;
+  }
+  | {
+    // A headless CLI child has no reconnectable endpoint — stdio dies with the
+    // supervising process — so its ref carries process identity only. A fresh
+    // adapter can verify/fence the exact child but never live-reattach; recovery
+    // is bounded (resume a continuation), not survival (v10 §4.8).
+    kind: "claude_cli";
+    pid: number | null;
+    processIdentity?: string | null;
+  };
 
 export interface ProviderSpawnRequest {
   workAttemptId: string;

@@ -30,12 +30,12 @@ function buildJoinInstruction(joinedVia: DesktopCodexJoinedVia, roomIdentifier: 
   return `Call the LetAgents MCP tool join_room with ${JSON.stringify({ name: roomIdentifier, session_mode: "current" })}.`;
 }
 
-function codenameInstructionLines(suggestedDisplayName: string): string[] {
+function codenameInstructionLines(suggestedDisplayName: string, providerLabel: string): string[] {
   const examples = LETAGENTS_CODENAME_EXAMPLES.join(", ");
   return [
     `3. Give yourself a short distinct LetAgents-style codename before you do any room work. Suggested codename: ${suggestedDisplayName}. Use it if it is not already visible in the room; otherwise choose another fused codename in the same style. Examples: ${examples}.`,
     "4. Call set_agent_name with that chosen codename before posting status or registering. Treat this as your room identity, not decoration.",
-    "5. Never call yourself Codex, Codex 1, Codex 2, or any numbered provider label.",
+    `5. Never call yourself ${providerLabel}, ${providerLabel} 1, ${providerLabel} 2, or any numbered provider label.`,
   ];
 }
 
@@ -49,7 +49,13 @@ export function buildCodexStartPrompt(input: {
   suggestedDisplayName: string;
   deadlineUtc: string | null;
   maxMinutes: number;
+  /** Human label for the provider running this worker. Defaults to Codex. */
+  providerLabel?: string;
+  /** register_agent_session runtime prefix. Defaults to codex. */
+  runtimeKey?: string;
 }): string {
+  const providerLabel = input.providerLabel ?? "Codex";
+  const runtimeKey = input.runtimeKey ?? "codex";
   const deadlineInstruction =
     input.maxMinutes > 0 && input.deadlineUtc
       ? `Hard stop deadline: ${input.deadlineUtc}. Stop when the stop phrase appears or when that deadline is reached, whichever comes first.`
@@ -78,15 +84,15 @@ export function buildCodexStartPrompt(input: {
   }
 
   return [
-    "Run as a persistent local Codex worker for a LetAgents room.",
+    `Run as a persistent local ${providerLabel} worker for a LetAgents room.`,
     `Primary working directory: ${input.cwd}. Use this repository/worktree when the room asks for implementation or repo work.`,
     deadlineInstruction,
     "",
     "Instructions:",
     `1. ${buildJoinInstruction(input.joinedVia, input.roomIdentifier)}`,
     "2. Call read_messages once, then call get_board once so you know the current participants and active work.",
-    ...codenameInstructionLines(input.suggestedDisplayName),
-    `6. Call register_agent_session with session_kind="worker", runtime=${JSON.stringify(`codex:${input.token}`)}, and the same chosen display_name. Keep the returned agent_session_id.`,
+    ...codenameInstructionLines(input.suggestedDisplayName, providerLabel),
+    `6. Call register_agent_session with session_kind="worker", runtime=${JSON.stringify(`${runtimeKey}:${input.token}`)}, and the same chosen display_name. Keep the returned agent_session_id.`,
     "7. Do not continue into the room loop until register_agent_session succeeds. If LetAgents MCP auth is required, call get_onboarding_status and finish with a short public setup-needed note instead of claiming availability.",
     "8. Pass that agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, post_reasoning, and task tools whenever the tool accepts it.",
     "9. If get_board shows accepted unassigned work that is appropriate for you, claim it with claim_task using the registered agent_session_id before entering the wait loop.",
