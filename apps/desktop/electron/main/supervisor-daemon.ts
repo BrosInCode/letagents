@@ -21,7 +21,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.4";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.5";
 const REQUEST_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
@@ -133,9 +133,13 @@ export class SupervisorDaemonClient {
 
   async create(input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> {
     if (!input.charter.trim()) throw new Error("A supervised agent charter is required.");
+    const creationRequestId = input.creationRequestId?.trim() || randomUUID();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(creationRequestId)) {
+      throw new Error("A valid supervised agent creation request id is required.");
+    }
     const now = this.now().toISOString();
     const entry: WireEntry = {
-      id: `supervised_${randomUUID()}`,
+      id: `supervised_${creationRequestId}`,
       room_id: input.roomIdentifier,
       display_name: input.displayName.trim() || "Supervised agent",
       provider: input.providerId,

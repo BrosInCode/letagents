@@ -788,10 +788,10 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
   }
 });
 
-test("concurrent supervised lane claims have exactly one daemon-serialized winner", async () => {
+test("concurrent supervised creates get independent lanes while duplicate request ids stay exactly-once", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
-  const daemon = new SupervisorDaemon(paths, "darwin");
+  let daemon = new SupervisorDaemon(paths, "darwin");
   try {
     await daemon.start();
     const candidate = (id: string): DaemonManifestEntry => ({
@@ -806,23 +806,49 @@ test("concurrent supervised lane claims have exactly one daemon-serialized winne
       daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("owner_a") }),
       daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("owner_b") }),
     ]);
-    assert.equal(results.filter((result) => result.ok).length, 1);
-    assert.equal(results.filter((result) => !result.ok && /already owned/.test(result.error ?? "")).length, 1);
-    const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    assert.equal(manifest.filter((candidate) => candidate.room_id === "focus_37" && candidate.provider === "codex" && candidate.desired_state !== "stopped").length, 1);
+    assert.equal(results.filter((result) => result.ok).length, 2);
+    let manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.deepEqual(manifest.map((candidate) => candidate.id).sort(), ["owner_a", "owner_b"]);
 
-    const winner = manifest.find((candidate) => candidate.room_id === "focus_37" && candidate.provider === "codex" && candidate.desired_state !== "stopped");
-    assert.ok(winner);
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: winner.id,
-      desired_state: "stopped",
+      id: "owner_a", desired_state: "running",
     })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: candidate("owner_retry"),
-    })).ok, true, "explicit Stop releases the room/provider claim for one clean retry owner");
-    const retried = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    assert.equal(retried.filter((candidate) => candidate.room_id === "focus_37" && candidate.provider === "codex" && candidate.desired_state !== "stopped").length, 1);
-    assert.equal(retried.find((candidate) => candidate.id === "owner_retry")?.desired_state, "paused");
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "owner_b", desired_state: "stopped",
+    })).ok, true, "one supervised agent stops independently");
+
+    const retry = await daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("owner_a") });
+    assert.equal(retry.ok, true);
+    assert.equal((retry.result as DaemonManifestEntry).desired_state, "running", "a stale creation retry cannot rewind lifecycle state");
+    const conflictingRetry = await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...candidate("owner_a"), charter: "different agent" },
+    });
+    assert.equal(conflictingRetry.ok, false);
+    assert.match(conflictingRetry.error ?? "", /already bound to different agent parameters/);
+
+    await daemon.stop();
+    daemon = new SupervisorDaemon(paths, "darwin");
+    await daemon.start();
+    manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.equal(manifest.filter((candidate) => candidate.id === "owner_a").length, 1, "daemon restart preserves exactly one durable request owner");
+    assert.equal(manifest.find((candidate) => candidate.id === "owner_a")?.desired_state, "running");
+    assert.equal(manifest.find((candidate) => candidate.id === "owner_b")?.desired_state, "stopped");
+    const blockedLegacy = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
+      reservation_id: "legacy_blocked_by_any_supervised", room_id: "focus_37", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+    });
+    assert.equal(blockedLegacy.ok, false, "any active supervised agent keeps the legacy provider engine fenced out");
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "owner_a", desired_state: "stopped",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
+      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+    })).ok, true, "legacy migration is available only after every supervised agent stops");
+    assert.equal((await daemonRequest(paths.socketPath, "lane.release_legacy", {
+      reservation_id: "legacy_after_all_supervised_stop",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "owner_b", desired_state: "running",
+    })).ok, true, "one previously stopped supervised agent can restart independently");
   } finally {
     await daemon.stop();
     await env.cleanup();

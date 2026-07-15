@@ -326,6 +326,7 @@ import {
 import {
   isVisibleManagedAgentSession,
   canStopManagedAgentTurn,
+  exactSupervisorEntriesForManagedSessions,
   managedAgentSessionMatchesTarget,
   managedAgentSessionMatchesReasoning,
   managedAgentSessionDisplayName,
@@ -414,7 +415,13 @@ const matchingManagedSessions = computed(() => {
   );
 });
 const matchingSupervisorEntries = computed(() => {
-  const ids = new Set(matchingManagedSessions.value.map((session) => session.supervisorEntryId).filter(Boolean));
+  const exactEntries = exactSupervisorEntriesForManagedSessions(supervisorEntries.value, matchingManagedSessions.value);
+  if (exactEntries) {
+    // Same-provider peers may intentionally share a display label. Once MCP
+    // registration gives us durable supervisor ids, never widen the Inspector
+    // match back out through labels and accidentally combine their activity.
+    return exactEntries;
+  }
   const target = props.target;
   const labels = new Set([
     target?.displayName,
@@ -423,7 +430,6 @@ const matchingSupervisorEntries = computed(() => {
     target?.ideLabel,
   ].filter(Boolean).map((value) => String(value).toLowerCase()));
   return supervisorEntries.value.filter((entry) => {
-    if (ids.has(entry.id)) return true;
     const displayName = entry.displayName.toLowerCase();
     return labels.has(displayName)
       || [...labels].some((label) => label.startsWith(`${displayName} |`));

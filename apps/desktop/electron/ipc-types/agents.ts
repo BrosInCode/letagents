@@ -409,6 +409,8 @@ export interface DesktopSupervisorManifestEntry {
 }
 
 export interface DesktopSupervisorCreateInput {
+  /** Stable across retries of one Start action; a new intentional agent gets a new id. */
+  creationRequestId?: string | null;
   roomIdentifier: string;
   displayName: string;
   providerId: DesktopAgentProviderId;

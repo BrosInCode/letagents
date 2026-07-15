@@ -2,7 +2,6 @@ import type {
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
-import { supervisedProviderLaneEntry } from "./managed-agents";
 
 export interface SupervisedRecoveryClient {
   listAgents(roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]>;
@@ -52,31 +51,7 @@ export function isSupervisedRuntimeSettled(
     entry.observedState === "working";
 }
 
-/**
- * Resolve only the durable supervisor lane that blocked this provider's Start
- * request. This deliberately never consults room presence, because an orphan
- * can fail before registering an MCP participant.
- */
-export async function loadSupervisedProviderLane(
-  client: SupervisedRecoveryClient,
-  roomIdentifier: string,
-  providerId: string,
-): Promise<SupervisedRecoveryLookup> {
-  try {
-    const entries = await client.listAgents(roomIdentifier);
-    return {
-      entry: supervisedProviderLaneEntry(entries, roomIdentifier, providerId),
-      error: null,
-    };
-  } catch {
-    return {
-      entry: null,
-      error: "Could not load the supervisor recovery entry. Check the daemon connection, then try Start again.",
-    };
-  }
-}
-
-/** Stop exactly the entry selected by the durable room/provider lane lookup. */
+/** Stop exactly one durable supervised entry without affecting its peers. */
 export function stopSupervisedProviderLane(
   client: SupervisedRecoveryClient,
   entryId: string,
