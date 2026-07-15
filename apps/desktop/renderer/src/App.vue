@@ -153,7 +153,7 @@
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
-          :room="selectedRoomInfo"
+          :room="selectedRoomWithProjectContext"
           :storage="selectedRoomStorage"
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
@@ -334,6 +334,7 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
+import { roomWithInheritedProjectContext } from "./domain/room-project-context";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -471,17 +472,28 @@ const desktopShellStyle = computed(() => ({
   "--sidebar-max-width": `${sidebarMaxWidth}px`,
 }));
 
+const selectedRoomWithProjectContext = computed(() => {
+  const room = selectedRoomInfo.value;
+  const parentRoom = rootRoomSnapshot.value?.room || null;
+  const isListedChild = Boolean(
+    rootRoomSnapshot.value?.focusRooms.some((focusRoom) =>
+      normalizeRoomIdentifier(focusRoom.identifier) === normalizeRoomIdentifier(room.identifier)
+    )
+  );
+  return roomWithInheritedProjectContext(room, parentRoom, isListedChild);
+});
+
 const selectedGitRoomMatchesActiveRepo = computed(() => {
-  const gitRoom = selectedRoomInfo.value.gitRoom;
+  const gitRoom = selectedRoomWithProjectContext.value.gitRoom;
   if (!gitRoom || !repoStatus.value?.isGitRepo) return false;
   const activeRoomIdentifier = normalizeRoomIdentifier(repoStatus.value.roomIdentifier);
   if (
     activeRoomIdentifier &&
-    activeRoomIdentifier === normalizeRoomIdentifier(selectedRoomInfo.value.identifier)
+    activeRoomIdentifier === normalizeRoomIdentifier(selectedRoomWithProjectContext.value.identifier)
   ) return true;
   const rootGitRoom = rootRoomSnapshot.value?.room?.gitRoom || null;
   if (rootGitRoom) return gitRoomsShareRepo(rootGitRoom, gitRoom);
-  return normalizeRoomIdentifier(selectedRoomInfo.value.identifier)
+  return normalizeRoomIdentifier(selectedRoomWithProjectContext.value.identifier)
     === normalizeRoomIdentifier(rootRoomSnapshot.value?.roomIdentifier);
 });
 
