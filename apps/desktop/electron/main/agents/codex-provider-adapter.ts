@@ -1,5 +1,3 @@
-import { execFileSync } from "node:child_process";
-
 import {
   launchCodexAppServer,
   resolveCodexAppServerUrl,
@@ -38,11 +36,19 @@ import {
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
 } from "./provider-adapter.js";
+import {
+  DEFAULT_STOP_GRACE_MS,
+  defaultGetProcessIdentity,
+  defaultObserveProcessExit,
+  defaultSignalProcess,
+  delay,
+  errorMessage,
+  observeFencedExit,
+  safeStreamPayload,
+  terminateFreshLaunch,
+} from "./provider-evidence.js";
 
-const DEFAULT_STOP_GRACE_MS = 5_000;
 const RESUME_PROBE_THREAD_ID = "00000000-0000-0000-0000-000000000000";
-const MAX_STREAM_PAYLOAD_BYTES = 32 * 1024;
-const SENSITIVE_PAYLOAD_KEY = /(?:authorization|cookie|credential|password|secret|api[_-]?key|(?:access|refresh|auth|bearer|session)[_-]?token|^token$)/i;
 
 type CodexThreadResult = { thread?: { id?: string } };
 
@@ -116,59 +122,6 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
   return [`mcp_servers.letagents.cwd=${JSON.stringify(cwd)}`];
 }
 
-function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, signal);
-      return;
-    }
-  } catch {
-    // Fall through to the direct child pid. The process group may already be
-    // gone while the child exit event is still in flight.
-  }
-  try {
-    process.kill(pid, signal);
-  } catch {
-    // Already terminal. The observed exit promise remains authoritative.
-  }
-}
-
-function defaultGetProcessIdentity(pid: number): string | null | undefined {
-  try {
-    const identity = execFileSync(
-      "/bin/ps",
-      ["-p", String(pid), "-o", "lstart=", "-o", "command="],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    return identity || undefined;
-  } catch {
-    try {
-      process.kill(pid, 0);
-      return undefined;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ESRCH" ? null : undefined;
-    }
-  }
-}
-
-async function defaultObserveProcessExit(
-  pid: number,
-  processIdentity: string,
-): Promise<CodexAppServerExit> {
-  while (true) {
-    const currentIdentity = defaultGetProcessIdentity(pid);
-    if (
-      currentIdentity === null
-      || (typeof currentIdentity === "string" && currentIdentity !== processIdentity)
-    ) return { type: "exit", code: null, signal: null };
-    await delay(1_000);
-  }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function streamKind(method: string): ProviderStreamEventKind {
   if (/(?:approval|requestApproval|guardian)/i.test(method)) return "approval";
   if (/(?:error|warning|failed)/i.test(method)) return "error";
@@ -179,60 +132,6 @@ function streamKind(method: string): ProviderStreamEventKind {
   if (/^turn\//.test(method)) return "turn_lifecycle";
   if (/^item\//.test(method)) return "item_lifecycle";
   return "provider_event";
-}
-
-function redactPayload(
-  value: unknown,
-  state: { redacted: boolean; truncated: boolean },
-  key = "",
-  depth = 0,
-): unknown {
-  if (SENSITIVE_PAYLOAD_KEY.test(key)) {
-    state.redacted = true;
-    return "[REDACTED]";
-  }
-  if (depth >= 12) {
-    state.truncated = true;
-    return "[MAX_DEPTH]";
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactPayload(entry, state, "", depth + 1));
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([entryKey, entry]) => [
-      entryKey,
-      redactPayload(entry, state, entryKey, depth + 1),
-    ]));
-  }
-  return value;
-}
-
-function safeStreamPayload(value: unknown): {
-  payload: unknown;
-  payloadTruncated: boolean;
-  payloadRedacted: boolean;
-} {
-  const state = { redacted: false, truncated: false };
-  const payload = redactPayload(value, state);
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(payload) ?? "null";
-  } catch {
-    return {
-      payload: { preview: "[UNSERIALIZABLE_PROVIDER_PAYLOAD]" },
-      payloadTruncated: true,
-      payloadRedacted: state.redacted,
-    };
-  }
-  if (Buffer.byteLength(serialized, "utf8") <= MAX_STREAM_PAYLOAD_BYTES) {
-    return { payload, payloadTruncated: state.truncated, payloadRedacted: state.redacted };
-  }
-  const serializedBytes = Buffer.from(serialized, "utf8");
-  return {
-    payload: { preview: serializedBytes.subarray(0, MAX_STREAM_PAYLOAD_BYTES).toString("utf8"), originalBytes: serializedBytes.length },
-    payloadTruncated: true,
-    payloadRedacted: state.redacted,
-  };
 }
 
 function isMethodNotFound(error: unknown): boolean {
@@ -296,82 +195,6 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
   }
 }
 
-function observeFencedExit(
-  client: CodexAdapterRpc,
-  pid: number,
-  processIdentity: string,
-  observedExit: Promise<CodexAppServerExit>,
-  deps: CodexProviderAdapterDependencies,
-): Promise<CodexAppServerExit> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let fencing = false;
-    let unsubscribe = () => {};
-    const finish = (exit: CodexAppServerExit) => {
-      if (settled) return;
-      settled = true;
-      unsubscribe();
-      resolve(exit);
-    };
-    observedExit.then(finish);
-    unsubscribe = client.onDisconnect(() => {
-      if (settled || fencing) return;
-      fencing = true;
-      void (async () => {
-        const identityBeforeTerm = deps.getProcessIdentity(pid);
-        if (
-          identityBeforeTerm === null
-          || (typeof identityBeforeTerm === "string" && identityBeforeTerm !== processIdentity)
-        ) {
-          finish({ type: "exit", code: null, signal: null });
-          return;
-        }
-        if (identityBeforeTerm === undefined) return;
-        deps.signalProcess(pid, "SIGTERM");
-        await delay(DEFAULT_STOP_GRACE_MS);
-        if (settled) return;
-        // Re-check the birth identity before escalation. A recycled PID must
-        // never be killed or mistaken for evidence that the original exited.
-        const identityBeforeKill = deps.getProcessIdentity(pid);
-        if (
-          identityBeforeKill === null
-          || (typeof identityBeforeKill === "string" && identityBeforeKill !== processIdentity)
-        ) {
-          finish({ type: "exit", code: null, signal: null });
-          return;
-        }
-        if (identityBeforeKill === undefined) return;
-        deps.signalProcess(pid, "SIGKILL");
-        // Only actual process-identity disappearance can make the generation
-        // terminal. An RPC close by itself remains ambiguous and restart-blocking.
-        finish(await observedExit);
-      })();
-    });
-    if (settled) unsubscribe();
-  });
-}
-
-async function terminateFreshLaunch(
-  launch: CodexAppServerLaunch,
-  deps: CodexProviderAdapterDependencies,
-): Promise<void> {
-  if (launch.pid === null) return;
-  let alreadyExited = false;
-  void launch.exited.then(() => { alreadyExited = true; });
-  await Promise.resolve();
-  if (alreadyExited) return;
-
-  deps.signalProcess(launch.pid, "SIGTERM");
-  const graceful = await Promise.race([
-    launch.exited.then(() => true),
-    delay(DEFAULT_STOP_GRACE_MS).then(() => false),
-  ]);
-  if (graceful) return;
-
-  deps.signalProcess(launch.pid, "SIGKILL");
-  await launch.exited;
-}
-
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
   launchServer: (serverUrl, codexBin, options) =>
@@ -384,13 +207,6 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   observeProcessExit: defaultObserveProcessExit,
   now: () => new Date().toISOString(),
 };
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timeout = setTimeout(resolve, Math.max(0, ms));
-    timeout.unref?.();
-  });
-}
 
 class CodexProviderHandle implements ProviderHandle {
   state: ProviderObservedState = "starting";
@@ -687,7 +503,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
   private async attachRunning(
     ref: ProviderContinuationRef,
-    connection: ProviderConnectionRef,
+    connection: Extract<ProviderConnectionRef, { kind: "codex_app_server" }>,
   ): Promise<CodexProviderHandle | null> {
     let handle: CodexProviderHandle | null = null;
     let exactEndpointVerified = false;

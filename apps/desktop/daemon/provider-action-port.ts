@@ -4,7 +4,9 @@
  * outside Electron's failure domain.
  */
 export type ProviderActionCapabilities = { resume: boolean; midTurnInjection: boolean; transcriptAccess: boolean; permissionPromptBridging: boolean; survivesRestart: boolean };
-export type ProviderActionConnectionRef = { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null };
+export type ProviderActionConnectionRef =
+  | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
+  | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null };
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; providerConnection?: ProviderActionConnectionRef | null };
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; resumeFrom?: ProviderActionRef | null; actionId?: string };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
