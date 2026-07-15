@@ -781,22 +781,28 @@ export class SupervisorDaemon {
     this.liveBindingIdentities.delete(entryId);
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveDisposers.delete(entryId);
-    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
-    if (entry?.work_attempt_id) {
-      const attempt = await this.durability.getAttempt(entry.work_attempt_id);
-      const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
-      if (execution && !execution.terminal) {
-        await this.durability.recordTerminal(entry.work_attempt_id, execution.execution_generation_id, {
-          ...this.terminalPayload(terminal, execution.actor),
-          generation: execution.generation,
-        });
+    await this.serializeEntryTick(entryId, async () => {
+      const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
+      const successorHandle = this.liveHandles.get(entryId);
+      if (successorHandle && successorHandle !== handle) return;
+      if (entry?.work_attempt_id) {
+        const attempt = await this.durability.getAttempt(entry.work_attempt_id);
+        if (this.liveHandles.get(entryId)) return;
+        const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
+        if (execution && !execution.terminal) {
+          await this.durability.recordTerminal(entry.work_attempt_id, execution.execution_generation_id, {
+            ...this.terminalPayload(terminal, execution.actor),
+            generation: execution.generation,
+          });
+        }
       }
-    }
-    if (terminalBinding) {
-      await this.workerBindings.unbind(entryId, terminalBinding.agentSessionId, terminalBinding.executionGenerationId);
-    }
-    await this.observeProviderExit(entryId, terminal, "daemon-provider", executionGenerationId, handle);
-    this.requestConvergence(entryId);
+      if (this.liveHandles.get(entryId)) return;
+      if (terminalBinding) {
+        await this.workerBindings.unbind(entryId, terminalBinding.agentSessionId, terminalBinding.executionGenerationId);
+      }
+      await this.observeProviderExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle);
+      this.requestConvergence(entryId);
+    });
   }
 
   private trackProviderCallback(operation: Promise<void>): void {
@@ -962,7 +968,11 @@ export class SupervisorDaemon {
 
   /** Provider terminal callback: records an actual exit edge before the next tick. */
   async observeProviderExit(entryId: string, terminal: ProviderActionTerminal, actor = "provider", expectedExecutionGenerationId?: string, expectedHandle?: ProviderActionHandle): Promise<void> {
-    await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
+    await this.serializeEntryTick(entryId, () => this.observeProviderExitOnce(entryId, terminal, actor, expectedExecutionGenerationId, expectedHandle));
+  }
+
+  private async observeProviderExitOnce(entryId: string, terminal: ProviderActionTerminal, actor: string, expectedExecutionGenerationId?: string, expectedHandle?: ProviderActionHandle): Promise<void> {
+    await this.serializeManifestMutation(async () => {
       const manifest = await this.store.load();
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
@@ -980,7 +990,7 @@ export class SupervisorDaemon {
       const observedState = entry.desired_state === "paused" ? "paused" : intentional ? "stopped" : "failed";
       const reconciliation = { ...advanceReconciliationState(entry.reconciliation, observedState, Date.now()), last_terminal: payload };
       await this.transitionOnce(entryId, observedState, "none", `provider terminal: ${terminal.terminalCause}`, actor, reconciliation);
-    }));
+    });
   }
 
   /** Starts periodic convergence and joins provider onExit to the same durable path. */

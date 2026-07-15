@@ -867,7 +867,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     })(), "replacement daemon while an old control socket is open", 1_000);
     await within(heldClosed, "old control connection destruction", 1_000);
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-      ...entry, id: "binding_race", room_id: "focus_37", observed_state: "working", work_attempt_id: null,
+      ...entry, id: "binding_race", room_id: "focus_37", observed_state: "working", work_attempt_id: "attempt_old",
       provider_ref: {
         work_attempt_id: "attempt_old", provider_continuation_id: "continuation_successor",
         provider_connection: null, execution_generation_id: "execution_old",
@@ -892,6 +892,10 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       liveHandles: Map<string, typeof staleHandle>;
       liveBindingIdentities: Map<string, { agentSessionId: string; executionGenerationId: string; updatedAt: string }>;
       store: ManifestStore;
+      durability: {
+        getAttempt: (id: string) => Promise<{ execution_generations: Array<{ execution_generation_id: string; terminal: unknown; actor: string; generation: number }> }>;
+        recordTerminal: (workAttemptId: string, executionGenerationId: string, terminal: unknown) => Promise<void>;
+      };
       handleProviderTerminal: (entryId: string, handle: typeof staleHandle, executionGenerationId: string, binding: { agentSessionId: string; executionGenerationId: string; updatedAt: string }, terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "stopped"; providerContinuationId: string }) => Promise<void>;
     };
     replacementInternals.liveHandles.set("binding_race", staleHandle);
@@ -901,6 +905,15 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       updatedAt: predecessorBinding.updated_at,
     };
     replacementInternals.liveBindingIdentities.set("binding_race", predecessorIdentity);
+    const fakeExecutions = [
+      { execution_generation_id: "execution_old", terminal: null as unknown, actor: "old-worker", generation: 1 },
+      { execution_generation_id: "execution_successor", terminal: null as unknown, actor: "successor-worker", generation: 2 },
+    ];
+    replacementInternals.durability.getAttempt = async () => ({ execution_generations: fakeExecutions });
+    replacementInternals.durability.recordTerminal = async (_workAttemptId, executionGenerationId, terminal) => {
+      const execution = fakeExecutions.find((candidate) => candidate.execution_generation_id === executionGenerationId)!;
+      execution.terminal = terminal;
+    };
     const originalReplacementLoad = replacementInternals.store.load.bind(replacementInternals.store);
     let gateNextLoad = true;
     replacementInternals.store.load = async () => {
@@ -913,7 +926,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     };
     const staleTerminal = replacementInternals.handleProviderTerminal("binding_race", staleHandle, "execution_old", predecessorIdentity, {
       endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "continuation_old",
-    }).catch(() => undefined);
+    });
     await terminalLoadReached;
     const successorBinding = await replacementBindings.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_new",
@@ -933,6 +946,8 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     assert.equal(afterStaleTerminal.observed_state, "working", "a stale terminal callback cannot transition the successor manifest entry");
     assert.equal(afterStaleTerminal.provider_ref?.provider_continuation_id, "continuation_successor");
     assert.equal(replacementInternals.liveHandles.get("binding_race"), successorHandle, "the successor provider handle remains live");
+    assert.equal(fakeExecutions[0]!.terminal, null, "the stale callback cannot terminalize the shared execution after its handle was replaced");
+    assert.equal(fakeExecutions[1]!.terminal, null, "the successor execution remains live");
 
     releaseCommit();
     releaseBindingCommit();
