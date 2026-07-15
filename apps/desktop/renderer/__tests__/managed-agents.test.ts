@@ -50,6 +50,7 @@ import {
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   exactSupervisorEntriesForManagedSessions,
+  exactSupervisorEntriesForTarget,
   matchingManagedAgentWorktrees,
   matchingManagedAgentWorktreesForBranch,
   normalizeManagedAgentRoomIdentifier,
@@ -58,6 +59,7 @@ import {
   shouldShowCursorMcpPolicySelector,
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
+  supervisedAgentWorkIndicators,
   visibleDesktopAgentProviders,
 } from "../src/domain/managed-agents";
 import {
@@ -168,6 +170,12 @@ function supervisorEntry(
     createdAt: "2026-07-15T12:00:00.000Z",
     workspacePath: "/tmp/repo",
     workAttemptId: "attempt_1",
+    agentSessionId: null,
+    agentSessionBindingState: "none",
+    bindingUpdatedAt: null,
+    executionGenerationId: null,
+    providerContinuationId: null,
+    providerPid: null,
     workplaceLiveness: { state: "unknown", observedAt: null, detail: null },
     nativeLiveness: { state: "unknown", observedAt: null, detail: null },
     restartCount: 0,
@@ -377,6 +385,79 @@ test("Inspector activity uses exact supervisor ids when same-provider agents sha
     ["supervised_second"],
   );
   assert.equal(exactSupervisorEntriesForManagedSessions([first, second], [{ supervisorEntryId: null }]), null);
+});
+
+test("a rebound room session resolves one exact supervisor entry without a local managed session", () => {
+  const first = supervisorEntry({
+    id: "supervised_first",
+    displayName: "Codex supervised agent",
+    agentSessionId: "agent_session_402",
+  });
+  const rebound = supervisorEntry({
+    id: "supervised_second",
+    displayName: "Codex supervised agent",
+    agentSessionId: "agent_session_403",
+  });
+  assert.deepEqual(
+    exactSupervisorEntriesForTarget([first, rebound], [], "agent_session_403").map((entry) => entry.id),
+    ["supervised_second"],
+  );
+  assert.deepEqual(
+    exactSupervisorEntriesForTarget([first, rebound], [], "agent_session_missing"),
+    [],
+    "a specific room worker never widens to a same-label peer",
+  );
+  assert.deepEqual(
+    exactSupervisorEntriesForTarget([
+      { ...rebound, agentSessionId: null },
+      first,
+    ], [], "agent_session_403", ["supervised_second"]).map((entry) => entry.id),
+    ["supervised_second"],
+    "a previously exact entry remains controllable when restart temporarily clears its worker binding",
+  );
+});
+
+test("supervisor native activity drives the chat work indicator for the bound room identity", () => {
+  const working = supervisorEntry({
+    id: "supervised_working",
+    agentSessionId: "agent_session_403",
+    agentSessionBindingState: "active",
+    observedState: "working",
+    condition: "none",
+    nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
+    activity: [{
+      observedAt: "2026-07-15T18:00:01.000Z",
+      sequence: 7,
+      provider: "codex",
+      kind: "tool_lifecycle",
+      method: "item/toolCall/started",
+      summary: "Inspecting the workspace",
+      status: "working",
+      payload: null,
+      payloadTruncated: false,
+      payloadRedacted: true,
+      durablePayloadRef: null,
+    }],
+  });
+  assert.deepEqual(
+    supervisedAgentWorkIndicators([
+      working,
+      { ...working, id: "supervised_stale", agentSessionId: "agent_session_404", nativeLiveness: { state: "stale", observedAt: working.nativeLiveness.observedAt, detail: null } },
+    ], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
+    [{
+      id: "supervised_working:7",
+      displayName: "DawnHarbor",
+      summary: "Inspecting the workspace",
+      startedAt: "2026-07-15T18:00:01.000Z",
+    }],
+  );
+  assert.deepEqual(
+    supervisedAgentWorkIndicators([
+      { ...working, agentSessionBindingState: "historical" },
+    ], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
+    [],
+    "a historical control identity never claims that an unbound worker is typing or working",
+  );
 });
 
 test("a successful first supervised Start has an immediate non-recovery runtime label", () => {

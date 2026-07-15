@@ -35,8 +35,10 @@ import {
   isImageAttachment,
 } from "../src/components/desktop/content/desktop-chat-message/attachments";
 import {
+  agentTargetWithPresenceSession,
   hasReasoningStreamSurface,
   latestReasoningForAgent,
+  useAgentReasoningLauncher,
 } from "../src/components/desktop/content/room-chat/useAgentReasoningLauncher";
 import {
   applyThreadQuoteToDraft,
@@ -440,6 +442,65 @@ describe("room chat helpers", () => {
     assert.equal(latestReasoningForAgent(target, [oldSession, newSession])?.id, "reasoning_new");
     assert.equal(hasReasoningStreamSurface(target, []), true);
     assert.equal(hasReasoningStreamSurface({ ...target, ideLabel: null }, [presenceEntry()]), true);
+  });
+
+  it("enriches a clicked rebound message sender with its unique current room session", () => {
+    const target = {
+      actorLabel: "DawnHarbor | EmmyMay's agent | Codex",
+      displayName: "DawnHarbor",
+      ownerAttribution: "EmmyMay's agent",
+      ideLabel: "Codex",
+      sender: "DawnHarbor | EmmyMay's agent | Codex",
+      agentKey: null,
+      agentSessionId: null,
+    };
+    const dawn = presenceEntry({
+      actorLabel: target.actorLabel,
+      displayName: "DawnHarbor",
+      agentSessionId: "agent_session_403",
+    });
+    const sameProviderPeer = presenceEntry({
+      actorLabel: "SilverCove | EmmyMay's agent | Codex",
+      displayName: "DawnHarbor",
+      agentSessionId: "agent_session_402",
+    });
+    let openedTarget = null as typeof target | null;
+    const launcher = useAgentReasoningLauncher({
+      presence: () => [sameProviderPeer, dawn],
+      reasoningSessions: () => [],
+      openReasoning: () => assert.fail("detail route should not open reasoning"),
+      openFallback: () => assert.fail("detail route should not open fallback"),
+      openAgentDetail: (resolved) => { openedTarget = resolved; },
+    });
+
+    launcher.openAgentModal(target);
+
+    assert.equal(openedTarget?.agentSessionId, "agent_session_403");
+    assert.equal(agentTargetWithPresenceSession(target, [sameProviderPeer, dawn]).agentSessionId, "agent_session_403");
+  });
+
+  it("fails closed when a clicked message identity maps to multiple room sessions", () => {
+    const target = {
+      actorLabel: "SharedActor | EmmyMay's agent | Codex",
+      displayName: "SharedActor",
+      ownerAttribution: "EmmyMay's agent",
+      ideLabel: "Codex",
+      sender: "SharedActor | EmmyMay's agent | Codex",
+      agentKey: "EmmyMay/sharedactor",
+      agentSessionId: null,
+    };
+    const first = presenceEntry({
+      actorLabel: target.actorLabel,
+      agentKey: target.agentKey,
+      agentSessionId: "agent_session_first",
+    });
+    const second = presenceEntry({
+      actorLabel: target.actorLabel,
+      agentKey: target.agentKey,
+      agentSessionId: "agent_session_second",
+    });
+
+    assert.equal(agentTargetWithPresenceSession(target, [first, second]).agentSessionId, null);
   });
 
   it("detects idle reasoning sessions before offering turn stops", () => {
@@ -862,8 +923,9 @@ function reasoningSession(id: string, updatedAt: string): DesktopReasoningSessio
   };
 }
 
-function presenceEntry(): DesktopAgentPresence {
+function presenceEntry(overrides: Partial<DesktopAgentPresence> = {}): DesktopAgentPresence {
   return {
+    agentKey: null,
     agentSessionId: "session_1",
     agentInstanceId: null,
     actorLabel: "Agent Smith | Codex",
@@ -881,5 +943,6 @@ function presenceEntry(): DesktopAgentPresence {
     lastHeartbeatAt: "2026-05-28T02:00:00.000Z",
     roomId: "room_1",
     livenessObservation: null,
+    ...overrides,
   };
 }

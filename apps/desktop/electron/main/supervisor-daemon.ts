@@ -21,7 +21,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.5";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.7";
 const REQUEST_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
@@ -46,6 +46,23 @@ type WireEntry = {
   source_repo_path?: string | null;
   workspace_path?: string | null;
   work_attempt_id?: string | null;
+  provider_ref?: {
+    provider_continuation_id: string;
+    execution_generation_id: string;
+    provider_connection?: { pid?: number | null } | null;
+  } | null;
+  worker_binding?: {
+    agent_session_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    updated_at: string;
+  } | null;
+  last_worker_binding?: {
+    agent_session_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    updated_at: string;
+  } | null;
   workplace_liveness?: { state: string; observed_at: string | null; detail: string | null };
   native_liveness?: { state: string; observed_at: string | null; detail: string | null };
   activity?: WireActivityEvent[];
@@ -87,6 +104,8 @@ export interface SupervisorDaemonLifecycleOptions {
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
   spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
+  terminateDaemon?: (pid: number) => void;
+  handoffTimeoutMs?: number;
   now?: () => Date;
 }
 
@@ -96,12 +115,16 @@ export class SupervisorDaemonClient {
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
   private readonly daemonWorkingDirectory: string;
+  private readonly terminateDaemon: (pid: number) => void;
+  private readonly handoffTimeoutMs: number;
   private readonly now: () => Date;
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
     this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
+    this.terminateDaemon = options.terminateDaemon ?? ((pid) => process.kill(pid, "SIGTERM"));
+    this.handoffTimeoutMs = options.handoffTimeoutMs ?? START_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
       const child = spawn(process.execPath, [scriptPath], {
@@ -251,7 +274,11 @@ export class SupervisorDaemonClient {
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
       ) return mapStatus(negotiated);
       await this.request("daemon.prepare_handoff", undefined, daemonVersion);
-      await this.waitForSocketDown();
+      try {
+        await this.waitForSocketDown();
+      } catch (error) {
+        await this.terminateStalledDaemon(negotiated, daemonVersion, error);
+      }
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
     }
@@ -282,12 +309,28 @@ export class SupervisorDaemonClient {
   }
 
   private async waitForSocketDown(): Promise<void> {
-    const deadline = Date.now() + START_TIMEOUT_MS;
+    const deadline = Date.now() + this.handoffTimeoutMs;
     while (Date.now() < deadline) {
       try { await this.request("daemon.negotiate"); } catch (error) { if (isConnectionUnavailable(error)) return; throw error; }
       await delay(25);
     }
     throw new Error("Existing supervisor daemon did not complete negotiated handoff; it was left running.");
+  }
+
+  private async terminateStalledDaemon(
+    negotiated: Record<string, unknown>,
+    daemonVersion: number,
+    handoffError: unknown,
+  ): Promise<void> {
+    const current = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, daemonVersion);
+    const pid = Number(current.pid);
+    const sameDaemon = Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid
+      && current.generation === negotiated.generation
+      && current.implementation_version === negotiated.implementation_version
+      && current.started_at === negotiated.started_at;
+    if (!sameDaemon) throw handoffError;
+    this.terminateDaemon(pid);
+    await this.waitForSocketDown();
   }
 
   private request<T = unknown>(method: string, params?: unknown, version = SUPERVISOR_DAEMON_PROTOCOL_VERSION): Promise<T> {
@@ -340,6 +383,8 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
 }
 
 function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
+  const activeWorkerBinding = entry.worker_binding ?? null;
+  const workerBinding = activeWorkerBinding ?? entry.last_worker_binding ?? null;
   return {
     id: entry.id,
     roomId: entry.room_id,
@@ -356,6 +401,12 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     createdAt: entry.created_at,
     workspacePath: entry.workspace_path ?? null,
     workAttemptId: entry.work_attempt_id ?? null,
+    agentSessionId: workerBinding?.agent_session_id ?? null,
+    agentSessionBindingState: activeWorkerBinding ? "active" : workerBinding ? "historical" : "none",
+    bindingUpdatedAt: workerBinding?.updated_at ?? null,
+    executionGenerationId: entry.provider_ref?.execution_generation_id ?? null,
+    providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
+    providerPid: entry.provider_ref?.provider_connection?.pid ?? null,
     workplaceLiveness: {
       state: entry.workplace_liveness?.state ?? "unknown",
       observedAt: entry.workplace_liveness?.observed_at ?? null,

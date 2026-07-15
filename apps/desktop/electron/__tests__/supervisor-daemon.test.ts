@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import type { ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
@@ -126,6 +126,38 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const second = await client.create({ ...createInput, creationRequestId: "request_bravo", displayName: "Second durable Codex" });
     assert.notEqual(second.id, created.id, "a new Start request creates an independent same-provider agent");
     assert.equal(wire.entries.length, 2);
+    Object.assign(wire.entries[0], {
+      work_attempt_id: "attempt_alpha",
+      provider_ref: {
+        provider_continuation_id: "continuation_alpha",
+        execution_generation_id: "generation_alpha",
+        provider_connection: { kind: "codex_app_server", pid: 4242 },
+      },
+      worker_binding: {
+        agent_session_id: "agent_session_rebound",
+        work_attempt_id: "attempt_alpha",
+        execution_generation_id: "generation_alpha",
+        updated_at: "2026-07-15T18:00:00.000Z",
+      },
+    });
+    const rebound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
+    assert.equal(rebound.agentSessionId, "agent_session_rebound");
+    assert.equal(rebound.agentSessionBindingState, "active");
+    assert.equal(rebound.executionGenerationId, "generation_alpha");
+    assert.equal(rebound.providerContinuationId, "continuation_alpha");
+    assert.equal(rebound.providerPid, 4242);
+    Object.assign(wire.entries[0], {
+      worker_binding: null,
+      last_worker_binding: {
+        agent_session_id: "agent_session_rebound",
+        work_attempt_id: "attempt_alpha",
+        execution_generation_id: "generation_alpha",
+        updated_at: "2026-07-15T18:00:00.000Z",
+      },
+    });
+    const temporarilyUnbound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
+    assert.equal(temporarilyUnbound.agentSessionId, "agent_session_rebound", "identity-only history keeps exact controls routed after live credentials unbind");
+    assert.equal(temporarilyUnbound.agentSessionBindingState, "historical", "historical control identity never masquerades as an active room binding");
     await assert.rejects(
       () => client.assertLegacyStartAllowed(created.roomId, "codex"),
       /already owns the codex lane through the supervised engine/,
@@ -215,6 +247,50 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
   } finally {
     await closeServer(replacementServer, env.socketPath);
     await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("desktop safely terminates a wedged negotiated daemon while preserving provider work", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let terminatedPid: number | null = null;
+  const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    21,
+    undefined,
+    "2.0.6-wedged",
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 50,
+      terminateDaemon: (pid) => {
+        terminatedPid = pid;
+        void closeServer(oldServer, env.socketPath);
+      },
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 22)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    const status = await client.ensureRunning();
+    assert.equal(terminatedPid, 77, "only the re-negotiated exact daemon PID is terminated");
+    assert.equal(status.generation, 22);
+    assert.doesNotThrow(() => process.kill(provider.pid!, 0), "daemon recovery does not kill detached provider work");
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    provider.kill("SIGKILL");
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
   }

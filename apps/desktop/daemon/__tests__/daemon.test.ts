@@ -16,7 +16,8 @@ import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { SupervisorDaemon } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonRequest } from "../types.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
@@ -59,11 +60,16 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   return new Promise((resolve, reject) => {
     const client = createConnection(socketPath);
     let received = "";
+    let settled = false;
     client.setEncoding("utf8");
     client.once("error", reject);
+    client.once("close", () => {
+      if (!settled) reject(new Error(`Daemon connection closed before '${method}' returned a response.`));
+    });
     client.on("data", (chunk) => {
       received += chunk;
       if (!received.includes("\n")) return;
+      settled = true;
       client.end();
       resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
     });
@@ -751,6 +757,214 @@ test("cross-version negotiation is allowed before a generation handoff", async (
   } finally { await env.cleanup(); }
 });
 
+test("version handoff releases authority without waiting for wedged callbacks and preserves provider work", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const first = new SupervisorDaemon(paths, "darwin");
+  let second: SupervisorDaemon | null = null;
+  const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  try {
+    await first.start();
+    const never = new Promise<void>(() => {});
+    const internals = first as unknown as {
+      convergenceRequests: Map<string, Promise<void>>;
+      providerCallbacks: Set<Promise<void>>;
+      scheduledConvergence: Map<string, Promise<{ dispose: () => Promise<void> }>>;
+    };
+    internals.convergenceRequests.set("wedged", never);
+    internals.providerCallbacks.add(never);
+    internals.scheduledConvergence.set("wedged", new Promise(() => {}));
+
+    const prepared = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(prepared.ok, true);
+    second = new SupervisorDaemon(paths, "darwin");
+    await within((async () => {
+      while (true) {
+        try { await second!.start(); return; }
+        catch (error) {
+          if (!(error instanceof DaemonAlreadyRunningError)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+    })(), "replacement daemon authority after handoff", 1_000);
+    assert.doesNotThrow(() => process.kill(provider.pid!, 0), "handoff detaches daemon observers without killing provider work");
+  } finally {
+    await second?.stop();
+    provider.kill("SIGKILL");
+    await env.cleanup();
+  }
+});
+
+test("handoff destroys open control sockets and fences a mutation paused before commit", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+    workerBindingsPath: join(env.root, "worker-bindings.json"),
+  };
+  const first = new SupervisorDaemon(paths, "darwin");
+  let second: SupervisorDaemon | null = null;
+  let releaseCommit!: () => void;
+  const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  let reachedCommit!: () => void;
+  const commitReached = new Promise<void>((resolve) => { reachedCommit = resolve; });
+  let releaseBindingCommit!: () => void;
+  const bindingCommitGate = new Promise<void>((resolve) => { releaseBindingCommit = resolve; });
+  let reachedBindingCommit!: () => void;
+  const bindingCommitReached = new Promise<void>((resolve) => { reachedBindingCommit = resolve; });
+  let heldSocket: ReturnType<typeof createConnection> | null = null;
+  try {
+    await first.start();
+    const store = (first as unknown as { store: ManifestStore }).store;
+    const originalWrite = store.write.bind(store);
+    store.write = (expected, entries, owners, commitFence) => originalWrite(expected, entries, owners, async (commit) => {
+      reachedCommit();
+      await commitGate;
+      if (commitFence) await commitFence(commit);
+      else await commit();
+    });
+    const lateMutation = daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...entry, id: "must_not_commit_after_handoff" },
+    }).catch(() => null);
+    const bindingStore = (first as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
+    const rawBindingStore = bindingStore as unknown as { write: (value: unknown) => Promise<void> };
+    const originalBindingWrite = rawBindingStore.write.bind(rawBindingStore);
+    rawBindingStore.write = async (value) => {
+      reachedBindingCommit();
+      await bindingCommitGate;
+      await originalBindingWrite(value);
+    };
+    const lateBinding = bindingStore.bind({
+      entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_old",
+      execution_generation_id: "execution_old", agent_session_id: "session_old",
+      agent_session_token: "old-secret", api_url: "https://letagents.chat",
+    }).catch(() => null);
+    await Promise.all([commitReached, bindingCommitReached]);
+
+    heldSocket = createConnection(paths.socketPath);
+    await new Promise<void>((resolve, reject) => {
+      heldSocket!.once("connect", resolve);
+      heldSocket!.once("error", reject);
+    });
+    const heldClosed = new Promise<void>((resolve) => heldSocket!.once("close", () => resolve()));
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    second = new SupervisorDaemon(paths, "darwin");
+    await within((async () => {
+      while (true) {
+        try { await second!.start(); return; }
+        catch (error) {
+          if (!(error instanceof DaemonAlreadyRunningError)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+    })(), "replacement daemon while an old control socket is open", 1_000);
+    await within(heldClosed, "old control connection destruction", 1_000);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "binding_race", room_id: "focus_37", observed_state: "working", work_attempt_id: "attempt_old",
+      provider_ref: {
+        work_attempt_id: "attempt_old", provider_continuation_id: "continuation_successor",
+        provider_connection: null, execution_generation_id: "execution_old",
+      },
+    } })).ok, true);
+    const replacementBindings = (second as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
+    const predecessorBinding = await replacementBindings.bind({
+      entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_old",
+      execution_generation_id: "execution_old", agent_session_id: "session_old",
+      agent_session_token: "old-secret", api_url: "https://letagents.chat",
+    });
+    const staleHandle = {
+      workAttemptId: "attempt_old", pid: null, providerContinuationId: "continuation_old",
+      providerConnection: null, observedState: "working" as const,
+    };
+    const successorHandle = { ...staleHandle, providerContinuationId: "continuation_successor" };
+    let releaseTerminalLoad!: () => void;
+    const terminalLoadGate = new Promise<void>((resolve) => { releaseTerminalLoad = resolve; });
+    let reachedTerminalLoad!: () => void;
+    const terminalLoadReached = new Promise<void>((resolve) => { reachedTerminalLoad = resolve; });
+    const replacementInternals = second as unknown as {
+      liveHandles: Map<string, typeof staleHandle>;
+      liveBindingIdentities: Map<string, { agentSessionId: string; executionGenerationId: string; updatedAt: string }>;
+      store: ManifestStore;
+      durability: {
+        getAttempt: (id: string) => Promise<{ execution_generations: Array<{ execution_generation_id: string; terminal: unknown; actor: string; generation: number }> }>;
+        recordTerminal: (workAttemptId: string, executionGenerationId: string, terminal: unknown) => Promise<void>;
+      };
+      handleProviderTerminal: (entryId: string, handle: typeof staleHandle, executionGenerationId: string, binding: { agentSessionId: string; executionGenerationId: string; updatedAt: string }, terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "stopped"; providerContinuationId: string }) => Promise<void>;
+    };
+    replacementInternals.liveHandles.set("binding_race", staleHandle);
+    const predecessorIdentity = {
+      agentSessionId: predecessorBinding.agent_session_id,
+      executionGenerationId: predecessorBinding.execution_generation_id,
+      updatedAt: predecessorBinding.updated_at,
+    };
+    replacementInternals.liveBindingIdentities.set("binding_race", predecessorIdentity);
+    const fakeExecutions = [
+      { execution_generation_id: "execution_old", terminal: null as unknown, actor: "old-worker", generation: 1 },
+      { execution_generation_id: "execution_successor", terminal: null as unknown, actor: "successor-worker", generation: 2 },
+    ];
+    replacementInternals.durability.getAttempt = async () => ({ execution_generations: fakeExecutions });
+    replacementInternals.durability.recordTerminal = async (_workAttemptId, executionGenerationId, terminal) => {
+      const execution = fakeExecutions.find((candidate) => candidate.execution_generation_id === executionGenerationId)!;
+      execution.terminal = terminal;
+    };
+    const originalReplacementLoad = replacementInternals.store.load.bind(replacementInternals.store);
+    let gateNextLoad = true;
+    replacementInternals.store.load = async () => {
+      if (gateNextLoad) {
+        gateNextLoad = false;
+        reachedTerminalLoad();
+        await terminalLoadGate;
+      }
+      return originalReplacementLoad();
+    };
+    const staleTerminal = replacementInternals.handleProviderTerminal("binding_race", staleHandle, "execution_old", predecessorIdentity, {
+      endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "continuation_old",
+    });
+    await terminalLoadReached;
+    const successorBinding = await replacementBindings.bind({
+      entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_new",
+      execution_generation_id: "execution_old", agent_session_id: "session_new",
+      agent_session_token: "new-secret", api_url: "https://letagents.chat",
+    });
+    replacementInternals.liveHandles.set("binding_race", successorHandle);
+    replacementInternals.liveBindingIdentities.set("binding_race", {
+      agentSessionId: successorBinding.agent_session_id,
+      executionGenerationId: successorBinding.execution_generation_id,
+      updatedAt: successorBinding.updated_at,
+    });
+    releaseTerminalLoad();
+    await staleTerminal;
+    const afterStaleTerminal = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+      .find((candidate) => candidate.id === "binding_race")!;
+    assert.equal(afterStaleTerminal.observed_state, "working", "a stale terminal callback cannot transition the successor manifest entry");
+    assert.equal(afterStaleTerminal.provider_ref?.provider_continuation_id, "continuation_successor");
+    assert.equal(replacementInternals.liveHandles.get("binding_race"), successorHandle, "the successor provider handle remains live");
+    assert.equal(fakeExecutions[0]!.terminal, null, "the stale callback cannot terminalize the shared execution after its handle was replaced");
+    assert.equal(fakeExecutions[1]!.terminal, null, "the successor execution remains live");
+
+    releaseCommit();
+    releaseBindingCommit();
+    await Promise.all([lateMutation, lateBinding]);
+    const listed = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.equal(listed.some((candidate) => candidate.id === "must_not_commit_after_handoff"), false);
+    assert.doesNotMatch(await readFile(paths.auditPath, "utf8").catch(() => ""), /must_not_commit_after_handoff/);
+    assert.equal((await replacementBindings.get("binding_race"))?.agent_session_id, "session_new", "a stale bind cannot overwrite its successor generation");
+  } finally {
+    releaseCommit();
+    releaseBindingCommit();
+    heldSocket?.destroy();
+    await second?.stop();
+    await env.cleanup();
+  }
+});
+
 test("daemon control surface persists three-axis state, dual-axis liveness, and bounded activity", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
@@ -1223,6 +1437,12 @@ test("generation handoff reattaches the same provider and publishes its supervis
       api_url: apiUrl,
     });
     assert.equal(bound.ok, true, bound.error);
+    const boundProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(boundProjection.worker_binding?.agent_session_id, "agent_session_exact");
+    assert.equal(boundProjection.worker_binding?.work_attempt_id, workAttemptId);
+    assert.equal(boundProjection.worker_binding?.execution_generation_id, executionGenerationId);
+    assert.equal(boundProjection.last_worker_binding?.agent_session_id, "agent_session_exact");
+    assert.doesNotMatch(JSON.stringify(boundProjection), /session-secret|api_url/, "renderer projection never exposes worker authority");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.bound"), "initial daemon worker binding activity");
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "tool_lifecycle", method: "item/toolCall/started", payload: { tool: "test" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 1), "first native stream event");
@@ -1266,6 +1486,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     const after = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(after.provider_ref?.provider_connection?.pid, originalPid);
     assert.equal(after.provider_ref?.provider_continuation_id, continuation);
+    assert.equal((after as DaemonManifestEntryView).worker_binding?.agent_session_id, "agent_session_exact", "daemon handoff preserves the public exact-session projection");
     sequence = 0; // A freshly attached adapter has a fresh local counter.
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/completed", payload: {}, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 5), "reattached stream event");
@@ -1296,6 +1517,9 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "stopped" });
     await eventually(async () => !child?.pid || (() => { try { process.kill(child.pid!, 0); return false; } catch { return true; } })(), "daemon stop authority");
     await eventually(async () => !/agent_session_exact/.test(await readFile(paths.workerBindingsPath, "utf8")), "terminal attempt worker binding removal");
+    const stoppedProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(stoppedProjection.worker_binding, null, "terminal stop removes live worker authority");
+    assert.equal(stoppedProjection.last_worker_binding?.agent_session_id, "agent_session_exact", "terminal stop preserves the non-secret exact control route");
     await eventually(async () => {
       const stopped = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return stopped.observed_state === "stopped" && stopped.condition === "none";
@@ -1314,6 +1538,18 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(resumed.provider_ref?.provider_continuation_id, continuation, "resume preserves provider continuation identity");
     assert.notEqual(resumed.provider_ref?.provider_connection?.pid, stoppedPid, "resume installs the replacement provider process");
     assert.equal(resumeCount, 1);
+    const resumedGenerationId = resumed.provider_ref!.execution_generation_id;
+    const rebound = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
+      entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_rebound",
+      work_attempt_id: workAttemptId, execution_generation_id: resumedGenerationId,
+      agent_session_token: "rebound-secret", api_url: apiUrl,
+    });
+    assert.equal(rebound.ok, true, rebound.error);
+    const reboundProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(reboundProjection.worker_binding?.agent_session_id, "agent_session_rebound", "a successor room session immediately replaces the public binding projection");
+    assert.equal(reboundProjection.last_worker_binding?.agent_session_id, "agent_session_rebound", "a rebound worker replaces the durable exact control route");
+    assert.equal(reboundProjection.worker_binding?.execution_generation_id, resumedGenerationId);
+    assert.doesNotMatch(JSON.stringify(reboundProjection), /rebound-secret/);
     const staleBind = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
       entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_stale",
       work_attempt_id: workAttemptId, execution_generation_id: stoppedGenerationId,

@@ -401,6 +401,13 @@ export interface DesktopSupervisorManifestEntry {
   createdAt: string;
   workspacePath: string | null;
   workAttemptId: string | null;
+  /** Exact current or last-verified room worker used for control routing. */
+  agentSessionId: string | null;
+  agentSessionBindingState: "active" | "historical" | "none";
+  bindingUpdatedAt: string | null;
+  executionGenerationId: string | null;
+  providerContinuationId: string | null;
+  providerPid: number | null;
   workplaceLiveness: DesktopSupervisorLivenessAxis;
   nativeLiveness: DesktopSupervisorLivenessAxis;
   restartCount: number;

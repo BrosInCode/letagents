@@ -12,11 +12,12 @@ import type { ProviderActionHandle, ProviderActionPort, ProviderActionRef, Provi
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
-import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
-import { WorkerBindingStore } from "./worker-binding-store.js";
+import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
+type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
@@ -38,12 +39,15 @@ export class SupervisorDaemon {
   private readonly socket: DaemonControlSocket;
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
   private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
+  private readonly scheduledConvergenceCancels = new Map<string, () => void>();
   private manifestMutation: Promise<void> = Promise.resolve();
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly liveDisposers = new Map<string, Array<() => void>>();
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
+  private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
+  private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private handoffScheduled = false;
 
@@ -63,7 +67,10 @@ export class SupervisorDaemon {
       gitCommand,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
-    this.workerBindings = new WorkerBindingStore(paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`);
+    this.workerBindings = new WorkerBindingStore(
+      paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
+      (commit) => this.fenceDaemonCommit(commit),
+    );
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
       await this.singleton.assertCurrent();
       await this.controlRequestBarrier?.(request);
@@ -77,7 +84,8 @@ export class SupervisorDaemon {
       if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
       if (request.method === "manifest.set_desired_state") {
         const params = this.paramsRecord(request.params);
-        return this.setDesiredState(String(params.id ?? ""), String(params.desired_state ?? "") as DesiredState);
+        const updated = await this.setDesiredState(String(params.id ?? ""), String(params.desired_state ?? "") as DesiredState);
+        return this.entryWithDerivedLiveness(updated);
       }
       if (request.method === "lane.reserve_legacy") {
         const params = this.paramsRecord(request.params);
@@ -151,7 +159,29 @@ export class SupervisorDaemon {
     this.liveDisposers.clear();
     await Promise.all([...this.providerCallbacks]);
     await this.socket.stop();
-    await this.singleton.release();
+    await this.serializeManifestCommit(() => this.singleton.release());
+  }
+
+  /**
+   * Version handoff must release daemon authority independently of provider or
+   * network callback latency. Provider work survives; only this daemon's
+   * observers and control authority are detached.
+   */
+  private async stopForHandoff(): Promise<void> {
+    for (const cancel of this.scheduledConvergenceCancels.values()) cancel();
+    this.scheduledConvergenceCancels.clear();
+    for (const scheduled of this.scheduledConvergence.values()) {
+      void scheduled.then(({ dispose }) => dispose()).catch(() => undefined);
+    }
+    this.scheduledConvergence.clear();
+    for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
+    this.liveDisposers.clear();
+    await this.socket.stop();
+    await this.serializeManifestCommit(() => this.singleton.release());
+    // Existing convergence/provider callbacks are generation-fenced below.
+    // Do not await them: a wedged native transport must not block an upgrade.
+    this.convergenceRequests.clear();
+    this.providerCallbacks.clear();
   }
 
   private status() {
@@ -168,7 +198,7 @@ export class SupervisorDaemon {
   private scheduleHandoff(): void {
     if (this.handoffScheduled) return;
     this.handoffScheduled = true;
-    setTimeout(() => { void this.stop(); }, 25).unref();
+    setTimeout(() => { void this.stopForHandoff().catch(() => undefined); }, 25).unref();
   }
 
   private paramsRecord(value: unknown): Record<string, unknown> {
@@ -235,7 +265,7 @@ export class SupervisorDaemon {
         activity: (entry.activity ?? []).slice(-200),
       };
       const entries = [...manifest.entries, nextEntry];
-      const next = await this.store.write(this.manifestGeneration, entries, legacyOwners);
+      const next = await this.writeManifest(this.manifestGeneration, entries, legacyOwners);
       this.manifestGeneration = next.generation;
       return nextEntry;
     });
@@ -260,7 +290,7 @@ export class SupervisorDaemon {
         }
       }
       const updated = { ...entry, desired_state: desiredState };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate), legacyOwners);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate), legacyOwners);
       this.manifestGeneration = next.generation;
       return updated;
     });
@@ -306,7 +336,7 @@ export class SupervisorDaemon {
         created_at: now,
         updated_at: now,
       };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, [...legacyOwners, owner]);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, [...legacyOwners, owner]);
       this.manifestGeneration = next.generation;
       return owner;
     });
@@ -342,7 +372,7 @@ export class SupervisorDaemon {
       const owners = manifest.legacy_lane_owners ?? [];
       const live = this.liveLegacyLaneOwners(owners);
       if (live.length === owners.length) return;
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, live);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, live);
       this.manifestGeneration = next.generation;
     });
   }
@@ -359,7 +389,7 @@ export class SupervisorDaemon {
         throw new Error(`Legacy reservation '${reservationId}' is already active for another session.`);
       }
       const updated: LegacyLaneOwner = { ...owner, state: "active", session_id: sessionId, updated_at: new Date().toISOString() };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, legacyOwners
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, legacyOwners
         .map((candidate) => candidate.reservation_id === reservationId ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
@@ -384,7 +414,7 @@ export class SupervisorDaemon {
         || (roomId && provider && candidate.room_id === roomId && candidate.provider === provider)
       ));
       if (retained.length === owners.length) return { released: false };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, retained);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, retained);
       this.manifestGeneration = next.generation;
       return { released: true };
     });
@@ -405,7 +435,7 @@ export class SupervisorDaemon {
         native_liveness: { state: event.status === "idle" ? "idle" : "active", observed_at: event.observed_at, detail: event.summary },
         activity: [...(entry.activity ?? []), event].slice(-200),
       };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
     });
@@ -420,13 +450,21 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       const updated: DaemonManifestEntry = { ...entry, workplace_liveness: { state, observed_at: observedAt, detail } };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
     });
   }
 
-  private entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): DaemonManifestEntry[] {
+  private async entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): Promise<DaemonManifestEntryView[]> {
+    const bindings = new Map((await this.workerBindings.list()).map((binding) => [binding.entry_id, binding]));
+    return Promise.all(entries.map((entry) => this.entryWithDerivedLiveness(entry, bindings.get(entry.id) ?? null)));
+  }
+
+  private async entryWithDerivedLiveness(
+    entry: DaemonManifestEntry,
+    projectedBinding?: WorkerSessionBinding | null,
+  ): Promise<DaemonManifestEntryView> {
     const now = Date.now();
     const staleAfterMs = 90_000;
     const derive = <T extends string>(axis: { state: T; observed_at: string | null; detail: string | null } | undefined, staleStates: string[]) => {
@@ -436,11 +474,24 @@ export class SupervisorDaemon {
         ? { ...axis, state: "stale" }
         : axis;
     };
-    return entries.map((entry) => ({
+    const binding = projectedBinding === undefined ? await this.workerBindings.get(entry.id) : projectedBinding;
+    const bindingMatchesCurrentGeneration = Boolean(
+      binding &&
+      binding.room_id === entry.room_id &&
+      binding.work_attempt_id === entry.work_attempt_id &&
+      binding.execution_generation_id === entry.provider_ref?.execution_generation_id,
+    );
+    return {
       ...entry,
       workplace_liveness: derive(entry.workplace_liveness, ["reachable"]) as DaemonManifestEntry["workplace_liveness"],
       native_liveness: derive(entry.native_liveness, ["active", "idle"]) as DaemonManifestEntry["native_liveness"],
-    }));
+      worker_binding: bindingMatchesCurrentGeneration && binding ? {
+        agent_session_id: binding.agent_session_id,
+        work_attempt_id: binding.work_attempt_id,
+        execution_generation_id: binding.execution_generation_id,
+        updated_at: binding.updated_at,
+      } : null,
+    };
   }
 
   private async readAttempt(id: string) {
@@ -462,7 +513,7 @@ export class SupervisorDaemon {
 
   /** Queue convergence without making a control-socket caller wait for launch. */
   private requestConvergence(entryId: string): void {
-    if (!this.providerPort || !this.autoConverge) return;
+    if (this.handoffScheduled || !this.providerPort || !this.autoConverge) return;
     const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -477,7 +528,7 @@ export class SupervisorDaemon {
   }
 
   private async convergeManifestEntry(entryId: string): Promise<void> {
-    if (!this.providerPort) return;
+    if (this.handoffScheduled || !this.providerPort) return;
     let entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
     if (!entry) return;
     if (entry.provider !== "codex") throw new Error(`No daemon provider port is available for ${entry.provider}.`);
@@ -518,7 +569,7 @@ export class SupervisorDaemon {
           : await this.providerPort.spawn(spawn);
         await this.persistProviderHandle(entry.id, handle, execution.execution_generation_id);
         await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
-        await this.installProviderHandle(entry.id, handle);
+        await this.installProviderHandle(entry.id, handle, execution.execution_generation_id);
         await this.transition(entry.id, handle.observedState, "none", ref ? "provider resumed under daemon authority" : "provider launched under daemon authority", "daemon-convergence");
       } catch (error) {
         const terminal = this.terminalPayload({
@@ -570,7 +621,7 @@ export class SupervisorDaemon {
     const handle = await this.providerPort!.attach(this.providerRef(entry));
     if (!handle) return null;
     await this.durability.recoverExecutionFence(ref.work_attempt_id);
-    await this.installProviderHandle(entry.id, handle);
+    await this.installProviderHandle(entry.id, handle, ref.execution_generation_id);
     return handle;
   }
 
@@ -603,11 +654,25 @@ export class SupervisorDaemon {
     }));
   }
 
-  private async installProviderHandle(entryId: string, handle: ProviderActionHandle): Promise<void> {
+  private async installProviderHandle(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): Promise<void> {
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveHandles.set(entryId, handle);
+    const binding = await this.workerBindings.get(entryId);
+    const currentBinding = this.liveBindingIdentities.get(entryId);
+    if (binding?.execution_generation_id === executionGenerationId) {
+      if (!currentBinding || binding.updated_at >= currentBinding.updatedAt) {
+        this.liveBindingIdentities.set(entryId, {
+          agentSessionId: binding.agent_session_id,
+          executionGenerationId: binding.execution_generation_id,
+          updatedAt: binding.updated_at,
+        });
+      }
+    } else if (currentBinding?.executionGenerationId !== executionGenerationId) {
+      this.liveBindingIdentities.delete(entryId);
+    }
     const disposeExit = await this.providerPort!.onExit(handle, (terminal) => {
-      this.trackProviderCallback(this.handleProviderTerminal(entryId, handle, terminal));
+      const bindingIdentity = this.liveBindingIdentities.get(entryId);
+      this.trackProviderCallback(this.handleProviderTerminal(entryId, handle, executionGenerationId, bindingIdentity, terminal));
     });
     const disposeStream = this.providerPort!.onStream
       ? await this.providerPort!.onStream!(handle, (event) => { this.trackProviderCallback(this.enqueueProviderStream(entryId, handle, event)); })
@@ -664,7 +729,21 @@ export class SupervisorDaemon {
     const attempt = await this.durability.getAttempt(input.work_attempt_id);
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
-    await this.workerBindings.bind(input);
+    const binding = await this.workerBindings.bind(input);
+    this.liveBindingIdentities.set(input.entry_id, {
+      agentSessionId: binding.agent_session_id,
+      executionGenerationId: binding.execution_generation_id,
+      updatedAt: binding.updated_at,
+    });
+    await this.updateManifestEntry(input.entry_id, (current) => ({
+      ...current,
+      last_worker_binding: {
+        agent_session_id: binding.agent_session_id,
+        work_attempt_id: binding.work_attempt_id,
+        execution_generation_id: binding.execution_generation_id,
+        updated_at: binding.updated_at,
+      },
+    }));
     await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
@@ -696,25 +775,34 @@ export class SupervisorDaemon {
     return true;
   }
 
-  private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, terminal: ProviderActionTerminal): Promise<void> {
+  private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, executionGenerationId: string, terminalBinding: LiveBindingIdentity | undefined, terminal: ProviderActionTerminal): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
     this.liveHandles.delete(entryId);
+    this.liveBindingIdentities.delete(entryId);
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveDisposers.delete(entryId);
-    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
-    if (entry?.work_attempt_id && entry.provider_ref?.execution_generation_id) {
-      const attempt = await this.durability.getAttempt(entry.work_attempt_id);
-      const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === entry.provider_ref!.execution_generation_id);
-      if (execution && !execution.terminal) {
-        await this.durability.recordTerminal(entry.work_attempt_id, execution.execution_generation_id, {
-          ...this.terminalPayload(terminal, execution.actor),
-          generation: execution.generation,
-        });
+    await this.serializeEntryTick(entryId, async () => {
+      const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
+      const successorHandle = this.liveHandles.get(entryId);
+      if (successorHandle && successorHandle !== handle) return;
+      if (entry?.work_attempt_id) {
+        const attempt = await this.durability.getAttempt(entry.work_attempt_id);
+        if (this.liveHandles.get(entryId)) return;
+        const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
+        if (execution && !execution.terminal) {
+          await this.durability.recordTerminal(entry.work_attempt_id, execution.execution_generation_id, {
+            ...this.terminalPayload(terminal, execution.actor),
+            generation: execution.generation,
+          });
+        }
       }
-    }
-    await this.workerBindings.unbind(entryId);
-    await this.observeProviderExit(entryId, terminal, "daemon-provider");
-    this.requestConvergence(entryId);
+      if (this.liveHandles.get(entryId)) return;
+      if (terminalBinding) {
+        await this.workerBindings.unbind(entryId, terminalBinding.agentSessionId, terminalBinding.executionGenerationId);
+      }
+      await this.observeProviderExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle);
+      this.requestConvergence(entryId);
+    });
   }
 
   private trackProviderCallback(operation: Promise<void>): void {
@@ -729,7 +817,7 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
       const updated = update(entry);
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
     });
@@ -764,9 +852,12 @@ export class SupervisorDaemon {
       reconciliation: nextReconciliation,
       reconciliation_notices: notices.slice(-32),
     };
-    const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
+    const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
     this.manifestGeneration = next.generation;
-    await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });
+    await this.serializeManifestCommit(async () => {
+      await this.singleton.assertCurrent();
+      await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });
+    });
   }
 
   /**
@@ -788,7 +879,7 @@ export class SupervisorDaemon {
     let reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, input.nowMs);
     if (JSON.stringify(reconciliation) !== JSON.stringify(entry.reconciliation)) {
       const persisted = { ...entry, reconciliation };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? persisted : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? persisted : candidate));
       this.manifestGeneration = next.generation;
     }
 
@@ -876,11 +967,18 @@ export class SupervisorDaemon {
   }
 
   /** Provider terminal callback: records an actual exit edge before the next tick. */
-  async observeProviderExit(entryId: string, terminal: ProviderActionTerminal, actor = "provider"): Promise<void> {
-    await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
+  async observeProviderExit(entryId: string, terminal: ProviderActionTerminal, actor = "provider", expectedExecutionGenerationId?: string, expectedHandle?: ProviderActionHandle): Promise<void> {
+    await this.serializeEntryTick(entryId, () => this.observeProviderExitOnce(entryId, terminal, actor, expectedExecutionGenerationId, expectedHandle));
+  }
+
+  private async observeProviderExitOnce(entryId: string, terminal: ProviderActionTerminal, actor: string, expectedExecutionGenerationId?: string, expectedHandle?: ProviderActionHandle): Promise<void> {
+    await this.serializeManifestMutation(async () => {
       const manifest = await this.store.load();
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+      if (expectedExecutionGenerationId && entry.provider_ref?.execution_generation_id !== expectedExecutionGenerationId) return;
+      const currentHandle = this.liveHandles.get(entryId);
+      if (expectedHandle && currentHandle && currentHandle !== expectedHandle) return;
       const payload = this.terminalPayload(terminal, actor);
       if (entry.condition === "quarantined") {
         // A stale child cannot unquarantine the entry, but its immutable death
@@ -892,7 +990,7 @@ export class SupervisorDaemon {
       const observedState = entry.desired_state === "paused" ? "paused" : intentional ? "stopped" : "failed";
       const reconciliation = { ...advanceReconciliationState(entry.reconciliation, observedState, Date.now()), last_terminal: payload };
       await this.transitionOnce(entryId, observedState, "none", `provider terminal: ${terminal.terminalCause}`, actor, reconciliation);
-    }));
+    });
   }
 
   /** Starts periodic convergence and joins provider onExit to the same durable path. */
@@ -913,6 +1011,15 @@ export class SupervisorDaemon {
       let listenerInstalledGeneration = 0;
       let listenerInstallTail: Promise<void> = Promise.resolve();
       const activeCallbacks = new Set<Promise<void>>();
+      const cancel = () => {
+        if (stopped) return;
+        stopped = true;
+        if (timer) clearInterval(timer);
+        unsubscribe();
+        if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
+        if (this.scheduledConvergenceCancels.get(entryId) === cancel) this.scheduledConvergenceCancels.delete(entryId);
+      };
+      this.scheduledConvergenceCancels.set(entryId, cancel);
       const trackCallback = (operation: Promise<void>) => {
         activeCallbacks.add(operation);
         void operation.then(() => activeCallbacks.delete(operation), () => activeCallbacks.delete(operation));
@@ -992,19 +1099,13 @@ export class SupervisorDaemon {
         else throw error;
       }
       const dispose = async () => {
-        if (!stopped) {
-          stopped = true;
-          if (timer) clearInterval(timer);
-          unsubscribe();
-          if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
-        }
+        cancel();
         await Promise.all([...activeCallbacks]);
       };
       resolveReservation({ dispose });
       return dispose;
     } catch (error) {
-      if (timer) clearInterval(timer);
-      unsubscribe();
+      this.scheduledConvergenceCancels.get(entryId)?.();
       try { await this.recordSchedulerFailure(entryId, error, actor); } catch { /* Preserve the original setup failure for the caller. */ }
       resolveReservation({ dispose: async () => {} });
       if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
@@ -1016,6 +1117,33 @@ export class SupervisorDaemon {
     const previous = this.manifestMutation;
     let release!: () => void;
     this.manifestMutation = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      await this.singleton.assertCurrent();
+      return await operation();
+    } finally { release(); }
+  }
+
+  private writeManifest(
+    expectedGeneration: number,
+    entries: DaemonManifestEntry[],
+    legacyOwners?: LegacyLaneOwner[],
+  ) {
+    return this.store.write(expectedGeneration, entries, legacyOwners, (commit) => this.fenceDaemonCommit(commit));
+  }
+
+  private fenceDaemonCommit(commit: () => Promise<void>): Promise<void> {
+    return this.serializeManifestCommit(async () => {
+      if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.");
+      await this.singleton.assertCurrent();
+      await commit();
+    });
+  }
+
+  private async serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.manifestCommit;
+    let release!: () => void;
+    this.manifestCommit = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try { return await operation(); } finally { release(); }
   }

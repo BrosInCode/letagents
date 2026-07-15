@@ -203,6 +203,11 @@
               </article>
             </div>
 
+            <div v-else-if="matchingSupervisorEntries.length" class="desktop-agent-detail-empty">
+              <strong>Daemon-supervised agent.</strong>
+              <p>Its durable lifecycle and exact room binding are available in Supervision below.</p>
+            </div>
+
             <div v-else class="desktop-agent-detail-empty">
               <strong>No local agent session matched this agent.</strong>
               <p>External agents still appear here through their published room activity.</p>
@@ -237,6 +242,11 @@
                 <div><dt>Native execution</dt><dd>{{ livenessLabel(entry.nativeLiveness) }}</dd></div>
                 <div><dt>Restarts</dt><dd>{{ entry.restartCount }}</dd></div>
                 <div><dt>Workspace</dt><dd>{{ entry.workspacePath || "Not provisioned" }}</dd></div>
+                <div><dt>{{ entry.agentSessionBindingState === "historical" ? "Last-bound room session" : "Room session" }}</dt><dd>{{ entry.agentSessionId || "Not bound" }}</dd></div>
+                <div><dt>Binding</dt><dd>{{ entry.agentSessionBindingState === "active" ? "Active" : entry.agentSessionBindingState === "historical" ? "Historical identity only" : "Not bound" }}</dd></div>
+                <div><dt>Execution</dt><dd>{{ entry.executionGenerationId || "Not started" }}</dd></div>
+                <div><dt>Continuation</dt><dd>{{ entry.providerContinuationId || "Not available" }}</dd></div>
+                <div><dt>Process</dt><dd>{{ entry.providerPid ?? "Not running" }}</dd></div>
                 <div><dt>Last terminal</dt><dd>{{ terminalLabel(entry.lastTerminal) }}</dd></div>
               </dl>
               <p>{{ entry.charter }}</p>
@@ -326,7 +336,7 @@ import {
 import {
   isVisibleManagedAgentSession,
   canStopManagedAgentTurn,
-  exactSupervisorEntriesForManagedSessions,
+  exactSupervisorEntriesForTarget,
   managedAgentSessionMatchesTarget,
   managedAgentSessionMatchesReasoning,
   managedAgentSessionDisplayName,
@@ -366,6 +376,7 @@ const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 const supervisorError = ref<string | null>(null);
 const updatingSupervisorEntryId = ref<string | null>(null);
 const expandedSupervisorActivity = ref<Record<string, boolean>>({});
+const knownSupervisorEntryIds = ref<string[]>([]);
 const loadingManagedSessions = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
@@ -414,8 +425,25 @@ const matchingManagedSessions = computed(() => {
     managedAgentSessionMatchesReasoning(session, reasoningSession)
   );
 });
+const directMatchingSupervisorEntries = computed(() =>
+  exactSupervisorEntriesForTarget(
+    supervisorEntries.value,
+    matchingManagedSessions.value,
+    props.target?.agentSessionId,
+  )
+);
+watch(directMatchingSupervisorEntries, (entries) => {
+  if (entries?.length) {
+    knownSupervisorEntryIds.value = entries.map((entry) => entry.id);
+  }
+});
 const matchingSupervisorEntries = computed(() => {
-  const exactEntries = exactSupervisorEntriesForManagedSessions(supervisorEntries.value, matchingManagedSessions.value);
+  const exactEntries = exactSupervisorEntriesForTarget(
+    supervisorEntries.value,
+    matchingManagedSessions.value,
+    props.target?.agentSessionId,
+    knownSupervisorEntryIds.value,
+  );
   if (exactEntries) {
     // Same-provider peers may intentionally share a display label. Once MCP
     // registration gives us durable supervisor ids, never widen the Inspector
@@ -535,6 +563,7 @@ function clearTransientState(): void {
   resolvingPermissionIds.value = {};
   updatingSupervisorEntryId.value = null;
   expandedSupervisorActivity.value = {};
+  knownSupervisorEntryIds.value = [];
 }
 
 function resetTransientState(): void {

@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readFile, rename } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export interface WorkerSessionBinding {
@@ -25,10 +25,14 @@ type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "last_sequence" | "l
 export class WorkerBindingStore {
   private mutations: Promise<void> = Promise.resolve();
 
-  constructor(readonly path: string) {}
+  constructor(readonly path: string, private readonly commitFence?: (commit: () => Promise<void>) => Promise<void>) {}
 
   async get(entryId: string): Promise<WorkerSessionBinding | null> {
     return (await this.load()).bindings[entryId] ?? null;
+  }
+
+  async list(): Promise<WorkerSessionBinding[]> {
+    return Object.values((await this.load()).bindings);
   }
 
   async bind(input: WorkerSessionBindingInput): Promise<WorkerSessionBinding> {
@@ -77,11 +81,13 @@ export class WorkerBindingStore {
     });
   }
 
-  async unbind(entryId: string, expectedSessionId?: string): Promise<boolean> {
+  async unbind(entryId: string, expectedSessionId?: string, expectedExecutionGenerationId?: string): Promise<boolean> {
     return this.serialize(async () => {
       const stored = await this.load();
       const current = stored.bindings[entryId];
-      if (!current || expectedSessionId && current.agent_session_id !== expectedSessionId) return false;
+      if (!current
+        || expectedSessionId && current.agent_session_id !== expectedSessionId
+        || expectedExecutionGenerationId && current.execution_generation_id !== expectedExecutionGenerationId) return false;
       const { [entryId]: _removed, ...bindings } = stored.bindings;
       await this.write({ version: 1, bindings });
       return true;
@@ -113,10 +119,19 @@ export class WorkerBindingStore {
     const temporary = `${this.path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
     const handle = await open(temporary, "wx", 0o600);
     try { await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
-    await rename(temporary, this.path);
-    await chmod(this.path, 0o600);
-    const directory = await open(dirname(this.path), "r");
-    try { await directory.sync(); } finally { await directory.close(); }
+    try {
+      const commit = async () => {
+        await rename(temporary, this.path);
+        await chmod(this.path, 0o600);
+        const directory = await open(dirname(this.path), "r");
+        try { await directory.sync(); } finally { await directory.close(); }
+      };
+      if (this.commitFence) await this.commitFence(commit);
+      else await commit();
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async serialize<T>(operation: () => Promise<T>): Promise<T> {

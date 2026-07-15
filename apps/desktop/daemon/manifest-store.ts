@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { DaemonManifest } from "./types.js";
@@ -32,6 +32,7 @@ export class ManifestStore {
     expectedGeneration: number,
     entries: DaemonManifest["entries"],
     legacyLaneOwners?: DaemonManifest["legacy_lane_owners"],
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<DaemonManifest> {
     return this.serialize(async () => {
       const current = await this.load();
@@ -47,9 +48,18 @@ export class ManifestStore {
       const temporary = `${this.path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
       const handle = await open(temporary, "wx", 0o600);
       try { await handle.writeFile(serialized, "utf8"); await handle.sync(); } finally { await handle.close(); }
-      await rename(temporary, this.path);
-      const directory = await open(dirname(this.path), "r");
-      try { await directory.sync(); } finally { await directory.close(); }
+      try {
+        const commit = async () => {
+          await rename(temporary, this.path);
+          const directory = await open(dirname(this.path), "r");
+          try { await directory.sync(); } finally { await directory.close(); }
+        };
+        if (commitFence) await commitFence(commit);
+        else await commit();
+      } catch (error) {
+        await unlink(temporary).catch(() => undefined);
+        throw error;
+      }
       return manifest;
     });
   }

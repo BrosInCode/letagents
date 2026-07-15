@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.5";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.7";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -47,6 +47,18 @@ export type DaemonActivityEvent = {
   durable_payload_ref: string | null;
 };
 
+/**
+ * Renderer-safe projection of the daemon-private worker binding. Credentials
+ * and API authority never leave WorkerBindingStore; this identity-only view
+ * lets UI controls resolve a room worker to one exact supervisor entry.
+ */
+export type DaemonWorkerBindingProjection = {
+  agent_session_id: string;
+  work_attempt_id: string;
+  execution_generation_id: string;
+  updated_at: string;
+};
+
 export type DaemonManifestEntry = {
   id: string;
   room_id: string;
@@ -81,8 +93,14 @@ export type DaemonManifestEntry = {
   workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
   activity?: DaemonActivityEvent[];
+  /** Last verified exact room identity; retained when live credentials unbind. */
+  last_worker_binding?: DaemonWorkerBindingProjection | null;
   reconciliation?: ReconciliationState;
   reconciliation_notices?: ReconciliationNotice[];
+};
+
+export type DaemonManifestEntryView = DaemonManifestEntry & {
+  worker_binding?: DaemonWorkerBindingProjection | null;
 };
 
 /** Durable mixed-engine fence for a legacy Electron-owned provider lane. */

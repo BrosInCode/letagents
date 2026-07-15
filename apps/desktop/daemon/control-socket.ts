@@ -1,6 +1,6 @@
 import { chmod, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { createServer, type Server } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 
 import { DAEMON_PROTOCOL_VERSION, type DaemonRequest, type DaemonResponse } from "./types.js";
 import { DaemonFenceLostError } from "./singleton.js";
@@ -9,6 +9,7 @@ export type RequestHandler = (request: DaemonRequest) => Promise<unknown> | unkn
 
 export class DaemonControlSocket {
   private server: Server | null = null;
+  private readonly connections = new Set<Socket>();
   constructor(readonly path: string, private readonly handle: RequestHandler, private readonly onFatal?: (error: Error) => Promise<void> | void, private readonly maxFrameBytes = 64 * 1024) {}
 
   async start(): Promise<void> {
@@ -16,6 +17,8 @@ export class DaemonControlSocket {
     await chmod(dirname(this.path), 0o700);
     await unlink(this.path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
     this.server = createServer((socket) => {
+      this.connections.add(socket);
+      socket.once("close", () => this.connections.delete(socket));
       let buffer = "";
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => {
@@ -34,8 +37,12 @@ export class DaemonControlSocket {
   }
 
   async stop(): Promise<void> {
-    if (this.server) await new Promise<void>((resolve, reject) => this.server!.close((error) => error ? reject(error) : resolve()));
+    const server = this.server;
+    if (!server) return;
     this.server = null;
+    for (const socket of this.connections) socket.destroy();
+    this.connections.clear();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await unlink(this.path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
 
