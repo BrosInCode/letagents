@@ -72,6 +72,7 @@ export type DaemonManifestEntry = {
     provider_connection:
       | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
       | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
+      | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
       | null;
     execution_generation_id: string;
   } | null;
