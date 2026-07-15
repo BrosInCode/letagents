@@ -1,0 +1,563 @@
+import {
+  launchCodexAppServer,
+  resolveCodexAppServerUrl,
+  waitForLaunchedCodexAppServer,
+  type CodexAppServerExit,
+  type CodexAppServerLaunch,
+} from "./codex-app-server.js";
+import {
+  CodexRpcClient,
+  type RpcNotification,
+  type ThreadReadResult,
+  type TurnStartResult,
+} from "./codex-rpc-client.js";
+import {
+  summarizeCodexRuntimeNotification,
+  summarizeCodexRuntimeSnapshot,
+} from "./codex-runtime-reasoning.js";
+import {
+  buildCodexStartPrompt,
+  DEFAULT_CODEX_STOP_PHRASE,
+  looksLikeInviteCode,
+  makeCodexStopToken,
+} from "./codex-start-prompt.js";
+import {
+  synthesizeTerminalPayload,
+  type ProviderActivityEvent,
+  type ProviderAdapter,
+  type ProviderAdapterCapabilities,
+  type ProviderContinuationRef,
+  type ProviderHandle,
+  type ProviderObservedState,
+  type ProviderSpawnRequest,
+  type ProviderStopOptions,
+  type ProviderTerminalPayload,
+} from "./provider-adapter.js";
+
+const DEFAULT_STOP_GRACE_MS = 5_000;
+const RESUME_PROBE_THREAD_ID = "00000000-0000-0000-0000-000000000000";
+
+type CodexThreadResult = { thread?: { id?: string } };
+
+export interface CodexAdapterRpc {
+  connect(): Promise<void>;
+  request<T>(method: string, params?: unknown): Promise<T>;
+  close(): void;
+}
+
+export interface CodexProviderAdapterDependencies {
+  resolveServerUrl(): Promise<string>;
+  launchServer(
+    serverUrl: string,
+    codexBin: string,
+    options: { trustedProjectPath: string; configOverrides: string[] },
+  ): CodexAppServerLaunch;
+  waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
+  createRpcClient(
+    serverUrl: string,
+    onNotification: (notification: RpcNotification) => void,
+  ): CodexAdapterRpc;
+  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  now(): string;
+}
+
+export interface CodexProviderAdapterOptions {
+  codexBin?: string;
+  dependencies?: Partial<CodexProviderAdapterDependencies>;
+  activitySink?: (event: ProviderActivityEvent) => void;
+}
+
+const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
+  // P0 task_28 did not prove native mid-turn injection or approval bridging.
+  // Resume is populated per app-server after a protocol-level probe.
+  resume: false,
+  midTurnInjection: false,
+  transcriptAccess: true,
+  permissionPromptBridging: false,
+  survivesRestart: true,
+};
+
+const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input"]);
+
+function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Codex launchPolicy must be the native app-server policy object.");
+  }
+  const policy = value as Record<string, unknown>;
+  for (const key of RESERVED_POLICY_KEYS) {
+    if (Object.hasOwn(policy, key)) {
+      throw new Error(`Codex launchPolicy cannot override reserved field '${key}'.`);
+    }
+  }
+  // Deliberately return the original values without mapping profile names or
+  // inventing LetAgents permission semantics. The Add Agent native policy is
+  // forwarded to app-server unchanged (plan v10 §4.8 / P0 cell h).
+  return policy;
+}
+
+/**
+ * Give the LetAgents MCP workplace the work-attempt cwd while preserving the
+ * user's installed command, auth, and environment. No bearer or curated HOME
+ * is injected here; desktop MCP setup remains the source of those values.
+ */
+export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
+  return [`mcp_servers.letagents.cwd=${JSON.stringify(cwd)}`];
+}
+
+function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void {
+  try {
+    if (process.platform !== "win32") {
+      process.kill(-pid, signal);
+      return;
+    }
+  } catch {
+    // Fall through to the direct child pid. The process group may already be
+    // gone while the child exit event is still in flight.
+  }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Already terminal. The observed exit promise remains authoritative.
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isMethodNotFound(error: unknown): boolean {
+  return /(?:-32601|method\s+not\s+found|unknown\s+method|unsupported\s+method)/i.test(
+    errorMessage(error),
+  );
+}
+
+function isMissingProbeThread(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /(?:thread|conversation|session).*(?:not\s+found|does\s+not\s+exist|unknown)|(?:not\s+found|unknown).*(?:thread|conversation|session)/i.test(
+    message,
+  );
+}
+
+async function probeResumeSupport(client: CodexAdapterRpc): Promise<boolean> {
+  try {
+    // app-server has no method-discovery endpoint. Resuming a deliberately
+    // nonexistent thread distinguishes a supported method (thread-not-found)
+    // from JSON-RPC method-not-found without creating a real continuation.
+    await client.request("thread/resume", { threadId: RESUME_PROBE_THREAD_ID });
+    return true;
+  } catch (error) {
+    if (isMethodNotFound(error)) return false;
+    if (isMissingProbeThread(error)) return true;
+    throw new Error(`Unable to probe Codex thread/resume capability: ${errorMessage(error)}`);
+  }
+}
+
+function configuredMcpServerNames(value: unknown): string[] {
+  const rows = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? [
+        ...((value as { data?: unknown }).data && Array.isArray((value as { data?: unknown }).data)
+          ? (value as { data: unknown[] }).data
+          : []),
+        ...((value as { servers?: unknown }).servers && Array.isArray((value as { servers?: unknown }).servers)
+          ? (value as { servers: unknown[] }).servers
+          : []),
+      ]
+      : [];
+  return rows.flatMap((row) => {
+    if (!row || typeof row !== "object") return [];
+    const name = (row as { name?: unknown }).name;
+    return typeof name === "string" ? [name] : [];
+  });
+}
+
+async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void> {
+  let response: unknown;
+  try {
+    response = await client.request("mcpServerStatus/list", {});
+  } catch (error) {
+    throw new Error(`Unable to verify the LetAgents MCP workplace: ${errorMessage(error)}`);
+  }
+  if (!configuredMcpServerNames(response).some((name) => name.toLowerCase() === "letagents")) {
+    throw new Error(
+      "LetAgents MCP server is not configured in Codex; refusing to launch without the room workplace.",
+    );
+  }
+}
+
+const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
+  resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
+  launchServer: (serverUrl, codexBin, options) =>
+    launchCodexAppServer(serverUrl, codexBin, options),
+  waitForServer: waitForLaunchedCodexAppServer,
+  createRpcClient: (serverUrl, onNotification) =>
+    new CodexRpcClient(serverUrl, onNotification),
+  signalProcess: defaultSignalProcess,
+  now: () => new Date().toISOString(),
+};
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, Math.max(0, ms));
+    timeout.unref?.();
+  });
+}
+
+class CodexProviderHandle implements ProviderHandle {
+  state: ProviderObservedState = "starting";
+  stopRequested = false;
+  protocolError = false;
+  terminal: ProviderTerminalPayload | null = null;
+  readonly exitListeners = new Set<(payload: ProviderTerminalPayload) => void>();
+  readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
+
+  constructor(
+    readonly workAttemptId: string,
+    readonly pid: number | null,
+    readonly providerContinuationId: string,
+    readonly client: CodexAdapterRpc,
+    readonly launch: CodexAppServerLaunch,
+  ) {}
+
+  observedState(): ProviderObservedState {
+    return this.state;
+  }
+}
+
+export class CodexProviderAdapter implements ProviderAdapter {
+  readonly id = "codex" as const;
+  private readonly codexBin: string;
+  private readonly deps: CodexProviderAdapterDependencies;
+  private readonly activitySink?: (event: ProviderActivityEvent) => void;
+  private readonly handles = new Map<string, CodexProviderHandle>();
+  private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
+  private resumeSupported = false;
+
+  constructor(options: CodexProviderAdapterOptions = {}) {
+    this.codexBin = options.codexBin || process.env.LETAGENTS_CODEX_BIN || "codex";
+    this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+    this.activitySink = options.activitySink;
+  }
+
+  capabilities(): ProviderAdapterCapabilities {
+    return { ...BASE_CODEX_CAPABILITIES, resume: this.resumeSupported };
+  }
+
+  async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
+    return this.start(req, null);
+  }
+
+  async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | null> {
+    const handle = this.handles.get(ref.workAttemptId);
+    if (
+      !handle ||
+      handle.terminal ||
+      handle.providerContinuationId !== ref.providerContinuationId
+    ) {
+      return null;
+    }
+    return handle;
+  }
+
+  async resume(
+    ref: ProviderContinuationRef,
+    req: ProviderSpawnRequest,
+  ): Promise<ProviderHandle> {
+    if (ref.workAttemptId !== req.workAttemptId) {
+      throw new Error("Codex resume ref must belong to the same work attempt.");
+    }
+    return this.start(req, ref);
+  }
+
+  async poke(_handle: ProviderHandle, _message: string): Promise<void> {
+    throw new Error("Codex mid-turn injection is not enabled: P0 proved room delivery, not native poke.");
+  }
+
+  async stop(
+    providerHandle: ProviderHandle,
+    options: ProviderStopOptions = {},
+  ): Promise<ProviderTerminalPayload> {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.terminal) return handle.terminal;
+    if (handle.pid === null) {
+      throw new Error("Cannot stop a Codex app-server without an observed process id.");
+    }
+
+    handle.stopRequested = true;
+    handle.state = "stopping";
+    const exitPromise = this.requireExitPromise(handle);
+    if (options.force) {
+      this.deps.signalProcess(handle.pid, "SIGKILL");
+      return exitPromise;
+    }
+
+    this.deps.signalProcess(handle.pid, "SIGTERM");
+    const graceMs = options.graceMs ?? DEFAULT_STOP_GRACE_MS;
+    const graceful = await Promise.race([
+      exitPromise.then((payload) => ({ payload })),
+      delay(graceMs).then(() => null),
+    ]);
+    if (graceful) return graceful.payload;
+
+    this.deps.signalProcess(handle.pid, "SIGKILL");
+    return exitPromise;
+  }
+
+  onExit(
+    providerHandle: ProviderHandle,
+    listener: (payload: ProviderTerminalPayload) => void,
+  ): () => void {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.terminal) {
+      queueMicrotask(() => listener(handle.terminal!));
+      return () => {};
+    }
+    handle.exitListeners.add(listener);
+    return () => handle.exitListeners.delete(listener);
+  }
+
+  onActivity(
+    providerHandle: ProviderHandle,
+    listener: (event: ProviderActivityEvent) => void,
+  ): () => void {
+    const handle = this.requireHandle(providerHandle);
+    handle.activityListeners.add(listener);
+    return () => handle.activityListeners.delete(listener);
+  }
+
+  private async start(
+    req: ProviderSpawnRequest,
+    resumeRef: ProviderContinuationRef | null,
+  ): Promise<CodexProviderHandle> {
+    const current = this.handles.get(req.workAttemptId);
+    if (current && !current.terminal) {
+      throw new Error(`Codex work attempt '${req.workAttemptId}' already has a live process.`);
+    }
+    if (!req.agentDisplayName?.trim()) {
+      throw new Error("Codex spawn requires the durable agent display name from the manifest.");
+    }
+
+    const policy = normalizeLaunchPolicy(req.launchPolicy);
+    const serverUrl = await this.deps.resolveServerUrl();
+    const launch = this.deps.launchServer(serverUrl, this.codexBin, {
+      trustedProjectPath: req.cwd,
+      configOverrides: codexMcpWorkplaceConfigOverrides(req.cwd),
+    });
+    const ready = await this.deps.waitForServer(serverUrl, launch);
+    if (!ready) {
+      if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
+      throw new Error(`Timed out waiting for Codex app-server at ${serverUrl}`);
+    }
+
+    let handle: CodexProviderHandle | null = null;
+    const pendingNotifications: RpcNotification[] = [];
+    const client = this.deps.createRpcClient(serverUrl, (notification) => {
+      if (!handle) {
+        pendingNotifications.push(notification);
+        return;
+      }
+      this.consumeNotification(handle, notification);
+    });
+
+    try {
+      await client.connect();
+      await requireLetAgentsWorkplace(client);
+      this.resumeSupported = await probeResumeSupport(client);
+      if (resumeRef && !this.resumeSupported) {
+        throw new Error(
+          "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
+        );
+      }
+      const threadResult = resumeRef
+        ? await client.request<CodexThreadResult>("thread/resume", {
+          threadId: resumeRef.providerContinuationId,
+          cwd: req.cwd,
+          ...policy,
+        })
+        : await client.request<CodexThreadResult>("thread/start", {
+          cwd: req.cwd,
+          ...policy,
+        });
+      const threadId = threadResult.thread?.id;
+      if (!threadId) {
+        throw new Error("Codex app-server did not return a thread id.");
+      }
+      if (resumeRef && threadId !== resumeRef.providerContinuationId) {
+        throw new Error("Codex app-server resumed a different thread than requested.");
+      }
+
+      handle = new CodexProviderHandle(
+        req.workAttemptId,
+        launch.pid,
+        threadId,
+        client,
+        launch,
+      );
+      this.handles.set(req.workAttemptId, handle);
+      const exitPromise = launch.exited.then((exit) => this.observeExit(handle!, exit));
+      this.exitPromises.set(handle, exitPromise);
+      for (const notification of pendingNotifications.splice(0)) {
+        this.consumeNotification(handle, notification);
+      }
+
+      if (resumeRef) {
+        // Read the durable continuation before starting its next turn. Besides
+        // producing activity evidence, this verifies that the exact resumed
+        // thread exposes its prior transcript to the new native process.
+        await this.emitTranscriptTail(handle);
+      }
+
+      const prompt = buildCodexStartPrompt({
+        roomIdentifier: req.roomId,
+        joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
+        cwd: req.cwd,
+        deliveryMode: "mcp_polling",
+        stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
+        token: makeCodexStopToken(),
+        suggestedDisplayName: req.agentDisplayName.trim(),
+        deadlineUtc: null,
+        maxMinutes: 0,
+      });
+      const turn = await client.request<TurnStartResult>("turn/start", {
+        threadId,
+        cwd: req.cwd,
+        input: [{ type: "text", text: prompt, text_elements: [] }],
+      });
+      if (!turn.turn?.id) {
+        throw new Error("Codex app-server did not return a turn id.");
+      }
+      handle.state = "working";
+      void this.emitTranscriptTail(handle);
+      return handle;
+    } catch (error) {
+      if (resumeRef && isMethodNotFound(error)) {
+        this.resumeSupported = false;
+        error = new Error(
+          "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
+        );
+      }
+      if (handle) handle.protocolError = true;
+      client.close();
+      if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
+      throw error;
+    }
+  }
+
+  private consumeNotification(
+    handle: CodexProviderHandle,
+    notification: RpcNotification,
+  ): void {
+    const summary = summarizeCodexRuntimeNotification(notification);
+    this.publishActivity(handle, {
+      source: "native_harness",
+      method: notification.method,
+      ...summary,
+    });
+    if (/^(turn\/completed|item\/completed)$/.test(notification.method)) {
+      void this.emitTranscriptTail(handle);
+    }
+  }
+
+  private async emitTranscriptTail(handle: CodexProviderHandle): Promise<void> {
+    try {
+      const read = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: handle.providerContinuationId,
+        includeTurns: true,
+      });
+      const latestTurn = read.thread?.turns?.at(-1);
+      const snapshot = summarizeCodexRuntimeSnapshot({
+        threadStatus: typeof read.thread?.status === "string"
+          ? read.thread.status
+          : read.thread?.status?.type,
+        turnStatus: typeof latestTurn?.status === "string"
+          ? latestTurn.status
+          : latestTurn?.status?.status,
+        recentItems: latestTurn?.items ?? latestTurn?.output ?? [],
+      });
+      if (!snapshot) return;
+      this.publishActivity(handle, {
+        source: "transcript_tail",
+        method: "thread/read",
+        ...snapshot,
+      });
+    } catch {
+      // Runtime evidence is best effort and must never end the worker turn.
+    }
+  }
+
+  private publishActivity(
+    handle: CodexProviderHandle,
+    input: {
+      source: ProviderActivityEvent["source"];
+      method: string | null;
+      summary: string;
+      status: ProviderActivityEvent["status"];
+      checking: string;
+      next_action: string;
+    },
+  ): void {
+    const event: ProviderActivityEvent = {
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId,
+      observedAt: this.deps.now(),
+      source: input.source,
+      method: input.method,
+      summary: input.summary,
+      status: input.status,
+      checking: input.checking,
+      nextAction: input.next_action,
+    };
+    this.activitySink?.(event);
+    for (const listener of handle.activityListeners) listener(event);
+  }
+
+  private observeExit(
+    handle: CodexProviderHandle,
+    exit: CodexAppServerExit,
+  ): ProviderTerminalPayload {
+    const terminal = exit.type === "error"
+      ? {
+        ...synthesizeTerminalPayload({
+          endedAt: this.deps.now(),
+          exitCode: null,
+          signal: null,
+          providerContinuationId: handle.providerContinuationId,
+          stopRequested: handle.stopRequested,
+        }),
+        terminalCause: "protocol_error" as const,
+      }
+      : synthesizeTerminalPayload({
+        endedAt: this.deps.now(),
+        exitCode: exit.code,
+        signal: exit.signal,
+        providerContinuationId: handle.providerContinuationId,
+        stopRequested: handle.stopRequested,
+      });
+    if (handle.protocolError) terminal.terminalCause = "protocol_error";
+    handle.terminal = terminal;
+    handle.state = terminal.terminalCause === "exited" || terminal.terminalCause === "stopped"
+      ? "stopped"
+      : "failed";
+    handle.client.close();
+    if (this.handles.get(handle.workAttemptId) === handle) {
+      this.handles.delete(handle.workAttemptId);
+    }
+    for (const listener of handle.exitListeners) listener(terminal);
+    handle.exitListeners.clear();
+    return terminal;
+  }
+
+  private requireHandle(handle: ProviderHandle): CodexProviderHandle {
+    if (!(handle instanceof CodexProviderHandle)) {
+      throw new Error("Provider handle does not belong to CodexProviderAdapter.");
+    }
+    return handle;
+  }
+
+  private requireExitPromise(handle: CodexProviderHandle): Promise<ProviderTerminalPayload> {
+    const promise = this.exitPromises.get(handle);
+    if (!promise) throw new Error("Codex provider handle is missing its exit observation.");
+    return promise;
+  }
+}
