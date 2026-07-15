@@ -512,6 +512,24 @@ test("desired stopped turns every terminal into a clean stopped observation and 
   } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
 });
 
+test("simulated flock reacquires the persistent lock inode after release", async () => {
+  const env = await fixture();
+  const lock = join(env.root, "daemon.lock");
+  const first = new DaemonSingleton(lock, "darwin");
+  const second = new DaemonSingleton(lock, "darwin");
+  try {
+    assert.equal(await first.acquire(), 1);
+    await assert.rejects(() => second.acquire(), DaemonAlreadyRunningError);
+    await first.release();
+    assert.equal((await stat(lock)).isFile(), true);
+    assert.equal(await second.acquire(), 2);
+  } finally {
+    await second.release();
+    await first.release();
+    await env.cleanup();
+  }
+});
+
 test("singleton fences a second daemon and detects a newer generation", async () => {
   const env = await fixture();
   try {
