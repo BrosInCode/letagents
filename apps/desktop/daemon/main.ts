@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { dirname, basename } from "node:path";
+import { dirname } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
@@ -12,7 +12,7 @@ import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
-import { createGitCommand, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
+import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore } from "./worker-binding-store.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
@@ -560,8 +560,7 @@ export class SupervisorDaemon {
     if (!sourcePath) throw new Error("A source repository is required to provision a supervised work attempt.");
     const remote = String(await this.gitCommand(["-C", sourcePath, "remote", "get-url", "origin"])).trim();
     const revision = String(await this.gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])).trim();
-    const rawRepo = basename(remote.replace(/\.git$/, "")) || "repository";
-    const repo = rawRepo.replace(/[^A-Za-z0-9._-]/g, "-");
+    const repo = repositoryStorageKey(remote);
     const workAttemptId = randomUUID();
     const provisioned = await this.provisioner.provision({ repo, workAttemptId, taskId: entry.id, remoteUrl: remote, revision });
     const attempt = await this.durability.createAttempt({ taskId: entry.id, leaseId: entry.id, leaseEpoch: 0, workspacePath: provisioned.path, workAttemptId });

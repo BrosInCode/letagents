@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { withWorkspaceFence } from "./workspace-fence.js";
@@ -55,6 +55,17 @@ function inside(root: string, candidate: string): boolean {
 export function normalizeRemote(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");
   return trimmed.endsWith(".git") ? trimmed.slice(0, -4) : trimmed;
+}
+
+/** A readable, collision-safe daemon storage key derived from full remote identity. */
+export function repositoryStorageKey(remoteUrl: string): string {
+  assertCredentialFreeRemote(remoteUrl);
+  const normalized = normalizeRemote(remoteUrl);
+  if (!normalized) throw new Error("A remote URL is required for repository storage.");
+  const tail = normalized.split(/[/:]/).filter(Boolean).at(-1) || "repository";
+  const label = tail.replace(/[^A-Za-z0-9._-]/g, "-") || "repository";
+  const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+  return safeSegment(`${label}-${digest}`, "repository storage key");
 }
 
 export function assertCredentialFreeRemote(value: string): void {
@@ -112,6 +123,9 @@ export class WorkspaceProvisioner {
         await this.verifyBare(await realpath(bare), remoteUrl);
         await this.writeMarker(join(bare, REPOSITORY_MARKER), repositoryMarker);
       }
+      const fencedBare = await realpath(bare);
+      await this.verifyBare(fencedBare, remoteUrl);
+      await this.refreshBare(fencedBare);
     });
     const canonicalBare = await realpath(bare);
     await this.verifyBare(canonicalBare, remoteUrl);
@@ -171,6 +185,21 @@ export class WorkspaceProvisioner {
   private async verifyBare(bare: string, remoteUrl: string): Promise<void> {
     if ((await this.query(["--git-dir", bare, "rev-parse", "--is-bare-repository"])) !== "true") throw new Error("Expected daemon repository is not bare.");
     if (normalizeRemote(await this.query(["--git-dir", bare, "remote", "get-url", "origin"])) !== remoteUrl) throw new Error("Bare repository remote identity does not match.");
+  }
+
+  private async refreshBare(bare: string): Promise<void> {
+    // Bare clones do not retain a remote fetch refspec. Refresh every advertised
+    // branch and tag into daemon-private namespaces so a long-lived repository
+    // can resolve branch-reachable and tag-only source commits created after its
+    // initial clone. The static
+    // refspec and verified origin prevent callers from selecting another
+    // remote or writing arbitrary refs; detached worktrees remain OID-pinned.
+    await this.run([
+      "--git-dir", bare,
+      "fetch", "--prune", "--no-tags", "origin",
+      "+refs/heads/*:refs/letagents/remotes/origin/*",
+      "+refs/tags/*:refs/letagents/tags/*",
+    ]);
   }
 
   private async verifyWorkspace(workspace: string, identity: WorkspaceMarker): Promise<void> {
