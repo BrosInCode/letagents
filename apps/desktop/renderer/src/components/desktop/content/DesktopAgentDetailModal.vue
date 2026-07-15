@@ -375,6 +375,7 @@ const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 const supervisorError = ref<string | null>(null);
 const updatingSupervisorEntryId = ref<string | null>(null);
 const expandedSupervisorActivity = ref<Record<string, boolean>>({});
+const knownSupervisorEntryIds = ref<string[]>([]);
 const loadingManagedSessions = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
@@ -423,11 +424,24 @@ const matchingManagedSessions = computed(() => {
     managedAgentSessionMatchesReasoning(session, reasoningSession)
   );
 });
+const directMatchingSupervisorEntries = computed(() =>
+  exactSupervisorEntriesForTarget(
+    supervisorEntries.value,
+    matchingManagedSessions.value,
+    props.target?.agentSessionId,
+  )
+);
+watch(directMatchingSupervisorEntries, (entries) => {
+  if (entries?.length) {
+    knownSupervisorEntryIds.value = entries.map((entry) => entry.id);
+  }
+});
 const matchingSupervisorEntries = computed(() => {
   const exactEntries = exactSupervisorEntriesForTarget(
     supervisorEntries.value,
     matchingManagedSessions.value,
     props.target?.agentSessionId,
+    knownSupervisorEntryIds.value,
   );
   if (exactEntries) {
     // Same-provider peers may intentionally share a display label. Once MCP
@@ -548,6 +562,7 @@ function clearTransientState(): void {
   resolvingPermissionIds.value = {};
   updatingSupervisorEntryId.value = null;
   expandedSupervisorActivity.value = {};
+  knownSupervisorEntryIds.value = [];
 }
 
 function resetTransientState(): void {

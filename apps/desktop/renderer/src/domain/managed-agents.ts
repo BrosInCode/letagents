@@ -204,6 +204,7 @@ export function exactSupervisorEntriesForTarget(
   entries: readonly DesktopSupervisorManifestEntry[],
   sessions: readonly Pick<DesktopManagedAgentSession, "supervisorEntryId">[],
   targetAgentSessionId: string | null | undefined,
+  knownSupervisorEntryIds: readonly string[] = [],
 ): DesktopSupervisorManifestEntry[] | null {
   const sessionId = targetAgentSessionId?.trim() || null;
   if (sessionId) {
@@ -212,6 +213,10 @@ export function exactSupervisorEntriesForTarget(
   }
   const sessionEntries = exactSupervisorEntriesForManagedSessions(entries, sessions);
   if (sessionEntries) return sessionEntries;
+  const knownIds = new Set(knownSupervisorEntryIds);
+  if (knownIds.size) {
+    return entries.filter((entry) => knownIds.has(entry.id));
+  }
   // A specific room worker must never widen to a same-label peer merely
   // because its daemon projection is still loading.
   return sessionId ? [] : null;

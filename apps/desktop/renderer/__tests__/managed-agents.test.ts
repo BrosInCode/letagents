@@ -406,6 +406,14 @@ test("a rebound room session resolves one exact supervisor entry without a local
     [],
     "a specific room worker never widens to a same-label peer",
   );
+  assert.deepEqual(
+    exactSupervisorEntriesForTarget([
+      { ...rebound, agentSessionId: null },
+      first,
+    ], [], "agent_session_403", ["supervised_second"]).map((entry) => entry.id),
+    ["supervised_second"],
+    "a previously exact entry remains controllable when restart temporarily clears its worker binding",
+  );
 });
 
 test("supervisor native activity drives the chat work indicator for the bound room identity", () => {
