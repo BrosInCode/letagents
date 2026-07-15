@@ -7,17 +7,24 @@ import { assertMacOS } from "./platform.js";
 export class DaemonFenceLostError extends Error {}
 export class DaemonAlreadyRunningError extends Error {}
 
+// Linux CI cannot exercise Darwin's O_EXLOCK directly. Model the ownership
+// part of flock in-process while still keeping the lock inode persistent, so
+// restart tests have the same acquire -> release -> reacquire semantics as
+// production macOS without reintroducing unlink races.
+const simulatedFlockOwners = new Set<string>();
+
 /**
- * A daemon-owned lock and durable generation fence. The exclusive create is
- * the portable Node representation of the macOS lock-file flock contract:
- * only one process can acquire it, and every operation must verify the durable
- * generation so an older supervisor exits instead of continuing after a handoff.
+ * A daemon-owned lock and durable generation fence. Production macOS uses a
+ * kernel flock; injected non-Darwin test hosts model the same ownership over a
+ * persistent inode. Every operation verifies the durable generation so an
+ * older supervisor exits instead of continuing after a handoff.
  */
 export class DaemonSingleton {
   readonly generationPath: string;
   private lockHeld = false;
   private generation = 0;
   private flockHandle: FileHandle | null = null;
+  private simulatedFlockHeld = false;
 
   constructor(readonly lockPath: string, private readonly platform = process.platform) {
     this.generationPath = `${lockPath}.generation`;
@@ -37,23 +44,34 @@ export class DaemonSingleton {
       // Darwin's O_EXLOCK is the kernel flock primitive. O_NONBLOCK makes a
       // competing daemon fail immediately instead of waiting behind a stale
       // supervisor. Node does not expose O_EXLOCK, so this is the documented
-      // Darwin flag value; test hosts use the atomic-create equivalent.
+      // Darwin flag value; test hosts use the simulated flock owner above.
       const usesDarwinFlock = this.platform === "darwin" && process.platform === "darwin";
-      const flags = usesDarwinFlock
-        ? constants.O_CREAT | constants.O_RDWR | constants.O_NONBLOCK | 0x20 /* O_EXLOCK */
-        : "wx";
-      const handle = await open(this.lockPath, flags, 0o600);
-      if (usesDarwinFlock) this.flockHandle = handle;
-      else await handle.close();
+      if (usesDarwinFlock) {
+        this.flockHandle = await open(
+          this.lockPath,
+          constants.O_CREAT | constants.O_RDWR | constants.O_NONBLOCK | 0x20 /* O_EXLOCK */,
+          0o600,
+        );
+      } else {
+        if (simulatedFlockOwners.has(this.lockPath)) {
+          throw new DaemonAlreadyRunningError("A supervisor daemon already owns this host lock.");
+        }
+        simulatedFlockOwners.add(this.lockPath);
+        this.simulatedFlockHeld = true;
+        const handle = await open(this.lockPath, "a+", 0o600);
+        await handle.close();
+      }
+      const prior = await this.readGeneration();
+      this.generation = prior + 1;
+      await this.writeGeneration(this.generation);
+      this.lockHeld = true;
+      return this.generation;
     } catch (error: unknown) {
+      await this.releaseFlockClaim();
+      if (error instanceof DaemonAlreadyRunningError) throw error;
       if (["EEXIST", "EAGAIN", "EWOULDBLOCK"].includes((error as NodeJS.ErrnoException).code ?? "")) throw new DaemonAlreadyRunningError("A supervisor daemon already owns this host lock.");
       throw error;
     }
-    const prior = await this.readGeneration();
-    this.generation = prior + 1;
-    await this.writeGeneration(this.generation);
-    this.lockHeld = true;
-    return this.generation;
   }
 
   async assertCurrent(): Promise<void> {
@@ -65,10 +83,16 @@ export class DaemonSingleton {
   async release(): Promise<void> {
     if (!this.lockHeld) return;
     this.lockHeld = false;
-    await this.flockHandle?.close();
-    this.flockHandle = null;
+    await this.releaseFlockClaim();
     // Keep the lock inode persistent. Unlinking after releasing flock permits
     // another daemon to lock the old inode while a third creates a new one.
+  }
+
+  private async releaseFlockClaim(): Promise<void> {
+    await this.flockHandle?.close();
+    this.flockHandle = null;
+    if (this.simulatedFlockHeld) simulatedFlockOwners.delete(this.lockPath);
+    this.simulatedFlockHeld = false;
   }
 
   private async readGeneration(): Promise<number> {
