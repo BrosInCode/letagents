@@ -325,7 +325,12 @@ test("Codex resume reopens the exact native thread and preserves the same launch
     dependencies: harness.dependencies,
     activitySink: (event) => activity.push(event),
   });
-  const request = spawnRequest();
+  const request = spawnRequest({
+    supervisorWorkerSession: {
+      agentSessionId: "agent_session_exact",
+      roomCursor: "msg_2819",
+    },
+  });
   const first = await adapter.spawn(request);
   const continuation = first.providerContinuationId!;
   harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
@@ -357,6 +362,11 @@ test("Codex resume reopens the exact native thread and preserves the same launch
   const readIndex = harness.clients[1]!.requests.findIndex((entry) => entry.method === "thread/read");
   const turnIndex = harness.clients[1]!.requests.findIndex((entry) => entry.method === "turn/start");
   assert.ok(readIndex >= 0 && readIndex < turnIndex, "prior transcript is read before the next turn");
+  const turn = harness.clients[1]!.requests[turnIndex]!.params as { input: Array<{ text: string }> };
+  assert.match(turn.input[0]!.text, /agent_session_exact/);
+  assert.match(turn.input[0]!.text, /msg_2819/);
+  assert.match(turn.input[0]!.text, /Do not call register_agent_session/);
+  assert.doesNotMatch(turn.input[0]!.text, /Suggested codename|Call set_agent_name/);
   assert.ok(activity.some((event) =>
     event.providerContinuationId === continuation
       && event.source === "transcript_tail"
@@ -695,6 +705,26 @@ test("native notifications and transcript tail become activity evidence", async 
     nativeStream.map((_, index) => index + 1),
     "native stream ordering is explicit per provider handle",
   );
+});
+
+test("native terminal failure status changes the Codex handle to failed", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+
+  harness.clients[0]!.emit({
+    method: "turn/completed",
+    params: { turn: { status: "failed" } },
+  });
+  await flush();
+  assert.equal(handle.observedState(), "failed");
+
+  harness.clients[0]!.emit({
+    method: "thread/status/changed",
+    params: { threadStatus: { type: "systemError" } },
+  });
+  await flush();
+  assert.equal(handle.observedState(), "failed");
 });
 
 test("native stream bounds oversized provider payloads without dropping method identity", async () => {

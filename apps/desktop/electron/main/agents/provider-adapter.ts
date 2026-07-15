@@ -130,6 +130,11 @@ export interface ProviderSpawnRequest {
   supervisorEntryId?: string;
   supervisorSocketPath?: string;
   supervisorExecutionGenerationId?: string;
+  /** Non-secret durable room identity restored by the daemon on resume. */
+  supervisorWorkerSession?: {
+    agentSessionId: string;
+    roomCursor: string | null;
+  };
 }
 
 export interface ProviderHandle {

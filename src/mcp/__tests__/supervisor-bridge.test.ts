@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { StoredAgentSessionState } from "../local-state.js";
-import { bindSupervisedWorkerSession } from "../server/runtime/supervisor-bridge.js";
+import { bindSupervisedWorkerSession, checkpointSupervisedWorkerCursor } from "../server/runtime/supervisor-bridge.js";
 
 const session: StoredAgentSessionState = {
   session_id: "agent_session_exact",
@@ -67,6 +67,42 @@ test("supervisor bridge binds only the exact worker session credential over the 
       agent_session_token: session.session_token,
       api_url: "https://letagents.chat",
     });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supervisor bridge checkpoints the exact worker cursor without sending its session token", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2 }
+        : { checkpointed: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    assert.equal(await checkpointSupervisedWorkerCursor(session, "msg_2819", supervisedEnv(socketPath)), true);
+    assert.equal(requests[1].method, "supervisor.checkpoint_worker_cursor");
+    assert.deepEqual(requests[1].params, {
+      entry_id: "manifest_exact",
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      agent_session_id: "agent_session_exact",
+      room_cursor: "msg_2819",
+    });
+    assert.doesNotMatch(JSON.stringify(requests[1]), /session-secret/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });

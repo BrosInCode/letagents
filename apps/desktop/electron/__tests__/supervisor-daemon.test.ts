@@ -177,7 +177,10 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
       repoRootPath: "/tmp/claude-work",
       launchPolicy: { permissionMode: "acceptEdits", model: "sonnet" },
     });
-    assert.deepEqual(wire.entries[1]?.provider_launch_policy, { permissionMode: "acceptEdits", model: "sonnet" });
+    assert.deepEqual(
+      wire.entries.find((candidate) => candidate.provider === "claude-code")?.provider_launch_policy,
+      { permissionMode: "acceptEdits", model: "sonnet" },
+    );
     const reservation = await client.reserveLegacyLane("room_legacy_client", "codex", "legacy_client");
     assert.equal(reservation.owner_pid, process.pid);
     assert.equal((await client.activateLegacyLane("legacy_client", "legacy_session_client")).state, "active");

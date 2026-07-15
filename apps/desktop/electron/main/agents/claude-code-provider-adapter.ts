@@ -171,10 +171,16 @@ function claudeStreamKind(message: ClaudeStreamMessage): ProviderStreamEventKind
   if (type === "assistant") return "text_delta";
   if (type === "user") return "tool_lifecycle";
   if (type === "tool_use_summary") return "tool_lifecycle";
-  if (type === "result") return "turn_lifecycle";
+  if (type === "result") return isClaudeFailedResult(message) ? "error" : "turn_lifecycle";
   if (type === "system") return "provider_event";
   if (/error/i.test(type)) return "error";
   return "provider_event";
+}
+
+function isClaudeFailedResult(message: ClaudeStreamMessage): boolean {
+  if (message.type !== "result") return false;
+  if ((message as { is_error?: unknown }).is_error === true) return true;
+  return typeof message.subtype === "string" && /(?:error|failed)/i.test(message.subtype);
 }
 
 function streamMethod(message: ClaudeStreamMessage): string {
@@ -585,6 +591,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         maxMinutes: 0,
         providerLabel: "Claude Code",
         runtimeKey: "claude-code",
+        ...(resumeRef && req.supervisorWorkerSession
+          ? { resumeWorker: req.supervisorWorkerSession }
+          : {}),
       });
       child.writeLine(userStreamJsonLine(prompt));
 
@@ -698,7 +707,20 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
     this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message));
     const type = typeof message.type === "string" ? message.type : "";
+    if (handle.state === "failed") return;
     if (type === "result") {
+      if (isClaudeFailedResult(message)) {
+        handle.state = "failed";
+        this.publishActivity(handle, {
+          source: "native_harness",
+          method: streamMethod(message),
+          summary: "Turn failed",
+          status: "blocked",
+          checking: "Claude Code reported a terminal turn failure.",
+          next_action: "Awaiting supervised recovery.",
+        });
+        return;
+      }
       handle.state = "idle";
       this.publishActivity(handle, {
         source: "native_harness",

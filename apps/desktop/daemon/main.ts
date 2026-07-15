@@ -27,6 +27,37 @@ export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState"
 
 class ReplacementListenerInstallError extends Error {}
 
+function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
+  const method = event.method.trim();
+  const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+    ? event.payload as Record<string, unknown>
+    : {};
+  const nestedStatus = (value: unknown): unknown[] => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [value];
+    const record = value as Record<string, unknown>;
+    return [value, record.type, record.status];
+  };
+  const statuses = [
+    payload.status,
+    payload.subtype,
+    payload.threadStatus,
+    payload.turnStatus,
+    (payload.thread as Record<string, unknown> | undefined)?.status,
+    (payload.turn as Record<string, unknown> | undefined)?.status,
+    (payload.latestTurn as Record<string, unknown> | undefined)?.status,
+  ].flatMap(nestedStatus);
+  const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
+  const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
+  const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
+  if (failedMethod
+    || failedResult
+    || failedStatus && /^(?:result|turn|thread)(?:\/|$)/i.test(method)
+    || event.kind === "error" && /^(?:result|turn|thread)(?:\/|$)/i.test(method)) return "failed";
+  if (/^(?:result(?:\/success)?|turn\/completed|thread\/completed)$/i.test(method)) return "terminal";
+  if (/(?:completed|finished|idle|stopped|interrupted)$/i.test(method)) return "idle";
+  return "working";
+}
+
 export class SupervisorDaemon {
   private manifestGeneration = 0;
   private readonly singleton: DaemonSingleton;
@@ -133,6 +164,16 @@ export class SupervisorDaemon {
           agent_session_id: String(params.agent_session_id ?? ""),
           agent_session_token: String(params.agent_session_token ?? ""),
           api_url: String(params.api_url ?? ""),
+        });
+      }
+      if (request.method === "supervisor.checkpoint_worker_cursor") {
+        const params = this.paramsRecord(request.params);
+        return this.checkpointWorkerCursor({
+          entry_id: String(params.entry_id ?? ""),
+          work_attempt_id: String(params.work_attempt_id ?? ""),
+          execution_generation_id: String(params.execution_generation_id ?? ""),
+          agent_session_id: String(params.agent_session_id ?? ""),
+          room_cursor: String(params.room_cursor ?? ""),
         });
       }
       if (request.method === "attempt.read") return this.readAttempt(String(this.paramsRecord(request.params).id ?? ""));
@@ -477,6 +518,8 @@ export class SupervisorDaemon {
     const binding = projectedBinding === undefined ? await this.workerBindings.get(entry.id) : projectedBinding;
     const bindingMatchesCurrentGeneration = Boolean(
       binding &&
+      entry.desired_state === "running" &&
+      ["starting", "working", "idle", "recovering"].includes(entry.observed_state) &&
       binding.room_id === entry.room_id &&
       binding.work_attempt_id === entry.work_attempt_id &&
       binding.execution_generation_id === entry.provider_ref?.execution_generation_id,
@@ -550,6 +593,15 @@ export class SupervisorDaemon {
       const attempt = await this.durability.getAttempt(entry.work_attempt_id!);
       const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
       const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
+      const priorBinding = entry.provider_ref ? await this.workerBindings.get(entry.id) : null;
+      const resumeWorker = priorBinding
+        && priorBinding.room_id === entry.room_id
+        && priorBinding.work_attempt_id === attempt.work_attempt_id
+        ? {
+          agentSessionId: priorBinding.agent_session_id,
+          roomCursor: priorBinding.room_cursor ?? null,
+        }
+        : null;
       const spawn = {
         workAttemptId: attempt.work_attempt_id,
         roomId: entry.room_id,
@@ -561,6 +613,7 @@ export class SupervisorDaemon {
         supervisorEntryId: entry.id,
         supervisorSocketPath: this.socket.path,
         supervisorExecutionGenerationId: execution.execution_generation_id,
+        ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
       };
       try {
         const ref = entry.provider_ref ? this.providerRef(entry) : null;
@@ -682,8 +735,14 @@ export class SupervisorDaemon {
     const heartbeat = setInterval(() => {
       const current = this.liveHandles.get(entryId);
       if (!current) return;
-      const status = current.observedState === "idle" ? "idle" : "working";
-      this.trackProviderCallback(this.publishNativeActivity(entryId, "native_harness.heartbeat", status).then(() => undefined).catch(() => undefined));
+      this.trackProviderCallback((async () => {
+        const manifestEntry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
+        if (!manifestEntry || this.liveHandles.get(entryId) !== current) return;
+        if (!["working", "idle"].includes(manifestEntry.observed_state)) return;
+        if (!["working", "idle"].includes(current.observedState)) return;
+        const status = current.observedState === "idle" ? "idle" : "working";
+        await this.publishNativeActivity(entryId, "native_harness.heartbeat", status);
+      })().catch(() => undefined));
     }, this.nativeHeartbeatIntervalMs);
     heartbeat.unref();
     this.liveDisposers.set(entryId, [disposeExit, disposeStream, () => clearInterval(heartbeat)]);
@@ -691,13 +750,18 @@ export class SupervisorDaemon {
 
   private async handleProviderStream(entryId: string, handle: ProviderActionHandle, event: ProviderActionStreamEvent): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
-    const idle = /(?:completed|finished|idle|stopped|interrupted)$/i.test(event.method);
+    const observedLifecycle = providerStreamLifecycle(event);
     const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
     if (!entry) return;
+    // A terminal native failure is sticky for the installed execution. Late
+    // deltas and heartbeats from that same handle are evidence, not recovery.
+    const lifecycle = entry.observed_state === "failed" ? "failed" : observedLifecycle;
     // Provider-local stream counters may restart when a replacement daemon
     // attaches. Persist a daemon-global monotonic sequence for the manifest.
     const sequence = Math.max((entry.activity?.at(-1)?.sequence ?? 0) + 1, event.sequence);
-    const status = idle ? "idle" : "working";
+    const status: DaemonActivityEvent["status"] = lifecycle === "failed"
+      ? "blocked"
+      : lifecycle === "terminal" ? "idle" : lifecycle;
     await this.appendActivity(entryId, {
       observed_at: event.observedAt,
       sequence,
@@ -711,7 +775,30 @@ export class SupervisorDaemon {
       payload_redacted: event.payloadRedacted,
       durable_payload_ref: event.durablePayloadRef,
     });
-    await this.publishNativeActivity(entryId, event.method, status, event.observedAt).catch(() => undefined);
+    if (lifecycle === "failed" && entry.observed_state !== "failed") {
+      await this.transition(entryId, "failed", entry.condition, `provider stream terminal failure: ${event.method}`, "daemon-provider-stream");
+    }
+    await this.publishNativeActivity(entryId, event.method, lifecycle === "working" ? "working" : "idle", event.observedAt).catch(() => undefined);
+    if ((lifecycle === "failed" || lifecycle === "terminal")
+      && this.liveHandles.get(entryId) === handle
+      && !["stopping", "stopped"].includes(handle.observedState)) {
+      try {
+        // A persistent polling turn ending (successfully or with a native
+        // terminal error) means delivery ended. Fence that native process so
+        // the terminal callback can mint a bounded resume generation.
+        await this.providerPort?.stop(handle, {
+          actionId: `manifest:${entryId}:terminal-turn:${event.sequence}`,
+        });
+      } catch (error) {
+        await this.transition(
+          entryId,
+          "failed",
+          "coordination_blocked",
+          `failed to fence terminal provider turn: ${error instanceof Error ? error.message : "unknown error"}`,
+          "daemon-provider-stream",
+        );
+      }
+    }
   }
 
   private enqueueProviderStream(entryId: string, handle: ProviderActionHandle, event: ProviderActionStreamEvent): Promise<void> {
@@ -731,6 +818,14 @@ export class SupervisorDaemon {
     const attempt = await this.durability.getAttempt(input.work_attempt_id);
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
+    const currentBinding = await this.workerBindings.get(input.entry_id);
+    if (currentBinding
+      && currentBinding.execution_generation_id === input.execution_generation_id
+      && currentBinding.agent_session_id === input.agent_session_id
+      && currentBinding.agent_session_token === input.agent_session_token
+      && currentBinding.api_url === new URL(input.api_url).origin) {
+      return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
+    }
     const binding = await this.workerBindings.bind(input);
     this.liveBindingIdentities.set(input.entry_id, {
       agentSessionId: binding.agent_session_id,
@@ -748,6 +843,35 @@ export class SupervisorDaemon {
     }));
     await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
+  }
+
+  private async checkpointWorkerCursor(input: { entry_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; room_cursor: string }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {
+    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
+    if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
+    if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker cursor work attempt does not match the supervised manifest entry.");
+    const attempt = await this.durability.getAttempt(input.work_attempt_id);
+    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
+    if (!execution || execution.terminal) throw new Error("Worker cursor execution generation is absent or terminal.");
+    const currentBinding = await this.workerBindings.get(input.entry_id);
+    if (!currentBinding
+      || currentBinding.agent_session_id !== input.agent_session_id
+      || currentBinding.execution_generation_id !== input.execution_generation_id) {
+      throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
+    }
+    if (currentBinding.room_cursor === input.room_cursor) {
+      return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
+    }
+    await this.workerBindings.checkpointCursor(
+      input.entry_id,
+      input.agent_session_id,
+      input.execution_generation_id,
+      input.room_cursor,
+    );
+    await this.durability.checkpoint(input.work_attempt_id, {
+      room_cursor: input.room_cursor,
+      provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
+    });
+    return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
   }
 
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
@@ -799,7 +923,7 @@ export class SupervisorDaemon {
         }
       }
       if (this.liveHandles.get(entryId)) return;
-      if (terminalBinding) {
+      if (terminalBinding && entry?.desired_state === "stopped") {
         await this.workerBindings.unbind(entryId, terminalBinding.agentSessionId, terminalBinding.executionGenerationId);
       }
       await this.observeProviderExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle);

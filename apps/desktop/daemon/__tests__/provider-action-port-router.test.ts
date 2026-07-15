@@ -152,6 +152,29 @@ test("provider router selects the native adapter by manifest provider and fences
   );
 });
 
+test("provider router public handle reads the native observed state live", async () => {
+  let observedState: "working" | "idle" | "failed" = "working";
+  const calls: string[] = [];
+  const adapter = fakeAdapter("claude-code", calls);
+  adapter.spawn = async (input) => ({
+    ...nativeHandle("claude-code", input.workAttemptId, "continuation-live"),
+    observedState: () => observedState,
+  });
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const handle = await router.spawn({
+    provider: "claude-code",
+    workAttemptId: "attempt-live",
+    roomId: "focus_37",
+    cwd: "/tmp/attempt-live",
+    launchPolicy: {},
+  });
+  assert.equal(handle.observedState, "working");
+  observedState = "idle";
+  assert.equal(handle.observedState, "idle", "the same daemon handle sees native result completion");
+  observedState = "failed";
+  assert.equal(handle.observedState, "failed", "the same daemon handle sees native terminal failure");
+});
+
 test("daemon convergence drives Claude through the router across stop and same-attempt resume", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-router-daemon-"));
   const source = join(root, "source");

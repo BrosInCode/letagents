@@ -36,7 +36,7 @@ function publicHandle(handle: NativeHandle): ProviderActionHandle {
     pid: handle.pid,
     providerContinuationId: handle.providerContinuationId,
     providerConnection: handle.providerConnection ?? null,
-    observedState: handle.observedState(),
+    get observedState() { return handle.observedState(); },
   };
 }
 

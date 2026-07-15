@@ -451,12 +451,22 @@ test("resume presents the recorded continuation and asserts the spike-proven sam
   assert.equal(adapter.capabilities().survivesRestart, false, "bounded recovery, not survival");
   const handle = await adapter.resume(
     { workAttemptId: "wa-claude-1", providerContinuationId: "sess-old" },
-    spawnRequest(),
+    spawnRequest({
+      supervisorWorkerSession: {
+        agentSessionId: "agent_session_exact",
+        roomCursor: "msg_2819",
+      },
+    }),
   );
   const args = harness.launches[0]!.args;
   assert.ok(args.join(" ").includes("--resume sess-old"), "the recorded continuation is presented to the CLI");
   assert.equal(args.includes("--session-id"), false, "resume does not mint a competing identity");
   assert.equal(handle.providerContinuationId, "sess-old", "the SAME session id continues");
+  const resumePrompt = (JSON.parse(harness.children[0]!.written[0]!) as { message: { content: Array<{ text: string }> } }).message.content[0]!.text;
+  assert.match(resumePrompt, /agent_session_exact/);
+  assert.match(resumePrompt, /msg_2819/);
+  assert.match(resumePrompt, /Do not call register_agent_session/);
+  assert.doesNotMatch(resumePrompt, /Suggested codename|Call set_agent_name/);
 
   // A CLI that resumes a DIFFERENT session is refused and the fresh child is
   // terminated — a stranger conversation must never become this work attempt's
@@ -521,4 +531,25 @@ test("result messages settle the observed state to idle and publish activity evi
   child.emit({ type: "result", subtype: "success", result: "done", num_turns: 3 });
   await flush();
   assert.equal(handle.observedState(), "idle");
+});
+
+test("error result messages settle the observed state to failed", async () => {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new ClaudeCodeProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => stream.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  harness.children[0]!.emit({
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    result: "native provider failure",
+  });
+  await flush();
+
+  assert.equal(handle.observedState(), "failed");
+  assert.equal(stream.at(-1)?.kind, "error");
+  assert.equal(stream.at(-1)?.method, "result/error_during_execution");
 });

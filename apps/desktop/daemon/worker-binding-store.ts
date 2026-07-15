@@ -9,13 +9,14 @@ export interface WorkerSessionBinding {
   agent_session_id: string;
   agent_session_token: string;
   api_url: string;
+  room_cursor: string | null;
   last_sequence: number;
   last_observed_at_ms: number;
   updated_at: string;
 }
 
 type StoredBindings = { version: 1; bindings: Record<string, WorkerSessionBinding> };
-type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "last_sequence" | "last_observed_at_ms" | "updated_at">;
+type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at">;
 
 /**
  * Daemon-private worker credentials. These deliberately live outside the
@@ -43,11 +44,42 @@ export class WorkerBindingStore {
       const binding: WorkerSessionBinding = {
         ...input,
         api_url: new URL(input.api_url).origin,
+        room_cursor: prior?.agent_session_id === input.agent_session_id
+          ? prior.room_cursor ?? null
+          : null,
         last_sequence: prior?.agent_session_id === input.agent_session_id ? prior.last_sequence : 0,
         last_observed_at_ms: prior?.agent_session_id === input.agent_session_id && Number.isSafeInteger(prior.last_observed_at_ms) ? prior.last_observed_at_ms : 0,
         updated_at: new Date().toISOString(),
       };
       await this.write({ version: 1, bindings: { ...stored.bindings, [input.entry_id]: binding } });
+      return binding;
+    });
+  }
+
+  async checkpointCursor(
+    entryId: string,
+    agentSessionId: string,
+    executionGenerationId: string,
+    roomCursor: string,
+  ): Promise<WorkerSessionBinding> {
+    for (const [field, value] of Object.entries({ entryId, agentSessionId, executionGenerationId, roomCursor })) {
+      if (!value.trim()) throw new Error(`Worker cursor checkpoint ${field} is required.`);
+    }
+    return this.serialize(async () => {
+      const stored = await this.load();
+      const prior = stored.bindings[entryId];
+      if (!prior
+        || prior.agent_session_id !== agentSessionId
+        || prior.execution_generation_id !== executionGenerationId) {
+        throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
+      }
+      if (prior.room_cursor === roomCursor) return prior;
+      const binding: WorkerSessionBinding = {
+        ...prior,
+        room_cursor: roomCursor,
+        updated_at: new Date().toISOString(),
+      };
+      await this.write({ version: 1, bindings: { ...stored.bindings, [entryId]: binding } });
       return binding;
     });
   }

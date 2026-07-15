@@ -1343,6 +1343,29 @@ test("Codex start prompts JSON-escape unusual room names", () => {
   );
 });
 
+test("supervised resume prompt reuses the exact worker and cursor without replaying registration", () => {
+  const prompt = buildCodexStartPrompt({
+    roomIdentifier: "focus_37",
+    joinedVia: "join_room",
+    cwd: "/tmp/repo",
+    deliveryMode: "mcp_polling",
+    stopPhrase: "/stop-codex-room",
+    token: "LOCAL_CODEX_ROOM_test",
+    suggestedDisplayName: "MapleRidge",
+    deadlineUtc: null,
+    maxMinutes: 0,
+    resumeWorker: { agentSessionId: "agent_session_exact", roomCursor: "msg_2819" },
+  });
+
+  assert.match(prompt, /agent_session_exact/);
+  assert.match(prompt, /msg_2819/);
+  assert.match(prompt, /exact supervised room is "focus_37"/);
+  assert.match(prompt, /Do not call resume_room_session/);
+  assert.match(prompt, /Do not call register_agent_session/);
+  assert.doesNotMatch(prompt, /Suggested codename|Call set_agent_name|Call read_messages once/);
+  assert.doesNotMatch(prompt, /join_room with|join_code with/);
+});
+
 test("desktop-delivered event prompts include stop handling without resuming MCP polling", () => {
   const prompt = buildDesktopEventPrompt(liveSession({
     stop_phrase: "/stop-codex-room",
