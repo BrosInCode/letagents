@@ -476,11 +476,7 @@ export class SupervisorDaemon {
       entry = await this.ensureWorkAttempt(entry);
       let handle = this.liveHandles.get(entry.id) ?? null;
       if (!handle && entry.provider_ref) {
-        handle = await this.providerPort.attach(this.providerRef(entry));
-        if (handle) {
-          await this.durability.recoverExecutionFence(entry.provider_ref.work_attempt_id);
-          await this.installProviderHandle(entry.id, handle);
-        }
+        handle = await this.attachLiveProvider(entry);
       }
       if (handle) {
         if (entry.observed_state !== handle.observedState) {
@@ -527,11 +523,7 @@ export class SupervisorDaemon {
 
     let handle = this.liveHandles.get(entry.id) ?? null;
     if (!handle && entry.provider_ref) {
-      handle = await this.providerPort.attach(this.providerRef(entry));
-      if (handle) {
-        await this.durability.recoverExecutionFence(entry.provider_ref.work_attempt_id);
-        await this.installProviderHandle(entry.id, handle);
-      }
+      handle = await this.attachLiveProvider(entry);
     }
     if (handle) {
       await this.transition(entry.id, "stopping", entry.condition, `desired state changed to ${entry.desired_state}`, "daemon-convergence");
@@ -549,6 +541,27 @@ export class SupervisorDaemon {
       providerContinuationId: ref.provider_continuation_id,
       providerConnection: ref.provider_connection,
     };
+  }
+
+  /**
+   * Attach only when the manifest's exact execution generation is still live.
+   * A provider transport (for example a long-lived app-server) can remain
+   * reachable after an intentional worker stop, but that transport is not
+   * authority to resurrect the terminal generation. A later desired=running
+   * transition must instead mint a successor generation and use resume/spawn.
+   */
+  private async attachLiveProvider(entry: DaemonManifestEntry): Promise<ProviderActionHandle | null> {
+    const ref = entry.provider_ref;
+    if (!ref) return null;
+    const attempt = await this.durability.getAttempt(ref.work_attempt_id);
+    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === ref.execution_generation_id);
+    if (!execution) throw new Error("Manifest provider reference has no matching durable execution generation.");
+    if (execution.terminal) return null;
+    const handle = await this.providerPort!.attach(this.providerRef(entry));
+    if (!handle) return null;
+    await this.durability.recoverExecutionFence(ref.work_attempt_id);
+    await this.installProviderHandle(entry.id, handle);
+    return handle;
   }
 
   private async ensureWorkAttempt(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {

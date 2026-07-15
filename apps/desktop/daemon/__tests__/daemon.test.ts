@@ -1125,6 +1125,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
   let child: ChildProcess | null = null;
   let continuation = "thread-durable";
   let sequence = 0;
+  let resumeCount = 0;
   const streamListeners = new Set<(event: any) => void>();
   const exitListeners = new Set<(terminal: any) => void>();
   const handle = () => ({
@@ -1133,21 +1134,29 @@ test("generation handoff reattaches the same provider and publishes its supervis
     observedState: "working" as const,
   });
   let workAttemptId = "";
+  const launchChild = () => {
+    child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    child.once("exit", (code, signal) => {
+      for (const listener of exitListeners) listener({ endedAt: new Date().toISOString(), exitCode: code, signal, terminalCause: "stopped", providerContinuationId: continuation });
+    });
+  };
   const port = (): ProviderActionPort => ({
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async (request) => {
       workAttemptId = request.workAttemptId;
-      child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-      child.once("exit", (code, signal) => {
-        for (const listener of exitListeners) listener({ endedAt: new Date().toISOString(), exitCode: code, signal, terminalCause: "stopped", providerContinuationId: continuation });
-      });
+      launchChild();
       return { ...handle(), workAttemptId };
     },
     attach: async (ref) => child?.pid && ref.providerContinuationId === continuation
       ? { ...handle(), workAttemptId: ref.workAttemptId }
       : null,
     attachAction: async () => ({ state: "absent" }),
-    resume: async () => { throw new Error("live handle must attach, not resume"); },
+    resume: async (ref) => {
+      resumeCount += 1;
+      workAttemptId = ref.workAttemptId;
+      launchChild();
+      return { ...handle(), workAttemptId };
+    },
     poke: async () => {},
     stop: async () => new Promise((resolveStop) => {
       const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: continuation };
@@ -1160,6 +1169,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
 
   const first = new SupervisorDaemon(paths, "darwin", port(), true);
   let second: SupervisorDaemon | null = null;
+  let third: SupervisorDaemon | null = null;
   try {
     await first.start();
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -1260,7 +1270,54 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "stopped" });
     await eventually(async () => !child?.pid || (() => { try { process.kill(child.pid!, 0); return false; } catch { return true; } })(), "daemon stop authority");
     await eventually(async () => !/agent_session_exact/.test(await readFile(paths.workerBindingsPath, "utf8")), "terminal attempt worker binding removal");
+    await eventually(async () => {
+      const stopped = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return stopped.observed_state === "stopped" && stopped.condition === "none";
+    }, "intentional stop remains unblocked after the terminal callback");
+
+    const stoppedPid = child?.pid;
+    const stoppedGenerationId = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!.provider_ref!.execution_generation_id;
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "running" });
+    await eventually(async () => {
+      const resumed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return resumed.observed_state === "working" && resumed.condition === "none" && resumed.provider_ref?.execution_generation_id !== stoppedGenerationId;
+    }, "intentional stop resumes under a successor execution generation");
+    const resumed = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
+    assert.equal(resumed.id, "supervised_handoff");
+    assert.equal(resumed.work_attempt_id, workAttemptId, "resume preserves the durable work attempt");
+    assert.equal(resumed.provider_ref?.provider_continuation_id, continuation, "resume preserves provider continuation identity");
+    assert.notEqual(resumed.provider_ref?.provider_connection?.pid, stoppedPid, "resume installs the replacement provider process");
+    assert.equal(resumeCount, 1);
+    const staleBind = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
+      entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_stale",
+      work_attempt_id: workAttemptId, execution_generation_id: stoppedGenerationId,
+      agent_session_token: "stale-secret", api_url: apiUrl,
+    });
+    assert.equal(staleBind.ok, false, "a terminal predecessor generation cannot bind a worker session");
+    assert.match(staleBind.error ?? "", /terminal/);
+    const resumedAttempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { restart_count: number; execution_generations: Array<{ terminal: unknown }> };
+    assert.equal(resumedAttempt.restart_count, 1);
+    assert.ok(resumedAttempt.execution_generations[0]?.terminal, "the predecessor terminal remains immutable after resume");
+    assert.equal(resumedAttempt.execution_generations[1]?.terminal, null, "the successor is the only live generation");
+
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "stopped" });
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped"), "second intentional stop");
+    await second.stop();
+    second = null;
+    third = new SupervisorDaemon(paths, "darwin", port(), true);
+    await third.start();
+    await eventually(async () => {
+      const stopped = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return stopped.observed_state === "stopped" && stopped.condition === "none";
+    }, "replacement daemon keeps a terminal generation stopped without stale attachment");
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "running" });
+    await eventually(async () => {
+      const resumedAfterHandoff = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return resumedAfterHandoff.observed_state === "working" && resumedAfterHandoff.condition === "none";
+    }, "replacement daemon resumes the stopped work attempt");
+    assert.equal(resumeCount, 2);
   } finally {
+    await third?.stop().catch(() => undefined);
     await second?.stop().catch(() => undefined);
     await first.stop().catch(() => undefined);
     if (child?.pid) { try { process.kill(child.pid, "SIGKILL"); } catch { /* already stopped */ } }
