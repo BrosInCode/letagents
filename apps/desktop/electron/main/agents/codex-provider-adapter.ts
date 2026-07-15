@@ -64,7 +64,7 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[] },
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> },
   ): CodexAppServerLaunch;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -379,6 +379,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const launch = this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
       configOverrides: codexMcpWorkplaceConfigOverrides(req.cwd),
+      ...(req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId ? {
+        env: {
+          LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
+          LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
+          LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
+          LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+        },
+      } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {

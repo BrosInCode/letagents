@@ -7,7 +7,9 @@ import {
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getLastEndedWorkerSessionDisplayName,
+  getRoomAgentSessionByCredentials,
   getRoomParticipants,
+  recordNativeHarnessActivity,
   upsertDesktopRoomAgentDeliveryHeartbeat,
   upsertRoomAgentPresence,
 } from "../../../db.js";
@@ -396,6 +398,75 @@ export function registerAgentSessionRoutes(
       }),
     ]);
     res.json({ room_id: project.id, delivery_session: delivery, presence });
+  });
+
+  app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/native-activity$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+    const body = req.body as {
+      agent_session_id?: string;
+      agent_session_token?: string;
+      observed_at?: unknown;
+      sequence?: unknown;
+      method?: unknown;
+      status?: unknown;
+    };
+    const suppliedSessionId = typeof body.agent_session_id === "string" ? body.agent_session_id.trim() : "";
+    const suppliedSessionToken = typeof body.agent_session_token === "string" ? body.agent_session_token.trim() : "";
+    const exactSession = suppliedSessionId && suppliedSessionToken
+      ? await getRoomAgentSessionByCredentials({
+        session_id: suppliedSessionId,
+        session_token: suppliedSessionToken,
+        room_id: project.id,
+      })
+      : null;
+    if (!exactSession) {
+      res.status(401).json({ error: "Invalid or ended native worker session credentials." });
+      return;
+    }
+    if (exactSession.session_kind !== "worker") {
+      res.status(403).json({ error: "Native activity requires a worker session." });
+      return;
+    }
+    if (exactSession.session_id !== targetSessionId) {
+      res.status(403).json({ error: "Worker sessions can only report native activity for themselves." });
+      return;
+    }
+    const observedAt = typeof body.observed_at === "string" ? body.observed_at : "";
+    const observedMs = Date.parse(observedAt);
+    const sequence = body.sequence;
+    const method = typeof body.method === "string" ? body.method.trim().slice(0, 160) : "";
+    const status = typeof body.status === "string" ? body.status.trim().slice(0, 32) : "working";
+    const serverNowMs = Date.now();
+    if (!Number.isFinite(observedMs) || observedMs > serverNowMs + 5_000 || serverNowMs - observedMs > 10 * 60 * 1000
+      || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1 || !method) {
+      res.status(400).json({ error: "observed_at, positive integer sequence, and native method are required." });
+      return;
+    }
+    try {
+      const result = await recordNativeHarnessActivity({
+        room_id: project.id,
+        agent_session_id: targetSessionId,
+        actor_label: exactSession.actor_label,
+        agent_key: exactSession.agent_key,
+        session_kind: "worker",
+        runtime: exactSession.runtime,
+        display_name: exactSession.display_name,
+        owner_label: exactSession.owner_label,
+        ide_label: exactSession.ide_label,
+        repo_branch: exactSession.repo_branch ?? null,
+        provider_observed_at: observedAt,
+        sequence,
+        method,
+        status,
+      });
+      res.json({ room_id: project.id, axis: "execution_activity", ...result });
+    } catch (error) {
+      respondWithInternalError(res, "POST /rooms/:room/agent-sessions/:session/native-activity", error, "Native activity could not be recorded.");
+    }
   });
 
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/desktop-pause$/, async (req: AuthenticatedRequest, res) => {

@@ -123,7 +123,7 @@ function createHarness(options: {
   const launchOptions: Array<{
     serverUrl: string;
     codexBin: string;
-    options: { trustedProjectPath: string; configOverrides: string[] };
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> };
   }> = [];
   let nextPid = 4100;
   let nextThread = 1;
@@ -274,6 +274,22 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     survivesRestart: true,
   });
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
+});
+
+test("Codex supervised launch passes only its daemon generation binding to the MCP child", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    supervisorEntryId: "manifest_exact",
+    supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact",
+  }));
+  assert.deepEqual(harness.launchOptions[0]?.options.env, {
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "manifest_exact",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+  });
 });
 
 test("Codex resume reopens the exact native thread and preserves the same launch policy", async () => {

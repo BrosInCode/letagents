@@ -369,14 +369,31 @@ test(
       reconnect_grace_expires_at: 5,
     });
 
-    // Fresh tool activity: the channel is silent but the runtime is working.
+    // Generic MCP/session traffic cannot prove native execution activity and
+    // therefore cannot suppress a workplace-reachability notice.
     await upsertRoomAgentLivenessObservation!({
       room_id: project.id,
       agent_session_id: session.session_id,
+      source: "agent_session",
       last_observed_at: isoMinutesAgo(1),
       last_tool_call_at: isoMinutesAgo(1),
     });
     let candidate = await getLivenessAnnouncementCandidate!({
+      room_id: project.id,
+      delivery_key: deliveryKey,
+    });
+    assert.equal(candidate?.runtime_last_active_at, null);
+    assert.equal(selectLivenessTransitions({ candidates: [candidate!] })[0]?.kind, "offline");
+
+    // Fresh native harness activity: the channel is silent but the runtime is working.
+    await upsertRoomAgentLivenessObservation!({
+      room_id: project.id,
+      agent_session_id: session.session_id,
+      source: "native_harness",
+      last_observed_at: isoMinutesAgo(1),
+      last_tool_call_at: isoMinutesAgo(1),
+    });
+    candidate = await getLivenessAnnouncementCandidate!({
       room_id: project.id,
       delivery_key: deliveryKey,
     });

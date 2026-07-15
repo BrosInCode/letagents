@@ -32,6 +32,11 @@ import type {
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
   DesktopManagedAgentStopInput,
+  DesktopSupervisorAttemptDetail,
+  DesktopSupervisorCreateInput,
+  DesktopSupervisorDaemonStatus,
+  DesktopSupervisorDesiredState,
+  DesktopSupervisorManifestEntry,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
 } from "./agents.js";
@@ -287,6 +292,14 @@ export interface DesktopApi {
       providerId: DesktopAgentProviderId,
       input: DesktopAgentProviderSetupInput
     ) => Promise<DesktopAgentProviderSetupResult>;
+  };
+  supervisor: {
+    getStatus: () => Promise<DesktopSupervisorDaemonStatus>;
+    listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
+    createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
+    setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
+    readAttempt: (id: string) => Promise<DesktopSupervisorAttemptDetail>;
+    onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
   };
   diagnostics: {
     getSnapshot: () => Promise<DiagnosticsSnapshot>;

@@ -8,10 +8,23 @@ export type ProviderActionConnectionRef =
   | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
   | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null };
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; providerConnection?: ProviderActionConnectionRef | null };
-export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; resumeFrom?: ProviderActionRef | null; actionId?: string };
+export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; agentDisplayName?: string; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null };
 export type ProviderActionAttachment = { state: "attached"; handle: ProviderActionHandle } | { state: "absent" } | { state: "ambiguous"; reason: string };
+export type ProviderActionStreamEvent = {
+  workAttemptId: string;
+  providerContinuationId: string | null;
+  observedAt: string;
+  sequence: number;
+  provider: string;
+  kind: string;
+  method: string;
+  payload: unknown;
+  payloadTruncated: boolean;
+  payloadRedacted: boolean;
+  durablePayloadRef: string | null;
+};
 
 export interface ProviderActionPort {
   capabilities(workAttemptId: string): Promise<ProviderActionCapabilities>;
@@ -23,4 +36,5 @@ export interface ProviderActionPort {
   poke(handle: ProviderActionHandle, message: string, options?: { actionId?: string }): Promise<void>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
+  onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;
 }

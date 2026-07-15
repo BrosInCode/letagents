@@ -213,6 +213,58 @@
             <p v-if="managedSessionError" class="desktop-agent-detail-error">{{ managedSessionError }}</p>
           </section>
 
+          <section v-if="matchingSupervisorEntries.length" class="desktop-agent-detail-panel" data-testid="desktop-agent-supervision-panel">
+            <header>
+              <span>Supervision</span>
+              <small v-if="supervisorStatus">
+                daemon {{ supervisorStatus.implementationVersion }} · generation {{ supervisorStatus.generation }}
+              </small>
+            </header>
+            <article
+              v-for="entry in matchingSupervisorEntries"
+              :key="entry.id"
+              class="desktop-agent-detail-session"
+            >
+              <div>
+                <strong>{{ entry.displayName }}</strong>
+                <small>{{ entry.provider }}{{ entry.model ? ` · ${entry.model}` : "" }}</small>
+              </div>
+              <dl class="desktop-agent-detail-reasoning">
+                <div><dt>Desired</dt><dd>{{ entry.desiredState }}</dd></div>
+                <div><dt>Observed</dt><dd>{{ entry.observedState }}</dd></div>
+                <div><dt>Condition</dt><dd>{{ entry.condition }}</dd></div>
+                <div><dt>Workplace</dt><dd>{{ livenessLabel(entry.workplaceLiveness) }}</dd></div>
+                <div><dt>Native execution</dt><dd>{{ livenessLabel(entry.nativeLiveness) }}</dd></div>
+                <div><dt>Restarts</dt><dd>{{ entry.restartCount }}</dd></div>
+                <div><dt>Workspace</dt><dd>{{ entry.workspacePath || "Not provisioned" }}</dd></div>
+                <div><dt>Last terminal</dt><dd>{{ terminalLabel(entry.lastTerminal) }}</dd></div>
+              </dl>
+              <p>{{ entry.charter }}</p>
+              <div class="desktop-agent-detail-permission-actions" aria-label="Desired state controls">
+                <button type="button" :disabled="entry.desiredState === 'running' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'running')">Run</button>
+                <button type="button" :disabled="entry.desiredState === 'paused' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'paused')">Pause</button>
+                <button type="button" :disabled="entry.desiredState === 'stopped' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'stopped')">Stop</button>
+              </div>
+              <div class="desktop-agent-detail-session-inspection">
+                <span>Activity — bounded/redacted native events, not thoughts</span>
+                <button type="button" @click="expandedSupervisorActivity[entry.id] = !expandedSupervisorActivity[entry.id]">
+                  {{ expandedSupervisorActivity[entry.id] ? "Hide" : "Show" }} {{ entry.activity.length }} events
+                </button>
+              </div>
+              <ul
+                v-if="expandedSupervisorActivity[entry.id] && entry.activity.length"
+                class="desktop-agent-detail-recent-items"
+                aria-label="Native activity events"
+              >
+                <li v-for="event in entry.activity" :key="`${entry.id}-${event.sequence}`">
+                  <span>{{ event.status }} · {{ formatTimestamp(event.observedAt) }}</span>
+                  <p>{{ event.summary }}</p>
+                </li>
+              </ul>
+            </article>
+            <p v-if="supervisorError" class="desktop-agent-detail-error">{{ supervisorError }}</p>
+          </section>
+
           <section class="desktop-agent-detail-panel">
             <header>
               <span>Published reasoning</span>
@@ -258,6 +310,10 @@ import type {
   DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopReasoningSession,
+  DesktopSupervisorDaemonStatus,
+  DesktopSupervisorDesiredState,
+  DesktopSupervisorLivenessAxis,
+  DesktopSupervisorManifestEntry,
 } from "../../../../../electron/ipc-types";
 import {
   latestReasoningSessionForTarget,
@@ -304,6 +360,11 @@ const emit = defineEmits<{
 
 const dialogElement = ref<HTMLElement | null>(null);
 const managedSessions = ref<DesktopManagedAgentSession[]>([]);
+const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
+const supervisorError = ref<string | null>(null);
+const updatingSupervisorEntryId = ref<string | null>(null);
+const expandedSupervisorActivity = ref<Record<string, boolean>>({});
 const loadingManagedSessions = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
@@ -351,6 +412,22 @@ const matchingManagedSessions = computed(() => {
     managedAgentSessionMatchesTarget(session, props.target!) ||
     managedAgentSessionMatchesReasoning(session, reasoningSession)
   );
+});
+const matchingSupervisorEntries = computed(() => {
+  const ids = new Set(matchingManagedSessions.value.map((session) => session.supervisorEntryId).filter(Boolean));
+  const target = props.target;
+  const labels = new Set([
+    target?.displayName,
+    target?.sender,
+    target?.actorLabel,
+    target?.ideLabel,
+  ].filter(Boolean).map((value) => String(value).toLowerCase()));
+  return supervisorEntries.value.filter((entry) => {
+    if (ids.has(entry.id)) return true;
+    const displayName = entry.displayName.toLowerCase();
+    return labels.has(displayName)
+      || [...labels].some((label) => label.startsWith(`${displayName} |`));
+  });
 });
 const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
@@ -443,12 +520,15 @@ function clearTransientState(): void {
   retryingSessionId.value = null;
   stopStatusMessage.value = null;
   managedSessionError.value = null;
+  supervisorError.value = null;
   managedSessionInspections.value = {};
   inspectingSessionIds.value = {};
   managedChangeSummaries.value = {};
   loadingChangeSummaryIds.value = {};
   expandedChangeSummaryIds.value = {};
   resolvingPermissionIds.value = {};
+  updatingSupervisorEntryId.value = null;
+  expandedSupervisorActivity.value = {};
 }
 
 function resetTransientState(): void {
@@ -456,6 +536,8 @@ function resetTransientState(): void {
   stopRefreshTimer();
   clearTransientState();
   managedSessions.value = [];
+  supervisorEntries.value = [];
+  supervisorStatus.value = null;
 }
 
 function isCurrentModalState(version: number): boolean {
@@ -474,9 +556,18 @@ async function loadManagedSessions(options: { quiet?: boolean; refreshChanges?: 
   }
   managedSessionError.value = null;
   try {
-    const sessions = await desktopIpc.workers.listManagedAgentSessions(props.roomIdentifier);
+    const [sessions, entries, daemonStatus] = await Promise.all([
+      desktopIpc.workers.listManagedAgentSessions(props.roomIdentifier),
+      desktopIpc.supervisor.listAgents(props.roomIdentifier).catch((error) => {
+        supervisorError.value = error instanceof Error ? error.message : "Supervisor daemon unavailable.";
+        return [];
+      }),
+      desktopIpc.supervisor.getStatus().catch(() => null),
+    ]);
     if (!isCurrentModalState(requestVersion)) return;
     managedSessions.value = sessions;
+    supervisorEntries.value = entries;
+    supervisorStatus.value = daemonStatus;
     await refreshMatchingManagedSessionDetails({
       quiet: options.quiet,
       version: requestVersion,
@@ -490,6 +581,31 @@ async function loadManagedSessions(options: { quiet?: boolean; refreshChanges?: 
       loadingManagedSessions.value = false;
     }
   }
+}
+
+async function setSupervisorDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<void> {
+  if (updatingSupervisorEntryId.value) return;
+  updatingSupervisorEntryId.value = id;
+  supervisorError.value = null;
+  try {
+    const updated = await desktopIpc.supervisor.setDesiredState(id, desiredState);
+    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((entry) => entry.id !== id)];
+  } catch (error) {
+    supervisorError.value = error instanceof Error ? error.message : "Could not update desired state.";
+  } finally {
+    updatingSupervisorEntryId.value = null;
+  }
+}
+
+function livenessLabel(axis: DesktopSupervisorLivenessAxis): string {
+  const time = axis.observedAt ? ` · ${formatTimestamp(axis.observedAt)}` : "";
+  return `${axis.state}${time}${axis.detail ? ` · ${axis.detail}` : ""}`;
+}
+
+function terminalLabel(terminal: Record<string, unknown> | null): string {
+  if (!terminal) return "None";
+  return [terminal.terminal_cause, terminal.exit_code != null ? `exit ${terminal.exit_code}` : null, terminal.ended_at]
+    .filter(Boolean).join(" · ");
 }
 
 async function refreshMatchingManagedSessionDetails(

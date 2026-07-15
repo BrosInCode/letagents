@@ -233,6 +233,18 @@ const api: DesktopApi = {
     runAgentProviderSetup: (providerId, input) =>
       ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
   },
+  supervisor: {
+    getStatus: () => ipcRenderer.invoke("desktop:supervisor:get-status"),
+    listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
+    createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
+    setDesiredState: (id, desiredState) => ipcRenderer.invoke("desktop:supervisor:set-desired-state", id, desiredState),
+    readAttempt: (id) => ipcRenderer.invoke("desktop:supervisor:read-attempt", id),
+    onActivity: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:supervisor:activity", listener);
+      return () => ipcRenderer.off("desktop:supervisor:activity", listener);
+    },
+  },
   diagnostics: {
     getSnapshot: () => ipcRenderer.invoke("desktop:diagnostics:get-snapshot"),
   },

@@ -224,6 +224,14 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         result.managedSessionCodename = true;
         result.addAgentStopAgentOnly = modalText().includes("Stop agent") && !modalText().includes("Stop turn");
         result.deliveryControls = modalText().includes("From the agent app") && modalText().includes("From this desktop app");
+        const supervisedLifecycleButton = document.querySelector('[data-testid="desktop-add-agent-lifecycle-supervised"]');
+        supervisedLifecycleButton?.click();
+        await waitFor("supervised lifecycle controls", () =>
+          modalText().includes("A detached daemon owns desired state and recovery") &&
+          Boolean(document.querySelector('[data-testid="desktop-add-agent-supervised-charter"]'))
+        );
+        result.supervisedLifecycleControls = true;
+        document.querySelector('[data-testid="desktop-add-agent-lifecycle-legacy"]')?.click();
         result.addAgentModalScroll = (() => {
           const dialog = document.querySelector(".desktop-add-agent-modal");
           const status = dialog?.querySelector(".desktop-add-agent-status");
@@ -270,6 +278,17 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
             modalText().includes("Do not call yourself Antigravity, Antigravity 1, Antigravity 2");
           result.bridgeOnlyRepoCopy = modalText().includes("Handled by provider app");
           result.setupConfirmationClears = !modalText().includes("Confirm install Codex");
+        } else {
+          // Antigravity is intentionally hidden in current builds. Still
+          // exercise provider-switch cleanup before returning to Codex.
+          document.querySelector('[data-testid="desktop-add-agent-provider-claude-code"]')?.click();
+          await waitFor("provider switch clears setup confirmation", () =>
+            modalText().includes("Claude Code") && !modalText().includes("Confirm install Codex")
+          );
+          result.externalProviderInstruction = true;
+          result.externalJoinPrompt = true;
+          result.bridgeOnlyRepoCopy = true;
+          result.setupConfirmationClears = true;
         }
 
         const codexProviderAgain = document.querySelector('[data-testid="desktop-add-agent-provider-codex"]');

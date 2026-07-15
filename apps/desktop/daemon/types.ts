@@ -1,4 +1,5 @@
-export const DAEMON_PROTOCOL_VERSION = 1;
+export const DAEMON_PROTOCOL_VERSION = 2;
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.0";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -22,6 +23,30 @@ export type ReconciliationState = {
 
 export type ReconciliationNotice = { at: string; kind: "quarantine_death" | "coordination_escalation"; cause: string; terminal?: ExecutionTerminalPayload };
 
+export type WorkplaceReachability = "reachable" | "stale" | "unknown";
+export type NativeExecutionActivity = "active" | "idle" | "stale" | "terminal" | "unknown";
+
+export type DaemonLivenessAxis<TState extends string> = {
+  state: TState;
+  observed_at: string | null;
+  detail: string | null;
+};
+
+/** Bounded, redacted provider evidence. This is activity, never hidden thoughts. */
+export type DaemonActivityEvent = {
+  observed_at: string;
+  sequence: number;
+  provider: string;
+  kind: string;
+  method: string;
+  summary: string;
+  status: "idle" | "working" | "reviewing" | "blocked";
+  payload: unknown;
+  payload_truncated: boolean;
+  payload_redacted: boolean;
+  durable_payload_ref: string | null;
+};
+
 export type DaemonManifestEntry = {
   id: string;
   room_id: string;
@@ -33,15 +58,49 @@ export type DaemonManifestEntry = {
   observed_state: ObservedState;
   condition: PolicyCondition;
   permission_profile_id: string | null;
+  /** Provider-native policy selected in Add Agent; passed through unchanged. */
+  provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
+  /** Read-only source checkout used only to resolve remote + revision. */
+  source_repo_path?: string | null;
+  workspace_path?: string | null;
+  work_attempt_id?: string | null;
+  provider_ref?: {
+    work_attempt_id: string;
+    provider_continuation_id: string;
+    provider_connection:
+      | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
+      | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
+      | null;
+    execution_generation_id: string;
+  } | null;
+  workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
+  native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
+  activity?: DaemonActivityEvent[];
   reconciliation?: ReconciliationState;
   reconciliation_notices?: ReconciliationNotice[];
+};
+
+/** Durable mixed-engine fence for a legacy Electron-owned provider lane. */
+export type LegacyLaneOwner = {
+  reservation_id: string;
+  room_id: string;
+  provider: string;
+  /** Electron process that owns an in-flight reservation. */
+  owner_pid: number;
+  /** Birth identity prevents a recycled PID from preserving an orphan fence. */
+  owner_process_identity: string;
+  state: "reserved" | "active";
+  session_id: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type DaemonManifest = {
   generation: number;
   entries: DaemonManifestEntry[];
+  legacy_lane_owners?: LegacyLaneOwner[];
 };
 
 export type Transition = {

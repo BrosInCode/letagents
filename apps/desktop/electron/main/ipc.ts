@@ -26,6 +26,11 @@ import type {
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
   DesktopManagedAgentStopInput,
+  DesktopSupervisorAttemptDetail,
+  DesktopSupervisorCreateInput,
+  DesktopSupervisorDaemonStatus,
+  DesktopSupervisorDesiredState,
+  DesktopSupervisorManifestEntry,
   DesktopAccountFocusRoomEntry,
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
@@ -135,6 +140,12 @@ import {
   stopDesktopManagedAgent,
 } from "./agents/codex-supervisor.js";
 import {
+  onSupervisorActivity,
+  supervisorDaemonClient,
+} from "./supervisor-daemon.js";
+import { emitToMainWindow } from "./window.js";
+import { transferSupervisorOwnership } from "./supervisor-ownership.js";
+import {
   buildDiagnosticsSnapshot,
   buildWorkerSnapshots,
   clearJoinedRoomInfoCache,
@@ -212,6 +223,7 @@ import {
 } from "./agents/open-model-settings.js";
 
 const { ipcMain } = electron as typeof import("electron");
+let supervisorActivityBridgeRegistered = false;
 
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
@@ -799,6 +811,58 @@ export function registerDesktopIpcHandlers(
     "desktop:workers:list",
     async (): Promise<WorkerSnapshot[]> => buildWorkerSnapshots(),
   );
+  targetIpcMain.handle(
+    "desktop:supervisor:get-status",
+    async (): Promise<DesktopSupervisorDaemonStatus> => supervisorDaemonClient.ensureRunning(),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:list-agents",
+    async (_event, roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> =>
+      supervisorDaemonClient.list(roomIdentifier ?? null),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:create-agent",
+    async (_event, input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> => {
+      const storage = await getDesktopRoomStorage(input.roomIdentifier);
+      if (storage.effectiveMode !== "cloud") {
+        throw new Error("Supervised agents are not available in local-only rooms yet. Publish or join a cloud room, or use the existing local agent path.");
+      }
+      if (input.providerId !== "codex") {
+        throw new Error(`Supervised ${input.providerId} is capability-gated: only the Codex native adapter currently proves durable attach, terminal evidence, and activity streaming.`);
+      }
+      const existing = (await supervisorDaemonClient.list(input.roomIdentifier))
+        .find((entry) => entry.provider === input.providerId && entry.desiredState !== "stopped");
+      if (existing) throw new Error(`${existing.displayName} already owns the supervised ${input.providerId} lane in this room.`);
+
+      // Claim the lane durably first. Every legacy start consults this daemon
+      // fence, so no new legacy owner may appear while transfer is in flight.
+      return transferSupervisorOwnership({
+        claim: () => supervisorDaemonClient.create(input),
+        listLegacy: () => listDesktopManagedAgentSessions(input.roomIdentifier)
+          .filter((session) => session.providerId === input.providerId && !session.supervisorEntryId),
+        stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
+        // Activation is the second durable CAS. The daemon, not Electron,
+        // launches the native provider and remains authoritative after quit.
+        activate: (manifest) => supervisorDaemonClient.setDesiredState(manifest.id, "running"),
+        rollback: (manifest) => supervisorDaemonClient.setDesiredState(manifest.id, "stopped").then(() => undefined),
+      });
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:set-desired-state",
+    async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
+      const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
+      return updated;
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:read-attempt",
+    async (_event, id: string): Promise<DesktopSupervisorAttemptDetail> => supervisorDaemonClient.readAttempt(id),
+  );
+  if (!supervisorActivityBridgeRegistered) {
+    supervisorActivityBridgeRegistered = true;
+    onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));
+  }
   targetIpcMain.handle(
     "desktop:workers:list-managed-agent-sessions",
     async (

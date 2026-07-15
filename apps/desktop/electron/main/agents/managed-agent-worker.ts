@@ -31,6 +31,7 @@ import {
   markAgentSessionEnded,
   saveAgentSession,
   saveStoredAgentIdentity,
+  supervisorEntryIdForAgentSession,
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
   type DesktopManagedLiveSessionBase,
@@ -371,9 +372,28 @@ async function postDesktopManagedWorkerDeliveryHeartbeat(
       body: JSON.stringify(body),
     });
     desktopDeliverySignalGuard.recordSuccess(session.session_id);
+    const supervisorEntryId = supervisorEntryIdForAgentSession(session.session_id);
+    if (supervisorEntryId) {
+      const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
+      await supervisorDaemonClient.updateWorkplaceLiveness(
+        supervisorEntryId,
+        "reachable",
+        roomClosed ? "Room channel reachable; delivery intentionally paused while the room is closed." : "Room heartbeat accepted.",
+      ).catch(() => undefined);
+    }
   } catch (error) {
     const status = error instanceof DesktopApiError ? error.status : null;
-    if (desktopDeliverySignalGuard.recordFailure(session.session_id, status).terminal) {
+    const terminal = desktopDeliverySignalGuard.recordFailure(session.session_id, status).terminal;
+    const supervisorEntryId = supervisorEntryIdForAgentSession(session.session_id);
+    if (supervisorEntryId) {
+      const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
+      await supervisorDaemonClient.updateWorkplaceLiveness(
+        supervisorEntryId,
+        terminal ? "stale" : "unknown",
+        terminal ? "Room session is no longer accepted; native execution is evaluated independently." : "Room heartbeat failed; reachability is unknown.",
+      ).catch(() => undefined);
+    }
+    if (terminal) {
       tearDownDesktopDeliverySignal(session.session_id);
     }
   }

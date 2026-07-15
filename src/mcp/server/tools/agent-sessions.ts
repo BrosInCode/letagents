@@ -37,6 +37,7 @@ import {
   requireValidWorkerBearerRuntime,
   workerModeDisabledToolResult,
 } from "../runtime/worker-bearer.js";
+import { bindSupervisedWorkerSession } from "../runtime/supervisor-bridge.js";
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
@@ -211,6 +212,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         ended_at: typeof created.ended_at === "string" ? created.ended_at : null,
       });
 
+      await bindSupervisedWorkerSession(session);
       scheduleCodexRuntimeStreamBridgeBind(session);
 
       return {

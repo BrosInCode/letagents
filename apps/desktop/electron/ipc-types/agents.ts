@@ -305,6 +305,8 @@ export interface DesktopManagedAgentSession {
   updatedAt: string;
   lastError: string | null;
   failure?: DesktopManagedAgentFailure | null;
+  /** Daemon manifest owner. Presence disables legacy lifecycle controls. */
+  supervisorEntryId?: string | null;
 }
 
 export interface DesktopManagedAgentStartInput {
@@ -321,6 +323,8 @@ export interface DesktopManagedAgentStartInput {
   effort?: DesktopManagedAgentEffort | null;
   stopPhrase?: string | null;
   maxMinutes?: number | null;
+  /** Internal desktop bridge field; renderer legacy starts leave this absent. */
+  supervisorEntryId?: string | null;
 }
 
 export interface DesktopManagedAgentRetryInput {
@@ -344,6 +348,80 @@ export interface DesktopManagedAgentInspectResult {
   session: DesktopManagedAgentSession;
   serverReachable: boolean;
   recentItems: Array<Record<string, unknown>>;
+}
+
+export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
+export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
+export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
+
+export interface DesktopSupervisorDaemonStatus {
+  healthy: boolean;
+  protocolVersion: number;
+  implementationVersion: string;
+  generation: number;
+  pid: number;
+  startedAt: string;
+}
+
+export interface DesktopSupervisorLivenessAxis {
+  state: string;
+  observedAt: string | null;
+  detail: string | null;
+}
+
+export interface DesktopSupervisorActivityEvent {
+  observedAt: string;
+  sequence: number;
+  provider: string;
+  kind: string;
+  method: string;
+  summary: string;
+  status: "idle" | "working" | "reviewing" | "blocked";
+  payload: unknown;
+  payloadTruncated: boolean;
+  payloadRedacted: boolean;
+  durablePayloadRef: string | null;
+}
+
+export interface DesktopSupervisorManifestEntry {
+  id: string;
+  roomId: string;
+  displayName: string;
+  provider: string;
+  model: string | null;
+  charter: string;
+  desiredState: DesktopSupervisorDesiredState;
+  observedState: DesktopSupervisorObservedState;
+  condition: DesktopSupervisorCondition;
+  permissionProfileId: string | null;
+  createdBy: string;
+  createdAt: string;
+  workspacePath: string | null;
+  workAttemptId: string | null;
+  workplaceLiveness: DesktopSupervisorLivenessAxis;
+  nativeLiveness: DesktopSupervisorLivenessAxis;
+  restartCount: number;
+  lastTerminal: Record<string, unknown> | null;
+  activity: DesktopSupervisorActivityEvent[];
+}
+
+export interface DesktopSupervisorCreateInput {
+  roomIdentifier: string;
+  displayName: string;
+  providerId: DesktopAgentProviderId;
+  model?: string | null;
+  charter: string;
+  permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
+  repoRootPath: string;
+}
+
+export interface DesktopSupervisorAttemptDetail {
+  entryId: string;
+  workAttemptId: string | null;
+  workspacePath: string | null;
+  lastTerminal: Record<string, unknown> | null;
+  restartCount: number;
+  activity: DesktopSupervisorActivityEvent[];
 }
 
 export interface DesktopOpenModelSettingsStatus {
