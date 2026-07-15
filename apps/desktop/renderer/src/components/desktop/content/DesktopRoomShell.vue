@@ -315,7 +315,7 @@ import {
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   pendingManagedAgentPermissionApprovals,
-  preferredManagedAgentRepoRootPath,
+  managedAgentRootPathForRoom,
   type ManagedAgentPermissionApproval,
   managedAgentSessionListsEqual,
   withRoomManagedAgentSessions,
@@ -393,6 +393,8 @@ const props = defineProps<{
   sourceStates?: DesktopSnapshotSourceStates | null;
   repoStatus: RepoStatus;
   gitRoomMatchesActiveRepo: boolean;
+  durableProjectRootPath?: string | null;
+  homePath?: string | null;
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
@@ -588,7 +590,13 @@ const managedAgentRepoStatus = computed(() =>
   managedAgentRepoStatusForRoom(props.repoStatus, props.room, props.gitRoomMatchesActiveRepo)
 );
 const managedAgentRepoRootPath = computed(() =>
-  preferredManagedAgentRepoRootPath(managedAgentRepoStatus.value, props.room.gitRoom)
+  managedAgentRootPathForRoom({
+    room: props.room,
+    repoStatus: managedAgentRepoStatus.value,
+    gitRoomMatchesActiveRepo: props.gitRoomMatchesActiveRepo,
+    durableProjectRootPath: props.durableProjectRootPath,
+    homePath: props.homePath,
+  })
 );
 const roomPresence = computed(() =>
   mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)

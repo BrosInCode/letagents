@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { DesktopRoomInfo } from "../../electron/ipc-types";
 import {
+  managedAgentRootPathForRoom,
   managedAgentRepoStatusForRoom,
   preferredManagedAgentRepoRootPath,
 } from "../src/domain/managed-agents";
@@ -89,4 +90,68 @@ test("an explicit focus Git context wins over its parent context", () => {
   const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
   const ownGitRoom = { ...projectGitRoom, ref: { ...projectGitRoom.ref, name: "feature/focus" } };
   assert.equal(roomWithInheritedProjectContext(room({ gitRoom: ownGitRoom }), parent, true).gitRoom, ownGitRoom);
+});
+
+test("Add Agent keeps a focus room on its durable project root when active repo status is missing", () => {
+  const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
+  const focusRoom = roomWithInheritedProjectContext(room(), parent, true);
+  assert.equal(managedAgentRootPathForRoom({
+    room: focusRoom,
+    repoStatus: null,
+    gitRoomMatchesActiveRepo: false,
+    durableProjectRootPath: "/project/main",
+    homePath: "/Users/emmy",
+  }), "/project/main");
+});
+
+test("Add Agent preserves branch worktree matching ahead of the durable project fallback", () => {
+  const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
+  const focusRoom = roomWithInheritedProjectContext(room(), parent, true);
+  assert.equal(managedAgentRootPathForRoom({
+    room: focusRoom,
+    repoStatus: {
+      rootPath: "/project/main",
+      mainRootPath: "/project/main",
+      defaultBranch: "main",
+      worktrees: [{
+        path: "/project/feature-launch",
+        branch: "feature/launch",
+        head: "abc1234",
+        isCurrent: false,
+      }],
+    },
+    gitRoomMatchesActiveRepo: true,
+    durableProjectRootPath: "/project/main",
+    homePath: "/Users/emmy",
+  }), "/project/feature-launch");
+});
+
+test("Add Agent uses home for a room without Git or project context", () => {
+  assert.equal(managedAgentRootPathForRoom({
+    room: room({ kind: "main", parentRoomId: null, gitRoom: null }),
+    repoStatus: {
+      rootPath: "/application/startup-repo",
+      mainRootPath: "/application/startup-repo",
+      defaultBranch: "main",
+      worktrees: [],
+    },
+    gitRoomMatchesActiveRepo: false,
+    durableProjectRootPath: null,
+    homePath: "/Users/emmy",
+  }), "/Users/emmy");
+});
+
+test("Add Agent never replaces a durable local project root with stale repo status", () => {
+  assert.equal(managedAgentRootPathForRoom({
+    room: room({ kind: "main", parentRoomId: null, gitRoom: null }),
+    repoStatus: {
+      rootPath: "/unrelated/repo",
+      mainRootPath: "/unrelated/repo",
+      defaultBranch: "main",
+      worktrees: [],
+    },
+    gitRoomMatchesActiveRepo: false,
+    durableProjectRootPath: "/project/local-folder",
+    homePath: "/Users/emmy",
+  }), "/project/local-folder");
 });
