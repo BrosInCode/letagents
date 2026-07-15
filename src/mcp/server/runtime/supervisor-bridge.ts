@@ -3,14 +3,18 @@ import { createConnection } from "node:net";
 
 import type { StoredAgentSessionState } from "../../local-state.js";
 
-const SUPERVISOR_PROTOCOL_VERSION = 1;
+const NEGOTIATION_PROTOCOL_VERSION = 1;
+const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2]);
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
-type SupervisorResponse = { ok?: boolean; error?: string };
+type SupervisorResponse = { version?: number; id?: string; ok?: boolean; error?: string; result?: unknown };
+type SupervisorBridgeOptions = { requestTimeoutMs?: number };
 
 /** Bind the exact worker credential minted by registration to its daemon lane. */
 export async function bindSupervisedWorkerSession(
   session: StoredAgentSessionState,
   env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
 ): Promise<boolean> {
   const entryId = env.LETAGENTS_SUPERVISOR_ENTRY_ID?.trim();
   const socketPath = env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim();
@@ -20,8 +24,19 @@ export async function bindSupervisedWorkerSession(
   if (!entryId || !socketPath || !workAttemptId || !executionGenerationId) throw new Error("Supervised worker bridge environment is incomplete.");
   if (session.session_kind !== "worker") throw new Error("A supervised provider must register a worker session.");
 
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Supervisor bridge timeout must be a positive integer.");
+  const negotiation = await supervisorRequest(socketPath, {
+    version: NEGOTIATION_PROTOCOL_VERSION,
+    id: randomUUID(),
+    method: "daemon.negotiate",
+  }, timeoutMs);
+  if (!negotiation.ok) throw new Error(negotiation.error || "Supervisor protocol negotiation failed.");
+  const protocolVersion = negotiationProtocolVersion(negotiation.result);
+  if (negotiation.version !== protocolVersion) throw new Error("Supervisor negotiation response version does not match its negotiated protocol.");
+
   const response = await supervisorRequest(socketPath, {
-    version: SUPERVISOR_PROTOCOL_VERSION,
+    version: protocolVersion,
     id: randomUUID(),
     method: "supervisor.bind_worker_session",
     params: {
@@ -33,19 +48,30 @@ export async function bindSupervisedWorkerSession(
       agent_session_token: session.session_token,
       api_url: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
     },
-  });
+  }, timeoutMs);
   if (!response.ok) throw new Error(response.error || "Supervisor rejected the worker session binding.");
+  if (response.version !== protocolVersion) throw new Error("Supervisor binding response used an unexpected protocol version.");
   return true;
 }
 
-function supervisorRequest(socketPath: string, request: Record<string, unknown>): Promise<SupervisorResponse> {
+function negotiationProtocolVersion(result: unknown): number {
+  if (!result || typeof result !== "object") throw new Error("Supervisor protocol negotiation returned a malformed result.");
+  const protocolVersion = (result as Record<string, unknown>).protocol_version;
+  if (typeof protocolVersion !== "number" || !Number.isSafeInteger(protocolVersion)
+    || !SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS.has(protocolVersion)) {
+    throw new Error(`Supervisor protocol negotiation returned unsupported version ${String(protocolVersion)}.`);
+  }
+  return protocolVersion;
+}
+
+function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number): Promise<SupervisorResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let buffer = "";
     const timer = setTimeout(() => {
       socket.destroy();
-      reject(new Error("Timed out binding the worker session to the supervisor daemon."));
-    }, 5_000);
+      reject(new Error("Timed out communicating with the supervisor daemon."));
+    }, timeoutMs);
     timer.unref();
     const finish = (operation: () => void) => {
       clearTimeout(timer);
@@ -58,7 +84,12 @@ function supervisorRequest(socketPath: string, request: Record<string, unknown>)
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       socket.end();
-      try { finish(() => resolve(JSON.parse(buffer.slice(0, newline)) as SupervisorResponse)); }
+      try {
+        const response = JSON.parse(buffer.slice(0, newline)) as SupervisorResponse;
+        finish(() => response.id === request.id
+          ? resolve(response)
+          : reject(new Error("Supervisor response id does not match its request.")));
+      }
       catch (error) { finish(() => reject(error)); }
     });
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
