@@ -299,7 +299,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
     },
     onStream: async (handle, listener) => {
       if (handle === failedHandle) {
-        queueMicrotask(() => listener({
+        listener({
           workAttemptId: attempt.work_attempt_id,
           providerContinuationId: "claude-continuation",
           observedAt: new Date().toISOString(),
@@ -311,7 +311,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
           payloadTruncated: false,
           payloadRedacted: false,
           durablePayloadRef: null,
-        }));
+        });
       }
       return () => {};
     },
