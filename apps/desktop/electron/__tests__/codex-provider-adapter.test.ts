@@ -15,6 +15,7 @@ import type { RpcNotification } from "../main/agents/codex-rpc-client.js";
 import type {
   ProviderActivityEvent,
   ProviderSpawnRequest,
+  ProviderStreamEvent,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
 
@@ -330,13 +331,31 @@ test("stop orders SIGTERM before observed terminal and escalates to SIGKILL afte
 test("native notifications and transcript tail become activity evidence", async () => {
   const harness = createHarness();
   const sink: ProviderActivityEvent[] = [];
+  const nativeStream: ProviderStreamEvent[] = [];
   const adapter = new CodexProviderAdapter({
     dependencies: harness.dependencies,
     activitySink: (event) => sink.push(event),
+    streamSink: (event) => nativeStream.push(event),
   });
   const handle = await adapter.spawn(spawnRequest());
   const subscribed: ProviderActivityEvent[] = [];
+  const subscribedStream: ProviderStreamEvent[] = [];
   adapter.onActivity(handle, (event) => subscribed.push(event));
+  adapter.onStream(handle, (event) => subscribedStream.push(event));
+
+  harness.clients[0]!.emit({
+    method: "item/agentMessage/delta",
+    params: { delta: "Reading the next room message", apiKey: "must-not-leak" },
+  });
+  harness.clients[0]!.emit({
+    method: "command/exec/outputDelta",
+    params: { processId: "p1", delta: "npm test: 13 passed" },
+  });
+  harness.clients[0]!.emit({ method: "turn/started", params: { turnId: "turn-1" } });
+  harness.clients[0]!.emit({ method: "item/mcpToolCall/progress", params: { tool: "read_messages" } });
+  harness.clients[0]!.emit({ method: "item/commandExecution/requestApproval", params: { command: "git push" } });
+  harness.clients[0]!.emit({ method: "error", params: { message: "provider error" } });
+  harness.clients[0]!.emit({ method: "thread/tokenUsage/updated", params: { inputTokens: 12 } });
 
   harness.clients[0]!.emit({
     method: "turn/completed",
@@ -348,6 +367,45 @@ test("native notifications and transcript tail become activity evidence", async 
   assert.ok(sink.some((event) =>
     event.source === "transcript_tail" && event.summary === "Transcript checkpoint persisted."));
   assert.ok(subscribed.some((event) => event.source === "transcript_tail"));
+  const textDelta = nativeStream.find((event) => event.method === "item/agentMessage/delta");
+  assert.equal(textDelta?.kind, "text_delta");
+  assert.equal((textDelta?.payload as { delta?: string }).delta, "Reading the next room message");
+  assert.equal((textDelta?.payload as { apiKey?: string }).apiKey, "[REDACTED]");
+  assert.equal(textDelta?.payloadRedacted, true);
+  assert.equal(
+    nativeStream.find((event) => event.method === "command/exec/outputDelta")?.kind,
+    "command_output",
+    "command deltas retain their tool-specific stream category",
+  );
+  assert.equal(nativeStream.find((event) => event.method === "turn/started")?.kind, "turn_lifecycle");
+  assert.equal(nativeStream.find((event) => event.method === "item/mcpToolCall/progress")?.kind, "tool_lifecycle");
+  assert.equal(nativeStream.find((event) => event.method.includes("requestApproval"))?.kind, "approval");
+  assert.equal(nativeStream.find((event) => event.method === "error")?.kind, "error");
+  assert.equal(nativeStream.find((event) => event.method.includes("tokenUsage"))?.kind, "usage");
+  assert.ok(nativeStream.some((event) => event.kind === "transcript_snapshot"));
+  assert.ok(subscribedStream.some((event) => event.method === "turn/completed"));
+  assert.deepEqual(
+    nativeStream.map((event) => event.sequence),
+    nativeStream.map((_, index) => index + 1),
+    "native stream ordering is explicit per provider handle",
+  );
+});
+
+test("native stream bounds oversized provider payloads without dropping method identity", async () => {
+  const harness = createHarness();
+  const nativeStream: ProviderStreamEvent[] = [];
+  const adapter = new CodexProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => nativeStream.push(event),
+  });
+  await adapter.spawn(spawnRequest());
+
+  harness.clients[0]!.emit({ method: "item/reasoning/textDelta", params: { delta: "x".repeat(40_000) } });
+  const event = nativeStream.find((entry) => entry.method === "item/reasoning/textDelta");
+  assert.equal(event?.kind, "text_delta");
+  assert.equal(event?.payloadTruncated, true);
+  assert.equal(typeof (event?.payload as { preview?: unknown }).preview, "string");
+  assert.equal(event?.durablePayloadRef, null);
 });
 
 test("launch policy cannot override adapter-owned thread fields", async () => {

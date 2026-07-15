@@ -122,6 +122,39 @@ export interface ProviderActivityEvent {
   nextAction: string;
 }
 
+export type ProviderStreamEventKind =
+  | "text_delta"
+  | "turn_lifecycle"
+  | "item_lifecycle"
+  | "tool_lifecycle"
+  | "command_output"
+  | "approval"
+  | "error"
+  | "usage"
+  | "transcript_snapshot"
+  | "provider_event";
+
+/**
+ * Loss-minimized native provider evidence for the first-party live feed. The
+ * compact ProviderActivityEvent is derived from this stream, never its only
+ * durable representation. Payloads are provider-shaped but bounded/redacted at
+ * the adapter boundary; a future persistence bridge may replace large payloads
+ * with durablePayloadRef without changing the event taxonomy.
+ */
+export interface ProviderStreamEvent {
+  workAttemptId: string;
+  providerContinuationId: string | null;
+  observedAt: string;
+  sequence: number;
+  provider: ProviderAdapterId;
+  kind: ProviderStreamEventKind;
+  method: string;
+  payload: unknown;
+  payloadTruncated: boolean;
+  payloadRedacted: boolean;
+  durablePayloadRef: string | null;
+}
+
 export interface ProviderAdapter {
   readonly id: ProviderAdapterId;
 
@@ -166,6 +199,12 @@ export interface ProviderAdapter {
   onActivity?(
     handle: ProviderHandle,
     listener: (event: ProviderActivityEvent) => void,
+  ): () => void;
+
+  /** Ordered native provider events for live UI and safe durable persistence. */
+  onStream?(
+    handle: ProviderHandle,
+    listener: (event: ProviderStreamEvent) => void,
   ): () => void;
 }
 

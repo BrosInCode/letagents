@@ -31,11 +31,15 @@ import {
   type ProviderObservedState,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
+  type ProviderStreamEvent,
+  type ProviderStreamEventKind,
   type ProviderTerminalPayload,
 } from "./provider-adapter.js";
 
 const DEFAULT_STOP_GRACE_MS = 5_000;
 const RESUME_PROBE_THREAD_ID = "00000000-0000-0000-0000-000000000000";
+const MAX_STREAM_PAYLOAD_BYTES = 32 * 1024;
+const SENSITIVE_PAYLOAD_KEY = /(?:authorization|cookie|credential|password|secret|api[_-]?key|(?:access|refresh|auth|bearer|session)[_-]?token|^token$)/i;
 
 type CodexThreadResult = { thread?: { id?: string } };
 
@@ -65,6 +69,7 @@ export interface CodexProviderAdapterOptions {
   codexBin?: string;
   dependencies?: Partial<CodexProviderAdapterDependencies>;
   activitySink?: (event: ProviderActivityEvent) => void;
+  streamSink?: (event: ProviderStreamEvent) => void;
 }
 
 const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
@@ -123,6 +128,72 @@ function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function streamKind(method: string): ProviderStreamEventKind {
+  if (/(?:approval|requestApproval|guardian)/i.test(method)) return "approval";
+  if (/(?:error|warning|failed)/i.test(method)) return "error";
+  if (/(?:usage|tokenUsage|rateLimit)/i.test(method)) return "usage";
+  if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
+  if (/(?:command|process|terminal)/i.test(method)) return "command_output";
+  if (/(?:delta|transcript)/i.test(method)) return "text_delta";
+  if (/^turn\//.test(method)) return "turn_lifecycle";
+  if (/^item\//.test(method)) return "item_lifecycle";
+  return "provider_event";
+}
+
+function redactPayload(
+  value: unknown,
+  state: { redacted: boolean; truncated: boolean },
+  key = "",
+  depth = 0,
+): unknown {
+  if (SENSITIVE_PAYLOAD_KEY.test(key)) {
+    state.redacted = true;
+    return "[REDACTED]";
+  }
+  if (depth >= 12) {
+    state.truncated = true;
+    return "[MAX_DEPTH]";
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactPayload(entry, state, "", depth + 1));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([entryKey, entry]) => [
+      entryKey,
+      redactPayload(entry, state, entryKey, depth + 1),
+    ]));
+  }
+  return value;
+}
+
+function safeStreamPayload(value: unknown): {
+  payload: unknown;
+  payloadTruncated: boolean;
+  payloadRedacted: boolean;
+} {
+  const state = { redacted: false, truncated: false };
+  const payload = redactPayload(value, state);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(payload) ?? "null";
+  } catch {
+    return {
+      payload: { preview: "[UNSERIALIZABLE_PROVIDER_PAYLOAD]" },
+      payloadTruncated: true,
+      payloadRedacted: state.redacted,
+    };
+  }
+  if (Buffer.byteLength(serialized, "utf8") <= MAX_STREAM_PAYLOAD_BYTES) {
+    return { payload, payloadTruncated: state.truncated, payloadRedacted: state.redacted };
+  }
+  const serializedBytes = Buffer.from(serialized, "utf8");
+  return {
+    payload: { preview: serializedBytes.subarray(0, MAX_STREAM_PAYLOAD_BYTES).toString("utf8"), originalBytes: serializedBytes.length },
+    payloadTruncated: true,
+    payloadRedacted: state.redacted,
+  };
 }
 
 function isMethodNotFound(error: unknown): boolean {
@@ -211,6 +282,8 @@ class CodexProviderHandle implements ProviderHandle {
   terminal: ProviderTerminalPayload | null = null;
   readonly exitListeners = new Set<(payload: ProviderTerminalPayload) => void>();
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
+  readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
+  streamSequence = 0;
 
   constructor(
     readonly workAttemptId: string,
@@ -230,6 +303,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly codexBin: string;
   private readonly deps: CodexProviderAdapterDependencies;
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
+  private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly handles = new Map<string, CodexProviderHandle>();
   private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
   private resumeSupported = false;
@@ -238,6 +312,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     this.codexBin = options.codexBin || process.env.LETAGENTS_CODEX_BIN || "codex";
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
+    this.streamSink = options.streamSink;
   }
 
   capabilities(): ProviderAdapterCapabilities {
@@ -324,6 +399,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const handle = this.requireHandle(providerHandle);
     handle.activityListeners.add(listener);
     return () => handle.activityListeners.delete(listener);
+  }
+
+  onStream(
+    providerHandle: ProviderHandle,
+    listener: (event: ProviderStreamEvent) => void,
+  ): () => void {
+    const handle = this.requireHandle(providerHandle);
+    handle.streamListeners.add(listener);
+    return () => handle.streamListeners.delete(listener);
   }
 
   private async start(
@@ -448,6 +532,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle: CodexProviderHandle,
     notification: RpcNotification,
   ): void {
+    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method));
     const summary = summarizeCodexRuntimeNotification(notification);
     this.publishActivity(handle, {
       source: "native_harness",
@@ -466,6 +551,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
         includeTurns: true,
       });
       const latestTurn = read.thread?.turns?.at(-1);
+      this.publishStream(handle, "thread/read", {
+        threadId: handle.providerContinuationId,
+        threadStatus: read.thread?.status,
+        latestTurn,
+      }, "transcript_snapshot");
       const snapshot = summarizeCodexRuntimeSnapshot({
         threadStatus: typeof read.thread?.status === "string"
           ? read.thread.status
@@ -484,6 +574,28 @@ export class CodexProviderAdapter implements ProviderAdapter {
     } catch {
       // Runtime evidence is best effort and must never end the worker turn.
     }
+  }
+
+  private publishStream(
+    handle: CodexProviderHandle,
+    method: string,
+    providerPayload: unknown,
+    kind: ProviderStreamEventKind,
+  ): void {
+    const safe = safeStreamPayload(providerPayload);
+    const event: ProviderStreamEvent = {
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId,
+      observedAt: this.deps.now(),
+      sequence: ++handle.streamSequence,
+      provider: this.id,
+      kind,
+      method,
+      ...safe,
+      durablePayloadRef: null,
+    };
+    this.streamSink?.(event);
+    for (const listener of handle.streamListeners) listener(event);
   }
 
   private publishActivity(
