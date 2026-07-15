@@ -37,10 +37,12 @@ export class DaemonControlSocket {
   }
 
   async stop(): Promise<void> {
+    const server = this.server;
+    if (!server) return;
+    this.server = null;
     for (const socket of this.connections) socket.destroy();
     this.connections.clear();
-    if (this.server) await new Promise<void>((resolve, reject) => this.server!.close((error) => error ? reject(error) : resolve()));
-    this.server = null;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await unlink(this.path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
 

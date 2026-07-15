@@ -17,6 +17,7 @@ import { SupervisorDaemon } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
@@ -806,6 +807,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     socketPath: join(env.root, "daemon.sock"),
     manifestPath: join(env.root, "manifest.json"),
     auditPath: join(env.root, "audit.jsonl"),
+    workerBindingsPath: join(env.root, "worker-bindings.json"),
   };
   const first = new SupervisorDaemon(paths, "darwin");
   let second: SupervisorDaemon | null = null;
@@ -813,6 +815,10 @@ test("handoff destroys open control sockets and fences a mutation paused before 
   const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
   let reachedCommit!: () => void;
   const commitReached = new Promise<void>((resolve) => { reachedCommit = resolve; });
+  let releaseBindingCommit!: () => void;
+  const bindingCommitGate = new Promise<void>((resolve) => { releaseBindingCommit = resolve; });
+  let reachedBindingCommit!: () => void;
+  const bindingCommitReached = new Promise<void>((resolve) => { reachedBindingCommit = resolve; });
   let heldSocket: ReturnType<typeof createConnection> | null = null;
   try {
     await first.start();
@@ -827,7 +833,20 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     const lateMutation = daemonRequest(paths.socketPath, "manifest.put", {
       entry: { ...entry, id: "must_not_commit_after_handoff" },
     }).catch(() => null);
-    await commitReached;
+    const bindingStore = (first as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
+    const rawBindingStore = bindingStore as unknown as { write: (value: unknown) => Promise<void> };
+    const originalBindingWrite = rawBindingStore.write.bind(rawBindingStore);
+    rawBindingStore.write = async (value) => {
+      reachedBindingCommit();
+      await bindingCommitGate;
+      await originalBindingWrite(value);
+    };
+    const lateBinding = bindingStore.bind({
+      entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_old",
+      execution_generation_id: "execution_old", agent_session_id: "session_old",
+      agent_session_token: "old-secret", api_url: "https://letagents.chat",
+    }).catch(() => null);
+    await Promise.all([commitReached, bindingCommitReached]);
 
     heldSocket = createConnection(paths.socketPath);
     await new Promise<void>((resolve, reject) => {
@@ -847,14 +866,24 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       }
     })(), "replacement daemon while an old control socket is open", 1_000);
     await within(heldClosed, "old control connection destruction", 1_000);
+    const replacementBindings = (second as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
+    await replacementBindings.bind({
+      entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_new",
+      execution_generation_id: "execution_new", agent_session_id: "session_new",
+      agent_session_token: "new-secret", api_url: "https://letagents.chat",
+    });
+    assert.equal(await replacementBindings.unbind("binding_race", undefined, "execution_old"), false, "a predecessor terminal cannot unbind its successor execution");
 
     releaseCommit();
-    await lateMutation;
+    releaseBindingCommit();
+    await Promise.all([lateMutation, lateBinding]);
     const listed = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     assert.equal(listed.some((candidate) => candidate.id === "must_not_commit_after_handoff"), false);
     assert.doesNotMatch(await readFile(paths.auditPath, "utf8").catch(() => ""), /must_not_commit_after_handoff/);
+    assert.equal((await replacementBindings.get("binding_race"))?.agent_session_id, "session_new", "a stale bind cannot overwrite its successor generation");
   } finally {
     releaseCommit();
+    releaseBindingCommit();
     heldSocket?.destroy();
     await second?.stop();
     await env.cleanup();

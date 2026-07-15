@@ -65,7 +65,10 @@ export class SupervisorDaemon {
       gitCommand,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
-    this.workerBindings = new WorkerBindingStore(paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`);
+    this.workerBindings = new WorkerBindingStore(
+      paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
+      (commit) => this.fenceDaemonCommit(commit),
+    );
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
       await this.singleton.assertCurrent();
       await this.controlRequestBarrier?.(request);
@@ -767,7 +770,7 @@ export class SupervisorDaemon {
         });
       }
     }
-    await this.workerBindings.unbind(entryId);
+    await this.workerBindings.unbind(entryId, undefined, entry?.provider_ref?.execution_generation_id);
     await this.observeProviderExit(entryId, terminal, "daemon-provider");
     this.requestConvergence(entryId);
   }
@@ -1089,11 +1092,15 @@ export class SupervisorDaemon {
     entries: DaemonManifestEntry[],
     legacyOwners?: LegacyLaneOwner[],
   ) {
-    return this.store.write(expectedGeneration, entries, legacyOwners, (commit) => this.serializeManifestCommit(async () => {
-      if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale manifest commit.");
+    return this.store.write(expectedGeneration, entries, legacyOwners, (commit) => this.fenceDaemonCommit(commit));
+  }
+
+  private fenceDaemonCommit(commit: () => Promise<void>): Promise<void> {
+    return this.serializeManifestCommit(async () => {
+      if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.");
       await this.singleton.assertCurrent();
       await commit();
-    }));
+    });
   }
 
   private async serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> {
