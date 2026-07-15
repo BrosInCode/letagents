@@ -237,6 +237,99 @@ test("terminal native failure is sticky for one provider execution", async () =>
   }
 });
 
+test("a provider handle returned already terminal is fenced and resumes under a successor generation", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "returned_terminal");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({
+    taskId: "returned_terminal",
+    leaseId: "returned_terminal",
+    leaseEpoch: 0,
+    workspacePath: workspace.path,
+    workAttemptId: workspace.id,
+  });
+  const failedHandle = {
+    workAttemptId: attempt.work_attempt_id,
+    pid: 4101,
+    providerContinuationId: "claude-continuation",
+    observedState: "failed" as const,
+  };
+  const recoveredHandle = {
+    ...failedHandle,
+    pid: 4102,
+    observedState: "working" as const,
+  };
+  let stopCount = 0;
+  let resumeCount = 0;
+  const exitListeners = new Map<object, (terminal: {
+    endedAt: string; exitCode: number | null; signal: string | null;
+    terminalCause: "stopped"; providerContinuationId: string;
+  }) => void>();
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => failedHandle,
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { resumeCount += 1; return recoveredHandle; },
+    poke: async () => {},
+    stop: async (handle) => {
+      stopCount += 1;
+      const terminal = {
+        endedAt: new Date().toISOString(),
+        exitCode: 1,
+        signal: null,
+        terminalCause: "stopped" as const,
+        providerContinuationId: "claude-continuation",
+      };
+      queueMicrotask(() => exitListeners.get(handle as object)?.(terminal));
+      return terminal;
+    },
+    onExit: async (handle, listener) => {
+      exitListeners.set(handle as object, listener);
+      return () => exitListeners.delete(handle as object);
+    },
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id: "returned_terminal",
+      provider: "claude-code",
+      observed_state: "absent",
+      workspace_path: attempt.workspace_path,
+      work_attempt_id: attempt.work_attempt_id,
+    } });
+    assert.equal(put.ok, true, put.error);
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return current.observed_state === "working"
+        && current.provider_ref?.execution_generation_id !== undefined;
+    }, "already-terminal launch recovery");
+    assert.equal(stopCount, 1, "daemon fences the terminal handle even though no stream listener observed its earlier result");
+    assert.equal(resumeCount, 1, "the persisted continuation resumes under one bounded successor");
+    const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "returned_terminal" })).result as {
+      execution_generations: Array<{ terminal: unknown }>;
+    };
+    assert.ok(detail.execution_generations[0]?.terminal, "the returned-terminal generation is durably terminal");
+    assert.equal(detail.execution_generations[1]?.terminal, null, "only the successor generation remains live");
+  } finally {
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "returned_terminal", desired_state: "stopped" }).catch(() => undefined);
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("reconciler policy uses the addressed-message watchdog rather than turn duration", () => {
   const base = {
     desiredState: "running" as const, observedState: "working" as const, condition: "none" as const,

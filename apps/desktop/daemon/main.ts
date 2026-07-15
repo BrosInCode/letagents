@@ -625,6 +625,18 @@ export class SupervisorDaemon {
         await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
         await this.installProviderHandle(entry.id, handle, execution.execution_generation_id);
         await this.transition(entry.id, handle.observedState, "none", ref ? "provider resumed under daemon authority" : "provider launched under daemon authority", "daemon-convergence");
+        if (["failed", "idle", "stopped"].includes(handle.observedState)) {
+          // A provider can finish the bootstrap turn before spawn/resume
+          // returns and before the daemon has installed its stream listener.
+          // The handle state is still authoritative: a persistent polling
+          // worker that already failed or completed has no live delivery
+          // loop. Fence it after installing the exit listener so the normal
+          // terminal callback can persist the edge and mint a bounded resume
+          // generation instead of parking forever on a terminal live handle.
+          await this.providerPort.stop(handle, {
+            actionId: `manifest:${entry.id}:returned-terminal:${generationNumber}`,
+          });
+        }
       } catch (error) {
         const terminal = this.terminalPayload({
           endedAt: new Date().toISOString(), exitCode: null, signal: null,
