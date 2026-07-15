@@ -45,6 +45,7 @@ export class SupervisorDaemon {
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
+  private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private handoffScheduled = false;
 
@@ -153,7 +154,7 @@ export class SupervisorDaemon {
     this.liveDisposers.clear();
     await Promise.all([...this.providerCallbacks]);
     await this.socket.stop();
-    await this.singleton.release();
+    await this.serializeManifestCommit(() => this.singleton.release());
   }
 
   /**
@@ -171,7 +172,7 @@ export class SupervisorDaemon {
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
     this.liveDisposers.clear();
     await this.socket.stop();
-    await this.singleton.release();
+    await this.serializeManifestCommit(() => this.singleton.release());
     // Existing convergence/provider callbacks are generation-fenced below.
     // Do not await them: a wedged native transport must not block an upgrade.
     this.convergenceRequests.clear();
@@ -259,7 +260,7 @@ export class SupervisorDaemon {
         activity: (entry.activity ?? []).slice(-200),
       };
       const entries = [...manifest.entries, nextEntry];
-      const next = await this.store.write(this.manifestGeneration, entries, legacyOwners);
+      const next = await this.writeManifest(this.manifestGeneration, entries, legacyOwners);
       this.manifestGeneration = next.generation;
       return nextEntry;
     });
@@ -284,7 +285,7 @@ export class SupervisorDaemon {
         }
       }
       const updated = { ...entry, desired_state: desiredState };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate), legacyOwners);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate), legacyOwners);
       this.manifestGeneration = next.generation;
       return updated;
     });
@@ -330,7 +331,7 @@ export class SupervisorDaemon {
         created_at: now,
         updated_at: now,
       };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, [...legacyOwners, owner]);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, [...legacyOwners, owner]);
       this.manifestGeneration = next.generation;
       return owner;
     });
@@ -366,7 +367,7 @@ export class SupervisorDaemon {
       const owners = manifest.legacy_lane_owners ?? [];
       const live = this.liveLegacyLaneOwners(owners);
       if (live.length === owners.length) return;
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, live);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, live);
       this.manifestGeneration = next.generation;
     });
   }
@@ -383,7 +384,7 @@ export class SupervisorDaemon {
         throw new Error(`Legacy reservation '${reservationId}' is already active for another session.`);
       }
       const updated: LegacyLaneOwner = { ...owner, state: "active", session_id: sessionId, updated_at: new Date().toISOString() };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, legacyOwners
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, legacyOwners
         .map((candidate) => candidate.reservation_id === reservationId ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
@@ -408,7 +409,7 @@ export class SupervisorDaemon {
         || (roomId && provider && candidate.room_id === roomId && candidate.provider === provider)
       ));
       if (retained.length === owners.length) return { released: false };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries, retained);
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, retained);
       this.manifestGeneration = next.generation;
       return { released: true };
     });
@@ -429,7 +430,7 @@ export class SupervisorDaemon {
         native_liveness: { state: event.status === "idle" ? "idle" : "active", observed_at: event.observed_at, detail: event.summary },
         activity: [...(entry.activity ?? []), event].slice(-200),
       };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
     });
@@ -444,7 +445,7 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       const updated: DaemonManifestEntry = { ...entry, workplace_liveness: { state, observed_at: observedAt, detail } };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
     });
@@ -783,7 +784,7 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
       const updated = update(entry);
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;
     });
@@ -818,9 +819,12 @@ export class SupervisorDaemon {
       reconciliation: nextReconciliation,
       reconciliation_notices: notices.slice(-32),
     };
-    const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
+    const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
     this.manifestGeneration = next.generation;
-    await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });
+    await this.serializeManifestCommit(async () => {
+      await this.singleton.assertCurrent();
+      await this.audit.append({ at: new Date().toISOString(), entry_id: entryId, from: entry.observed_state, to, cause, actor, generation: next.generation });
+    });
   }
 
   /**
@@ -842,7 +846,7 @@ export class SupervisorDaemon {
     let reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, input.nowMs);
     if (JSON.stringify(reconciliation) !== JSON.stringify(entry.reconciliation)) {
       const persisted = { ...entry, reconciliation };
-      const next = await this.store.write(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? persisted : candidate));
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? persisted : candidate));
       this.manifestGeneration = next.generation;
     }
 
@@ -1078,6 +1082,26 @@ export class SupervisorDaemon {
       await this.singleton.assertCurrent();
       return await operation();
     } finally { release(); }
+  }
+
+  private writeManifest(
+    expectedGeneration: number,
+    entries: DaemonManifestEntry[],
+    legacyOwners?: LegacyLaneOwner[],
+  ) {
+    return this.store.write(expectedGeneration, entries, legacyOwners, (commit) => this.serializeManifestCommit(async () => {
+      if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale manifest commit.");
+      await this.singleton.assertCurrent();
+      await commit();
+    }));
+  }
+
+  private async serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.manifestCommit;
+    let release!: () => void;
+    this.manifestCommit = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
   }
 
   private terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload {

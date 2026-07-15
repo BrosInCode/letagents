@@ -59,11 +59,16 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   return new Promise((resolve, reject) => {
     const client = createConnection(socketPath);
     let received = "";
+    let settled = false;
     client.setEncoding("utf8");
     client.once("error", reject);
+    client.once("close", () => {
+      if (!settled) reject(new Error(`Daemon connection closed before '${method}' returned a response.`));
+    });
     client.on("data", (chunk) => {
       received += chunk;
       if (!received.includes("\n")) return;
+      settled = true;
       client.end();
       resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
     });
@@ -790,6 +795,68 @@ test("version handoff releases authority without waiting for wedged callbacks an
   } finally {
     await second?.stop();
     provider.kill("SIGKILL");
+    await env.cleanup();
+  }
+});
+
+test("handoff destroys open control sockets and fences a mutation paused before commit", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const first = new SupervisorDaemon(paths, "darwin");
+  let second: SupervisorDaemon | null = null;
+  let releaseCommit!: () => void;
+  const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  let reachedCommit!: () => void;
+  const commitReached = new Promise<void>((resolve) => { reachedCommit = resolve; });
+  let heldSocket: ReturnType<typeof createConnection> | null = null;
+  try {
+    await first.start();
+    const store = (first as unknown as { store: ManifestStore }).store;
+    const originalWrite = store.write.bind(store);
+    store.write = (expected, entries, owners, commitFence) => originalWrite(expected, entries, owners, async (commit) => {
+      reachedCommit();
+      await commitGate;
+      if (commitFence) await commitFence(commit);
+      else await commit();
+    });
+    const lateMutation = daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...entry, id: "must_not_commit_after_handoff" },
+    }).catch(() => null);
+    await commitReached;
+
+    heldSocket = createConnection(paths.socketPath);
+    await new Promise<void>((resolve, reject) => {
+      heldSocket!.once("connect", resolve);
+      heldSocket!.once("error", reject);
+    });
+    const heldClosed = new Promise<void>((resolve) => heldSocket!.once("close", () => resolve()));
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    second = new SupervisorDaemon(paths, "darwin");
+    await within((async () => {
+      while (true) {
+        try { await second!.start(); return; }
+        catch (error) {
+          if (!(error instanceof DaemonAlreadyRunningError)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+    })(), "replacement daemon while an old control socket is open", 1_000);
+    await within(heldClosed, "old control connection destruction", 1_000);
+
+    releaseCommit();
+    await lateMutation;
+    const listed = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.equal(listed.some((candidate) => candidate.id === "must_not_commit_after_handoff"), false);
+    assert.doesNotMatch(await readFile(paths.auditPath, "utf8").catch(() => ""), /must_not_commit_after_handoff/);
+  } finally {
+    releaseCommit();
+    heldSocket?.destroy();
+    await second?.stop();
     await env.cleanup();
   }
 });
