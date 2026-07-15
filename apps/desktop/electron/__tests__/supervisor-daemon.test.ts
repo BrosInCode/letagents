@@ -169,6 +169,15 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const listed = await client.list(created.roomId);
     assert.equal(listed.find((entry) => entry.id === second.id)?.desiredState, "running", "stopping one same-provider agent does not affect its peer");
     assert.equal((await client.readAttempt(created.id)).workspacePath, null);
+    await client.create({
+      roomIdentifier: "git-room:github.com:owner/claude-repo",
+      displayName: "Durable Claude",
+      providerId: "claude-code",
+      charter: "Keep polling.",
+      repoRootPath: "/tmp/claude-work",
+      launchPolicy: { permissionMode: "acceptEdits", model: "sonnet" },
+    });
+    assert.deepEqual(wire.entries[1]?.provider_launch_policy, { permissionMode: "acceptEdits", model: "sonnet" });
     const reservation = await client.reserveLegacyLane("room_legacy_client", "codex", "legacy_client");
     assert.equal(reservation.owner_pid, process.pid);
     assert.equal((await client.activateLegacyLane("legacy_client", "legacy_session_client")).state, "active");

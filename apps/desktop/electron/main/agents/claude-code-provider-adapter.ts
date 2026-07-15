@@ -69,7 +69,7 @@ export interface ClaudeCliChild {
 }
 
 export interface ClaudeCodeProviderAdapterDependencies {
-  launchChild(input: { claudeBin: string; args: string[]; cwd: string }): ClaudeCliChild;
+  launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
@@ -228,12 +228,12 @@ function userStreamJsonLine(text: string): string {
  * session"), so a supervisor that itself runs under Claude Code must not leak
  * that marker into the worker. Nothing else is scrubbed or curated.
  */
-export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const { CLAUDECODE: _omitted, ...env } = base;
+export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const { CLAUDECODE: _omitted, ...env } = { ...base, ...overrides };
   return env;
 }
 
-function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string }): ClaudeCliChild {
+function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild {
   const child = spawn(input.claudeBin, input.args, {
     cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
@@ -241,7 +241,9 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     // targets -pid first) reaps the CLI's descendants too, and the child is not
     // torn down as a side effect of the supervisor's own stdio going away.
     detached: process.platform !== "win32",
-    env: claudeCliEnv(),
+    // Inherits the user's configured LetAgents MCP workplace and adds only
+    // the daemon generation bridge consumed by that MCP process.
+    env: claudeCliEnv(process.env, input.env),
   });
 
   const lineListeners = new Set<(line: string) => void>();
@@ -510,7 +512,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       ...policyArgs,
       ...(resumeRef ? ["--resume", resumeRef.providerContinuationId] : ["--session-id", expectedSessionId]),
     ];
-    const child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd });
+    const supervisorEnv = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
+      ? {
+        LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
+        LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
+        LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
+        LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+      }
+      : undefined;
+    const child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: supervisorEnv });
 
     if (child.pid === null) {
       // Node exposes no safe signalling target in this state. Fail closed until

@@ -603,6 +603,7 @@ import {
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
+  supervisedProviderLaunchPolicy,
   visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
@@ -789,6 +790,12 @@ const repoLabel = computed(() => {
   }
   return props.repoRootPath || "Required before local agents can start";
 });
+
+const supervisedPermissionBridgeUnavailable = computed(() =>
+  launchMode.value === "supervised"
+  && selectedProviderId.value === "claude-code"
+  && selectedPermissionProfile.value?.id === "ask_before_write"
+);
 
 const matchingWorktrees = computed(() =>
   props.roomGitRoom && !props.gitRoomMatchesActiveRepo
@@ -1132,6 +1139,9 @@ async function startManagedAgent(): Promise<void> {
   startManagedSessionRefreshTimer(1_000);
   try {
     if (launchMode.value === "supervised") {
+      if (supervisedPermissionBridgeUnavailable.value) {
+        throw new Error("Supervised Claude Code cannot use Ask before writes yet because native permission prompts are not bridged. Choose Read-only or Full access.");
+      }
       if (!hasSupervisedRuntime(selectedProvider.value)) {
         throw new Error("This provider has not passed the durable supervision evidence gate.");
       }
@@ -1144,6 +1154,10 @@ async function startManagedAgent(): Promise<void> {
         repoRootPath: props.repoRootPath,
         charter: supervisedCharter.value.trim(),
         permissionProfileId: selectedPermissionProfile.value?.id ?? null,
+        launchPolicy: supervisedProviderLaunchPolicy(
+          selectedProviderId.value,
+          selectedPermissionProfile.value?.id ?? null,
+        ),
         model: selectedModel.value,
       });
       if (!isCurrentModalState(requestVersion)) return;

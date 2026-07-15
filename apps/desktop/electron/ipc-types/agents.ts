@@ -424,6 +424,8 @@ export interface DesktopSupervisorCreateInput {
   model?: string | null;
   charter: string;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
+  /** Opaque, provider-native CLI/app-server options. The daemon forwards this unchanged. */
+  launchPolicy?: unknown;
   repoRootPath: string;
 }
 

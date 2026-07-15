@@ -342,9 +342,11 @@ test("open-model permission profiles default to honestly-labeled full access", (
 test("Open Model remains capability-gated from durable supervision", () => {
   const providers = listDesktopAgentProviders();
   const codex = providers.find((provider) => provider.id === "codex");
+  const claude = providers.find((provider) => provider.id === "claude-code");
   const openModel = providers.find((provider) => provider.id === "open-model");
 
   assert.ok(codex?.capabilities.includes("supervised_runtime"));
+  assert.ok(claude?.capabilities.includes("supervised_runtime"));
   assert.ok(openModel?.capabilities.includes("desktop_managed_runtime"));
   assert.equal(openModel?.capabilities.includes("supervised_runtime"), false);
 });

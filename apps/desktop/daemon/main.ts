@@ -531,7 +531,7 @@ export class SupervisorDaemon {
     if (this.handoffScheduled || !this.providerPort) return;
     let entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
     if (!entry) return;
-    if (entry.provider !== "codex") throw new Error(`No daemon provider port is available for ${entry.provider}.`);
+    if (!this.providerPort) throw new Error(`No daemon provider port is available for ${entry.provider}.`);
 
     if (entry.desired_state === "running") {
       entry = await this.ensureWorkAttempt(entry);
@@ -555,6 +555,7 @@ export class SupervisorDaemon {
         roomId: entry.room_id,
         cwd: attempt.workspace_path,
         launchPolicy: entry.provider_launch_policy ?? {},
+        provider: entry.provider,
         agentDisplayName: entry.display_name,
         actionId: `manifest:${entry.id}:generation:${generationNumber}`,
         supervisorEntryId: entry.id,
@@ -563,7 +564,7 @@ export class SupervisorDaemon {
       };
       try {
         const ref = entry.provider_ref ? this.providerRef(entry) : null;
-        const capabilities = await this.providerPort.capabilities(attempt.work_attempt_id);
+        const capabilities = await this.providerPort.capabilities(attempt.work_attempt_id, entry.provider);
         handle = ref && capabilities.resume
           ? await this.providerPort.resume(ref, { ...spawn, resumeFrom: ref })
           : await this.providerPort.spawn(spawn);
@@ -600,6 +601,7 @@ export class SupervisorDaemon {
     return {
       workAttemptId: ref.work_attempt_id,
       providerContinuationId: ref.provider_continuation_id,
+      provider: entry.provider,
       providerConnection: ref.provider_connection,
     };
   }
@@ -1176,8 +1178,8 @@ export class SupervisorDaemon {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   void (async () => {
-    const { CodexProviderActionPort } = await import("./codex-provider-port.js");
-    const daemon = new SupervisorDaemon(defaultDaemonPaths(), process.platform, new CodexProviderActionPort(), true);
+    const { ProviderActionPortRouter } = await import("./provider-action-port-router.js");
+    const daemon = new SupervisorDaemon(defaultDaemonPaths(), process.platform, new ProviderActionPortRouter(), true);
     await daemon.start();
   })().catch((error) => { console.error(error); process.exitCode = 1; });
 }

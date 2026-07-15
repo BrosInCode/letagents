@@ -146,6 +146,20 @@ export function managedAgentRepoStatusForRoom<T extends Pick<RepoStatus, "rootPa
   return repoStatus;
 }
 
+/** Native Claude CLI policy corresponding to an available desktop profile. */
+export function supervisedProviderLaunchPolicy(
+  providerId: DesktopAgentProviderId | null | undefined,
+  permissionProfileId: DesktopManagedAgentPermissionProfileId | null | undefined,
+): Record<string, unknown> | undefined {
+  if (providerId !== "claude-code") return undefined;
+  switch (permissionProfileId) {
+    case "read_only": return { permissionMode: "plan" };
+    case "ask_before_write": return { permissionMode: "default" };
+    case "full_access": return { permissionMode: "bypassPermissions" };
+    default: throw new Error("Choose an available Claude Code permission profile before supervised launch.");
+  }
+}
+
 export function isVisibleManagedAgentSession(
   session: DesktopManagedAgentSession,
 ): boolean {

@@ -104,7 +104,7 @@ function birthIdentity(pid: number): string {
 
 function createHarness(options: HarnessOptions = {}) {
   const children: FakeClaudeChild[] = [];
-  const launches: Array<{ claudeBin: string; args: string[]; cwd: string }> = [];
+  const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 4100;
@@ -245,6 +245,22 @@ test("spawn launches the headless CLI with verbatim policy flags, verifies the w
   assert.ok(!/Never call yourself Codex/.test(prompt), "codename guard names this provider, not Codex");
 
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
+});
+
+test("Claude supervised launch passes the exact daemon generation bridge to its LetAgents MCP workplace", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    supervisorEntryId: "manifest_exact",
+    supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact",
+  }));
+  assert.deepEqual(harness.launches[0]?.env, {
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "manifest_exact",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+  });
 });
 
 test("launch policy is opaque but shape-checked: reserved flags and non-object policies are rejected before launch", async () => {

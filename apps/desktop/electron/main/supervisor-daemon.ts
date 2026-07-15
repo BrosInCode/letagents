@@ -21,7 +21,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.7";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.8";
 const REQUEST_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
@@ -174,9 +174,13 @@ export class SupervisorDaemonClient {
       observed_state: "absent",
       condition: "none",
       permission_profile_id: input.permissionProfileId ?? null,
-      provider_launch_policy: input.providerId === "codex" && (!input.permissionProfileId || input.permissionProfileId === "full_access")
+      // A caller-supplied policy belongs to the selected native provider. Do
+      // not reinterpret it as a LetAgents permission profile on its way to
+      // the daemon. The Codex default remains only for the existing UI that
+      // has not supplied an explicit provider policy yet.
+      provider_launch_policy: input.launchPolicy ?? (input.providerId === "codex" && (!input.permissionProfileId || input.permissionProfileId === "full_access")
         ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }
-        : {},
+        : {}),
       created_by: "desktop",
       created_at: now,
       source_repo_path: input.repoRootPath,
