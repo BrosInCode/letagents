@@ -142,6 +142,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     });
     const rebound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
     assert.equal(rebound.agentSessionId, "agent_session_rebound");
+    assert.equal(rebound.agentSessionBindingState, "active");
     assert.equal(rebound.executionGenerationId, "generation_alpha");
     assert.equal(rebound.providerContinuationId, "continuation_alpha");
     assert.equal(rebound.providerPid, 4242);
@@ -156,6 +157,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     });
     const temporarilyUnbound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
     assert.equal(temporarilyUnbound.agentSessionId, "agent_session_rebound", "identity-only history keeps exact controls routed after live credentials unbind");
+    assert.equal(temporarilyUnbound.agentSessionBindingState, "historical", "historical control identity never masquerades as an active room binding");
     await assert.rejects(
       () => client.assertLegacyStartAllowed(created.roomId, "codex"),
       /already owns the codex lane through the supervised engine/,

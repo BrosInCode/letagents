@@ -401,8 +401,9 @@ export interface DesktopSupervisorManifestEntry {
   createdAt: string;
   workspacePath: string | null;
   workAttemptId: string | null;
-  /** Exact room worker currently bound to this execution generation. */
+  /** Exact current or last-verified room worker used for control routing. */
   agentSessionId: string | null;
+  agentSessionBindingState: "active" | "historical" | "none";
   bindingUpdatedAt: string | null;
   executionGenerationId: string | null;
   providerContinuationId: string | null;

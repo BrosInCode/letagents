@@ -235,6 +235,7 @@ export function supervisedAgentWorkIndicators(
   return entries
     .filter((entry) =>
       normalizeManagedAgentRoomIdentifier(entry.roomId) === room &&
+      entry.agentSessionBindingState === "active" &&
       entry.desiredState === "running" &&
       entry.observedState === "working" &&
       entry.condition === "none" &&

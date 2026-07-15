@@ -171,6 +171,7 @@ function supervisorEntry(
     workspacePath: "/tmp/repo",
     workAttemptId: "attempt_1",
     agentSessionId: null,
+    agentSessionBindingState: "none",
     bindingUpdatedAt: null,
     executionGenerationId: null,
     providerContinuationId: null,
@@ -420,6 +421,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
   const working = supervisorEntry({
     id: "supervised_working",
     agentSessionId: "agent_session_403",
+    agentSessionBindingState: "active",
     observedState: "working",
     condition: "none",
     nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
@@ -448,6 +450,13 @@ test("supervisor native activity drives the chat work indicator for the bound ro
       summary: "Inspecting the workspace",
       startedAt: "2026-07-15T18:00:01.000Z",
     }],
+  );
+  assert.deepEqual(
+    supervisedAgentWorkIndicators([
+      { ...working, agentSessionBindingState: "historical" },
+    ], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
+    [],
+    "a historical control identity never claims that an unbound worker is typing or working",
   );
 });
 

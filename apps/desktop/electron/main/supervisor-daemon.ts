@@ -357,7 +357,8 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
 }
 
 function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
-  const workerBinding = entry.worker_binding ?? entry.last_worker_binding ?? null;
+  const activeWorkerBinding = entry.worker_binding ?? null;
+  const workerBinding = activeWorkerBinding ?? entry.last_worker_binding ?? null;
   return {
     id: entry.id,
     roomId: entry.room_id,
@@ -375,6 +376,7 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     workspacePath: entry.workspace_path ?? null,
     workAttemptId: entry.work_attempt_id ?? null,
     agentSessionId: workerBinding?.agent_session_id ?? null,
+    agentSessionBindingState: activeWorkerBinding ? "active" : workerBinding ? "historical" : "none",
     bindingUpdatedAt: workerBinding?.updated_at ?? null,
     executionGenerationId: entry.provider_ref?.execution_generation_id ?? null,
     providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,

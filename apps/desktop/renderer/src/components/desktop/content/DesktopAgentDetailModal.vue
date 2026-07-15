@@ -242,7 +242,8 @@
                 <div><dt>Native execution</dt><dd>{{ livenessLabel(entry.nativeLiveness) }}</dd></div>
                 <div><dt>Restarts</dt><dd>{{ entry.restartCount }}</dd></div>
                 <div><dt>Workspace</dt><dd>{{ entry.workspacePath || "Not provisioned" }}</dd></div>
-                <div><dt>Room session</dt><dd>{{ entry.agentSessionId || "Not bound" }}</dd></div>
+                <div><dt>{{ entry.agentSessionBindingState === "historical" ? "Last-bound room session" : "Room session" }}</dt><dd>{{ entry.agentSessionId || "Not bound" }}</dd></div>
+                <div><dt>Binding</dt><dd>{{ entry.agentSessionBindingState === "active" ? "Active" : entry.agentSessionBindingState === "historical" ? "Historical identity only" : "Not bound" }}</dd></div>
                 <div><dt>Execution</dt><dd>{{ entry.executionGenerationId || "Not started" }}</dd></div>
                 <div><dt>Continuation</dt><dd>{{ entry.providerContinuationId || "Not available" }}</dd></div>
                 <div><dt>Process</dt><dd>{{ entry.providerPid ?? "Not running" }}</dd></div>
