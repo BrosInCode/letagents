@@ -21,7 +21,7 @@ export interface SupervisorLaneOwnerSummary {
  * silently unfenced just to make the Start button succeed.
  */
 export function describeSupervisorLaneConflict(owner: SupervisorLaneOwnerSummary): string {
-  const inspect = "Open the existing agent in Inspector and choose Stop before creating a replacement.";
+  const inspect = "Use the supervised runtime recovery card below and choose Stop before creating a replacement.";
   if (owner.observedState === "failed" || owner.condition !== "none") {
     const cause = owner.lastError ? ` Cause: ${owner.lastError}.` : "";
     return `${owner.displayName} already reserved this room's supervised ${owner.provider} lane, but startup is ${owner.observedState} (${owner.condition}).${cause} ${inspect}`;

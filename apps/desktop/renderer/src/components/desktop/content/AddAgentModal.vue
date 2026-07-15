@@ -416,6 +416,33 @@
               </article>
             </section>
 
+            <section
+              v-if="supervisedConflict"
+              class="desktop-add-agent-managed-sessions"
+              data-testid="desktop-add-agent-supervised-conflict"
+              aria-label="Supervised agent recovery"
+            >
+              <article class="desktop-add-agent-managed-session" data-state="blocked">
+                <span>Supervised runtime needs recovery</span>
+                <strong>{{ supervisedConflict.displayName }}</strong>
+                <small>
+                  {{ supervisedConflict.observedState }} · {{ supervisedConflict.condition }}
+                </small>
+                <p v-if="supervisedConflict.lastError">{{ supervisedConflict.lastError }}</p>
+                <div class="desktop-add-agent-managed-session-actions">
+                  <button
+                    type="button"
+                    class="desktop-add-agent-managed-session-danger"
+                    data-testid="desktop-add-agent-stop-supervised-conflict"
+                    :disabled="Boolean(stoppingSupervisorEntryId)"
+                    @click="stopSupervisedConflict"
+                  >
+                    {{ stoppingSupervisorEntryId === supervisedConflict.id ? "Stopping..." : "Stop this supervised agent" }}
+                  </button>
+                </div>
+              </article>
+            </section>
+
             <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
 
             <div class="desktop-add-agent-actions">
@@ -535,6 +562,7 @@ import type {
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
   DesktopOpenModelSettingsStatus,
+  DesktopSupervisorManifestEntry,
   RepoStatus,
 } from "../../../../../electron/ipc-types";
 import {
@@ -568,6 +596,7 @@ import {
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
+  supervisedProviderLaneEntry,
   visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
@@ -611,6 +640,8 @@ const setupBusy = ref(false);
 const startingAgent = ref(false);
 const creatingWorktree = ref(false);
 const stoppingSessionId = ref<string | null>(null);
+const stoppingSupervisorEntryId = ref<string | null>(null);
+const supervisedConflict = ref<DesktopSupervisorManifestEntry | null>(null);
 const copyingAuthCommand = ref(false);
 const copyingExternalPrompt = ref(false);
 const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
@@ -1090,6 +1121,7 @@ async function startManagedAgent(): Promise<void> {
         model: selectedModel.value,
       });
       if (!isCurrentModalState(requestVersion)) return;
+      supervisedConflict.value = null;
       setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
       await loadManagedSessions();
       return;
@@ -1115,11 +1147,48 @@ async function startManagedAgent(): Promise<void> {
     await runPreflight();
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
+    if (launchMode.value === "supervised") {
+      const conflict = await loadSupervisedConflict(requestVersion);
+      if (!isCurrentModalState(requestVersion)) return;
+      supervisedConflict.value = conflict;
+    }
     setupMessage.value = error instanceof Error ? error.message : "Could not start this agent.";
   } finally {
     if (isCurrentModalState(requestVersion)) {
       startingAgent.value = false;
       startManagedSessionRefreshTimer();
+    }
+  }
+}
+
+async function loadSupervisedConflict(requestVersion = modalStateVersion): Promise<DesktopSupervisorManifestEntry | null> {
+  if (!selectedProviderId.value || !props.roomIdentifier) return null;
+  try {
+    const entries = await desktopIpc.supervisor.listAgents(props.roomIdentifier);
+    if (!isCurrentModalState(requestVersion)) return null;
+    return supervisedProviderLaneEntry(entries, props.roomIdentifier, selectedProviderId.value);
+  } catch {
+    return null;
+  }
+}
+
+async function stopSupervisedConflict(): Promise<void> {
+  const entry = supervisedConflict.value;
+  if (!entry || stoppingSupervisorEntryId.value) return;
+  const requestVersion = modalStateVersion;
+  stoppingSupervisorEntryId.value = entry.id;
+  setupMessage.value = `Stopping ${entry.displayName}...`;
+  try {
+    const updated = await desktopIpc.supervisor.setDesiredState(entry.id, "stopped");
+    if (!isCurrentModalState(requestVersion)) return;
+    supervisedConflict.value = updated.desiredState === "stopped" ? null : updated;
+    setupMessage.value = `${updated.displayName} is stopped. Start once to create its replacement.`;
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    setupMessage.value = error instanceof Error ? error.message : "Could not stop the supervised agent.";
+  } finally {
+    if (isCurrentModalState(requestVersion)) {
+      stoppingSupervisorEntryId.value = null;
     }
   }
 }
@@ -1329,6 +1398,8 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   setupBusy.value = false;
   startingAgent.value = false;
   stoppingSessionId.value = null;
+  stoppingSupervisorEntryId.value = null;
+  supervisedConflict.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
@@ -1487,6 +1558,8 @@ function resetTransientState(): void {
   setupBusy.value = false;
   startingAgent.value = false;
   stoppingSessionId.value = null;
+  stoppingSupervisorEntryId.value = null;
+  supervisedConflict.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;

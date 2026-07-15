@@ -8,6 +8,7 @@ import type {
   DesktopGitRoomInfo,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
+  DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
 import {
   activeManagedAgentWorkIndicators,
@@ -56,6 +57,7 @@ import {
   shouldShowCursorMcpPolicySelector,
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
+  supervisedProviderLaneEntry,
   visibleDesktopAgentProviders,
 } from "../src/domain/managed-agents";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
@@ -136,6 +138,34 @@ function session(
     startedAt: "2026-06-14T12:00:00.000Z",
     updatedAt: "2026-06-14T12:00:00.000Z",
     lastError: null,
+    ...overrides,
+  };
+}
+
+function supervisorEntry(
+  overrides: Partial<DesktopSupervisorManifestEntry> = {},
+): DesktopSupervisorManifestEntry {
+  return {
+    id: "supervised_1",
+    roomId: "room_1",
+    displayName: "Codex supervised agent",
+    provider: "codex",
+    model: null,
+    charter: "Work from the board.",
+    desiredState: "running",
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "startup failed before MCP registration",
+    permissionProfileId: "full_access",
+    createdBy: "desktop",
+    createdAt: "2026-07-15T12:00:00.000Z",
+    workspacePath: "/tmp/repo",
+    workAttemptId: "attempt_1",
+    workplaceLiveness: { state: "unknown", observedAt: null, detail: null },
+    nativeLiveness: { state: "unknown", observedAt: null, detail: null },
+    restartCount: 0,
+    lastTerminal: null,
+    activity: [],
     ...overrides,
   };
 }
@@ -304,6 +334,33 @@ test("durable supervision is advertised only by providers with validated native 
     runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
   })), false);
+});
+
+test("supervised recovery selects the blocked provider lane even without an MCP participant", () => {
+  const healthy = supervisorEntry({
+    id: "healthy",
+    condition: "none",
+    observedState: "running",
+  });
+  const blocked = supervisorEntry({ id: "blocked" });
+  assert.equal(
+    supervisedProviderLaneEntry([healthy, blocked], " ROOM_1 ", "CODEX")?.id,
+    "blocked",
+  );
+  assert.equal(
+    supervisedProviderLaneEntry([blocked], "room_2", "codex"),
+    null,
+  );
+  assert.equal(
+    supervisedProviderLaneEntry([blocked], "room_1", "claude-code"),
+    null,
+  );
+  assert.equal(
+    supervisedProviderLaneEntry([
+      supervisorEntry({ desiredState: "stopped" }),
+    ], "room_1", "codex"),
+    null,
+  );
 });
 
 test("delivery mode selector only shows for managed Codex", () => {
