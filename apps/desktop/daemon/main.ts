@@ -19,6 +19,11 @@ import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
+type RecoveryClock = {
+  nowMs?: () => number;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
+};
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
@@ -81,11 +86,14 @@ export class SupervisorDaemon {
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
+  private readonly nowMs: () => number;
+  private readonly setRecoveryTimeout: typeof setTimeout;
+  private readonly clearRecoveryTimeout: typeof clearTimeout;
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private handoffScheduled = false;
 
-  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>) {
+  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}) {
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
     this.store = new ManifestStore(paths.manifestPath);
     this.audit = new AuditLog(paths.auditPath);
@@ -182,6 +190,9 @@ export class SupervisorDaemon {
       if (request.method === "attempt.read") return this.readAttempt(String(this.paramsRecord(request.params).id ?? ""));
       throw new Error(`Unsupported daemon method: ${request.method}`);
     }, async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); });
+    this.nowMs = recoveryClock.nowMs ?? Date.now;
+    this.setRecoveryTimeout = recoveryClock.setTimeout ?? setTimeout;
+    this.clearRecoveryTimeout = recoveryClock.clearTimeout ?? clearTimeout;
   }
 
   async start(): Promise<void> {
@@ -197,7 +208,7 @@ export class SupervisorDaemon {
   }
 
   async stop(): Promise<void> {
-    for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
+    for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
     this.recoveryTimers.clear();
     await Promise.all([...this.scheduledConvergence.values()].map(async (scheduled) => (await scheduled).dispose()));
     await Promise.all([...this.convergenceRequests.values()]);
@@ -340,6 +351,7 @@ export class SupervisorDaemon {
       this.manifestGeneration = next.generation;
       return updated;
     });
+    if (desiredState !== "running") this.clearRecoveryConvergence(id);
     this.requestConvergence(id);
     return updated;
   }
@@ -511,7 +523,7 @@ export class SupervisorDaemon {
     entry: DaemonManifestEntry,
     projectedBinding?: WorkerSessionBinding | null,
   ): Promise<DaemonManifestEntryView> {
-    const now = Date.now();
+    const now = this.nowMs();
     const staleAfterMs = 90_000;
     const derive = <T extends string>(axis: { state: T; observed_at: string | null; detail: string | null } | undefined, staleStates: string[]) => {
       if (!axis?.observed_at || !staleStates.includes(axis.state)) return axis;
@@ -584,7 +596,7 @@ export class SupervisorDaemon {
     if (entry.desired_state === "running") {
       if (entry.condition === "quarantined") return;
       if (entry.observed_state === "failed") {
-        const now = Date.now();
+        const now = this.nowMs();
         const exitsInWindow = (entry.reconciliation?.exit_timestamps_ms ?? [])
           .filter((at) => at >= now - CRASH_LOOP_WINDOW_MS).length;
         if (exitsInWindow >= CRASH_LOOP_EXIT_LIMIT) {
@@ -611,6 +623,12 @@ export class SupervisorDaemon {
       if (handle) {
         if (entry.observed_state !== handle.observedState) {
           await this.transition(entry.id, handle.observedState, "none", "reattached durable provider handle", "daemon-convergence");
+        }
+        if (["failed", "idle", "stopped"].includes(handle.observedState)) {
+          await this.fenceTerminalProviderHandleOnce(
+            handle,
+            `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
+          );
         }
         return;
       }
@@ -681,7 +699,7 @@ export class SupervisorDaemon {
     }
     if (handle) {
       await this.transition(entry.id, "stopping", entry.condition, `desired state changed to ${entry.desired_state}`, "daemon-convergence");
-      await this.providerPort.stop(handle, { actionId: `manifest:${entry.id}:${entry.desired_state}:${Date.now()}` });
+      await this.providerPort.stop(handle, { actionId: `manifest:${entry.id}:${entry.desired_state}:${this.nowMs()}` });
       return;
     }
     await this.transition(entry.id, entry.desired_state === "paused" ? "paused" : "stopped", "none", "desired state converged without a live provider", "daemon-convergence");
@@ -862,12 +880,19 @@ export class SupervisorDaemon {
 
   private scheduleRecoveryConvergence(entryId: string, delayMs: number): void {
     if (this.recoveryTimers.has(entryId)) return;
-    const timer = setTimeout(() => {
+    const timer = this.setRecoveryTimeout(() => {
       this.recoveryTimers.delete(entryId);
       this.requestConvergence(entryId);
     }, Math.max(1, delayMs));
-    timer.unref();
+    timer.unref?.();
     this.recoveryTimers.set(entryId, timer);
+  }
+
+  private clearRecoveryConvergence(entryId: string): void {
+    const timer = this.recoveryTimers.get(entryId);
+    if (!timer) return;
+    this.clearRecoveryTimeout(timer);
+    this.recoveryTimers.delete(entryId);
   }
 
   private async bindWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
@@ -1023,7 +1048,7 @@ export class SupervisorDaemon {
     const manifest = await this.store.load();
     const entry = manifest.entries.find((candidate) => candidate.id === entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
-    const nextReconciliation = reconciliation ?? advanceReconciliationState(entry.reconciliation, to, Date.now());
+    const nextReconciliation = reconciliation ?? advanceReconciliationState(entry.reconciliation, to, this.nowMs());
     const noticeKind = notice ?? (condition === "quarantined" ? "quarantine_death" : condition === "coordination_blocked" ? "coordination_escalation" : undefined);
     const notices = [...(entry.reconciliation_notices ?? [])];
     if (noticeKind) notices.push({ at: new Date().toISOString(), kind: noticeKind, cause, terminal: terminal ?? nextReconciliation.last_terminal ?? undefined });
@@ -1169,12 +1194,12 @@ export class SupervisorDaemon {
       if (entry.condition === "quarantined") {
         // A stale child cannot unquarantine the entry, but its immutable death
         // evidence must still reach the durable operator inbox.
-        await this.transitionOnce(entryId, entry.observed_state, "quarantined", `late provider terminal: ${terminal.terminalCause}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, Date.now()), last_terminal: payload }, "quarantine_death", payload);
+        await this.transitionOnce(entryId, entry.observed_state, "quarantined", `late provider terminal: ${terminal.terminalCause}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs()), last_terminal: payload }, "quarantine_death", payload);
         return;
       }
       const intentional = entry.desired_state === "stopped" || entry.desired_state === "paused";
       const observedState = entry.desired_state === "paused" ? "paused" : intentional ? "stopped" : "failed";
-      const reconciliation = { ...advanceReconciliationState(entry.reconciliation, observedState, Date.now()), last_terminal: payload };
+      const reconciliation = { ...advanceReconciliationState(entry.reconciliation, observedState, this.nowMs()), last_terminal: payload };
       await this.transitionOnce(entryId, observedState, "none", `provider terminal: ${terminal.terminalCause}`, actor, reconciliation);
     });
   }
@@ -1218,7 +1243,7 @@ export class SupervisorDaemon {
           const manifest = await this.store.load();
           const entry = manifest.entries.find((candidate) => candidate.id === entryId);
           if (!entry) return;
-          await this.transitionOnce(entryId, entry.observed_state, entry.condition, `stale terminal from superseded provider handle pid=${staleHandle.pid ?? "unknown"}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, Date.now()), last_terminal: payload }, "coordination_escalation", payload);
+          await this.transitionOnce(entryId, entry.observed_state, entry.condition, `stale terminal from superseded provider handle pid=${staleHandle.pid ?? "unknown"}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs()), last_terminal: payload }, "coordination_escalation", payload);
         }));
       };
       const installExitListener = async (nextHandle: ProviderActionHandle, generation: number) => {

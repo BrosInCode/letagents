@@ -56,6 +56,38 @@ async function eventually(predicate: () => Promise<boolean>, label: string, time
   throw new Error(`timed out waiting for ${label}`);
 }
 
+function fakeRecoveryClock(startMs = 10_000) {
+  let nowMs = startMs;
+  let nextId = 1;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  const delays: number[] = [];
+  const setTimer = ((callback: () => void, delay = 0) => {
+    const id = nextId++;
+    const handle = { id, unref() { return handle; } } as unknown as ReturnType<typeof setTimeout>;
+    timers.set(id, { at: nowMs + Number(delay), callback });
+    delays.push(Number(delay));
+    return handle;
+  }) as typeof setTimeout;
+  const clearTimer = ((handle: ReturnType<typeof setTimeout>) => {
+    const id = (handle as unknown as { id?: number }).id;
+    if (id !== undefined) timers.delete(id);
+  }) as typeof clearTimeout;
+  return {
+    clock: { nowMs: () => nowMs, setTimeout: setTimer, clearTimeout: clearTimer },
+    delays,
+    pending: () => timers.size,
+    advance: async (deltaMs: number) => {
+      nowMs += deltaMs;
+      const due = [...timers.entries()].filter(([, timer]) => timer.at <= nowMs).sort((a, b) => a[1].at - b[1].at);
+      for (const [id, timer] of due) {
+        timers.delete(id);
+        timer.callback();
+      }
+      await Promise.resolve();
+    },
+  };
+}
+
 async function daemonRequest(socketPath: string, method: string, params?: unknown, version = DAEMON_PROTOCOL_VERSION): Promise<{ ok: boolean; result?: unknown; error?: string; version: number }> {
   return new Promise((resolve, reject) => {
     const client = createConnection(socketPath);
@@ -270,6 +302,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
   };
   let stopCount = 0;
   let resumeCount = 0;
+  const streamListeners = new Map<object, (event: any) => void>();
   const exitListeners = new Map<object, (terminal: {
     endedAt: string; exitCode: number | null; signal: string | null;
     terminalCause: "stopped"; providerContinuationId: string;
@@ -298,6 +331,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
       return () => exitListeners.delete(handle as object);
     },
     onStream: async (handle, listener) => {
+      streamListeners.set(handle as object, listener);
       if (handle === failedHandle) {
         listener({
           workAttemptId: attempt.work_attempt_id,
@@ -313,12 +347,12 @@ test("a provider handle returned already terminal is fenced and resumes under a 
           durablePayloadRef: null,
         });
       }
-      return () => {};
+      return () => streamListeners.delete(handle as object);
     },
   };
-  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  const recovery = fakeRecoveryClock();
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, recovery.clock);
   try {
-    const startedAt = Date.now();
     await daemon.start();
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry,
@@ -329,12 +363,17 @@ test("a provider handle returned already terminal is fenced and resumes under a 
       work_attempt_id: attempt.work_attempt_id,
     } });
     assert.equal(put.ok, true, put.error);
+    await eventually(async () => stopCount === 1 && recovery.pending() === 1, "terminal fence and recovery timer");
+    assert.equal(resumeCount, 0);
+    await recovery.advance(999);
+    await Promise.resolve();
+    assert.equal(resumeCount, 0, "generation 2 cannot start before the persisted backoff");
+    await recovery.advance(1);
     await eventually(async () => {
       const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return current.observed_state === "working"
         && current.provider_ref?.execution_generation_id !== undefined;
-    }, "already-terminal launch recovery", 3_000);
-    assert.ok(Date.now() - startedAt >= 900, "the successor cannot bypass the persisted one-second recovery backoff");
+    }, "already-terminal launch recovery");
     assert.equal(stopCount, 1, "returned-state and just-installed stream paths share one idempotent terminal fence");
     assert.equal(resumeCount, 1, "the listener boundary race mints exactly one bounded successor");
     const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "returned_terminal" })).result as {
@@ -342,9 +381,158 @@ test("a provider handle returned already terminal is fenced and resumes under a 
     };
     assert.ok(detail.execution_generations[0]?.terminal, "the returned-terminal generation is durably terminal");
     assert.equal(detail.execution_generations[1]?.terminal, null, "only the successor generation remains live");
+
+    streamListeners.get(recoveredHandle as object)?.({
+      workAttemptId: attempt.work_attempt_id,
+      providerContinuationId: "claude-continuation",
+      observedAt: new Date().toISOString(),
+      sequence: 2,
+      provider: "claude-code",
+      kind: "error",
+      method: "result/error_during_execution",
+      payload: { type: "result", subtype: "error_during_execution", is_error: true },
+      payloadTruncated: false,
+      payloadRedacted: false,
+      durablePayloadRef: null,
+    });
+    await eventually(async () => recovery.pending() === 1, "second terminal recovery timer");
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "returned_terminal", desired_state: "stopped" });
+    assert.equal(recovery.pending(), 0, "manual Stop cancels the pending recovery timer");
+    await recovery.advance(60_000);
+    await Promise.resolve();
+    assert.equal(resumeCount, 1, "a cancelled recovery timer cannot mint another successor");
   } finally {
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "returned_terminal", desired_state: "stopped" }).catch(() => undefined);
     await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("direct terminal recovery increases delay and quarantines before a sixth generation", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "bounded_terminal_loop");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "bounded_terminal_loop", leaseId: "bounded_terminal_loop", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  let launchCount = 0;
+  const exitListeners = new Map<object, (terminal: any) => void>();
+  const failedHandle = () => ({ workAttemptId: attempt.work_attempt_id, pid: 4200 + launchCount, providerContinuationId: "bounded-continuation", observedState: "failed" as const });
+  const launch = () => { launchCount += 1; return failedHandle(); };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => launch(),
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => launch(),
+    poke: async () => {},
+    stop: async (handle) => {
+      const terminal = { endedAt: new Date().toISOString(), exitCode: 1, signal: null, terminalCause: "stopped" as const, providerContinuationId: "bounded-continuation" };
+      queueMicrotask(() => exitListeners.get(handle as object)?.(terminal));
+      return terminal;
+    },
+    onExit: async (handle, listener) => { exitListeners.set(handle as object, listener); return () => exitListeners.delete(handle as object); },
+    onStream: async () => () => {},
+  };
+  const recovery = fakeRecoveryClock();
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, recovery.clock);
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "bounded_terminal_loop", provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    for (const [index, delay] of [1_000, 2_000, 4_000, 8_000].entries()) {
+      await eventually(async () => launchCount === index + 1 && recovery.pending() === 1, `recovery timer ${index + 1}`);
+      assert.equal(recovery.delays.at(-1), delay);
+      await recovery.advance(delay - 1);
+      await Promise.resolve();
+      assert.equal(launchCount, index + 1);
+      await recovery.advance(1);
+    }
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return current.condition === "quarantined";
+    }, "fifth terminal quarantine");
+    assert.equal(launchCount, CRASH_LOOP_EXIT_LIMIT, "the threshold prevents generation 6");
+    assert.equal(recovery.pending(), 0, "quarantine leaves no recovery timer");
+    const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "bounded_terminal_loop" })).result as { execution_generations: unknown[] };
+    assert.equal(detail.execution_generations.length, CRASH_LOOP_EXIT_LIMIT);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("a terminal handle discovered during daemon reattach is fenced and resumes once", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "reattached_terminal");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "reattached_terminal", leaseId: "reattached_terminal", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  const liveHandle = { workAttemptId: attempt.work_attempt_id, pid: 4301, providerContinuationId: "reattach-continuation", observedState: "working" as const };
+  const terminalHandle = { ...liveHandle, observedState: "idle" as const };
+  const successorHandle = { ...liveHandle, pid: 4302 };
+  const firstPort: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => liveHandle,
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("first daemon starts fresh"); },
+    poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "reattach-continuation" }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const recovery = fakeRecoveryClock();
+  const first = new SupervisorDaemon(paths, "darwin", firstPort, true, 15_000, undefined, recovery.clock);
+  let second: SupervisorDaemon | null = null;
+  let stopCount = 0;
+  let resumeCount = 0;
+  const exitListeners = new Map<object, (terminal: any) => void>();
+  try {
+    await first.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "reattached_terminal", provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "first daemon provider start");
+    await first.stop();
+
+    const secondPort: ProviderActionPort = {
+      ...firstPort,
+      spawn: async () => { throw new Error("reattach recovery must preserve the continuation"); },
+      attach: async () => terminalHandle,
+      resume: async () => { resumeCount += 1; return successorHandle; },
+      stop: async (handle) => {
+        stopCount += 1;
+        const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped" as const, providerContinuationId: "reattach-continuation" };
+        queueMicrotask(() => exitListeners.get(handle as object)?.(terminal));
+        return terminal;
+      },
+      onExit: async (handle, listener) => { exitListeners.set(handle as object, listener); return () => exitListeners.delete(handle as object); },
+    };
+    second = new SupervisorDaemon(paths, "darwin", secondPort, true, 15_000, undefined, recovery.clock);
+    await second.start();
+    await eventually(async () => stopCount === 1 && recovery.pending() === 1, "terminal reattach fence");
+    assert.equal(resumeCount, 0);
+    await recovery.advance(1_000);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "reattached successor");
+    assert.equal(stopCount, 1);
+    assert.equal(resumeCount, 1);
+    const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "reattached_terminal" })).result as { execution_generations: Array<{ terminal: unknown }> };
+    assert.ok(detail.execution_generations[0]?.terminal);
+    assert.equal(detail.execution_generations[1]?.terminal, null);
+  } finally {
+    await second?.stop().catch(() => undefined);
+    await first.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
