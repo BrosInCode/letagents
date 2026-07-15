@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 import {
@@ -35,6 +38,10 @@ import {
   terminateFreshLaunch,
   type ProviderProcessExit,
 } from "./provider-evidence.js";
+import {
+  getJsonLetAgentsMcpServerFromRaw,
+  LETAGENTS_NPX_ARGS,
+} from "../mcp-config.js";
 
 // P2a (plan v10 §4.8/§6): Claude Code through its NATIVE harness. The legacy
 // managed-Claude engine runs the Agent SDK in-process inside Electron — no OS
@@ -70,6 +77,7 @@ export interface ClaudeCliChild {
 
 export interface ClaudeCodeProviderAdapterDependencies {
   launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild;
+  createLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
@@ -129,6 +137,12 @@ const RESERVED_POLICY_KEYS = new Set([
   // a policy must not silently disable the continuation.
   "noSessionPersistence",
   "no-session-persistence",
+  // The managed workplace is injected explicitly so project-level .mcp.json
+  // files cannot shadow it or exfiltrate its worker credential.
+  "mcpConfig",
+  "mcp-config",
+  "strictMcpConfig",
+  "strict-mcp-config",
 ]);
 
 function camelToKebab(key: string): string {
@@ -324,8 +338,57 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
   };
 }
 
+export async function createEphemeralClaudeMcpConfig(
+  mcpEnv: Record<string, string>,
+  temporaryRoot = tmpdir(),
+): Promise<{ path: string; dispose(): Promise<void> }> {
+  const directory = await mkdtemp(join(temporaryRoot, "letagents-claude-mcp-"));
+  const configPath = join(directory, "mcp.json");
+  await writeFile(configPath, JSON.stringify({
+    mcpServers: {
+      letagents: {
+        command: "npx",
+        args: [...LETAGENTS_NPX_ARGS],
+        env: mcpEnv,
+      },
+    },
+  }), { encoding: "utf8", mode: 0o600 });
+  let disposed = false;
+  return {
+    path: configPath,
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+async function defaultCreateLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }> {
+  const candidates = [
+    join(homedir(), ".claude", "settings.json"),
+    join(homedir(), ".claude.json"),
+  ];
+  for (const path of candidates) {
+    try {
+      const server = getJsonLetAgentsMcpServerFromRaw(await readFile(path, "utf8"));
+      const env = server?.env;
+      const apiUrl = env?.LETAGENTS_API_URL?.trim();
+      if (!apiUrl) continue;
+      const mcpEnv: Record<string, string> = { LETAGENTS_API_URL: apiUrl };
+      const token = env?.LETAGENTS_TOKEN?.trim();
+      if (token) mcpEnv.LETAGENTS_TOKEN = token;
+      return createEphemeralClaudeMcpConfig(mcpEnv);
+    } catch {
+      // A malformed/missing secondary Claude config does not hide a valid one.
+    }
+  }
+  throw new Error("Claude's repaired LetAgents MCP environment is unavailable.");
+}
+
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   launchChild: defaultLaunchChild,
+  createLetAgentsMcpConfig: defaultCreateLetAgentsMcpConfig,
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
@@ -506,6 +569,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
 
     const policyArgs = claudeLaunchPolicyArgs(req.launchPolicy);
+    const managedMcpConfig = await this.deps.createLetAgentsMcpConfig();
+    // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
+    // the managed room workplace. The short-lived 0600 config lives outside
+    // the worktree, its path (never its credential) enters argv, and it is
+    // deleted as soon as Claude reports the initialized MCP workplace.
     // The spike (msg_1382) proved both identity paths: a minted --session-id is
     // honored verbatim on fresh spawns, and --resume continues the SAME session
     // id. Either way the continuation is asserted against init below.
@@ -515,6 +583,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       "--verbose",
       "--input-format", "stream-json",
       "--output-format", "stream-json",
+      "--strict-mcp-config",
+      "--mcp-config", managedMcpConfig.path,
       ...policyArgs,
       ...(resumeRef ? ["--resume", resumeRef.providerContinuationId] : ["--session-id", expectedSessionId]),
     ];
@@ -526,12 +596,19 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
       }
       : undefined;
-    const child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: supervisorEnv });
+    let child: ClaudeCliChild;
+    try {
+      child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: supervisorEnv });
+    } catch (error) {
+      await managedMcpConfig.dispose();
+      throw error;
+    }
 
     if (child.pid === null) {
       // Node exposes no safe signalling target in this state. Fail closed until
       // the launch itself proves terminal instead of retrying beside an orphan.
       await child.exited;
+      await managedMcpConfig.dispose();
       throw new Error(
         "Claude CLI launch did not expose a process id; refusing to start an unfenceable writer.",
       );
@@ -540,6 +617,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (typeof processIdentity !== "string" || !processIdentity) {
       child.markIntentionalClose();
       await terminateFreshLaunch(child, this.deps, this.stopGraceMs);
+      await managedMcpConfig.dispose();
       throw new Error(
         "Claude CLI process identity could not be verified; refusing to start an unfenceable writer.",
       );
@@ -658,6 +736,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       throw error;
     } finally {
       if (initTimer) clearTimeout(initTimer);
+      await managedMcpConfig.dispose();
     }
   }
 

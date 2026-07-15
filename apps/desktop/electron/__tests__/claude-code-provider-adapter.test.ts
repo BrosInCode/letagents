@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   ClaudeCodeProviderAdapter,
   claudeCliEnv,
   claudeLaunchPolicyArgs,
+  createEphemeralClaudeMcpConfig,
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
 } from "../main/agents/claude-code-provider-adapter.js";
@@ -108,8 +112,15 @@ function createHarness(options: HarnessOptions = {}) {
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 4100;
+  let mcpConfigDisposals = 0;
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
+    async createLetAgentsMcpConfig() {
+      return {
+        path: "/private/tmp/letagents-claude-mcp-test/mcp.json",
+        async dispose() { mcpConfigDisposals += 1; },
+      };
+    },
     launchChild(input) {
       launches.push(input);
       const pid = options.pid === undefined ? nextPid++ : options.pid;
@@ -174,7 +185,14 @@ function createHarness(options: HarnessOptions = {}) {
     now: () => new Date(1_700_000_000_000).toISOString(),
   };
 
-  return { children, launches, signals, identities, dependencies };
+  return {
+    children,
+    launches,
+    signals,
+    identities,
+    dependencies,
+    get mcpConfigDisposals() { return mcpConfigDisposals; },
+  };
 }
 
 function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
@@ -261,6 +279,63 @@ test("Claude supervised launch passes the exact daemon generation bridge to its 
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
   });
+  const args = harness.launches[0]!.args;
+  assert.equal(args.includes("--strict-mcp-config"), true);
+  assert.equal(argValue(args, "--mcp-config"), "/private/tmp/letagents-claude-mcp-test/mcp.json");
+  assert.equal(JSON.stringify(args).includes("test-worker-token"), false, "worker auth never enters process argv");
+  assert.equal(harness.mcpConfigDisposals, 1, "ephemeral MCP config is removed after init");
+});
+
+test("managed Claude MCP config is private, official-runtime-only, and ephemeral outside the worktree", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-claude-mcp-test-"));
+  try {
+    const config = await createEphemeralClaudeMcpConfig({
+      LETAGENTS_API_URL: "https://letagents.example",
+      LETAGENTS_TOKEN: "test-worker-token",
+    }, root);
+    const parsed = JSON.parse(await readFile(config.path, "utf8"));
+    assert.deepEqual(parsed, {
+      mcpServers: {
+        letagents: {
+          command: "npx",
+          args: ["-y", "--package=letagents-runtime@npm:letagents", "letagents"],
+          env: {
+            LETAGENTS_API_URL: "https://letagents.example",
+            LETAGENTS_TOKEN: "test-worker-token",
+          },
+        },
+      },
+    });
+    assert.equal((await stat(config.path)).mode & 0o777, 0o600);
+    await config.dispose();
+    await assert.rejects(access(config.path));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("repo-tracked legacy .mcp.json cannot override the supervised Claude workplace", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "letagents-managed-workspace-"));
+  try {
+    await writeFile(join(workspace, ".mcp.json"), JSON.stringify({
+      mcpServers: {
+        letagents: {
+          command: "npx",
+          args: ["-y", "letagents"],
+          cwd: workspace,
+        },
+      },
+    }));
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    await adapter.spawn(spawnRequest({ cwd: workspace }));
+    const args = harness.launches[0]!.args;
+    assert.equal(args.includes("--strict-mcp-config"), true);
+    assert.equal(argValue(args, "--mcp-config"), "/private/tmp/letagents-claude-mcp-test/mcp.json");
+    assert.equal(argValue(args, "--mcp-config")!.startsWith(workspace), false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("launch policy is opaque but shape-checked: reserved flags and non-object policies are rejected before launch", async () => {
@@ -269,6 +344,8 @@ test("launch policy is opaque but shape-checked: reserved flags and non-object p
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { resume: "sess-x" } })), /reserved flag 'resume'/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { sessionId: "sess-x" } })), /reserved flag 'sessionId'/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { noSessionPersistence: true } })), /reserved flag 'noSessionPersistence'/, "a policy may not disable the continuation");
+  await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { mcpConfig: "/tmp/other.json" } })), /reserved flag 'mcpConfig'/);
+  await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { strictMcpConfig: false } })), /reserved flag 'strictMcpConfig'/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: "bypassPermissions" })), /native CLI options object/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { hooks: { PreToolUse: [] } } })), /must be a scalar/);
   assert.equal(harness.launches.length, 0, "nothing launched for a rejected policy");
@@ -294,6 +371,7 @@ test("a CLI without the LetAgents workplace is terminated with no orphan", async
   await assert.rejects(adapter.spawn(spawnRequest()), /refusing to launch without the room workplace/);
   assert.deepEqual(harness.signals[0], { pid: 4100, signal: "SIGTERM" });
   assert.equal(harness.children[0]!.alive, false, "the fresh child was terminated and awaited");
+  assert.equal(harness.mcpConfigDisposals, 1, "startup refusal removes the private MCP config");
 });
 
 test("startup identity failure terminates and awaits the known fresh child", async () => {
