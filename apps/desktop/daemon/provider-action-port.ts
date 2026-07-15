@@ -6,11 +6,12 @@
 export type ProviderActionCapabilities = { resume: boolean; midTurnInjection: boolean; transcriptAccess: boolean; permissionPromptBridging: boolean; survivesRestart: boolean };
 export type ProviderActionConnectionRef =
   | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
-  | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null };
+  | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
+  | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null };
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; providerConnection?: ProviderActionConnectionRef | null };
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; agentDisplayName?: string; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
-export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error"; providerContinuationId: string | null };
+export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 export type ProviderActionAttachment = { state: "attached"; handle: ProviderActionHandle } | { state: "absent" } | { state: "ambiguous"; reason: string };
 export type ProviderActionStreamEvent = {
   workAttemptId: string;

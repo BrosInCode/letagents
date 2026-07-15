@@ -56,7 +56,13 @@ export type ProviderTerminalCause =
   | "killed"        // SIGKILL / force stop
   | "stopped"       // graceful SIGTERM stop
   | "crashed"       // unexpected death
-  | "protocol_error"; // harness/RPC violation
+  | "protocol_error" // harness/RPC violation
+  // The provider refused/ended service for account reasons (usage limit, spend
+  // cap) while the process itself behaved: recoverable by configuration, so the
+  // reconciler must not count it as a crash or quarantine-worthy exit. Proven
+  // signature for Cursor in the task_38 spike (msg_1708): init observed, no
+  // result event, exit != 0, ActionRequiredError usage-limit stderr.
+  | "provider_quota";
 
 // Immutable payload recorded when a generation ends. Mirrors P1b's
 // `execution_generation` terminal record so the reconciler/attestation can
@@ -93,6 +99,14 @@ export type ProviderConnectionRef =
     // adapter can verify/fence the exact child but never live-reattach; recovery
     // is bounded (resume a continuation), not survival (v10 §4.8).
     kind: "claude_cli";
+    pid: number | null;
+    processIdentity?: string | null;
+  }
+  | {
+    // Cursor runs one child per TURN: pid/identity are non-null only while a
+    // turn is live; an idle lane honestly records no process at all and its
+    // continuation lives entirely in the session id (task_38 matrix row).
+    kind: "cursor_cli";
     pid: number | null;
     processIdentity?: string | null;
   };
