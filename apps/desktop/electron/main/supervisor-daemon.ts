@@ -21,7 +21,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.6";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.7";
 const REQUEST_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
@@ -52,6 +52,12 @@ type WireEntry = {
     provider_connection?: { pid?: number | null } | null;
   } | null;
   worker_binding?: {
+    agent_session_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    updated_at: string;
+  } | null;
+  last_worker_binding?: {
     agent_session_id: string;
     work_attempt_id: string;
     execution_generation_id: string;
@@ -351,6 +357,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
 }
 
 function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
+  const workerBinding = entry.worker_binding ?? entry.last_worker_binding ?? null;
   return {
     id: entry.id,
     roomId: entry.room_id,
@@ -367,8 +374,8 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     createdAt: entry.created_at,
     workspacePath: entry.workspace_path ?? null,
     workAttemptId: entry.work_attempt_id ?? null,
-    agentSessionId: entry.worker_binding?.agent_session_id ?? null,
-    bindingUpdatedAt: entry.worker_binding?.updated_at ?? null,
+    agentSessionId: workerBinding?.agent_session_id ?? null,
+    bindingUpdatedAt: workerBinding?.updated_at ?? null,
     executionGenerationId: entry.provider_ref?.execution_generation_id ?? null,
     providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
     providerPid: entry.provider_ref?.provider_connection?.pid ?? null,

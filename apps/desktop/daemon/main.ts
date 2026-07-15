@@ -686,7 +686,16 @@ export class SupervisorDaemon {
     const attempt = await this.durability.getAttempt(input.work_attempt_id);
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
-    await this.workerBindings.bind(input);
+    const binding = await this.workerBindings.bind(input);
+    await this.updateManifestEntry(input.entry_id, (current) => ({
+      ...current,
+      last_worker_binding: {
+        agent_session_id: binding.agent_session_id,
+        work_attempt_id: binding.work_attempt_id,
+        execution_generation_id: binding.execution_generation_id,
+        updated_at: binding.updated_at,
+      },
+    }));
     await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }

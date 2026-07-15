@@ -1227,6 +1227,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(boundProjection.worker_binding?.agent_session_id, "agent_session_exact");
     assert.equal(boundProjection.worker_binding?.work_attempt_id, workAttemptId);
     assert.equal(boundProjection.worker_binding?.execution_generation_id, executionGenerationId);
+    assert.equal(boundProjection.last_worker_binding?.agent_session_id, "agent_session_exact");
     assert.doesNotMatch(JSON.stringify(boundProjection), /session-secret|api_url/, "renderer projection never exposes worker authority");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.bound"), "initial daemon worker binding activity");
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "tool_lifecycle", method: "item/toolCall/started", payload: { tool: "test" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
@@ -1302,6 +1303,9 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "stopped" });
     await eventually(async () => !child?.pid || (() => { try { process.kill(child.pid!, 0); return false; } catch { return true; } })(), "daemon stop authority");
     await eventually(async () => !/agent_session_exact/.test(await readFile(paths.workerBindingsPath, "utf8")), "terminal attempt worker binding removal");
+    const stoppedProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(stoppedProjection.worker_binding, null, "terminal stop removes live worker authority");
+    assert.equal(stoppedProjection.last_worker_binding?.agent_session_id, "agent_session_exact", "terminal stop preserves the non-secret exact control route");
     await eventually(async () => {
       const stopped = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return stopped.observed_state === "stopped" && stopped.condition === "none";
@@ -1329,6 +1333,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(rebound.ok, true, rebound.error);
     const reboundProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
     assert.equal(reboundProjection.worker_binding?.agent_session_id, "agent_session_rebound", "a successor room session immediately replaces the public binding projection");
+    assert.equal(reboundProjection.last_worker_binding?.agent_session_id, "agent_session_rebound", "a rebound worker replaces the durable exact control route");
     assert.equal(reboundProjection.worker_binding?.execution_generation_id, resumedGenerationId);
     assert.doesNotMatch(JSON.stringify(reboundProjection), /rebound-secret/);
     const staleBind = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
