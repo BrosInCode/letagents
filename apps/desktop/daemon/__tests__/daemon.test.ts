@@ -318,6 +318,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
   };
   const daemon = new SupervisorDaemon(paths, "darwin", port, true);
   try {
+    const startedAt = Date.now();
     await daemon.start();
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry,
@@ -332,7 +333,8 @@ test("a provider handle returned already terminal is fenced and resumes under a 
       const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return current.observed_state === "working"
         && current.provider_ref?.execution_generation_id !== undefined;
-    }, "already-terminal launch recovery");
+    }, "already-terminal launch recovery", 3_000);
+    assert.ok(Date.now() - startedAt >= 900, "the successor cannot bypass the persisted one-second recovery backoff");
     assert.equal(stopCount, 1, "returned-state and just-installed stream paths share one idempotent terminal fence");
     assert.equal(resumeCount, 1, "the listener boundary race mints exactly one bounded successor");
     const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "returned_terminal" })).result as {
@@ -342,6 +344,52 @@ test("a provider handle returned already terminal is fenced and resumes under a 
     assert.equal(detail.execution_generations[1]?.terminal, null, "only the successor generation remains live");
   } finally {
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "returned_terminal", desired_state: "stopped" }).catch(() => undefined);
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("direct provider convergence quarantines persisted crash loops without another spawn", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  let spawnCount = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawnCount += 1; throw new Error("quarantined entry must not spawn"); },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { spawnCount += 1; throw new Error("quarantined entry must not resume"); },
+    poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+    onExit: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    const now = Date.now();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id: "persisted_crash_loop",
+      observed_state: "failed",
+      reconciliation: {
+        exit_timestamps_ms: Array.from({ length: CRASH_LOOP_EXIT_LIMIT }, (_, index) => now - index),
+        consecutive_action_failures: CRASH_LOOP_EXIT_LIMIT,
+        last_observed_state: "failed",
+        next_restart_at_ms: now + 60_000,
+        completed_action_ids: [],
+        last_action_sequence: 0,
+        pending_action: null,
+      },
+    } })).ok, true);
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return current.condition === "quarantined";
+    }, "persisted crash-loop quarantine");
+    assert.equal(spawnCount, 0);
+  } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }

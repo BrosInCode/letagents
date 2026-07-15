@@ -9,6 +9,7 @@ import { WorkDurabilityStore } from "./durability-store.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
 import type { ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal } from "./provider-action-port.js";
+import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
@@ -78,6 +79,7 @@ export class SupervisorDaemon {
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
+  private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
@@ -195,6 +197,8 @@ export class SupervisorDaemon {
   }
 
   async stop(): Promise<void> {
+    for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
+    this.recoveryTimers.clear();
     await Promise.all([...this.scheduledConvergence.values()].map(async (scheduled) => (await scheduled).dispose()));
     await Promise.all([...this.convergenceRequests.values()]);
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
@@ -578,6 +582,27 @@ export class SupervisorDaemon {
     if (!this.providerPort) throw new Error(`No daemon provider port is available for ${entry.provider}.`);
 
     if (entry.desired_state === "running") {
+      if (entry.condition === "quarantined") return;
+      if (entry.observed_state === "failed") {
+        const now = Date.now();
+        const exitsInWindow = (entry.reconciliation?.exit_timestamps_ms ?? [])
+          .filter((at) => at >= now - CRASH_LOOP_WINDOW_MS).length;
+        if (exitsInWindow >= CRASH_LOOP_EXIT_LIMIT) {
+          await this.transition(
+            entry.id,
+            "failed",
+            "quarantined",
+            "crash-loop threshold reached before provider restart",
+            "daemon-convergence",
+          );
+          return;
+        }
+        const restartAt = entry.reconciliation?.next_restart_at_ms;
+        if (typeof restartAt === "number" && restartAt > now) {
+          this.scheduleRecoveryConvergence(entry.id, restartAt - now);
+          return;
+        }
+      }
       entry = await this.ensureWorkAttempt(entry);
       let handle = this.liveHandles.get(entry.id) ?? null;
       if (!handle && entry.provider_ref) {
@@ -833,6 +858,16 @@ export class SupervisorDaemon {
       .then(() => undefined);
     this.terminalFenceRequests.set(handle, operation);
     return operation;
+  }
+
+  private scheduleRecoveryConvergence(entryId: string, delayMs: number): void {
+    if (this.recoveryTimers.has(entryId)) return;
+    const timer = setTimeout(() => {
+      this.recoveryTimers.delete(entryId);
+      this.requestConvergence(entryId);
+    }, Math.max(1, delayMs));
+    timer.unref();
+    this.recoveryTimers.set(entryId, timer);
   }
 
   private async bindWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
