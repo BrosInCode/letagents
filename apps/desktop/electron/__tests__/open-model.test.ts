@@ -36,6 +36,28 @@ async function tempSettingsPath(): Promise<string> {
   return join(dir, "settings.json");
 }
 
+const unsafeOpenModelBaseUrls = [
+  "https://alice:unsafe-secret@example.com/v1",
+  "https://example.com/v1?api_key=unsafe-secret",
+  "https://example.com/v1?access-token=unsafe-secret",
+  "https://example.com/v1?auth[client_secret]=unsafe-secret",
+  "https://example.com/v1?X-Amz-Signature=unsafe-secret",
+  "https://example.com/v1?refresh_token=unsafe-secret",
+  "https://example.com/v1?session_token=unsafe-secret",
+  "https://example.com/v1?private_key=unsafe-secret",
+  "https://example.com/v1?api_secret=unsafe-secret",
+  "https://example.com/v1?access_key_id=unsafe-secret",
+  "https://example.com/v1?AWSAccessKeyId=unsafe-secret",
+  "https://example.com/v1?apikey=unsafe-secret",
+  "https://example.com/v1?authtoken=unsafe-secret",
+  "https://example.com/v1?clientsecret=unsafe-secret",
+  "https://example.com/v1?securitytoken=unsafe-secret",
+  "https://example.com/v1?secretkey=unsafe-secret",
+  "https://example.com/v1?accesskeyid=unsafe-secret",
+  "https://example.com/v1?awsaccesskeyid=unsafe-secret",
+  "https://example.com/v1#access_token=unsafe-secret",
+];
+
 test("open model settings encrypt the API key and round-trip", async () => {
   const settingsPath = await tempSettingsPath();
 
@@ -108,6 +130,53 @@ test("open model settings reject invalid endpoint URLs", async () => {
     ),
     /not a valid URL/,
   );
+
+  const malformedSecretUrl = "https://[invalid.example/?api_key=malformed-secret";
+  await assert.rejects(
+    saveOpenModelSettings(
+      { baseUrl: malformedSecretUrl, model: "m" },
+      { storePath: settingsPath, secretStorage },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /not a valid URL/);
+      assert.doesNotMatch(error.message, /api_key|malformed-secret/);
+      return true;
+    },
+  );
+});
+
+test("open model settings reject endpoint URLs that expose secrets without echoing them", async () => {
+  for (const baseUrl of unsafeOpenModelBaseUrls) {
+    const settingsPath = await tempSettingsPath();
+    await assert.rejects(
+      saveOpenModelSettings(
+        { baseUrl, model: "m" },
+        { storePath: settingsPath, secretStorage },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /must not contain/);
+        assert.doesNotMatch(error.message, /alice|unsafe-secret/);
+        assert.equal(error.message.includes(baseUrl), false);
+        return true;
+      },
+    );
+  }
+});
+
+test("open model settings preserve ordinary non-secret endpoint query options", async () => {
+  const settingsPath = await tempSettingsPath();
+  const baseUrl =
+    "https://models.example.test/v1?region=us-east-1&compat=responses&design=minimal&author=alice&monkey=capuchin";
+
+  const status = await saveOpenModelSettings(
+    { baseUrl, model: "m" },
+    { storePath: settingsPath, secretStorage },
+  );
+
+  assert.equal(status.baseUrl, baseUrl);
+  assert.equal((await readOpenModelSettings({ storePath: settingsPath, secretStorage })).baseUrl, baseUrl);
 });
 
 test("unconfigured open model settings report configured=false", async () => {
@@ -235,6 +304,27 @@ test("openModelCodexLaunch refuses unconfigured settings", () => {
       }),
     /Configure a model endpoint/,
   );
+});
+
+test("openModelCodexLaunch rejects unsafe endpoint settings loaded from disk", () => {
+  for (const baseUrl of unsafeOpenModelBaseUrls) {
+    assert.throws(
+      () =>
+        openModelCodexLaunch({
+          apiKey: null,
+          baseUrl,
+          model: "m",
+          savedAt: null,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /must not contain/);
+        assert.doesNotMatch(error.message, /alice|unsafe-secret/);
+        assert.equal(error.message.includes(baseUrl), false);
+        return true;
+      },
+    );
+  }
 });
 
 test("open-model permission profiles default to honestly-labeled full access", () => {
