@@ -189,14 +189,16 @@ export class WorkspaceProvisioner {
 
   private async refreshBare(bare: string): Promise<void> {
     // Bare clones do not retain a remote fetch refspec. Refresh every advertised
-    // branch into a daemon-private namespace so a long-lived repository can
-    // resolve source commits created after its initial clone. The static
+    // branch and tag into daemon-private namespaces so a long-lived repository
+    // can resolve branch-reachable and tag-only source commits created after its
+    // initial clone. The static
     // refspec and verified origin prevent callers from selecting another
     // remote or writing arbitrary refs; detached worktrees remain OID-pinned.
     await this.run([
       "--git-dir", bare,
       "fetch", "--prune", "--no-tags", "origin",
       "+refs/heads/*:refs/letagents/remotes/origin/*",
+      "+refs/tags/*:refs/letagents/tags/*",
     ]);
   }
 

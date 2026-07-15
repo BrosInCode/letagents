@@ -1387,6 +1387,7 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
       "--git-dir", await realpath(join(env.root, "repos", "repo.git")),
       "fetch", "--prune", "--no-tags", "origin",
       "+refs/heads/*:refs/letagents/remotes/origin/*",
+      "+refs/tags/*:refs/letagents/tags/*",
     ]);
     assert.match(first.path, new RegExp(`worktrees/repo/${workAttemptId}$`));
     assert.ok(commands[0]!.includes("--bare"));
@@ -1465,6 +1466,27 @@ test("workspace provisioner refreshes an existing bare clone before resolving a 
     assert.equal(
       (await execFileAsync("git", ["--git-dir", join(daemonRoot, "repos", "repo.git"), "rev-parse", "refs/letagents/remotes/origin/fresh-after-clone"])).stdout.trim(),
       secondRevision,
+    );
+
+    await execFileAsync("git", ["-C", source, "checkout", "--detach", secondRevision]);
+    await writeFile(join(source, "README.md"), "tag only\n");
+    await execFileAsync("git", ["-C", source, "add", "README.md"]);
+    await execFileAsync("git", ["-C", source, "commit", "-m", "tag only"]);
+    await execFileAsync("git", ["-C", source, "tag", "release-only"]);
+    const tagOnlyRevision = (await execFileAsync("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+    await execFileAsync("git", ["-C", source, "push", "origin", "refs/tags/release-only"]);
+
+    const tagged = await provisioner.provision({
+      repo: "repo",
+      workAttemptId: randomUUID(),
+      taskId: "task_tag_only",
+      remoteUrl: remote,
+      revision: tagOnlyRevision,
+    });
+    assert.equal((await execFileAsync("git", ["-C", tagged.path, "rev-parse", "HEAD"])).stdout.trim(), tagOnlyRevision);
+    assert.equal(
+      (await execFileAsync("git", ["--git-dir", join(daemonRoot, "repos", "repo.git"), "rev-parse", "refs/letagents/tags/release-only^{commit}"])).stdout.trim(),
+      tagOnlyRevision,
     );
   } finally { await env.cleanup(); }
 });
