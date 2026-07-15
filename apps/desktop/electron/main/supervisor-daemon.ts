@@ -104,6 +104,8 @@ export interface SupervisorDaemonLifecycleOptions {
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
   spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
+  terminateDaemon?: (pid: number) => void;
+  handoffTimeoutMs?: number;
   now?: () => Date;
 }
 
@@ -113,12 +115,16 @@ export class SupervisorDaemonClient {
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
   private readonly daemonWorkingDirectory: string;
+  private readonly terminateDaemon: (pid: number) => void;
+  private readonly handoffTimeoutMs: number;
   private readonly now: () => Date;
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
     this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
+    this.terminateDaemon = options.terminateDaemon ?? ((pid) => process.kill(pid, "SIGTERM"));
+    this.handoffTimeoutMs = options.handoffTimeoutMs ?? START_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
       const child = spawn(process.execPath, [scriptPath], {
@@ -268,7 +274,11 @@ export class SupervisorDaemonClient {
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
       ) return mapStatus(negotiated);
       await this.request("daemon.prepare_handoff", undefined, daemonVersion);
-      await this.waitForSocketDown();
+      try {
+        await this.waitForSocketDown();
+      } catch (error) {
+        await this.terminateStalledDaemon(negotiated, daemonVersion, error);
+      }
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
     }
@@ -299,12 +309,28 @@ export class SupervisorDaemonClient {
   }
 
   private async waitForSocketDown(): Promise<void> {
-    const deadline = Date.now() + START_TIMEOUT_MS;
+    const deadline = Date.now() + this.handoffTimeoutMs;
     while (Date.now() < deadline) {
       try { await this.request("daemon.negotiate"); } catch (error) { if (isConnectionUnavailable(error)) return; throw error; }
       await delay(25);
     }
     throw new Error("Existing supervisor daemon did not complete negotiated handoff; it was left running.");
+  }
+
+  private async terminateStalledDaemon(
+    negotiated: Record<string, unknown>,
+    daemonVersion: number,
+    handoffError: unknown,
+  ): Promise<void> {
+    const current = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, daemonVersion);
+    const pid = Number(current.pid);
+    const sameDaemon = Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid
+      && current.generation === negotiated.generation
+      && current.implementation_version === negotiated.implementation_version
+      && current.started_at === negotiated.started_at;
+    if (!sameDaemon) throw handoffError;
+    this.terminateDaemon(pid);
+    await this.waitForSocketDown();
   }
 
   private request<T = unknown>(method: string, params?: unknown, version = SUPERVISOR_DAEMON_PROTOCOL_VERSION): Promise<T> {
