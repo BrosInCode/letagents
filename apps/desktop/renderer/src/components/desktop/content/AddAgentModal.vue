@@ -257,7 +257,7 @@
             </section>
 
             <section
-              v-if="selectedProvider?.capabilities.includes('desktop_managed_runtime')"
+              v-if="hasSupervisedRuntime(selectedProvider)"
               class="desktop-add-agent-delivery"
               aria-label="Agent lifecycle"
               data-testid="desktop-add-agent-lifecycle"
@@ -550,6 +550,7 @@ import {
   externalMcpProviderJoinPrompt,
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
+  hasSupervisedRuntime,
   isAgentSetupConfirmationActive,
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
@@ -781,7 +782,6 @@ const deliveryModeDescription = computed(() =>
 
 const lifecycleDescription = computed(() => {
   if (launchMode.value === "legacy") return "The current app-owned path stays unchanged and stops with its normal lifecycle.";
-  if (selectedProviderId.value !== "codex") return "This provider is not yet proven for durable supervision; starting it will show the exact missing capability.";
   if (/^local[_-]/i.test(props.roomIdentifier) || /^git-room:local:/i.test(props.roomIdentifier)) {
     return "Supervision needs a cloud room for durable workplace reachability. Local-only rooms keep the existing path.";
   }
@@ -1077,6 +1077,9 @@ async function startManagedAgent(): Promise<void> {
   startManagedSessionRefreshTimer(1_000);
   try {
     if (launchMode.value === "supervised") {
+      if (!hasSupervisedRuntime(selectedProvider.value)) {
+        throw new Error("This provider has not passed the durable supervision evidence gate.");
+      }
       const entry = await desktopIpc.supervisor.createAgent({
         providerId: selectedProviderId.value,
         roomIdentifier: props.roomIdentifier,
@@ -1314,6 +1317,9 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   modalStateVersion += 1;
   clearScheduledModelPreflight();
   selectedProviderId.value = providerId;
+  if (!hasSupervisedRuntime(selectedProvider.value)) {
+    launchMode.value = "legacy";
+  }
   resetModelSelection();
   syncPermissionProfileSelection();
   syncDeliveryModeSelection();
