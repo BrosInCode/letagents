@@ -419,11 +419,14 @@
             <section
               v-if="supervisedConflict"
               class="desktop-add-agent-managed-sessions"
-              data-testid="desktop-add-agent-supervised-conflict"
-              aria-label="Supervised agent recovery"
+              data-testid="desktop-add-agent-supervised-runtime"
+              aria-label="Supervised agent runtime"
             >
-              <article class="desktop-add-agent-managed-session" data-state="blocked">
-                <span>Supervised runtime needs recovery</span>
+              <article
+                class="desktop-add-agent-managed-session"
+                :data-state="supervisedConflict.condition === 'none' ? supervisedConflict.observedState : 'blocked'"
+              >
+                <span>{{ supervisedConflictLabel }}</span>
                 <strong>{{ supervisedConflict.displayName }}</strong>
                 <small>
                   {{ supervisedConflict.observedState }} · {{ supervisedConflict.condition }}
@@ -433,7 +436,7 @@
                   <button
                     type="button"
                     class="desktop-add-agent-managed-session-danger"
-                    data-testid="desktop-add-agent-stop-supervised-conflict"
+                    data-testid="desktop-add-agent-stop-supervised-runtime"
                     :disabled="Boolean(stoppingSupervisorEntryId)"
                     @click="stopSupervisedConflict"
                   >
@@ -607,6 +610,7 @@ import {
   loadSupervisedProviderLane,
   stopSupervisedProviderLane,
   supervisedRecoveryDetail,
+  supervisedRuntimeCardLabel,
 } from "../../../domain/supervised-recovery";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
@@ -690,6 +694,9 @@ const selectedProvider = computed(() =>
 );
 const supervisedConflictDetail = computed(() =>
   supervisedConflict.value ? supervisedRecoveryDetail(supervisedConflict.value) : null
+);
+const supervisedConflictLabel = computed(() =>
+  supervisedConflict.value ? supervisedRuntimeCardLabel(supervisedConflict.value) : "Supervised runtime"
 );
 
 const activeManagedSessions = computed(() =>
@@ -1133,10 +1140,14 @@ async function startManagedAgent(): Promise<void> {
         model: selectedModel.value,
       });
       if (!isCurrentModalState(requestVersion)) return;
-      supervisedConflict.value = null;
+      // A durable `running` claim returns before the native provider has
+      // published room presence. Render this manifest entry immediately so
+      // the first Start click has a visible result and cannot be mistaken for
+      // a no-op that needs a second click.
+      supervisedConflict.value = entry;
       supervisedConflictLookupError.value = null;
       setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
-      await loadManagedSessions();
+      void loadManagedSessions({ quiet: true });
       return;
     }
     const result = await desktopIpc.workers.startManagedAgent({

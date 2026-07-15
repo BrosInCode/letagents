@@ -58,3 +58,19 @@ export function supervisedRecoveryDetail(
     .sort((left, right) => right.sequence - left.sequence)[0];
   return latestActivity?.summary?.trim() || null;
 }
+
+/**
+ * The first Start response is intentionally durable before the provider has
+ * registered an MCP participant. Give that state a distinct UI label instead
+ * of making it look like a failed recovery only visible after a second click.
+ */
+export function supervisedRuntimeCardLabel(
+  entry: Pick<DesktopSupervisorManifestEntry, "observedState" | "condition">,
+): string {
+  if (entry.condition !== "none" || entry.observedState === "failed") {
+    return "Supervised runtime needs recovery";
+  }
+  if (entry.observedState === "working") return "Supervised runtime is working";
+  if (entry.observedState === "idle") return "Supervised runtime is ready";
+  return "Supervised runtime is starting";
+}

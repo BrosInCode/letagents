@@ -64,6 +64,7 @@ import {
   loadSupervisedProviderLane,
   stopSupervisedProviderLane,
   supervisedRecoveryDetail,
+  supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
 
@@ -432,6 +433,17 @@ test("supervised recovery keeps an honest fallback and surfaces the latest durab
       durablePayloadRef: null,
     }],
   })), "provider restart failed before MCP registration");
+});
+
+test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
+  assert.equal(supervisedRuntimeCardLabel(supervisorEntry({
+    observedState: "absent",
+    condition: "none",
+  })), "Supervised runtime is starting");
+  assert.equal(supervisedRuntimeCardLabel(supervisorEntry({
+    observedState: "failed",
+    condition: "none",
+  })), "Supervised runtime needs recovery");
 });
 
 test("delivery mode selector only shows for managed Codex", () => {
