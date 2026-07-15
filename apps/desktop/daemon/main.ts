@@ -45,6 +45,7 @@ export class SupervisorDaemon {
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
+  private readonly liveBindingIdentities = new Map<string, { agentSessionId: string; executionGenerationId: string; updatedAt: string }>();
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private handoffScheduled = false;
@@ -567,7 +568,7 @@ export class SupervisorDaemon {
           : await this.providerPort.spawn(spawn);
         await this.persistProviderHandle(entry.id, handle, execution.execution_generation_id);
         await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
-        await this.installProviderHandle(entry.id, handle);
+        await this.installProviderHandle(entry.id, handle, execution.execution_generation_id);
         await this.transition(entry.id, handle.observedState, "none", ref ? "provider resumed under daemon authority" : "provider launched under daemon authority", "daemon-convergence");
       } catch (error) {
         const terminal = this.terminalPayload({
@@ -619,7 +620,7 @@ export class SupervisorDaemon {
     const handle = await this.providerPort!.attach(this.providerRef(entry));
     if (!handle) return null;
     await this.durability.recoverExecutionFence(ref.work_attempt_id);
-    await this.installProviderHandle(entry.id, handle);
+    await this.installProviderHandle(entry.id, handle, ref.execution_generation_id);
     return handle;
   }
 
@@ -652,9 +653,22 @@ export class SupervisorDaemon {
     }));
   }
 
-  private async installProviderHandle(entryId: string, handle: ProviderActionHandle): Promise<void> {
+  private async installProviderHandle(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): Promise<void> {
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveHandles.set(entryId, handle);
+    const binding = await this.workerBindings.get(entryId);
+    const currentBinding = this.liveBindingIdentities.get(entryId);
+    if (binding?.execution_generation_id === executionGenerationId) {
+      if (!currentBinding || binding.updated_at >= currentBinding.updatedAt) {
+        this.liveBindingIdentities.set(entryId, {
+          agentSessionId: binding.agent_session_id,
+          executionGenerationId: binding.execution_generation_id,
+          updatedAt: binding.updated_at,
+        });
+      }
+    } else if (currentBinding?.executionGenerationId !== executionGenerationId) {
+      this.liveBindingIdentities.delete(entryId);
+    }
     const disposeExit = await this.providerPort!.onExit(handle, (terminal) => {
       this.trackProviderCallback(this.handleProviderTerminal(entryId, handle, terminal));
     });
@@ -714,6 +728,11 @@ export class SupervisorDaemon {
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
     const binding = await this.workerBindings.bind(input);
+    this.liveBindingIdentities.set(input.entry_id, {
+      agentSessionId: binding.agent_session_id,
+      executionGenerationId: binding.execution_generation_id,
+      updatedAt: binding.updated_at,
+    });
     await this.updateManifestEntry(input.entry_id, (current) => ({
       ...current,
       last_worker_binding: {
@@ -756,7 +775,9 @@ export class SupervisorDaemon {
 
   private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, terminal: ProviderActionTerminal): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
+    const terminalBinding = this.liveBindingIdentities.get(entryId);
     this.liveHandles.delete(entryId);
+    this.liveBindingIdentities.delete(entryId);
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveDisposers.delete(entryId);
     const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
@@ -770,7 +791,9 @@ export class SupervisorDaemon {
         });
       }
     }
-    await this.workerBindings.unbind(entryId, undefined, entry?.provider_ref?.execution_generation_id);
+    if (terminalBinding) {
+      await this.workerBindings.unbind(entryId, terminalBinding.agentSessionId, terminalBinding.executionGenerationId);
+    }
     await this.observeProviderExit(entryId, terminal, "daemon-provider");
     this.requestConvergence(entryId);
   }

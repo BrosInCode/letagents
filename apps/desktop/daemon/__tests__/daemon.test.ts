@@ -869,10 +869,10 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     const replacementBindings = (second as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
     await replacementBindings.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_new",
-      execution_generation_id: "execution_new", agent_session_id: "session_new",
+      execution_generation_id: "execution_old", agent_session_id: "session_new",
       agent_session_token: "new-secret", api_url: "https://letagents.chat",
     });
-    assert.equal(await replacementBindings.unbind("binding_race", undefined, "execution_old"), false, "a predecessor terminal cannot unbind its successor execution");
+    assert.equal(await replacementBindings.unbind("binding_race", "session_old", "execution_old"), false, "a predecessor terminal cannot unbind a replacement session on the same execution");
 
     releaseCommit();
     releaseBindingCommit();
