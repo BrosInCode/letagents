@@ -24,6 +24,7 @@ import {
   externalMcpProviderJoinPrompt,
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
+  hasSupervisedRuntime,
   isAgentSetupConfirmationActive,
   isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
@@ -282,6 +283,26 @@ test("managed model selector only shows for desktop-managed providers", () => {
   })), true);
   assert.equal(shouldShowManagedModelSelector(provider({
     capabilities: ["external_mcp"],
+  })), false);
+});
+
+test("durable supervision is advertised only by providers with validated native evidence", () => {
+  assert.equal(hasSupervisedRuntime(provider({
+    capabilities: ["external_mcp", "desktop_managed_runtime", "supervised_runtime"],
+  })), true);
+  assert.equal(hasSupervisedRuntime(provider({
+    id: "open-model",
+    name: "Open Model",
+    capabilities: ["desktop_managed_runtime", "reasoning_stream"],
+    runtimeCommand: "codex",
+    mcpTargetId: "open-model",
+  })), false);
+  assert.equal(hasSupervisedRuntime(provider({
+    id: "cursor",
+    name: "Cursor",
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "cursor-agent",
+    mcpTargetId: "cursor",
   })), false);
 });
 

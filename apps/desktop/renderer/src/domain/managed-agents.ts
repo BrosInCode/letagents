@@ -29,6 +29,16 @@ export function hasDesktopManagedRuntime(
   return Boolean(provider?.capabilities.includes("desktop_managed_runtime"));
 }
 
+/**
+ * Durable supervision is stricter than the app-owned managed runtime. A
+ * provider opts in only after its native evidence cells prove that lifecycle.
+ */
+export function hasSupervisedRuntime(
+  provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
+): boolean {
+  return Boolean(provider?.capabilities.includes("supervised_runtime"));
+}
+
 export function visibleDesktopAgentProviders(
   providers: DesktopAgentProvider[],
 ): DesktopAgentProvider[] {

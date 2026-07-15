@@ -22,6 +22,7 @@ import {
   saveOpenModelSettings,
 } from "../main/agents/open-model-settings.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
+import { listDesktopAgentProviders } from "../main/agents/provider-registry.js";
 
 const secretStorage = {
   isEncryptionAvailable: () => true,
@@ -246,6 +247,16 @@ test("open-model permission profiles default to honestly-labeled full access", (
     () => assertManagedAgentPermissionProfileAvailable("open-model", "read_only"),
     /not available/,
   );
+});
+
+test("Open Model remains capability-gated from durable supervision", () => {
+  const providers = listDesktopAgentProviders();
+  const codex = providers.find((provider) => provider.id === "codex");
+  const openModel = providers.find((provider) => provider.id === "open-model");
+
+  assert.ok(codex?.capabilities.includes("supervised_runtime"));
+  assert.ok(openModel?.capabilities.includes("desktop_managed_runtime"));
+  assert.equal(openModel?.capabilities.includes("supervised_runtime"), false);
 });
 
 test("codexAppServerLaunchArgs threads config overrides after the trust override", () => {
