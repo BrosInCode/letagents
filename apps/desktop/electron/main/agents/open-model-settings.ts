@@ -11,6 +11,56 @@ import type {
 
 export const DEFAULT_OPEN_MODEL_BASE_URL = "https://openrouter.ai/api/v1";
 
+const SECRET_QUERY_NAME_TOKENS = new Set([
+  "auth",
+  "authorization",
+  "bearer",
+  "credential",
+  "credentials",
+  "key",
+  "password",
+  "passwd",
+  "secret",
+  "sig",
+  "signature",
+  "token",
+]);
+
+// Some providers use lowercase compact names with no punctuation or camel-case
+// boundary. Keep these as exact aliases so ordinary names such as `author`,
+// `design`, and `monkey` are not rejected merely for containing auth/sig/key.
+const COMPACT_SECRET_QUERY_NAMES = new Set([
+  "accesskey",
+  "accesskeyid",
+  "accesstoken",
+  "apikey",
+  "apitoken",
+  "authtoken",
+  "awsaccesskeyid",
+  "bearertoken",
+  "clientsecret",
+  "privatekey",
+  "refreshtoken",
+  "secretkey",
+  "securitytoken",
+  "sessiontoken",
+  "subscriptionkey",
+  "xapikey",
+]);
+
+function queryNameContainsCredential(queryName: string): boolean {
+  const words = queryName
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  if (words.some((word) => SECRET_QUERY_NAME_TOKENS.has(word))) return true;
+
+  const compactName = queryName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return COMPACT_SECRET_QUERY_NAMES.has(compactName);
+}
+
 const require = createRequire(import.meta.url);
 
 interface OpenModelSecretStorage {
@@ -126,10 +176,32 @@ export function assertValidOpenModelBaseUrl(baseUrl: string): void {
   try {
     parsed = new URL(baseUrl);
   } catch {
-    throw new Error(`The model endpoint URL is not a valid URL: ${baseUrl}`);
+    // Do not echo the input: a malformed URL can itself contain credentials.
+    throw new Error("The model endpoint URL is not a valid URL.");
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     throw new Error("The model endpoint URL must use http or https.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(
+      "The model endpoint URL must not contain credentials. Save the API key in the dedicated API key field instead.",
+    );
+  }
+  if (parsed.hash) {
+    throw new Error(
+      "The model endpoint URL must not contain a fragment because fragments are exposed in process arguments.",
+    );
+  }
+
+  // Ordinary endpoint selectors (for example `?region=us`) remain valid. Reject
+  // query names conventionally used to transport credentials because base_url
+  // is passed to Codex as a process argument and is visible to process tooling.
+  for (const queryName of parsed.searchParams.keys()) {
+    if (queryNameContainsCredential(queryName)) {
+      throw new Error(
+        "The model endpoint URL must not contain credential query parameters. Save the API key in the dedicated API key field instead.",
+      );
+    }
   }
 }
 
