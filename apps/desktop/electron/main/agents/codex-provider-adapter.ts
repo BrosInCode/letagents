@@ -48,6 +48,7 @@ export interface CodexAdapterRpc {
   connect(): Promise<void>;
   request<T>(method: string, params?: unknown): Promise<T>;
   close(): void;
+  onDisconnect(listener: () => void): () => void;
 }
 
 export interface CodexProviderAdapterDependencies {
@@ -325,6 +326,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly handles = new Map<string, CodexProviderHandle>();
+  private readonly pendingAttaches = new Map<string, Promise<CodexProviderHandle | null>>();
   private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
   // P0 proved app-server thread/resume on the supported Codex runtime. Start
   // optimistic so a fresh reconciler can select resume, then probe every native
@@ -358,11 +360,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
       return handle;
     }
     const connection = ref.providerConnection;
-    if (!connection || connection.kind !== "codex_app_server" || connection.pid === null) {
+    if (!connection || connection.kind !== "codex_app_server") {
       return null;
     }
-    if (!this.deps.isProcessAlive(connection.pid)) return null;
-    return this.attachRunning(ref, connection);
+    const pending = this.pendingAttaches.get(ref.workAttemptId);
+    if (pending) return pending;
+    const attaching = this.attachRunning(ref, connection).finally(() => {
+      if (this.pendingAttaches.get(ref.workAttemptId) === attaching) {
+        this.pendingAttaches.delete(ref.workAttemptId);
+      }
+    });
+    this.pendingAttaches.set(ref.workAttemptId, attaching);
+    return attaching;
   }
 
   async resume(
@@ -477,7 +486,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     try {
       await client.connect();
       await requireLetAgentsWorkplace(client);
-      this.resumeSupported = await probeResumeSupport(client);
+      const probedResume = await probeResumeSupport(client);
+      if (!probedResume) this.resumeSupported = false;
       if (resumeRef && !this.resumeSupported) {
         throw new Error(
           "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
@@ -572,7 +582,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     try {
       await client.connect();
       await requireLetAgentsWorkplace(client);
-      this.resumeSupported = await probeResumeSupport(client);
+      const probedResume = await probeResumeSupport(client);
+      if (!probedResume) this.resumeSupported = false;
       const read = await client.request<ThreadReadResult>("thread/read", {
         threadId: ref.providerContinuationId,
         includeTurns: true,
@@ -580,10 +591,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (read.thread?.id !== ref.providerContinuationId) {
         throw new Error("Codex app-server did not verify the exact durable continuation thread.");
       }
-      const launch: CodexAppServerLaunch = {
-        pid: connection.pid,
-        exited: this.deps.observeProcessExit(connection.pid!),
-      };
+      const rpcDisconnected = new Promise<CodexAppServerExit>((resolve) => {
+        client.onDisconnect(() => resolve({ type: "exit", code: null, signal: null }));
+      });
+      const exitEvidence = connection.pid !== null
+        ? Promise.race([rpcDisconnected, this.deps.observeProcessExit(connection.pid)])
+        : rpcDisconnected;
+      const launch: CodexAppServerLaunch = { pid: connection.pid, exited: exitEvidence };
       handle = new CodexProviderHandle(
         ref.workAttemptId,
         connection.pid,
@@ -602,7 +616,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       return handle;
     } catch (error) {
       client.close();
-      if (!this.deps.isProcessAlive(connection.pid!)) return null;
+      if (connection.pid !== null && !this.deps.isProcessAlive(connection.pid)) return null;
       throw new Error(
         `Codex app-server attach is ambiguous; refusing to launch a second writer: ${errorMessage(error)}`,
       );

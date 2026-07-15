@@ -58,6 +58,9 @@ export interface ThreadReadResult {
 
 export class CodexRpcClient {
   private ws: WebSocket | null = null;
+  private intentionalClose = false;
+  private disconnectNotified = false;
+  private readonly disconnectListeners = new Set<() => void>();
   private nextId = 1;
   private readonly pending = new Map<
     number,
@@ -94,7 +97,10 @@ export class CodexRpcClient {
           resolve();
         }
       };
-      ws.onerror = () => rejectConnect(new Error(`WebSocket error connecting to ${this.serverUrl}`));
+      ws.onerror = () => {
+        rejectConnect(new Error(`WebSocket error connecting to ${this.serverUrl}`));
+        if (settled) this.notifyDisconnect();
+      };
       ws.onmessage = (event) => this.handleMessage(String(event.data));
       ws.onclose = () => {
         rejectConnect(new Error(`WebSocket closed connecting to ${this.serverUrl}`));
@@ -103,6 +109,7 @@ export class CodexRpcClient {
           pending.reject(new Error("WebSocket closed"));
         }
         this.pending.clear();
+        this.notifyDisconnect();
       };
     });
 
@@ -155,9 +162,19 @@ export class CodexRpcClient {
   }
 
   close(): void {
+    this.intentionalClose = true;
     if (this.ws?.readyState === getWebSocketCtor().OPEN) {
       this.ws.close();
     }
+  }
+
+  onDisconnect(listener: () => void): () => void {
+    if (this.disconnectNotified && !this.intentionalClose) {
+      queueMicrotask(listener);
+      return () => {};
+    }
+    this.disconnectListeners.add(listener);
+    return () => this.disconnectListeners.delete(listener);
   }
 
   private handleMessage(raw: string): void {
@@ -201,6 +218,13 @@ export class CodexRpcClient {
       payload.params = params;
     }
     this.send(payload);
+  }
+
+  private notifyDisconnect(): void {
+    if (this.intentionalClose || this.disconnectNotified) return;
+    this.disconnectNotified = true;
+    for (const listener of this.disconnectListeners) listener();
+    this.disconnectListeners.clear();
   }
 
   private send(payload: Record<string, unknown>): void {

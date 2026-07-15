@@ -25,6 +25,7 @@ class FakeRpc implements CodexAdapterRpc {
   readonly requests: RecordedRequest[] = [];
   connected = false;
   closed = false;
+  private readonly disconnectListeners = new Set<() => void>();
 
   constructor(
     readonly threadId: string,
@@ -81,6 +82,16 @@ class FakeRpc implements CodexAdapterRpc {
 
   close(): void {
     this.closed = true;
+  }
+
+  onDisconnect(listener: () => void): () => void {
+    this.disconnectListeners.add(listener);
+    return () => this.disconnectListeners.delete(listener);
+  }
+
+  disconnect(): void {
+    for (const listener of this.disconnectListeners) listener();
+    this.disconnectListeners.clear();
   }
 
   emit(notification: RpcNotification): void {
@@ -306,6 +317,58 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
   }), attached);
+});
+
+test("reattached RPC disconnect emits terminal even when the old pid still appears alive", async () => {
+  const harness = createHarness();
+  const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const request = spawnRequest();
+  const first = await firstAdapter.spawn(request);
+  const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await freshAdapter.attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  });
+  assert.ok(attached);
+  const terminals: ProviderTerminalPayload[] = [];
+  freshAdapter.onExit(attached, (terminal) => terminals.push(terminal));
+
+  assert.equal(harness.dependencies.isProcessAlive(4100), true, "simulates immediate pid reuse/liveness");
+  harness.clients[1]!.disconnect();
+  await flush();
+
+  assert.equal(terminals.length, 1);
+  assert.equal(terminals[0]?.terminalCause, "crashed");
+  assert.equal(attached.observedState(), "failed");
+});
+
+test("pid-less durable endpoint is verified over RPC and fenced as ambiguous on failure", async () => {
+  const healthy = createHarness();
+  const request = spawnRequest();
+  const first = await new CodexProviderAdapter({ dependencies: healthy.dependencies }).spawn(request);
+  const pidlessConnection = { ...first.providerConnection!, pid: null };
+  const attached = await new CodexProviderAdapter({ dependencies: healthy.dependencies }).attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: pidlessConnection,
+  });
+  assert.ok(attached);
+  assert.equal(attached.pid, null);
+  assert.equal(healthy.launches.length, 1);
+
+  const unavailable = createHarness({ threadReadFails: true });
+  const unavailableFirst = await new CodexProviderAdapter({
+    dependencies: unavailable.dependencies,
+  }).spawn(request);
+  await assert.rejects(new CodexProviderAdapter({
+    dependencies: unavailable.dependencies,
+  }).attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: unavailableFirst.providerContinuationId!,
+    providerConnection: { ...unavailableFirst.providerConnection!, pid: null },
+  }), /attach is ambiguous; refusing to launch a second writer/);
+  assert.equal(unavailable.launches.length, 1);
 });
 
 test("fresh attach fences an unverifiable live app-server instead of allowing a duplicate writer", async () => {
