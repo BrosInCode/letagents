@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createConnection } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 
 import type {
@@ -18,6 +18,10 @@ import { desktopRoot } from "./paths.js";
 import { defaultGetProcessIdentity } from "./agents/provider-evidence.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
+// Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
+// handoff; implementation equality decides whether the already-running daemon
+// actually contains this desktop build's fixes.
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.1";
 const REQUEST_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
@@ -81,7 +85,8 @@ export class SupervisorDaemonProtocolMismatchError extends Error {
 export interface SupervisorDaemonLifecycleOptions {
   socketPath?: string;
   daemonScriptPath?: string;
-  spawnDaemon?: (scriptPath: string) => ChildProcess;
+  daemonWorkingDirectory?: string;
+  spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
   now?: () => Date;
 }
 
@@ -89,15 +94,18 @@ export class SupervisorDaemonClient {
   readonly socketPath: string;
   readonly daemonScriptPath: string;
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
-  private readonly spawnDaemon: (scriptPath: string) => ChildProcess;
+  private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
+  private readonly daemonWorkingDirectory: string;
   private readonly now: () => Date;
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
     this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
+    this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
     this.now = options.now ?? (() => new Date());
-    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath) => {
+    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
       const child = spawn(process.execPath, [scriptPath], {
+        cwd,
         detached: true,
         stdio: "ignore",
         env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -233,14 +241,19 @@ export class SupervisorDaemonClient {
     try {
       const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
       const daemonVersion = Number(negotiated.protocol_version ?? 0);
-      if (daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION) return mapStatus(negotiated);
+      const implementationVersion = String(negotiated.implementation_version ?? "unknown");
+      if (
+        daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
+        && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
+      ) return mapStatus(negotiated);
       await this.request("daemon.prepare_handoff", undefined, daemonVersion);
       await this.waitForSocketDown();
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
     }
     await access(this.daemonScriptPath);
-    const child = this.spawnDaemon(this.daemonScriptPath);
+    await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
+    const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory);
     child.once("error", () => undefined);
     return this.waitForHealthy();
   }

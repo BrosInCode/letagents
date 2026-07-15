@@ -1,10 +1,31 @@
+import { execFile } from "node:child_process";
 import { lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import { withWorkspaceFence } from "./workspace-fence.js";
 
 /** Action commands return void; identity queries must return stdout. */
 export type GitCommand = (args: string[]) => Promise<string | void>;
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Run every daemon-owned Git command from an explicit stable directory. A
+ * long-lived supervisor may outlive the checkout/worktree that launched it;
+ * inheriting that deleted cwd makes even `git --git-dir ...` fail before Git
+ * can inspect the daemon-owned repository.
+ */
+export function createGitCommand(stableCwd: string): GitCommand {
+  const cwd = resolve(stableCwd);
+  return async (args) => {
+    const { stdout } = await execFileAsync("git", args, {
+      cwd,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return stdout;
+  };
+}
 
 type RepositoryMarker = { version: 1; repo: string; remote_url: string };
 export type WorkspaceMarker = {

@@ -447,6 +447,7 @@ export function launchCodexAppServer(
     sensitiveCodexAppServerLaunchValues(env, options),
   );
   const child = spawn(codexBin, codexAppServerLaunchArgs(serverUrl, options), {
+    cwd: options.trustedProjectPath?.trim() || undefined,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
     env,

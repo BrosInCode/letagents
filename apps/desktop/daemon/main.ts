@@ -1,7 +1,6 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, basename } from "node:path";
-import { promisify } from "node:util";
 
 import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
@@ -13,17 +12,10 @@ import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
-import { WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
+import { createGitCommand, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore } from "./worker-binding-store.js";
 
-const execFileAsync = promisify(execFile);
-
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
-
-const gitCommand: GitCommand = async (args) => {
-  const { stdout } = await execFileAsync("git", args, { maxBuffer: 8 * 1024 * 1024 });
-  return stdout;
-};
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
@@ -40,6 +32,7 @@ export class SupervisorDaemon {
   private readonly audit: AuditLog;
   private readonly durability: WorkDurabilityStore;
   private readonly provisioner: WorkspaceProvisioner;
+  private readonly gitCommand: GitCommand;
   private readonly workerBindings: WorkerBindingStore;
   private readonly socket: DaemonControlSocket;
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
@@ -58,6 +51,8 @@ export class SupervisorDaemon {
     this.store = new ManifestStore(paths.manifestPath);
     this.audit = new AuditLog(paths.auditPath);
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
+    const gitCommand = createGitCommand(root);
+    this.gitCommand = gitCommand;
     this.durability = new WorkDurabilityStore(
       paths.attemptsPath ?? `${paths.manifestPath}.attempts`,
       paths.attemptsRoot ?? `${paths.manifestPath}.attempt-data`,
@@ -563,8 +558,8 @@ export class SupervisorDaemon {
     }
     const sourcePath = entry.source_repo_path?.trim() || entry.workspace_path?.trim();
     if (!sourcePath) throw new Error("A source repository is required to provision a supervised work attempt.");
-    const remote = String(await gitCommand(["-C", sourcePath, "remote", "get-url", "origin"])).trim();
-    const revision = String(await gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    const remote = String(await this.gitCommand(["-C", sourcePath, "remote", "get-url", "origin"])).trim();
+    const revision = String(await this.gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])).trim();
     const rawRepo = basename(remote.replace(/\.git$/, "")) || "repository";
     const repo = rawRepo.replace(/[^A-Za-z0-9._-]/g, "-");
     const workAttemptId = randomUUID();
