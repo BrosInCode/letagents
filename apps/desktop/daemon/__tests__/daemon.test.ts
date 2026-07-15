@@ -751,6 +751,49 @@ test("cross-version negotiation is allowed before a generation handoff", async (
   } finally { await env.cleanup(); }
 });
 
+test("version handoff releases authority without waiting for wedged callbacks and preserves provider work", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const first = new SupervisorDaemon(paths, "darwin");
+  let second: SupervisorDaemon | null = null;
+  const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  try {
+    await first.start();
+    const never = new Promise<void>(() => {});
+    const internals = first as unknown as {
+      convergenceRequests: Map<string, Promise<void>>;
+      providerCallbacks: Set<Promise<void>>;
+      scheduledConvergence: Map<string, Promise<{ dispose: () => Promise<void> }>>;
+    };
+    internals.convergenceRequests.set("wedged", never);
+    internals.providerCallbacks.add(never);
+    internals.scheduledConvergence.set("wedged", new Promise(() => {}));
+
+    const prepared = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(prepared.ok, true);
+    second = new SupervisorDaemon(paths, "darwin");
+    await within((async () => {
+      while (true) {
+        try { await second!.start(); return; }
+        catch (error) {
+          if (!(error instanceof DaemonAlreadyRunningError)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+    })(), "replacement daemon authority after handoff", 1_000);
+    assert.doesNotThrow(() => process.kill(provider.pid!, 0), "handoff detaches daemon observers without killing provider work");
+  } finally {
+    await second?.stop();
+    provider.kill("SIGKILL");
+    await env.cleanup();
+  }
+});
+
 test("daemon control surface persists three-axis state, dual-axis liveness, and bounded activity", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };

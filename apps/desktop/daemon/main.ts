@@ -38,6 +38,7 @@ export class SupervisorDaemon {
   private readonly socket: DaemonControlSocket;
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
   private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
+  private readonly scheduledConvergenceCancels = new Map<string, () => void>();
   private manifestMutation: Promise<void> = Promise.resolve();
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly liveDisposers = new Map<string, Array<() => void>>();
@@ -155,6 +156,28 @@ export class SupervisorDaemon {
     await this.singleton.release();
   }
 
+  /**
+   * Version handoff must release daemon authority independently of provider or
+   * network callback latency. Provider work survives; only this daemon's
+   * observers and control authority are detached.
+   */
+  private async stopForHandoff(): Promise<void> {
+    for (const cancel of this.scheduledConvergenceCancels.values()) cancel();
+    this.scheduledConvergenceCancels.clear();
+    for (const scheduled of this.scheduledConvergence.values()) {
+      void scheduled.then(({ dispose }) => dispose()).catch(() => undefined);
+    }
+    this.scheduledConvergence.clear();
+    for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
+    this.liveDisposers.clear();
+    await this.socket.stop();
+    await this.singleton.release();
+    // Existing convergence/provider callbacks are generation-fenced below.
+    // Do not await them: a wedged native transport must not block an upgrade.
+    this.convergenceRequests.clear();
+    this.providerCallbacks.clear();
+  }
+
   private status() {
     return {
       healthy: true,
@@ -169,7 +192,7 @@ export class SupervisorDaemon {
   private scheduleHandoff(): void {
     if (this.handoffScheduled) return;
     this.handoffScheduled = true;
-    setTimeout(() => { void this.stop(); }, 25).unref();
+    setTimeout(() => { void this.stopForHandoff().catch(() => undefined); }, 25).unref();
   }
 
   private paramsRecord(value: unknown): Record<string, unknown> {
@@ -484,7 +507,7 @@ export class SupervisorDaemon {
 
   /** Queue convergence without making a control-socket caller wait for launch. */
   private requestConvergence(entryId: string): void {
-    if (!this.providerPort || !this.autoConverge) return;
+    if (this.handoffScheduled || !this.providerPort || !this.autoConverge) return;
     const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -499,7 +522,7 @@ export class SupervisorDaemon {
   }
 
   private async convergeManifestEntry(entryId: string): Promise<void> {
-    if (!this.providerPort) return;
+    if (this.handoffScheduled || !this.providerPort) return;
     let entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
     if (!entry) return;
     if (entry.provider !== "codex") throw new Error(`No daemon provider port is available for ${entry.provider}.`);
@@ -944,6 +967,15 @@ export class SupervisorDaemon {
       let listenerInstalledGeneration = 0;
       let listenerInstallTail: Promise<void> = Promise.resolve();
       const activeCallbacks = new Set<Promise<void>>();
+      const cancel = () => {
+        if (stopped) return;
+        stopped = true;
+        if (timer) clearInterval(timer);
+        unsubscribe();
+        if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
+        if (this.scheduledConvergenceCancels.get(entryId) === cancel) this.scheduledConvergenceCancels.delete(entryId);
+      };
+      this.scheduledConvergenceCancels.set(entryId, cancel);
       const trackCallback = (operation: Promise<void>) => {
         activeCallbacks.add(operation);
         void operation.then(() => activeCallbacks.delete(operation), () => activeCallbacks.delete(operation));
@@ -1023,19 +1055,13 @@ export class SupervisorDaemon {
         else throw error;
       }
       const dispose = async () => {
-        if (!stopped) {
-          stopped = true;
-          if (timer) clearInterval(timer);
-          unsubscribe();
-          if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
-        }
+        cancel();
         await Promise.all([...activeCallbacks]);
       };
       resolveReservation({ dispose });
       return dispose;
     } catch (error) {
-      if (timer) clearInterval(timer);
-      unsubscribe();
+      this.scheduledConvergenceCancels.get(entryId)?.();
       try { await this.recordSchedulerFailure(entryId, error, actor); } catch { /* Preserve the original setup failure for the caller. */ }
       resolveReservation({ dispose: async () => {} });
       if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
@@ -1048,7 +1074,10 @@ export class SupervisorDaemon {
     let release!: () => void;
     this.manifestMutation = new Promise<void>((resolve) => { release = resolve; });
     await previous;
-    try { return await operation(); } finally { release(); }
+    try {
+      await this.singleton.assertCurrent();
+      return await operation();
+    } finally { release(); }
   }
 
   private terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload {
