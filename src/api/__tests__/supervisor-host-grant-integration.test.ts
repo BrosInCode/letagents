@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import test from "node:test";
 
@@ -60,6 +61,8 @@ async function setupLifecycle() {
 
 test("supervisor registry is exact default-deny", () => {
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/renew"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/leases/tl_1/attestation"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/leases/tl_1/rebind"), true);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/rooms/room_1/messages"), false);
   assert.equal(isSupervisorGrantRouteAllowed("DELETE", "/supervisor-host-grants/grant_1"), false);
 });
@@ -130,6 +133,123 @@ test("wrong-session rotation route cannot mutate a grant-bound bearer", { skip: 
   await rotate({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: "wrong_session" }, body: { generation: 1, bearer_id: initial.agentSession!.bearer_id } }, response);
   assert.equal(response.statusCode, 403);
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never)).authKind, "agent_session");
+});
+
+test("attestation route: strict inputs, in-tx authorization, immutable evidence", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const attest = handlers.get("POST /supervisor-host-grants/:grantId/leases/:leaseId/attestation"); assert.ok(attest);
+  const grantId = reqBase.params.grantId;
+
+  // The predecessor is a real supervised worker: minted under THIS grant, then
+  // ended (terminal) — the in-tx authorization requires both.
+  const from = await authDb!.createRoomAgentSession({ room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Route Agent", agent_key: agent.canonical_key, display_name: "Route Agent", owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent", supervisor_grant_id: grantResult.grant.grant_id });
+  const lease = await authDb!.createTaskLease({ room_id: room.id, task_id: "task_1", kind: "work", agent_key: agent.canonical_key, actor_label: "Route Agent", created_by: "Route Agent", agent_session_id: from.session_id });
+  const wa = randomUUID();
+  const eg = randomUUID();
+  const goodBody = { generation: 1, expected_epoch: 0, from_agent_session_id: from.session_id, work_attempt_id: wa, execution_generation_id: eg, cause: "crashed" };
+  const call = async (body: Record<string, unknown>, leaseId = lease.id) => {
+    const res = recorder();
+    await attest({ ...reqBase, params: { grantId, leaseId }, body }, res);
+    return res;
+  };
+
+  // A live (not ended) predecessor cannot be attested terminal.
+  const live = await call(goodBody);
+  assert.equal(live.statusCode, 403);
+  assert.equal((live.body as any).code, "predecessor_live");
+
+  await authDb!.endRoomAgentSession({ session_id: from.session_id });
+
+  // Terminal predecessor, in-scope lease → 201, recorded at the grant's current
+  // generation, un-consumed.
+  const ok = await call(goodBody);
+  assert.equal(ok.statusCode, 201);
+  assert.equal((ok.body as any).lease_id, lease.id);
+  assert.equal((ok.body as any).supervisor_generation, 1);
+  assert.equal((ok.body as any).consumed_at, null);
+  const recordedId = (ok.body as any).id;
+
+  // Idempotent identical retry → 200, the SAME untouched row (and the body
+  // cannot forge a different generation than the validated grant fence).
+  const retry = await call({ ...goodBody, supervisor_generation: 99 });
+  assert.equal(retry.statusCode, 200, "identical retry is idempotent, not a new insert");
+  assert.equal((retry.body as any).id, recordedId);
+  assert.equal((retry.body as any).supervisor_generation, 1, "generation is taken from the grant, not the body");
+  assert.equal((retry.body as any).attested_at, (ok.body as any).attested_at, "evidence untouched by the retry");
+
+  // Conflicting retry (different execution identity) → 409, evidence immutable.
+  const conflict = await call({ ...goodBody, execution_generation_id: randomUUID() });
+  assert.equal(conflict.statusCode, 409);
+  assert.equal((conflict.body as any).code, "evidence_conflict");
+  const [row] = await client!.db.select().from(schema!.task_lease_rebind_attestations).where(eq(schema!.task_lease_rebind_attestations.id, recordedId)).limit(1);
+  assert.equal(row.execution_generation_id, eg, "original evidence not overwritten");
+
+  // Strict JSON integer epoch: string epochs (Number-coercible or not) → 400.
+  for (const expected_epoch of ["", "0", "3", null, 1.5]) {
+    const bad = await call({ ...goodBody, expected_epoch });
+    assert.equal(bad.statusCode, 400, `expected_epoch ${JSON.stringify(expected_epoch)} rejected`);
+  }
+
+  // Strict cause enum and UUID-shaped P1b execution ids → 400.
+  assert.equal((await call({ ...goodBody, cause: "sdf" })).statusCode, 400);
+  assert.equal((await call({ ...goodBody, work_attempt_id: "wa_1" })).statusCode, 400);
+  assert.equal((await call({ ...goodBody, execution_generation_id: "eg_1" })).statusCode, 400);
+
+  // Wrong epoch / wrong from-session (not the holder) → 409 lease_mismatch.
+  const wrongEpoch = await call({ ...goodBody, expected_epoch: 5 });
+  assert.equal(wrongEpoch.statusCode, 409);
+  assert.equal((wrongEpoch.body as any).code, "lease_mismatch");
+  const wrongFrom = await call({ ...goodBody, from_agent_session_id: "sess_not_holder" });
+  assert.equal(wrongFrom.statusCode, 409);
+  assert.equal((wrongFrom.body as any).code, "lease_mismatch");
+
+  // Stale grant generation proof → rejected before any write.
+  const staleGrant = await call({ ...goodBody, generation: 99 });
+  assert.equal(staleGrant.statusCode, 403);
+
+  // A lease the grant does not scope (different agent key) → 403, nothing written.
+  const otherAgent = await authDb!.registerAgentIdentity({ canonical_key: "owner/other-agent", name: "other-agent", display_name: "Other", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const otherLease = await authDb!.createTaskLease({ room_id: room.id, task_id: "task_2", kind: "work", agent_key: otherAgent.canonical_key, actor_label: "Other", created_by: "Other" });
+  const denied = await call({ ...goodBody, from_agent_session_id: "sess_x" }, otherLease.id);
+  assert.equal(denied.statusCode, 403);
+  assert.equal((denied.body as any).code, "grant_scope");
+
+  // Unknown lease → 404.
+  const missing = await call(goodBody, "tl_nope");
+  assert.equal(missing.statusCode, 404);
+
+  // Missing required fields → 400.
+  const bad = await call({ generation: 1, expected_epoch: 0, from_agent_session_id: from.session_id });
+  assert.equal(bad.statusCode, 400);
+
+  // Exactly one attestation row exists after the whole gauntlet.
+  const rows = await client!.db.select().from(schema!.task_lease_rebind_attestations);
+  assert.equal(rows.length, 1, "only the one legitimate attestation was persisted");
+});
+
+test("rebind route requires the exact attestation tuple and a strict integer epoch", { skip: requiresDatabase }, async () => {
+  const { handlers, reqBase } = await setupLifecycle();
+  const rebind = handlers.get("POST /supervisor-host-grants/:grantId/leases/:leaseId/rebind"); assert.ok(rebind);
+  const grantId = reqBase.params.grantId;
+  const call = async (body: Record<string, unknown>) => {
+    const res = recorder();
+    await rebind({ ...reqBase, params: { grantId, leaseId: "tl_x" }, body }, res);
+    return res;
+  };
+  const good = {
+    generation: 1, expected_epoch: 0, from_agent_session_id: "sess_a", to_agent_session_id: "sess_b",
+    attestation_id: "tlra_1", work_attempt_id: randomUUID(), execution_generation_id: randomUUID(),
+  };
+  // Every degraded variant of the exact-tuple requirement → 400 before any DB work.
+  assert.equal((await call({ ...good, attestation_id: undefined })).statusCode, 400);
+  assert.equal((await call({ ...good, work_attempt_id: undefined })).statusCode, 400);
+  assert.equal((await call({ ...good, execution_generation_id: "eg_1" })).statusCode, 400);
+  assert.equal((await call({ ...good, expected_epoch: "0" })).statusCode, 400);
+  assert.equal((await call({ ...good, expected_epoch: "" })).statusCode, 400);
+  // Well-formed but nonexistent → the transaction decides (409 lost_race here).
+  const wellFormed = await call(good);
+  assert.equal(wellFormed.statusCode, 409);
+  assert.equal((wellFormed.body as any).code, "lost_race");
 });
 
 test("concurrent renewal has exactly one winner and stale token cannot replay", { skip: requiresDatabase }, async () => {

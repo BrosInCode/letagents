@@ -9,10 +9,15 @@ import {
   getGitRoomBindingForRoom,
   getGitRoomBindingsForRooms,
   getProjectById,
+  getActiveTaskLeases,
   getRoomSharedArtifactByIdentityKey,
   getRoomSharedArtifacts,
+  getTaskById,
+  getTaskOwnershipState,
   linkRoomSharedArtifactToTask,
+  publishWorkerArtifactFenced,
   updateProjectDisplayName,
+  updateTask,
   upsertRoomSharedArtifact,
 } from "../db.js";
 import { fetchPullRequestUnifiedDiff } from "../github/pull-request-diff.js";
@@ -296,6 +301,9 @@ export function registerApiRoutes(app: Express): void {
 
   const roomTaskRouteDeps = {
     taskEvents,
+    getTaskById,
+    getTaskOwnershipState,
+    updateTask,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
@@ -330,9 +338,11 @@ export function registerApiRoutes(app: Express): void {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireParticipant,
+    getActiveTaskLeases,
     getRoomSharedArtifactByIdentityKey,
     getRoomSharedArtifacts,
     linkRoomSharedArtifactToTask,
+    publishWorkerArtifactFenced,
     requireWorkerRequestAgentIdentity,
     upsertRoomSharedArtifact,
   } satisfies RoomArtifactRouteDeps;

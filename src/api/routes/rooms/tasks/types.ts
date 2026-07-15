@@ -4,6 +4,7 @@ import type { Response } from "express";
 import type {
   GitRoomBinding,
   BoardIntentConsumptionInput,
+  LeaseFence,
   Project,
   Task,
   TaskLeaseKind,
@@ -25,6 +26,7 @@ export type TaskCoordinationGuardDecision =
       kind: "allow";
       boardIntentApproval?: BoardIntentConsumptionInput | null;
       workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+      leaseFence?: LeaseFence | null;
     }
   | { kind: "deny"; code: string; error: string };
 
@@ -34,6 +36,11 @@ export type TaskAdmissionGuardDecision =
 
 export interface RoomTaskRouteDeps {
   taskEvents: EventEmitter;
+  // DB accessors injected (not direct imports) so the route's fence-forwarding
+  // and 409 mapping can be unit-tested without a database.
+  getTaskById: typeof import("../../../db.js").getTaskById;
+  getTaskOwnershipState: typeof import("../../../db.js").getTaskOwnershipState;
+  updateTask: typeof import("../../../db.js").updateTask;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,

@@ -491,6 +491,20 @@
       "when": 1784332800000,
       "tag": "0069_supervisor_host_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1784419200000,
+      "tag": "0070_task_lease_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1784505600000,
+      "tag": "0071_task_lease_rebind_attestation",
+      "breakpoints": true
     }
   ]
 }

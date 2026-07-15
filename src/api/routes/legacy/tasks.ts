@@ -8,8 +8,10 @@ import {
   getTaskById,
   getTaskOwnershipState,
   getTasks,
+  LeaseFenceStaleError,
   updateTask,
   type BoardIntentConsumptionInput,
+  type LeaseFence,
   type Project,
   type Task,
   type TaskStatus,
@@ -43,6 +45,7 @@ type TaskCoordinationGuardDecision =
       kind: "allow";
       boardIntentApproval?: BoardIntentConsumptionInput | null;
       workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+      leaseFence?: LeaseFence | null;
     }
   | { kind: "deny"; code: string; error: string };
 
@@ -450,6 +453,7 @@ export function registerLegacyProjectTaskRoutes(
         {
           boardIntentApproval,
           workLeaseCreation: coordination.workLeaseCreation ?? null,
+          leaseFence: coordination.leaseFence ?? null,
         }
       );
       if (updated && updates.status && updates.status !== task.status) {
@@ -463,6 +467,10 @@ export function registerLegacyProjectTaskRoutes(
       }
       res.json(updated);
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       if (error instanceof BoardIntentApprovalConsumptionError) {
         await recordBoardIntentConsumptionFailure({
           roomId: projectId,

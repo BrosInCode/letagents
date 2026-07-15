@@ -3,6 +3,7 @@ import type {
   Task,
   BoardIntentActionType,
   BoardIntentConsumptionInput,
+  LeaseFence,
   TaskLeaseKind,
   TaskOwnershipState,
   TaskWorkLeaseCreationInput,
@@ -39,6 +40,13 @@ export type TaskCoordinationGuardDecision =
       kind: "allow";
       boardIntentApproval?: BoardIntentConsumptionInput | null;
       workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+      // Rebind fence (plan §4.5) for the write path. Populated when the caller's
+      // authority to mutate derives from holding a session-bound WORK lease, so
+      // the guarded write re-validates the lease identity+epoch under the shared
+      // advisory lock and a rebound-away predecessor's stale write aborts. Null
+      // for owner/admin, lease-creation, and sessionless (pre-supervisor) leases
+      // — those the rebind path never touches.
+      leaseFence?: LeaseFence | null;
     }
   | { kind: "deny"; code: string; error: string };
 
@@ -141,11 +149,32 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
   function allowDecision(input: {
     boardIntentApproval?: BoardIntentConsumptionInput | null;
     workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+    leaseFence?: LeaseFence | null;
   } = {}): TaskCoordinationAllowDecision {
     return {
       kind: "allow",
       ...(input.boardIntentApproval ? { boardIntentApproval: input.boardIntentApproval } : {}),
       ...(input.workLeaseCreation ? { workLeaseCreation: input.workLeaseCreation } : {}),
+      ...(input.leaseFence ? { leaseFence: input.leaseFence } : {}),
+    };
+  }
+
+  // Build a rebind fence from a held lease, or null when fencing does not apply.
+  // Only SESSION-BOUND WORK leases are fenced: the rebind path (§4.5) never
+  // moves review leases or sessionless (pre-supervisor, actor_key-authorized)
+  // leases, so there is no stale-predecessor hazard to guard for those. This is
+  // rebind SAFETY, not authorization — it never turns an allow into a deny.
+  function leaseFenceFor(lease: CoordinationLeaseLike | null | undefined): LeaseFence | null {
+    if (!lease || lease.kind !== "work" || lease.status !== "active" || !lease.agent_session_id) {
+      return null;
+    }
+    return {
+      lease_id: lease.id,
+      room_id: lease.room_id,
+      task_id: lease.task_id,
+      kind: "work",
+      expected_epoch: lease.epoch,
+      agent_session_id: lease.agent_session_id,
     };
   }
 
@@ -456,6 +485,61 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
   async function enforceTaskCoordinationMutation(
     input: TaskCoordinationMutationInput
   ): Promise<TaskCoordinationGuardDecision> {
+    // The work-lease fence applies ONLY to authenticated worker (agent_session)
+    // writes. Anonymous / human-session / other non-owner_token requests are
+    // NOT lease principals and must not be reclassified as work-lease traffic —
+    // check agent_session explicitly, not "!== owner_token".
+    if (input.req.authKind === "agent_session") {
+      // agent_session (worker-bearer) writes. Only WORK-lease-scoped mutations
+      // are holder-scoped: claim creates a fresh lease, review mutations ride a
+      // non-rebindable review lease, and unclassified updates aren't lease-bound.
+      const workerClassified = input.forcedMutation
+        ? { ...input.forcedMutation, claim: false }
+        : classifyTaskCoordinationMutation(input.updates);
+      if (!workerClassified || workerClassified.leaseKind !== "work" || workerClassified.claim) {
+        return { kind: "allow" };
+      }
+      // A work-lease-scoped worker mutation MUST be performed by the CURRENT
+      // holder of the task's active work lease. We capture the lease's identity
+      // and epoch and bind the fence to the CALLER's session. Rebind safety
+      // (§4.5), not orthogonal authz: the earlier "fence only when the caller
+      // still holds it" downgraded a rebound-away predecessor to an unfenced
+      // allow (the exact bypass) — so missing/moved/stale must 409, never
+      // reclassify to ordinary no-lease traffic.
+      // Resolve the task's active work lease FIRST. If there is none, or its
+      // holder session differs from the authenticated worker session (moved by
+      // rebind, sessionless, or another worker's), deny outright — never build a
+      // fence from a caller-filtered lookup that returned nothing.
+      const sessionId = input.actorSessionId;
+      const workerLeases = await deps.getActiveTaskLeases(input.projectId, input.task.id);
+      const activeWorkLease = workerLeases.find(
+        (lease) => lease.kind === "work" && lease.status === "active"
+      );
+      if (!activeWorkLease || !sessionId || activeWorkLease.agent_session_id !== sessionId) {
+        return {
+          kind: "deny",
+          code: "coordination_work_lease_required",
+          error: "This task mutation requires holding the task's active work lease.",
+        };
+      }
+      // Matches now — capture the lease's OWN full tuple; the in-tx shared lock
+      // revalidates it, so a rebind that commits between here and the write
+      // (lookup-before-rebind) still fails the fence and 409s.
+      return {
+        kind: "allow",
+        leaseFence: {
+          lease_id: activeWorkLease.id,
+          room_id: input.projectId,
+          task_id: input.task.id,
+          kind: "work",
+          expected_epoch: activeWorkLease.epoch,
+          agent_session_id: activeWorkLease.agent_session_id,
+        },
+      };
+    }
+
+    // Non-owner, non-worker requests (anonymous / human session / other) are not
+    // lease principals — preserve their prior behavior, no coordination fence.
     if (input.req.authKind !== "owner_token") {
       return { kind: "allow" };
     }
@@ -553,12 +637,17 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         leaseId: decision.lease.id,
         reason: `Allowed ${classified.mutation} with lease ${decision.lease.id}.`,
       });
-      if (classified.mutation === "workflow_artifact_attach") {
+      // Fence the write on the authorizing lease when it is session-bound
+      // (rebind safety, §4.5). Sessionless owner-token leases yield null and
+      // stay on the unfenced path the rebind never touches.
+      const fence = leaseFenceFor(decision.lease);
+      // When fenced, the lease pr_url ref bind is folded into updateTask's fenced
+      // tx (msg_565) so it commits atomically with the task + artifact writes;
+      // only the unfenced (sessionless) path binds here, pre-tx, as before.
+      if (classified.mutation === "workflow_artifact_attach" && !fence) {
         await bindWorkflowArtifactPrUrlIfPresent(input.projectId, decision.lease.id, input.updates);
       }
-      return boardIntentApproval
-        ? { kind: "allow", boardIntentApproval }
-        : { kind: "allow" };
+      return allowDecision({ boardIntentApproval, leaseFence: fence });
     }
 
     if (decision.code === "missing_lease") {

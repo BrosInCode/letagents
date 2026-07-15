@@ -307,6 +307,7 @@ export function toTaskLease(row: TaskLeaseRow): TaskLease {
     agent_instance_id: row.agent_instance_id,
     agent_session_id: row.agent_session_id,
     actor_label: row.actor_label,
+    epoch: row.epoch,
     branch_ref: row.branch_ref,
     pr_url: row.pr_url,
     output_intent: row.output_intent,

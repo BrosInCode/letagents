@@ -10,7 +10,9 @@ import {
   getFocusRoomsForParent,
   getTaskById,
   getTaskOwnershipState,
+  LeaseFenceStaleError,
   updateFocusRoomSettings,
+  type LeaseFence,
   type Project,
   type Task,
 } from "../../db.js";
@@ -41,7 +43,7 @@ type RoomRole = "admin" | "participant" | "anonymous";
 type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
 
 type FocusConclusionGuardDecision =
-  | { kind: "allow" }
+  | { kind: "allow"; leaseFence?: LeaseFence | null }
   | { kind: "deny"; code: string; error: string };
 
 type OwnerTokenWorkerWriteIdentity =
@@ -384,6 +386,7 @@ export function registerRoomFocusRoutes(
         { required: Boolean(focusRoom.source_task_id && focusRoom.focus_status !== "concluded") }
       );
 
+      let conclusionLeaseFence: LeaseFence | null = null;
       if (focusRoom.source_task_id) {
         const task = await getTaskById(project.id, focusRoom.source_task_id);
         const taskOwnership = await getTaskOwnershipState(project.id, focusRoom.source_task_id);
@@ -402,10 +405,11 @@ export function registerRoomFocusRoutes(
             res.status(409).json({ error: coordination.error, code: coordination.code });
             return;
           }
+          conclusionLeaseFence = coordination.leaseFence ?? null;
         }
       }
 
-      const result = await concludeFocusRoom(project.id, focusKey, summary, conclusionDetails);
+      const result = await concludeFocusRoom(project.id, focusKey, summary, conclusionDetails, conclusionLeaseFence);
       if (!result) {
         res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
         return;
@@ -446,6 +450,10 @@ export function registerRoomFocusRoutes(
         })),
       });
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "POST /rooms/:room_id/focus/:focus_key/conclude",

@@ -1,7 +1,7 @@
 import type { Express, Response } from "express";
 import type { EventEmitter } from "node:events";
 
-import { getActiveTaskLeases, type Project, type RoomSharedArtifact } from "../../db.js";
+import { LeaseFenceStaleError, type LeaseFence, type Project, type RoomSharedArtifact } from "../../db.js";
 import type {
   AuthenticatedRequest,
 } from "../../http/helpers.js";
@@ -39,11 +39,19 @@ export interface RoomArtifactRouteDeps {
     task_id: string;
     source?: PublishedArtifactSource;
   }): Promise<unknown>;
+  publishWorkerArtifactFenced(input: {
+    leaseFence: LeaseFence;
+    room_id: string;
+    artifact: TaskWorkflowArtifact;
+    linked_task_id: string;
+    source?: PublishedArtifactSource;
+  }): Promise<RoomSharedArtifact>;
   requireWorkerRequestAgentIdentity(input: {
     req: AuthenticatedRequest;
     body: Record<string, unknown>;
     room_id: string;
   }): Promise<WorkerRequestAgentIdentityResult>;
+  getActiveTaskLeases: typeof import("../../db.js").getActiveTaskLeases;
   getRoomSharedArtifactByIdentityKey(input: {
     room_id: string;
     identity_key: string;
@@ -262,33 +270,59 @@ export function registerRoomArtifactRoutes(
         return;
       }
       const linkedTaskIds = parseLinkedTaskIds(body);
-      if (workerIdentity && req.authKind === "agent_session") {
+      let sharedArtifact: RoomSharedArtifact;
+      // ANY agent-attributed publication is fenced — both the agent_session
+      // bearer path and the owner_token-presenting-agent-credentials path set
+      // workerIdentity (with the same agent_session_id the fence keys on). The
+      // earlier `authKind === 'agent_session'` gate let an agent artifact
+      // published via owner_token skip the lease fence entirely.
+      if (workerIdentity) {
         if (linkedTaskIds.length !== 1) {
           res.status(403).json({ error: "Worker artifacts must be bound to exactly one active task." });
           return;
         }
-        const leases = await getActiveTaskLeases(project.id, linkedTaskIds[0]!);
-        const ownsWorkLease = leases.some((lease) => lease.kind === "work"
+        const linkedTaskId = linkedTaskIds[0]!;
+        const leases = await deps.getActiveTaskLeases(project.id, linkedTaskId);
+        const heldLease = leases.find((lease) => lease.kind === "work"
           && lease.status === "active"
           && lease.agent_session_id === workerIdentity.agent_session_id);
-        if (!ownsWorkLease) {
+        if (!heldLease || !heldLease.agent_session_id) {
           res.status(403).json({ error: "Worker artifacts must be bound to the caller's active work lease." });
           return;
         }
-      }
-      const sharedArtifact = await deps.upsertRoomSharedArtifact({
-        room_id: project.id,
-        artifact,
-        source,
-      });
-
-      for (const taskId of linkedTaskIds) {
-        await deps.linkRoomSharedArtifactToTask({
+        // Atomic + fenced (§4.5): the upsert and the task link commit together
+        // under the held lease's advisory lock, so a rebind that moves the lease
+        // between the ownership check above and the write aborts the whole
+        // publish instead of binding a stale artifact.
+        sharedArtifact = await deps.publishWorkerArtifactFenced({
+          leaseFence: {
+            lease_id: heldLease.id,
+            room_id: project.id,
+            task_id: linkedTaskId,
+            kind: "work",
+            expected_epoch: heldLease.epoch,
+            agent_session_id: heldLease.agent_session_id,
+          },
           room_id: project.id,
-          artifact_identity_key: sharedArtifact.identity_key,
-          task_id: taskId,
+          artifact,
+          linked_task_id: linkedTaskId,
           source,
         });
+      } else {
+        sharedArtifact = await deps.upsertRoomSharedArtifact({
+          room_id: project.id,
+          artifact,
+          source,
+        });
+
+        for (const taskId of linkedTaskIds) {
+          await deps.linkRoomSharedArtifactToTask({
+            room_id: project.id,
+            artifact_identity_key: sharedArtifact.identity_key,
+            task_id: taskId,
+            source,
+          });
+        }
       }
 
       const hydratedArtifact = await deps.getRoomSharedArtifactByIdentityKey({
@@ -308,6 +342,10 @@ export function registerRoomArtifactRoutes(
         },
       });
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "POST /rooms/:room_id/artifacts",

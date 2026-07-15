@@ -8,6 +8,11 @@ import {
   getAgentIdentityByCanonicalKey,
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
+  isRebindAttestationCause,
+  isUuidShapedExecutionId,
+  REBIND_ATTESTATION_CAUSES,
+  rebindTaskLease,
+  recordRebindAttestation,
   revokeSupervisorHostGrant,
   rotateRoomAgentSessionBearer,
   rotateSupervisorHostGrant,
@@ -241,5 +246,125 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     }
     const ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id, supervisor_grant_fence: fence(grant) });
     res.json(ended);
+  });
+
+  // Terminal rebind attestation (plan §4.5). Before a supervisor may rebind an
+  // in-flight lease it must attest — under its current grant fence — that it
+  // observed the predecessor execution terminate. This persists that proof for
+  // the {lease, epoch, from-session} tuple; rebindTaskLease consumes exactly one
+  // such row. All authorization (grant fence + scope, lease/holder/epoch state,
+  // terminal predecessor identity) is validated by recordRebindAttestation
+  // INSIDE the same locked transaction as the insert — the route only parses.
+  // The recorded supervisor_generation comes from the validated fence (never
+  // the body) so a stale generation cannot be forged.
+  app.post("/supervisor-host-grants/:grantId/leases/:leaseId/attestation", async (req: AuthenticatedRequest, res) => {
+    const grant = await requireCurrentSupervisorGrant(req, res);
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
+    const leaseId = String(req.params.leaseId ?? "").trim();
+    const body = req.body as {
+      expected_epoch?: unknown; from_agent_session_id?: unknown;
+      work_attempt_id?: unknown; execution_generation_id?: unknown; cause?: unknown;
+    };
+    // The epoch must arrive as a JSON integer. `Number()` coercion is banned
+    // here: it maps "" and whitespace strings to 0, silently attesting epoch 0.
+    const expectedEpoch = body.expected_epoch;
+    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
+    const workAttemptId = typeof body.work_attempt_id === "string" ? body.work_attempt_id.trim() : "";
+    const executionGenerationId = typeof body.execution_generation_id === "string" ? body.execution_generation_id.trim() : "";
+    const cause = typeof body.cause === "string" ? body.cause.trim() : "";
+    if (!leaseId || typeof expectedEpoch !== "number" || !Number.isInteger(expectedEpoch) || expectedEpoch < 0 || !fromSession) {
+      res.status(400).json({ error: "leaseId, integer expected_epoch, and from_agent_session_id are required." });
+      return;
+    }
+    if (!isUuidShapedExecutionId(workAttemptId) || !isUuidShapedExecutionId(executionGenerationId)) {
+      res.status(400).json({ error: "work_attempt_id and execution_generation_id must be UUID-shaped P1b execution ids." });
+      return;
+    }
+    if (!isRebindAttestationCause(cause)) {
+      res.status(400).json({ error: `cause must be one of: ${REBIND_ATTESTATION_CAUSES.join(", ")}.` });
+      return;
+    }
+    try {
+      const result = await recordRebindAttestation({
+        lease_id: leaseId,
+        epoch: expectedEpoch,
+        from_agent_session_id: fromSession,
+        supervisor_grant_fence: fence(grant),
+        work_attempt_id: workAttemptId,
+        execution_generation_id: executionGenerationId,
+        cause,
+      });
+      if (!result.ok) {
+        // not_found → 404; stale fence / stale caller view / immutable-evidence
+        // conflict → 409 (re-read and retry with current state); authorization
+        // shortfalls → 403; input-shape failures re-checked in-tx → 400.
+        const status = result.reason === "lease_not_found" ? 404
+          : result.reason === "grant_fence_stale" || result.reason === "lease_mismatch" || result.reason === "evidence_conflict" ? 409
+          : result.reason === "invalid_cause" || result.reason === "invalid_execution_identity" ? 400
+          : 403;
+        res.status(status).json({ error: `Terminal attestation rejected: ${result.reason}.`, code: result.reason });
+        return;
+      }
+      res.status(result.created ? 201 : 200).json(result.attestation);
+    } catch (error) {
+      respondWithInternalError(res, "POST /supervisor-host-grants/:grantId/leases/:leaseId/attestation", error, "Terminal attestation could not be recorded.");
+    }
+  });
+
+  // Fenced lease rebind (plan §4.5). A restarted worker's new session takes
+  // over its predecessor's in-flight lease under the supervisor's grant. Same
+  // agent_key is necessary but not sufficient — the grant fence + scope + the
+  // epoch/from-session CAS all gate it, and the predecessor's authority is
+  // revoked in the same transaction.
+  app.post("/supervisor-host-grants/:grantId/leases/:leaseId/rebind", async (req: AuthenticatedRequest, res) => {
+    const grant = await requireCurrentSupervisorGrant(req, res);
+    if (!grant) return;
+    if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
+      res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+      return;
+    }
+    const leaseId = String(req.params.leaseId ?? "").trim();
+    const body = req.body as {
+      expected_epoch?: unknown; from_agent_session_id?: unknown; to_agent_session_id?: unknown;
+      attestation_id?: unknown; work_attempt_id?: unknown; execution_generation_id?: unknown;
+    };
+    // JSON integer only — Number() coercion maps "" to 0 (see attestation route).
+    const expectedEpoch = body.expected_epoch;
+    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
+    const toSession = typeof body.to_agent_session_id === "string" ? body.to_agent_session_id.trim() : "";
+    const attestationId = typeof body.attestation_id === "string" ? body.attestation_id.trim() : "";
+    const workAttemptId = typeof body.work_attempt_id === "string" ? body.work_attempt_id.trim() : "";
+    const executionGenerationId = typeof body.execution_generation_id === "string" ? body.execution_generation_id.trim() : "";
+    if (!leaseId || typeof expectedEpoch !== "number" || !Number.isInteger(expectedEpoch) || expectedEpoch < 0
+      || !fromSession || !toSession || !attestationId) {
+      res.status(400).json({ error: "leaseId, integer expected_epoch, from_agent_session_id, to_agent_session_id, and attestation_id are required." });
+      return;
+    }
+    if (!isUuidShapedExecutionId(workAttemptId) || !isUuidShapedExecutionId(executionGenerationId)) {
+      res.status(400).json({ error: "work_attempt_id and execution_generation_id must be UUID-shaped P1b execution ids." });
+      return;
+    }
+    const result = await rebindTaskLease({
+      lease_id: leaseId,
+      expected_epoch: expectedEpoch,
+      from_agent_session_id: fromSession,
+      to_agent_session_id: toSession,
+      supervisor_grant_fence: fence(grant),
+      attestation_id: attestationId,
+      work_attempt_id: workAttemptId,
+      execution_generation_id: executionGenerationId,
+    });
+    if (!result.ok) {
+      // lost_race / stale fence → 409 (retryable after re-reading state);
+      // scope / mismatch / live-predecessor → 403 (not authorized as asked).
+      const status = result.reason === "lost_race" || result.reason === "grant_fence_stale" ? 409 : 403;
+      res.status(status).json({ error: `Lease rebind rejected: ${result.reason}.`, code: result.reason });
+      return;
+    }
+    res.json(result.lease);
   });
 }
