@@ -50,6 +50,7 @@ export interface ThreadReadTurn {
 
 export interface ThreadReadResult {
   thread?: {
+    id?: string;
     status?: { type?: string } | string;
     turns?: ThreadReadTurn[];
   };

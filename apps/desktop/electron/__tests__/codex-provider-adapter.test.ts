@@ -29,7 +29,11 @@ class FakeRpc implements CodexAdapterRpc {
   constructor(
     readonly threadId: string,
     private readonly notify: (notification: RpcNotification) => void,
-    private readonly options: { resumeSupported: boolean; workplacePresent: boolean },
+    private readonly options: {
+      resumeSupported: boolean;
+      workplacePresent: boolean;
+      threadReadFails: boolean;
+    },
   ) {}
 
   async connect(): Promise<void> {
@@ -58,8 +62,11 @@ class FakeRpc implements CodexAdapterRpc {
       return { turn: { id: `turn-${this.threadId}` } } as T;
     }
     if (method === "thread/read") {
+      if (this.options.threadReadFails) throw new Error("thread endpoint unavailable");
+      const requestedThreadId = (params as { threadId?: string } | undefined)?.threadId;
       return {
         thread: {
+          id: requestedThreadId ?? this.threadId,
           status: { type: "idle" },
           turns: [{
             id: `turn-${this.threadId}`,
@@ -82,10 +89,15 @@ class FakeRpc implements CodexAdapterRpc {
 }
 
 type FakeLaunch = CodexAppServerLaunch & {
+  alive: boolean;
   resolveExit(exit: CodexAppServerExit): void;
 };
 
-function createHarness(options: { resumeSupported?: boolean; workplacePresent?: boolean } = {}) {
+function createHarness(options: {
+  resumeSupported?: boolean;
+  workplacePresent?: boolean;
+  threadReadFails?: boolean;
+} = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
@@ -104,8 +116,12 @@ function createHarness(options: { resumeSupported?: boolean; workplacePresent?: 
       let resolveExit!: (exit: CodexAppServerExit) => void;
       const launch: FakeLaunch = {
         pid: nextPid++,
+        alive: true,
         exited: new Promise((resolve) => { resolveExit = resolve; }),
-        resolveExit,
+        resolveExit: (exit) => {
+          launch.alive = false;
+          resolveExit(exit);
+        },
       };
       launches.push(launch);
       launchOptions.push({ serverUrl, codexBin, options });
@@ -116,11 +132,18 @@ function createHarness(options: { resumeSupported?: boolean; workplacePresent?: 
       const client = new FakeRpc(`thread-${nextThread++}`, notify, {
         resumeSupported: options.resumeSupported ?? true,
         workplacePresent: options.workplacePresent ?? true,
+        threadReadFails: options.threadReadFails ?? false,
       });
       clients.push(client);
       return client;
     },
     signalProcess: (pid, signal) => signals.push({ pid, signal }),
+    isProcessAlive: (pid) => launches.some((launch) => launch.pid === pid && launch.alive),
+    observeProcessExit: async (pid) => {
+      const launch = launches.find((entry) => entry.pid === pid);
+      if (!launch) throw new Error(`Unknown fake process ${pid}`);
+      return launch.exited;
+    },
     now: () => `2026-07-15T00:00:${String(clock++).padStart(2, "0")}.000Z`,
   };
 
@@ -157,7 +180,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     codexBin: "/usr/local/bin/codex",
     dependencies: harness.dependencies,
   });
-  assert.equal(adapter.capabilities().resume, false, "resume is unknown before the app-server probe");
+  assert.equal(adapter.capabilities().resume, true, "P0-backed resume is available to a fresh reconciler");
   const policy = {
     approvalPolicy: "never",
     sandboxPolicy: { type: "dangerFullAccess" },
@@ -167,6 +190,11 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
 
   assert.equal(handle.observedState(), "working");
   assert.equal(handle.providerContinuationId, "thread-1");
+  assert.deepEqual(handle.providerConnection, {
+    kind: "codex_app_server",
+    url: "ws://127.0.0.1:4700",
+    pid: 4100,
+  });
   assert.equal(harness.launchOptions[0]?.codexBin, "/usr/local/bin/codex");
   assert.deepEqual(harness.launchOptions[0]?.options, {
     trustedProjectPath: "/tmp/letagents-work-attempt",
@@ -219,7 +247,12 @@ test("Codex resume reopens the exact native thread and preserves the same launch
   harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
   await flush();
 
-  const resumed = await adapter.resume({
+  const resumedAdapter = new CodexProviderAdapter({
+    dependencies: harness.dependencies,
+    activitySink: (event) => activity.push(event),
+  });
+  assert.equal(resumedAdapter.capabilities().resume, true);
+  const resumed = await resumedAdapter.resume({
     workAttemptId: request.workAttemptId,
     providerContinuationId: continuation,
   }, request);
@@ -244,6 +277,50 @@ test("Codex resume reopens the exact native thread and preserves the same launch
     event.providerContinuationId === continuation
       && event.source === "transcript_tail"
       && event.summary === "Transcript checkpoint persisted."));
+});
+
+test("fresh adapter reattaches the durable app-server endpoint without launching a duplicate child", async () => {
+  const harness = createHarness();
+  const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const request = spawnRequest();
+  const first = await firstAdapter.spawn(request);
+  assert.ok(first.providerConnection);
+
+  const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await freshAdapter.attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  });
+
+  assert.ok(attached);
+  assert.equal(attached.providerContinuationId, first.providerContinuationId);
+  assert.equal(attached.pid, first.pid);
+  assert.equal(harness.launches.length, 1, "reattach must not create a second native writer");
+  assert.equal(
+    harness.clients[1]!.requests.some((entry) => entry.method === "thread/start" || entry.method === "turn/start"),
+    false,
+  );
+  assert.equal(await freshAdapter.attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  }), attached);
+});
+
+test("fresh attach fences an unverifiable live app-server instead of allowing a duplicate writer", async () => {
+  const harness = createHarness({ threadReadFails: true });
+  const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const request = spawnRequest();
+  const first = await firstAdapter.spawn(request);
+  const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+
+  await assert.rejects(freshAdapter.attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  }), /attach is ambiguous; refusing to launch a second writer/);
+  assert.equal(harness.launches.length, 1);
 });
 
 test("resume capability fails honestly when app-server lacks thread/resume", async () => {

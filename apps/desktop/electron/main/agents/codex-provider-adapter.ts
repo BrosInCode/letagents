@@ -26,6 +26,7 @@ import {
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
+  type ProviderConnectionRef,
   type ProviderContinuationRef,
   type ProviderHandle,
   type ProviderObservedState,
@@ -62,6 +63,8 @@ export interface CodexProviderAdapterDependencies {
     onNotification: (notification: RpcNotification) => void,
   ): CodexAdapterRpc;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
+  isProcessAlive(pid: number): boolean;
+  observeProcessExit(pid: number): Promise<CodexAppServerExit>;
   now(): string;
 }
 
@@ -124,6 +127,20 @@ function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void {
   } catch {
     // Already terminal. The observed exit promise remains authoritative.
   }
+}
+
+function defaultIsProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function defaultObserveProcessExit(pid: number): Promise<CodexAppServerExit> {
+  while (defaultIsProcessAlive(pid)) await delay(1_000);
+  return { type: "exit", code: null, signal: null };
 }
 
 function errorMessage(error: unknown): string {
@@ -265,6 +282,8 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   createRpcClient: (serverUrl, onNotification) =>
     new CodexRpcClient(serverUrl, onNotification),
   signalProcess: defaultSignalProcess,
+  isProcessAlive: defaultIsProcessAlive,
+  observeProcessExit: defaultObserveProcessExit,
   now: () => new Date().toISOString(),
 };
 
@@ -289,6 +308,7 @@ class CodexProviderHandle implements ProviderHandle {
     readonly workAttemptId: string,
     readonly pid: number | null,
     readonly providerContinuationId: string,
+    readonly providerConnection: ProviderConnectionRef,
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
   ) {}
@@ -306,7 +326,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly handles = new Map<string, CodexProviderHandle>();
   private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
-  private resumeSupported = false;
+  // P0 proved app-server thread/resume on the supported Codex runtime. Start
+  // optimistic so a fresh reconciler can select resume, then probe every native
+  // process and durably downgrade on method-not-found.
+  private resumeSupported = true;
 
   constructor(options: CodexProviderAdapterOptions = {}) {
     this.codexBin = options.codexBin || process.env.LETAGENTS_CODEX_BIN || "codex";
@@ -330,9 +353,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.terminal ||
       handle.providerContinuationId !== ref.providerContinuationId
     ) {
+      if (handle) return null;
+    } else {
+      return handle;
+    }
+    const connection = ref.providerConnection;
+    if (!connection || connection.kind !== "codex_app_server" || connection.pid === null) {
       return null;
     }
-    return handle;
+    if (!this.deps.isProcessAlive(connection.pid)) return null;
+    return this.attachRunning(ref, connection);
   }
 
   async resume(
@@ -475,6 +505,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         req.workAttemptId,
         launch.pid,
         threadId,
+        { kind: "codex_app_server", url: serverUrl, pid: launch.pid },
         client,
         launch,
       );
@@ -525,6 +556,56 @@ export class CodexProviderAdapter implements ProviderAdapter {
       client.close();
       if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
       throw error;
+    }
+  }
+
+  private async attachRunning(
+    ref: ProviderContinuationRef,
+    connection: ProviderConnectionRef,
+  ): Promise<CodexProviderHandle | null> {
+    let handle: CodexProviderHandle | null = null;
+    const pendingNotifications: RpcNotification[] = [];
+    const client = this.deps.createRpcClient(connection.url, (notification) => {
+      if (!handle) pendingNotifications.push(notification);
+      else this.consumeNotification(handle, notification);
+    });
+    try {
+      await client.connect();
+      await requireLetAgentsWorkplace(client);
+      this.resumeSupported = await probeResumeSupport(client);
+      const read = await client.request<ThreadReadResult>("thread/read", {
+        threadId: ref.providerContinuationId,
+        includeTurns: true,
+      });
+      if (read.thread?.id !== ref.providerContinuationId) {
+        throw new Error("Codex app-server did not verify the exact durable continuation thread.");
+      }
+      const launch: CodexAppServerLaunch = {
+        pid: connection.pid,
+        exited: this.deps.observeProcessExit(connection.pid!),
+      };
+      handle = new CodexProviderHandle(
+        ref.workAttemptId,
+        connection.pid,
+        ref.providerContinuationId,
+        connection,
+        client,
+        launch,
+      );
+      handle.state = "working";
+      this.handles.set(ref.workAttemptId, handle);
+      this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
+      for (const notification of pendingNotifications.splice(0)) {
+        this.consumeNotification(handle, notification);
+      }
+      this.publishStream(handle, "thread/read", read, "transcript_snapshot");
+      return handle;
+    } catch (error) {
+      client.close();
+      if (!this.deps.isProcessAlive(connection.pid!)) return null;
+      throw new Error(
+        `Codex app-server attach is ambiguous; refusing to launch a second writer: ${errorMessage(error)}`,
+      );
     }
   }
 

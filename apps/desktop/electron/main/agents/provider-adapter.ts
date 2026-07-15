@@ -75,6 +75,14 @@ export interface ProviderTerminalPayload {
 export interface ProviderContinuationRef {
   workAttemptId: string;
   providerContinuationId: string;
+  /** Durable native process endpoint used to reconnect without creating a second writer. */
+  providerConnection?: ProviderConnectionRef | null;
+}
+
+export interface ProviderConnectionRef {
+  kind: "codex_app_server";
+  url: string;
+  pid: number | null;
 }
 
 export interface ProviderSpawnRequest {
@@ -100,6 +108,8 @@ export interface ProviderHandle {
   readonly pid: number | null;
   /** The provider-native session id once known (thread/session). */
   readonly providerContinuationId: string | null;
+  /** Persist this with the continuation so a fresh adapter can verify/reattach. */
+  readonly providerConnection?: ProviderConnectionRef | null;
   observedState(): ProviderObservedState;
 }
 
