@@ -101,6 +101,7 @@ class FakeRpc implements CodexAdapterRpc {
 
 type FakeLaunch = CodexAppServerLaunch & {
   alive: boolean;
+  processIdentity: string;
   resolveExit(exit: CodexAppServerExit): void;
 };
 
@@ -120,6 +121,7 @@ function createHarness(options: {
   let nextPid = 4100;
   let nextThread = 1;
   let clock = 0;
+  let identityObservable = true;
 
   const dependencies: CodexProviderAdapterDependencies = {
     resolveServerUrl: async () => `ws://127.0.0.1:${4700 + launches.length}`,
@@ -128,12 +130,14 @@ function createHarness(options: {
       const launch: FakeLaunch = {
         pid: nextPid++,
         alive: true,
+        processIdentity: "",
         exited: new Promise((resolve) => { resolveExit = resolve; }),
         resolveExit: (exit) => {
           launch.alive = false;
           resolveExit(exit);
         },
       };
+      launch.processIdentity = `fake-process-${launch.pid}-birth-1`;
       launches.push(launch);
       launchOptions.push({ serverUrl, codexBin, options });
       return launch;
@@ -149,16 +153,28 @@ function createHarness(options: {
       return client;
     },
     signalProcess: (pid, signal) => signals.push({ pid, signal }),
-    isProcessAlive: (pid) => launches.some((launch) => launch.pid === pid && launch.alive),
-    observeProcessExit: async (pid) => {
+    getProcessIdentity: (pid) => identityObservable
+      ? launches.find((launch) => launch.pid === pid && launch.alive)?.processIdentity ?? null
+      : undefined,
+    observeProcessExit: async (pid, processIdentity) => {
       const launch = launches.find((entry) => entry.pid === pid);
       if (!launch) throw new Error(`Unknown fake process ${pid}`);
+      if (launch.processIdentity !== processIdentity) {
+        return { type: "exit", code: null, signal: null };
+      }
       return launch.exited;
     },
     now: () => `2026-07-15T00:00:${String(clock++).padStart(2, "0")}.000Z`,
   };
 
-  return { dependencies, launches, clients, signals, launchOptions };
+  return {
+    dependencies,
+    launches,
+    clients,
+    signals,
+    launchOptions,
+    setIdentityObservable: (observable: boolean) => { identityObservable = observable; },
+  };
 }
 
 function spawnRequest(overrides: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
@@ -205,6 +221,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     kind: "codex_app_server",
     url: "ws://127.0.0.1:4700",
     pid: 4100,
+    processIdentity: "fake-process-4100-birth-1",
   });
   assert.equal(harness.launchOptions[0]?.codexBin, "/usr/local/bin/codex");
   assert.deepEqual(harness.launchOptions[0]?.options, {
@@ -319,7 +336,7 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
   }), attached);
 });
 
-test("reattached RPC disconnect emits terminal even when the old pid still appears alive", async () => {
+test("reattached RPC disconnect fences the exact child and waits for verified exit", async () => {
   const harness = createHarness();
   const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const request = spawnRequest();
@@ -334,8 +351,14 @@ test("reattached RPC disconnect emits terminal even when the old pid still appea
   const terminals: ProviderTerminalPayload[] = [];
   freshAdapter.onExit(attached, (terminal) => terminals.push(terminal));
 
-  assert.equal(harness.dependencies.isProcessAlive(4100), true, "simulates immediate pid reuse/liveness");
+  assert.equal(harness.dependencies.getProcessIdentity(4100), "fake-process-4100-birth-1");
   harness.clients[1]!.disconnect();
+  await flush();
+
+  assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+  assert.equal(harness.launches[0]?.alive, true);
+  assert.equal(terminals.length, 0, "RPC loss alone cannot make a live writer restartable");
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
   await flush();
 
   assert.equal(terminals.length, 1);
@@ -343,18 +366,41 @@ test("reattached RPC disconnect emits terminal even when the old pid still appea
   assert.equal(attached.observedState(), "failed");
 });
 
-test("pid-less durable endpoint is verified over RPC and fenced as ambiguous on failure", async () => {
+test("unverifiable process identity keeps RPC loss ambiguous until actual exit", async () => {
+  const harness = createHarness();
+  const request = spawnRequest();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+  const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await freshAdapter.attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  });
+  assert.ok(attached);
+  const terminals: ProviderTerminalPayload[] = [];
+  freshAdapter.onExit(attached, (terminal) => terminals.push(terminal));
+
+  harness.setIdentityObservable(false);
+  harness.clients[1]!.disconnect();
+  await flush();
+  assert.deepEqual(harness.signals, [], "an unverifiable pid must not be signalled");
+  assert.equal(terminals.length, 0, "unverifiable liveness must remain restart-blocking");
+
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
+  await flush();
+  assert.equal(terminals.length, 1, "the actual child-exit observation remains authoritative");
+});
+
+test("pid-less durable endpoint stays ambiguous even when exact thread RPC succeeds", async () => {
   const healthy = createHarness();
   const request = spawnRequest();
   const first = await new CodexProviderAdapter({ dependencies: healthy.dependencies }).spawn(request);
   const pidlessConnection = { ...first.providerConnection!, pid: null };
-  const attached = await new CodexProviderAdapter({ dependencies: healthy.dependencies }).attach({
+  await assert.rejects(new CodexProviderAdapter({ dependencies: healthy.dependencies }).attach({
     workAttemptId: request.workAttemptId,
     providerContinuationId: first.providerContinuationId!,
     providerConnection: pidlessConnection,
-  });
-  assert.ok(attached);
-  assert.equal(attached.pid, null);
+  }), /attach is ambiguous; refusing to launch a second writer/);
   assert.equal(healthy.launches.length, 1);
 
   const unavailable = createHarness({ threadReadFails: true });
@@ -369,6 +415,21 @@ test("pid-less durable endpoint is verified over RPC and fenced as ambiguous on 
     providerConnection: { ...unavailableFirst.providerConnection!, pid: null },
   }), /attach is ambiguous; refusing to launch a second writer/);
   assert.equal(unavailable.launches.length, 1);
+});
+
+test("recycled pid cannot authenticate a durable endpoint or become exit evidence", async () => {
+  const harness = createHarness();
+  const request = spawnRequest();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+  harness.launches[0]!.processIdentity = "fake-process-4100-birth-2";
+
+  await assert.rejects(new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  }), /attach is ambiguous; refusing to launch a second writer/);
+  assert.equal(harness.launches.length, 1);
+  assert.deepEqual(harness.signals, [], "the recycled pid must not be signalled");
 });
 
 test("fresh attach fences an unverifiable live app-server instead of allowing a duplicate writer", async () => {
@@ -446,7 +507,7 @@ test("observed crash emits one synthesized terminal payload and makes attach abs
   }), null);
 });
 
-test("spawned RPC disconnect is terminal even before the child pid exit is observable", async () => {
+test("spawned RPC disconnect fences the child and waits for observed exit", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
@@ -457,6 +518,11 @@ test("spawned RPC disconnect is terminal even before the child pid exit is obser
   await flush();
 
   assert.equal(harness.launches[0]?.alive, true);
+  assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+  assert.equal(terminals.length, 0, "RPC loss is not child-exit evidence");
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
+  await flush();
+
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]?.terminalCause, "crashed");
   assert.equal(handle.observedState(), "failed");

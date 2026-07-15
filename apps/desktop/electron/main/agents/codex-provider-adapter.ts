@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 import {
   launchCodexAppServer,
   resolveCodexAppServerUrl,
@@ -64,8 +66,9 @@ export interface CodexProviderAdapterDependencies {
     onNotification: (notification: RpcNotification) => void,
   ): CodexAdapterRpc;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
-  isProcessAlive(pid: number): boolean;
-  observeProcessExit(pid: number): Promise<CodexAppServerExit>;
+  /** null means verified absent; undefined means liveness could not be verified. */
+  getProcessIdentity(pid: number): string | null | undefined;
+  observeProcessExit(pid: number, processIdentity: string): Promise<CodexAppServerExit>;
   now(): string;
 }
 
@@ -130,18 +133,36 @@ function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-function defaultIsProcessAlive(pid: number): boolean {
+function defaultGetProcessIdentity(pid: number): string | null | undefined {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    const identity = execFileSync(
+      "/bin/ps",
+      ["-p", String(pid), "-o", "lstart=", "-o", "command="],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    return identity || undefined;
+  } catch {
+    try {
+      process.kill(pid, 0);
+      return undefined;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? null : undefined;
+    }
   }
 }
 
-async function defaultObserveProcessExit(pid: number): Promise<CodexAppServerExit> {
-  while (defaultIsProcessAlive(pid)) await delay(1_000);
-  return { type: "exit", code: null, signal: null };
+async function defaultObserveProcessExit(
+  pid: number,
+  processIdentity: string,
+): Promise<CodexAppServerExit> {
+  while (true) {
+    const currentIdentity = defaultGetProcessIdentity(pid);
+    if (
+      currentIdentity === null
+      || (typeof currentIdentity === "string" && currentIdentity !== processIdentity)
+    ) return { type: "exit", code: null, signal: null };
+    await delay(1_000);
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -275,9 +296,58 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
   }
 }
 
-function rpcDisconnectExit(client: CodexAdapterRpc): Promise<CodexAppServerExit> {
+function observeFencedExit(
+  client: CodexAdapterRpc,
+  pid: number,
+  processIdentity: string,
+  observedExit: Promise<CodexAppServerExit>,
+  deps: CodexProviderAdapterDependencies,
+): Promise<CodexAppServerExit> {
   return new Promise((resolve) => {
-    client.onDisconnect(() => resolve({ type: "exit", code: null, signal: null }));
+    let settled = false;
+    let fencing = false;
+    let unsubscribe = () => {};
+    const finish = (exit: CodexAppServerExit) => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      resolve(exit);
+    };
+    observedExit.then(finish);
+    unsubscribe = client.onDisconnect(() => {
+      if (settled || fencing) return;
+      fencing = true;
+      void (async () => {
+        const identityBeforeTerm = deps.getProcessIdentity(pid);
+        if (
+          identityBeforeTerm === null
+          || (typeof identityBeforeTerm === "string" && identityBeforeTerm !== processIdentity)
+        ) {
+          finish({ type: "exit", code: null, signal: null });
+          return;
+        }
+        if (identityBeforeTerm === undefined) return;
+        deps.signalProcess(pid, "SIGTERM");
+        await delay(DEFAULT_STOP_GRACE_MS);
+        if (settled) return;
+        // Re-check the birth identity before escalation. A recycled PID must
+        // never be killed or mistaken for evidence that the original exited.
+        const identityBeforeKill = deps.getProcessIdentity(pid);
+        if (
+          identityBeforeKill === null
+          || (typeof identityBeforeKill === "string" && identityBeforeKill !== processIdentity)
+        ) {
+          finish({ type: "exit", code: null, signal: null });
+          return;
+        }
+        if (identityBeforeKill === undefined) return;
+        deps.signalProcess(pid, "SIGKILL");
+        // Only actual process-identity disappearance can make the generation
+        // terminal. An RPC close by itself remains ambiguous and restart-blocking.
+        finish(await observedExit);
+      })();
+    });
+    if (settled) unsubscribe();
   });
 }
 
@@ -289,7 +359,7 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   createRpcClient: (serverUrl, onNotification) =>
     new CodexRpcClient(serverUrl, onNotification),
   signalProcess: defaultSignalProcess,
-  isProcessAlive: defaultIsProcessAlive,
+  getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
   now: () => new Date().toISOString(),
 };
@@ -478,6 +548,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
       throw new Error(`Timed out waiting for Codex app-server at ${serverUrl}`);
     }
+    if (launch.pid === null) {
+      throw new Error(
+        "Codex app-server launch did not expose a process id; refusing to start an unfenceable writer.",
+      );
+    }
+    const processIdentity = this.deps.getProcessIdentity(launch.pid);
+    if (typeof processIdentity !== "string" || !processIdentity) {
+      throw new Error(
+        "Codex app-server process identity could not be verified; refusing to start an unfenceable writer.",
+      );
+    }
 
     let handle: CodexProviderHandle | null = null;
     const pendingNotifications: RpcNotification[] = [];
@@ -490,7 +571,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
     const observedLaunch: CodexAppServerLaunch = {
       pid: launch.pid,
-      exited: Promise.race([launch.exited, rpcDisconnectExit(client)]),
+      exited: observeFencedExit(client, launch.pid, processIdentity, launch.exited, this.deps),
     };
 
     try {
@@ -525,7 +606,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         req.workAttemptId,
         launch.pid,
         threadId,
-        { kind: "codex_app_server", url: serverUrl, pid: launch.pid },
+        { kind: "codex_app_server", url: serverUrl, pid: launch.pid, processIdentity },
         client,
         observedLaunch,
       );
@@ -584,6 +665,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     connection: ProviderConnectionRef,
   ): Promise<CodexProviderHandle | null> {
     let handle: CodexProviderHandle | null = null;
+    let exactEndpointVerified = false;
     const pendingNotifications: RpcNotification[] = [];
     const client = this.deps.createRpcClient(connection.url, (notification) => {
       if (!handle) pendingNotifications.push(notification);
@@ -601,10 +683,28 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (read.thread?.id !== ref.providerContinuationId) {
         throw new Error("Codex app-server did not verify the exact durable continuation thread.");
       }
-      const rpcDisconnected = rpcDisconnectExit(client);
-      const exitEvidence = connection.pid !== null
-        ? Promise.race([rpcDisconnected, this.deps.observeProcessExit(connection.pid)])
-        : rpcDisconnected;
+      exactEndpointVerified = true;
+      if (connection.pid === null || !connection.processIdentity) {
+        throw new Error("durable endpoint has no verified process identity");
+      }
+      const currentIdentity = this.deps.getProcessIdentity(connection.pid);
+      if (currentIdentity === undefined) {
+        throw new Error("durable endpoint process identity cannot be verified");
+      }
+      if (currentIdentity !== connection.processIdentity) {
+        throw new Error("durable endpoint process identity no longer matches its recorded birth");
+      }
+      const observedExit = this.deps.observeProcessExit(
+        connection.pid,
+        connection.processIdentity,
+      );
+      const exitEvidence = observeFencedExit(
+        client,
+        connection.pid,
+        connection.processIdentity,
+        observedExit,
+        this.deps,
+      );
       const launch: CodexAppServerLaunch = { pid: connection.pid, exited: exitEvidence };
       handle = new CodexProviderHandle(
         ref.workAttemptId,
@@ -624,7 +724,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
       return handle;
     } catch (error) {
       client.close();
-      if (connection.pid !== null && !this.deps.isProcessAlive(connection.pid)) return null;
+      const currentIdentity = connection.pid !== null && connection.processIdentity
+        ? this.deps.getProcessIdentity(connection.pid)
+        : undefined;
+      if (
+        !exactEndpointVerified
+        && connection.pid !== null
+        && connection.processIdentity
+        && currentIdentity !== undefined
+        && currentIdentity !== connection.processIdentity
+      ) return null;
       throw new Error(
         `Codex app-server attach is ambiguous; refusing to launch a second writer: ${errorMessage(error)}`,
       );

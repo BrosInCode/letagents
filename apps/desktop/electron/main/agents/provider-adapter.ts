@@ -83,6 +83,8 @@ export interface ProviderConnectionRef {
   kind: "codex_app_server";
   url: string;
   pid: number | null;
+  /** Stable process birth/command identity; prevents PID-reuse death laundering. */
+  processIdentity?: string | null;
 }
 
 export interface ProviderSpawnRequest {
