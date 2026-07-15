@@ -607,7 +607,9 @@ import {
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import {
+  isSupervisedRuntimeSettled,
   loadSupervisedProviderLane,
+  refreshSupervisedRuntimeEntry,
   stopSupervisedProviderLane,
   supervisedRecoveryDetail,
   supervisedRuntimeCardLabel,
@@ -687,6 +689,7 @@ let preflightRequestId = 0;
 let modelRequestId = 0;
 let modalStateVersion = 0;
 let managedSessionRefreshTimer: number | null = null;
+let supervisedRuntimeRefreshTimer: number | null = null;
 let modelPreflightTimer: number | null = null;
 
 const selectedProvider = computed(() =>
@@ -995,6 +998,7 @@ watch(
     } else {
       resetTransientState();
       stopManagedSessionRefreshTimer();
+      stopSupervisedRuntimeRefreshTimer();
     }
   },
   { immediate: true },
@@ -1061,6 +1065,7 @@ watch(
 onBeforeUnmount(() => {
   clearScheduledModelPreflight();
   stopManagedSessionRefreshTimer();
+  stopSupervisedRuntimeRefreshTimer();
 });
 
 async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {
@@ -1147,6 +1152,7 @@ async function startManagedAgent(): Promise<void> {
       supervisedConflict.value = entry;
       supervisedConflictLookupError.value = null;
       setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
+      startSupervisedRuntimeRefresh(entry.id);
       void loadManagedSessions({ quiet: true });
       return;
     }
@@ -1209,6 +1215,7 @@ async function stopSupervisedConflict(): Promise<void> {
     const updated = await stopSupervisedProviderLane(desktopIpc.supervisor, entry.id);
     if (!isCurrentModalState(requestVersion)) return;
     supervisedConflict.value = updated.desiredState === "stopped" ? null : updated;
+    stopSupervisedRuntimeRefreshTimer();
     setupMessage.value = `${updated.displayName} is stopped. Start once to create its replacement.`;
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
@@ -1426,6 +1433,7 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   startingAgent.value = false;
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
+  stopSupervisedRuntimeRefreshTimer();
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
@@ -1587,6 +1595,7 @@ function resetTransientState(): void {
   startingAgent.value = false;
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
+  stopSupervisedRuntimeRefreshTimer();
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
@@ -1617,6 +1626,46 @@ function stopManagedSessionRefreshTimer(): void {
   if (managedSessionRefreshTimer !== null) {
     window.clearInterval(managedSessionRefreshTimer);
     managedSessionRefreshTimer = null;
+  }
+}
+
+function startSupervisedRuntimeRefresh(entryId: string, intervalMs = 1_000): void {
+  stopSupervisedRuntimeRefreshTimer();
+  const refresh = async (): Promise<void> => {
+    if (!props.open || supervisedConflict.value?.id !== entryId) {
+      stopSupervisedRuntimeRefreshTimer();
+      return;
+    }
+    const requestVersion = modalStateVersion;
+    const refreshed = await refreshSupervisedRuntimeEntry(
+      desktopIpc.supervisor,
+      props.roomIdentifier,
+      entryId,
+    );
+    if (!isCurrentModalState(requestVersion) || supervisedConflict.value?.id !== entryId) return;
+    if (refreshed.error) {
+      supervisedConflictLookupError.value = refreshed.error;
+      return;
+    }
+    if (!refreshed.entry) {
+      supervisedConflictLookupError.value = "The supervised runtime is no longer listed by the daemon. It was not restarted.";
+      stopSupervisedRuntimeRefreshTimer();
+      return;
+    }
+    supervisedConflict.value = refreshed.entry;
+    supervisedConflictLookupError.value = null;
+    if (isSupervisedRuntimeSettled(refreshed.entry)) {
+      stopSupervisedRuntimeRefreshTimer();
+    }
+  };
+  void refresh();
+  supervisedRuntimeRefreshTimer = window.setInterval(() => void refresh(), intervalMs);
+}
+
+function stopSupervisedRuntimeRefreshTimer(): void {
+  if (supervisedRuntimeRefreshTimer !== null) {
+    window.clearInterval(supervisedRuntimeRefreshTimer);
+    supervisedRuntimeRefreshTimer = null;
   }
 }
 
