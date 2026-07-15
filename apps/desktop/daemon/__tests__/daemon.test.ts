@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createConnection, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,7 +17,7 @@ import { SupervisorDaemon } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonRequest } from "../types.js";
-import { createGitCommand, WorkspaceProvisioner } from "../workspace-provisioner.js";
+import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
@@ -1379,6 +1379,15 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
     const first = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
     const second = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "moved-branch" });
     assert.equal(first.reused, false); assert.equal(second.reused, true); assert.ok(commands.length > 2);
+    const refresh = commands.findIndex((args) => args.includes("fetch"));
+    const resolution = commands.findIndex((args) => args.includes("abc^{commit}"));
+    assert.ok(refresh >= 0 && refresh < resolution, "the verified origin is refreshed before revision resolution");
+    assert.equal(commands[refresh]![1], await realpath(join(env.root, "repos", "repo.git")));
+    assert.deepEqual(commands[refresh], [
+      "--git-dir", await realpath(join(env.root, "repos", "repo.git")),
+      "fetch", "--prune", "--no-tags", "origin",
+      "+refs/heads/*:refs/letagents/remotes/origin/*",
+    ]);
     assert.match(first.path, new RegExp(`worktrees/repo/${workAttemptId}$`));
     assert.ok(commands[0]!.includes("--bare"));
     await rm(join(first.path, ".letagents-work-attempt.json"));
@@ -1397,6 +1406,66 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
     const outside = join(env.root, "outside"); await mkdir(outside);
     await symlink(outside, first.path);
     await assert.rejects(() => provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" }), /symlink/);
+  } finally { await env.cleanup(); }
+});
+
+test("repository storage keys preserve full project identity across same-basename remotes", () => {
+  const first = repositoryStorageKey("https://git.example.invalid/owner-a/shared-project.git");
+  const equivalent = repositoryStorageKey("https://git.example.invalid/owner-a/shared-project.git/");
+  const second = repositoryStorageKey("https://git.example.invalid/owner-b/shared-project.git");
+  assert.equal(first, equivalent);
+  assert.notEqual(first, second);
+  assert.match(first, /^shared-project-[0-9a-f]{16}$/);
+  assert.match(second, /^shared-project-[0-9a-f]{16}$/);
+});
+
+test("workspace provisioner refreshes an existing bare clone before resolving a new source revision", async () => {
+  const env = await fixture();
+  try {
+    const remote = join(env.root, "origin.git");
+    const source = join(env.root, "source");
+    const daemonRoot = join(env.root, "daemon");
+    await execFileAsync("git", ["init", "--bare", remote]);
+    await execFileAsync("git", ["init", source]);
+    await execFileAsync("git", ["-C", source, "config", "user.email", "daemon@example.invalid"]);
+    await execFileAsync("git", ["-C", source, "config", "user.name", "Daemon Test"]);
+    await writeFile(join(source, "README.md"), "first\n");
+    await execFileAsync("git", ["-C", source, "add", "README.md"]);
+    await execFileAsync("git", ["-C", source, "commit", "-m", "first"]);
+    await execFileAsync("git", ["-C", source, "branch", "-M", "main"]);
+    await execFileAsync("git", ["-C", source, "remote", "add", "origin", remote]);
+    await execFileAsync("git", ["-C", source, "push", "-u", "origin", "main"]);
+    await execFileAsync("git", ["--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main"]);
+    const firstRevision = (await execFileAsync("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+
+    const provisioner = new WorkspaceProvisioner(daemonRoot, createGitCommand(daemonRoot));
+    const first = await provisioner.provision({
+      repo: "repo",
+      workAttemptId: randomUUID(),
+      taskId: "task_first",
+      remoteUrl: remote,
+      revision: firstRevision,
+    });
+    assert.equal((await execFileAsync("git", ["-C", first.path, "rev-parse", "HEAD"])).stdout.trim(), firstRevision);
+
+    await writeFile(join(source, "README.md"), "second\n");
+    await execFileAsync("git", ["-C", source, "add", "README.md"]);
+    await execFileAsync("git", ["-C", source, "commit", "-m", "second"]);
+    const secondRevision = (await execFileAsync("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+    await execFileAsync("git", ["-C", source, "push", "origin", "HEAD:refs/heads/fresh-after-clone"]);
+
+    const second = await provisioner.provision({
+      repo: "repo",
+      workAttemptId: randomUUID(),
+      taskId: "task_second",
+      remoteUrl: remote,
+      revision: secondRevision,
+    });
+    assert.equal((await execFileAsync("git", ["-C", second.path, "rev-parse", "HEAD"])).stdout.trim(), secondRevision);
+    assert.equal(
+      (await execFileAsync("git", ["--git-dir", join(daemonRoot, "repos", "repo.git"), "rev-parse", "refs/letagents/remotes/origin/fresh-after-clone"])).stdout.trim(),
+      secondRevision,
+    );
   } finally { await env.cleanup(); }
 });
 
