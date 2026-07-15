@@ -419,11 +419,14 @@
             <section
               v-if="supervisedConflict"
               class="desktop-add-agent-managed-sessions"
-              data-testid="desktop-add-agent-supervised-conflict"
-              aria-label="Supervised agent recovery"
+              data-testid="desktop-add-agent-supervised-runtime"
+              aria-label="Supervised agent runtime"
             >
-              <article class="desktop-add-agent-managed-session" data-state="blocked">
-                <span>Supervised runtime needs recovery</span>
+              <article
+                class="desktop-add-agent-managed-session"
+                :data-state="supervisedConflict.condition === 'none' ? supervisedConflict.observedState : 'blocked'"
+              >
+                <span>{{ supervisedConflictLabel }}</span>
                 <strong>{{ supervisedConflict.displayName }}</strong>
                 <small>
                   {{ supervisedConflict.observedState }} · {{ supervisedConflict.condition }}
@@ -433,7 +436,7 @@
                   <button
                     type="button"
                     class="desktop-add-agent-managed-session-danger"
-                    data-testid="desktop-add-agent-stop-supervised-conflict"
+                    data-testid="desktop-add-agent-stop-supervised-runtime"
                     :disabled="Boolean(stoppingSupervisorEntryId)"
                     @click="stopSupervisedConflict"
                   >
@@ -604,9 +607,12 @@ import {
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import {
+  isSupervisedRuntimeSettled,
   loadSupervisedProviderLane,
+  refreshSupervisedRuntimeEntry,
   stopSupervisedProviderLane,
   supervisedRecoveryDetail,
+  supervisedRuntimeCardLabel,
 } from "../../../domain/supervised-recovery";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
@@ -683,6 +689,7 @@ let preflightRequestId = 0;
 let modelRequestId = 0;
 let modalStateVersion = 0;
 let managedSessionRefreshTimer: number | null = null;
+let supervisedRuntimeRefreshTimer: number | null = null;
 let modelPreflightTimer: number | null = null;
 
 const selectedProvider = computed(() =>
@@ -690,6 +697,9 @@ const selectedProvider = computed(() =>
 );
 const supervisedConflictDetail = computed(() =>
   supervisedConflict.value ? supervisedRecoveryDetail(supervisedConflict.value) : null
+);
+const supervisedConflictLabel = computed(() =>
+  supervisedConflict.value ? supervisedRuntimeCardLabel(supervisedConflict.value) : "Supervised runtime"
 );
 
 const activeManagedSessions = computed(() =>
@@ -988,6 +998,7 @@ watch(
     } else {
       resetTransientState();
       stopManagedSessionRefreshTimer();
+      stopSupervisedRuntimeRefreshTimer();
     }
   },
   { immediate: true },
@@ -1054,6 +1065,7 @@ watch(
 onBeforeUnmount(() => {
   clearScheduledModelPreflight();
   stopManagedSessionRefreshTimer();
+  stopSupervisedRuntimeRefreshTimer();
 });
 
 async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {
@@ -1133,10 +1145,15 @@ async function startManagedAgent(): Promise<void> {
         model: selectedModel.value,
       });
       if (!isCurrentModalState(requestVersion)) return;
-      supervisedConflict.value = null;
+      // A durable `running` claim returns before the native provider has
+      // published room presence. Render this manifest entry immediately so
+      // the first Start click has a visible result and cannot be mistaken for
+      // a no-op that needs a second click.
+      supervisedConflict.value = entry;
       supervisedConflictLookupError.value = null;
       setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
-      await loadManagedSessions();
+      startSupervisedRuntimeRefresh(entry.id);
+      void loadManagedSessions({ quiet: true });
       return;
     }
     const result = await desktopIpc.workers.startManagedAgent({
@@ -1198,6 +1215,7 @@ async function stopSupervisedConflict(): Promise<void> {
     const updated = await stopSupervisedProviderLane(desktopIpc.supervisor, entry.id);
     if (!isCurrentModalState(requestVersion)) return;
     supervisedConflict.value = updated.desiredState === "stopped" ? null : updated;
+    stopSupervisedRuntimeRefreshTimer();
     setupMessage.value = `${updated.displayName} is stopped. Start once to create its replacement.`;
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
@@ -1415,6 +1433,7 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   startingAgent.value = false;
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
+  stopSupervisedRuntimeRefreshTimer();
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
@@ -1576,6 +1595,7 @@ function resetTransientState(): void {
   startingAgent.value = false;
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
+  stopSupervisedRuntimeRefreshTimer();
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
   copyingAuthCommand.value = false;
@@ -1606,6 +1626,46 @@ function stopManagedSessionRefreshTimer(): void {
   if (managedSessionRefreshTimer !== null) {
     window.clearInterval(managedSessionRefreshTimer);
     managedSessionRefreshTimer = null;
+  }
+}
+
+function startSupervisedRuntimeRefresh(entryId: string, intervalMs = 1_000): void {
+  stopSupervisedRuntimeRefreshTimer();
+  const refresh = async (): Promise<void> => {
+    if (!props.open || supervisedConflict.value?.id !== entryId) {
+      stopSupervisedRuntimeRefreshTimer();
+      return;
+    }
+    const requestVersion = modalStateVersion;
+    const refreshed = await refreshSupervisedRuntimeEntry(
+      desktopIpc.supervisor,
+      props.roomIdentifier,
+      entryId,
+    );
+    if (!isCurrentModalState(requestVersion) || supervisedConflict.value?.id !== entryId) return;
+    if (refreshed.error) {
+      supervisedConflictLookupError.value = refreshed.error;
+      return;
+    }
+    if (!refreshed.entry) {
+      supervisedConflictLookupError.value = "The supervised runtime is no longer listed by the daemon. It was not restarted.";
+      stopSupervisedRuntimeRefreshTimer();
+      return;
+    }
+    supervisedConflict.value = refreshed.entry;
+    supervisedConflictLookupError.value = null;
+    if (isSupervisedRuntimeSettled(refreshed.entry)) {
+      stopSupervisedRuntimeRefreshTimer();
+    }
+  };
+  void refresh();
+  supervisedRuntimeRefreshTimer = window.setInterval(() => void refresh(), intervalMs);
+}
+
+function stopSupervisedRuntimeRefreshTimer(): void {
+  if (supervisedRuntimeRefreshTimer !== null) {
+    window.clearInterval(supervisedRuntimeRefreshTimer);
+    supervisedRuntimeRefreshTimer = null;
   }
 }
 

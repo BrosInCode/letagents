@@ -62,8 +62,11 @@ import {
 } from "../src/domain/managed-agents";
 import {
   loadSupervisedProviderLane,
+  isSupervisedRuntimeSettled,
+  refreshSupervisedRuntimeEntry,
   stopSupervisedProviderLane,
   supervisedRecoveryDetail,
+  supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
 
@@ -432,6 +435,65 @@ test("supervised recovery keeps an honest fallback and surfaces the latest durab
       durablePayloadRef: null,
     }],
   })), "provider restart failed before MCP registration");
+});
+
+test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
+  assert.equal(supervisedRuntimeCardLabel(supervisorEntry({
+    observedState: "absent",
+    condition: "none",
+  })), "Supervised runtime is starting");
+  assert.equal(supervisedRuntimeCardLabel(supervisorEntry({
+    observedState: "failed",
+    condition: "none",
+  })), "Supervised runtime needs recovery");
+});
+
+test("a first supervised Start refreshes its exact durable entry to blocked or healthy without another create", async () => {
+  const starting = supervisorEntry({
+    id: "first_start",
+    observedState: "absent",
+    condition: "none",
+  });
+  const blocked = {
+    ...starting,
+    observedState: "paused" as const,
+    condition: "coordination_blocked" as const,
+    lastError: "provider launch failed before MCP registration",
+  };
+  const healthy = {
+    ...starting,
+    observedState: "idle" as const,
+    condition: "none" as const,
+    lastError: null,
+  };
+  let createCalls = 0;
+  const snapshots = [[blocked], [healthy]];
+  const client = {
+    async createAgent() {
+      createCalls += 1;
+      return starting;
+    },
+    async listAgents() {
+      return snapshots.shift() || [healthy];
+    },
+  };
+
+  const created = await client.createAgent();
+  assert.equal(createCalls, 1);
+  assert.equal(supervisedRuntimeCardLabel(created), "Supervised runtime is starting");
+
+  const afterBlocked = await refreshSupervisedRuntimeEntry(client, "room_1", created.id);
+  assert.equal(afterBlocked.entry?.id, created.id);
+  assert.equal(afterBlocked.entry?.condition, "coordination_blocked");
+  assert.equal(supervisedRuntimeCardLabel(afterBlocked.entry!), "Supervised runtime needs recovery");
+  assert.equal(isSupervisedRuntimeSettled(afterBlocked.entry!), true);
+
+  const afterHealthy = await refreshSupervisedRuntimeEntry(client, "room_1", created.id);
+  assert.equal(afterHealthy.entry?.id, created.id);
+  assert.equal(afterHealthy.entry?.observedState, "idle");
+  assert.equal(supervisedRuntimeCardLabel(afterHealthy.entry!), "Supervised runtime is ready");
+  assert.equal(isSupervisedRuntimeSettled(afterHealthy.entry!), true);
+  assert.equal(createCalls, 1, "refreshing a returned entry must never issue a second create");
 });
 
 test("delivery mode selector only shows for managed Codex", () => {
