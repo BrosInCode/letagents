@@ -3279,6 +3279,54 @@ test("CodexRpcClient initializes app-server using the documented wire shape", as
   assert.equal(sentMessages[2]?.jsonrpc, undefined);
 });
 
+test("CodexRpcClient request timeout does not report a live socket as disconnected", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  let disconnected = 0;
+  let socketClosed = false;
+
+  class FakeWebSocket {
+    static readonly OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+
+    constructor(readonly url: string) {
+      queueMicrotask(() => this.onopen?.());
+    }
+
+    send(raw: string): void {
+      const message = JSON.parse(raw) as { id?: number; method?: string };
+      if (!message.id || message.method !== "initialize") return;
+      queueMicrotask(() => {
+        this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {} }) });
+      });
+    }
+
+    close(): void {
+      socketClosed = true;
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+    FakeWebSocket as unknown as typeof WebSocket;
+  try {
+    const client = new CodexRpcClient("ws://127.0.0.1:4500", undefined, 5);
+    client.onDisconnect(() => { disconnected += 1; });
+    await client.connect();
+
+    await assert.rejects(client.request("thread/read", {}), /request timed out: thread\/read/);
+    assert.equal(disconnected, 0);
+    assert.equal(socketClosed, false);
+    client.close();
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
 test("CodexRpcClient rejects requests when the app-server socket is not open", async () => {
   const originalWebSocket = globalThis.WebSocket;
 

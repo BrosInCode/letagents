@@ -34,6 +34,7 @@ class FakeRpc implements CodexAdapterRpc {
       resumeSupported: boolean;
       workplacePresent: boolean;
       threadReadFails: boolean;
+      threadReadTimesOut: boolean;
     },
   ) {}
 
@@ -63,6 +64,9 @@ class FakeRpc implements CodexAdapterRpc {
       return { turn: { id: `turn-${this.threadId}` } } as T;
     }
     if (method === "thread/read") {
+      if (this.options.threadReadTimesOut) {
+        throw new Error("Codex app-server request timed out: thread/read");
+      }
       if (this.options.threadReadFails) throw new Error("thread endpoint unavailable");
       const requestedThreadId = (params as { threadId?: string } | undefined)?.threadId;
       return {
@@ -109,6 +113,9 @@ function createHarness(options: {
   resumeSupported?: boolean;
   workplacePresent?: boolean;
   threadReadFails?: boolean;
+  threadReadTimesOut?: boolean;
+  identityUnavailableAtLaunch?: boolean;
+  exitOnSignal?: boolean;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -121,7 +128,7 @@ function createHarness(options: {
   let nextPid = 4100;
   let nextThread = 1;
   let clock = 0;
-  let identityObservable = true;
+  let identityObservable = !(options.identityUnavailableAtLaunch ?? false);
 
   const dependencies: CodexProviderAdapterDependencies = {
     resolveServerUrl: async () => `ws://127.0.0.1:${4700 + launches.length}`,
@@ -148,11 +155,18 @@ function createHarness(options: {
         resumeSupported: options.resumeSupported ?? true,
         workplacePresent: options.workplacePresent ?? true,
         threadReadFails: options.threadReadFails ?? false,
+        threadReadTimesOut: options.threadReadTimesOut ?? false,
       });
       clients.push(client);
       return client;
     },
-    signalProcess: (pid, signal) => signals.push({ pid, signal }),
+    signalProcess: (pid, signal) => {
+      signals.push({ pid, signal });
+      if (options.exitOnSignal) {
+        const launch = launches.find((entry) => entry.pid === pid && entry.alive);
+        launch?.resolveExit({ type: "exit", code: null, signal });
+      }
+    },
     getProcessIdentity: (pid) => identityObservable
       ? launches.find((launch) => launch.pid === pid && launch.alive)?.processIdentity ?? null
       : undefined,
@@ -473,6 +487,30 @@ test("spawn fails clearly when the configured LetAgents MCP workplace is absent"
   await assert.rejects(adapter.spawn(spawnRequest()), /LetAgents MCP server is not configured/);
   assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
   assert.equal(harness.clients[0]?.closed, true);
+});
+
+test("request timeout leaves a slow live writer working and unsignalled", async () => {
+  const harness = createHarness({ threadReadTimesOut: true });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const terminals: ProviderTerminalPayload[] = [];
+  adapter.onExit(handle, (terminal) => terminals.push(terminal));
+  await flush();
+
+  assert.equal(handle.observedState(), "working");
+  assert.equal(harness.launches[0]?.alive, true);
+  assert.deepEqual(harness.signals, []);
+  assert.deepEqual(terminals, []);
+});
+
+test("startup identity failure terminates and awaits the known fresh child", async () => {
+  const harness = createHarness({ identityUnavailableAtLaunch: true, exitOnSignal: true });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+
+  await assert.rejects(adapter.spawn(spawnRequest()), /process identity could not be verified/);
+  assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+  assert.equal(harness.launches[0]?.alive, false);
+  assert.equal(harness.clients.length, 0, "no RPC thread may start before process identity is durable");
 });
 
 test("spawn requires manifest identity instead of generating an adapter-local name", async () => {

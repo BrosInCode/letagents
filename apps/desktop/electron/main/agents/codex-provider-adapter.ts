@@ -351,6 +351,27 @@ function observeFencedExit(
   });
 }
 
+async function terminateFreshLaunch(
+  launch: CodexAppServerLaunch,
+  deps: CodexProviderAdapterDependencies,
+): Promise<void> {
+  if (launch.pid === null) return;
+  let alreadyExited = false;
+  void launch.exited.then(() => { alreadyExited = true; });
+  await Promise.resolve();
+  if (alreadyExited) return;
+
+  deps.signalProcess(launch.pid, "SIGTERM");
+  const graceful = await Promise.race([
+    launch.exited.then(() => true),
+    delay(DEFAULT_STOP_GRACE_MS).then(() => false),
+  ]);
+  if (graceful) return;
+
+  deps.signalProcess(launch.pid, "SIGKILL");
+  await launch.exited;
+}
+
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
   launchServer: (serverUrl, codexBin, options) =>
@@ -549,12 +570,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error(`Timed out waiting for Codex app-server at ${serverUrl}`);
     }
     if (launch.pid === null) {
+      // Node exposes no safe signalling target in this state. Fail closed until
+      // the launch itself proves terminal instead of retrying beside an orphan.
+      await launch.exited;
       throw new Error(
         "Codex app-server launch did not expose a process id; refusing to start an unfenceable writer.",
       );
     }
     const processIdentity = this.deps.getProcessIdentity(launch.pid);
     if (typeof processIdentity !== "string" || !processIdentity) {
+      await terminateFreshLaunch(launch, this.deps);
       throw new Error(
         "Codex app-server process identity could not be verified; refusing to start an unfenceable writer.",
       );
