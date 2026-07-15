@@ -77,6 +77,7 @@ export class SupervisorDaemon {
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
+  private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
   private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
@@ -633,9 +634,10 @@ export class SupervisorDaemon {
           // loop. Fence it after installing the exit listener so the normal
           // terminal callback can persist the edge and mint a bounded resume
           // generation instead of parking forever on a terminal live handle.
-          await this.providerPort.stop(handle, {
-            actionId: `manifest:${entry.id}:returned-terminal:${generationNumber}`,
-          });
+          await this.fenceTerminalProviderHandleOnce(
+            handle,
+            `manifest:${entry.id}:returned-terminal:${generationNumber}`,
+          );
         }
       } catch (error) {
         const terminal = this.terminalPayload({
@@ -798,9 +800,10 @@ export class SupervisorDaemon {
         // A persistent polling turn ending (successfully or with a native
         // terminal error) means delivery ended. Fence that native process so
         // the terminal callback can mint a bounded resume generation.
-        await this.providerPort?.stop(handle, {
-          actionId: `manifest:${entryId}:terminal-turn:${event.sequence}`,
-        });
+        await this.fenceTerminalProviderHandleOnce(
+          handle,
+          `manifest:${entryId}:terminal-turn:${event.sequence}`,
+        );
       } catch (error) {
         await this.transition(
           entryId,
@@ -820,6 +823,16 @@ export class SupervisorDaemon {
     });
     this.providerStreamQueues.set(entryId, next);
     return next;
+  }
+
+  private fenceTerminalProviderHandleOnce(handle: ProviderActionHandle, actionId: string): Promise<void> {
+    const existing = this.terminalFenceRequests.get(handle);
+    if (existing) return existing;
+    const operation = this.providerPort!
+      .stop(handle, { actionId })
+      .then(() => undefined);
+    this.terminalFenceRequests.set(handle, operation);
+    return operation;
   }
 
   private async bindWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {

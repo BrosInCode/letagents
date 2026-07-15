@@ -297,7 +297,24 @@ test("a provider handle returned already terminal is fenced and resumes under a 
       exitListeners.set(handle as object, listener);
       return () => exitListeners.delete(handle as object);
     },
-    onStream: async () => () => {},
+    onStream: async (handle, listener) => {
+      if (handle === failedHandle) {
+        queueMicrotask(() => listener({
+          workAttemptId: attempt.work_attempt_id,
+          providerContinuationId: "claude-continuation",
+          observedAt: new Date().toISOString(),
+          sequence: 1,
+          provider: "claude-code",
+          kind: "error",
+          method: "result/error_during_execution",
+          payload: { type: "result", subtype: "error_during_execution", is_error: true },
+          payloadTruncated: false,
+          payloadRedacted: false,
+          durablePayloadRef: null,
+        }));
+      }
+      return () => {};
+    },
   };
   const daemon = new SupervisorDaemon(paths, "darwin", port, true);
   try {
@@ -316,8 +333,8 @@ test("a provider handle returned already terminal is fenced and resumes under a 
       return current.observed_state === "working"
         && current.provider_ref?.execution_generation_id !== undefined;
     }, "already-terminal launch recovery");
-    assert.equal(stopCount, 1, "daemon fences the terminal handle even though no stream listener observed its earlier result");
-    assert.equal(resumeCount, 1, "the persisted continuation resumes under one bounded successor");
+    assert.equal(stopCount, 1, "returned-state and just-installed stream paths share one idempotent terminal fence");
+    assert.equal(resumeCount, 1, "the listener boundary race mints exactly one bounded successor");
     const detail = (await daemonRequest(paths.socketPath, "attempt.read", { id: "returned_terminal" })).result as {
       execution_generations: Array<{ terminal: unknown }>;
     };
