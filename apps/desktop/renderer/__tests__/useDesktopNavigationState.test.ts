@@ -253,6 +253,54 @@ describe("useDesktopNavigationState", () => {
     });
   });
 
+  it("preserves an existing repo room's durable root when reopened with an explicit null rootPath", () => {
+    withLocalStorage(() => {
+      // Regression (task_60): the account/app-agent reopen path calls
+      // openRoomSnapshot with { kind: "room", rootPath: null } for a repo-backed
+      // room that already has a durable project root. That explicit null must NOT
+      // wipe the stored root — otherwise Add Agent later falls back to HOME and
+      // the daemon convergence blocks because HOME is not a Git repo.
+      const recentRootRooms = ref<RecentRootRoom[]>([{
+        identifier: "github.com/BrosInCode/letagents",
+        kind: "project",
+        rootPath: "/Users/emmy/Projects/letagents",
+        displayName: "sky-lake",
+        meta: "staging",
+        updatedAt: "2026-06-07T00:00:00.000Z",
+      }]);
+      const state = useDesktopNavigationState({
+        accountRooms: ref([]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms,
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(null),
+        selectedRootRoomIdentifier: ref<string | null>(null),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      state.openRoomSnapshot(roomSnapshot("github.com/BrosInCode/letagents", {
+        displayName: "sky-lake",
+        gitRoom: gitRoom({ isDefault: true, refName: "staging" }),
+      }), {
+        kind: "room",
+        rootPath: null,
+        meta: "Admin",
+        aliasIdentifiers: ["sky-lake"],
+      });
+
+      assert.equal(recentRootRooms.value.length, 1);
+      assert.equal(recentRootRooms.value[0].rootPath, "/Users/emmy/Projects/letagents");
+    });
+  });
+
   it("resolves unique account room display-name aliases to canonical ids", () => {
     const rooms: DesktopAccountRoomEntry[] = [
       accountRoom("github.com/BrosInCode/letagents", "sky-lake"),

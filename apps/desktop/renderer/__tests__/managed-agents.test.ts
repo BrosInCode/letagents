@@ -33,6 +33,7 @@ import {
   isBranchScopedGitRoomIdentifier,
   managedAgentRepoDetail,
   managedAgentRepoStatusForRoom,
+  managedAgentRootPathForRoom,
   managedAgentRoomBranchMismatch,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSelectionForProvider,
@@ -652,6 +653,46 @@ test("managedAgentRepoStatusForRoom requires verified repo identity for branch r
       gitRoom: branchGitRoom("feature/codex-work"),
     }, true),
     repoStatus,
+  );
+});
+
+test("managedAgentRootPathForRoom requires repo selection instead of falling back to HOME", () => {
+  // Regression (task_60): a repo-backed focus room whose durable root was lost
+  // (an account/app-agent reopen wiped it) must resolve to null so Add Agent
+  // requires an explicit repo — never HOME. HOME is not a Git repo and the daemon
+  // convergence blocks on `git -C <home> remote get-url origin`.
+  assert.equal(
+    managedAgentRootPathForRoom({
+      room: { gitRoom: branchGitRoom("feature/codex-work") },
+      repoStatus: null,
+      gitRoomMatchesActiveRepo: false,
+      durableProjectRootPath: null,
+      homePath: "/Users/emmy",
+    }),
+    null,
+  );
+  // A durable project root still keeps a focus room attached when the live probe
+  // is absent.
+  assert.equal(
+    managedAgentRootPathForRoom({
+      room: { gitRoom: null },
+      repoStatus: null,
+      gitRoomMatchesActiveRepo: false,
+      durableProjectRootPath: "/Users/emmy/Projects/letagents",
+      homePath: "/Users/emmy",
+    }),
+    "/Users/emmy/Projects/letagents",
+  );
+  // Only a room with no project context at all resolves to HOME.
+  assert.equal(
+    managedAgentRootPathForRoom({
+      room: { gitRoom: null },
+      repoStatus: null,
+      gitRoomMatchesActiveRepo: false,
+      durableProjectRootPath: null,
+      homePath: "/Users/emmy",
+    }),
+    "/Users/emmy",
   );
 });
 

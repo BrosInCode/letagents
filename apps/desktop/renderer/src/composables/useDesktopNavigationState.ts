@@ -149,8 +149,17 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
       (entry) => aliases.has(normalizeRoomIdentifier(entry.identifier) || "")
     ) || null;
     const hasRootPathOverride = Object.prototype.hasOwnProperty.call(rememberOptions, "rootPath");
-    const rootPath = hasRootPathOverride
-      ? rememberOptions.rootPath || null
+    const overrideRootPath = hasRootPathOverride ? rememberOptions.rootPath || null : undefined;
+    // A truthy override wins. An explicit null/empty override normally clears the
+    // root (e.g. canonicalizing a stale invite-room alias). But for a repo-backed
+    // room — one whose snapshot carries a gitRoom — a null override must NOT erase
+    // a previously-recorded durable project root: the account/app-agent reopen
+    // path sends { rootPath: null } to mean "open as a room", not "forget which
+    // project this repo room belongs to". Preserving it keeps the repo-backed
+    // focus room attached to its project instead of falling back to HOME later.
+    const snapshotIsRepoBacked = Boolean(snapshot.room?.gitRoom);
+    const rootPath = overrideRootPath !== undefined
+      ? overrideRootPath ?? (snapshotIsRepoBacked ? existingRoom?.rootPath ?? null : null)
       : existingRoom
         ? existingRoom.rootPath
         : options.repoStatus.value?.rootPath ?? options.appInfo.value?.workspaceRoot ?? null;
