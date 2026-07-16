@@ -45,6 +45,7 @@ import {
   errorMessage,
   observeFencedExit,
   safeStreamPayload,
+  sameProcessBirthIdentity,
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
@@ -130,6 +131,37 @@ function streamKind(method: string): ProviderStreamEventKind {
   if (/^turn\//.test(method)) return "turn_lifecycle";
   if (/^item\//.test(method)) return "item_lifecycle";
   return "provider_event";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | null {
+  const root = recordValue(value);
+  if (!root) return null;
+  const candidates = [
+    root.status,
+    root.threadStatus,
+    root.turnStatus,
+    recordValue(root.thread)?.status,
+    recordValue(root.turn)?.status,
+  ].flatMap((candidate) => {
+    const nested = recordValue(candidate);
+    return [candidate, nested?.type, nested?.status];
+  });
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    if (/^(?:systemError|error|failed)$/i.test(candidate)) return "failed";
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    if (/^(?:completed|interrupted|idle|stopped)$/i.test(candidate)) return "idle";
+    if (/^(?:active|inProgress|running|queued|pending)$/i.test(candidate)) return "working";
+  }
+  return null;
 }
 
 function isMethodNotFound(error: unknown): boolean {
@@ -471,6 +503,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
         suggestedDisplayName: req.agentDisplayName.trim(),
         deadlineUtc: null,
         maxMinutes: 0,
+        ...(resumeRef && req.supervisorWorkerSession
+          ? { resumeWorker: req.supervisorWorkerSession }
+          : {}),
       });
       const turn = await client.request<TurnStartResult>("turn/start", {
         threadId,
@@ -520,7 +555,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (currentIdentity === undefined) {
         throw new Error("durable endpoint process identity cannot be verified");
       }
-      if (currentIdentity !== connection.processIdentity) {
+      if (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity)) {
         throw new Error("durable endpoint process identity no longer matches its recorded birth");
       }
       const observedExit = this.deps.observeProcessExit(
@@ -561,7 +596,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         && connection.pid !== null
         && connection.processIdentity
         && currentIdentity !== undefined
-        && currentIdentity !== connection.processIdentity
+        && (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity))
       ) return null;
       throw new Error(
         `Codex app-server attach is ambiguous; refusing to launch a second writer: ${errorMessage(error)}`,
@@ -574,6 +609,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     notification: RpcNotification,
   ): void {
     this.publishStream(handle, notification.method, notification.params, streamKind(notification.method));
+    const lifecycle = /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
+      ? "failed"
+      : codexLifecycleStatus(notification.params)
+        ?? (/^(?:turn|thread)\/(?:completed|interrupted|stopped)$/i.test(notification.method) ? "idle" : null)
+        ?? (/^(?:turn|thread)\/(?:started|resumed)$/i.test(notification.method) ? "working" : null);
+    if (lifecycle && (handle.state !== "failed" || lifecycle === "failed")) handle.state = lifecycle;
     const summary = summarizeCodexRuntimeNotification(notification);
     this.publishActivity(handle, {
       source: "native_harness",

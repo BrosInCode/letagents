@@ -53,6 +53,11 @@ export function buildCodexStartPrompt(input: {
   providerLabel?: string;
   /** register_agent_session runtime prefix. Defaults to codex. */
   runtimeKey?: string;
+  /** Exact non-secret room continuity restored by the supervisor. */
+  resumeWorker?: {
+    agentSessionId: string;
+    roomCursor: string | null;
+  };
 }): string {
   const providerLabel = input.providerLabel ?? "Codex";
   const runtimeKey = input.runtimeKey ?? "codex";
@@ -80,6 +85,35 @@ export function buildCodexStartPrompt(input: {
       "- Be concise, avoid duplicate responses, and do not narrate hidden chain-of-thought.",
       `- Stop immediately if a future room message text exactly equals: ${input.stopPhrase}`,
       `- When stopping, finish with exactly: ${input.token}_DONE`,
+    ].join("\n");
+  }
+
+  if (input.resumeWorker) {
+    const cursorInstruction = input.resumeWorker.roomCursor
+      ? `Use ${JSON.stringify(input.resumeWorker.roomCursor)} as the first after_message_id cursor.`
+      : "No prior worker cursor was checkpointed; perform one bounded catch-up wait, then checkpoint and advance its returned cursor.";
+    return [
+      `Resume the existing persistent local ${providerLabel} worker for a LetAgents room.`,
+      `Primary working directory: ${input.cwd}. Continue the same work attempt in this repository/worktree.`,
+      deadlineInstruction,
+      "",
+      "Durable worker continuity:",
+      `1. Your exact existing agent_session_id is ${JSON.stringify(input.resumeWorker.agentSessionId)}. Reuse it for every room, status, reasoning, task, and wait tool that accepts agent_session_id.`,
+      `2. The exact supervised room is ${JSON.stringify(input.roomIdentifier)}. Pass it explicitly as room_id to every room and task tool; do not infer a repo/default room.`,
+      `3. ${cursorInstruction}`,
+      "4. Call get_board once to re-read the current lease and task state, then immediately continue wait_for_messages from that cursor.",
+      "5. Stay in the wait loop and advance from each returned message id or last_observed_message_id.",
+      "6. Continue unfinished room work from the existing transcript, workspace, and lease state.",
+      `7. Stop immediately if a browser/user room message text exactly equals: ${input.stopPhrase}`,
+      `8. When stopping, reply in the relevant room thread with exactly: ${input.token}_DONE`,
+      "",
+      "Identity fences:",
+      "- Do not call join_room or join_code during this resume bootstrap.",
+      "- Do not call resume_room_session; it recreates owner participation and uses shared room-local cursor state.",
+      "- Do not choose or set a new codename.",
+      "- Do not call register_agent_session or create a replacement worker session.",
+      "- Do not replay the full room history; continue from the saved cursor.",
+      "- Do not narrate hidden chain-of-thought or spam keepalives.",
     ].join("\n");
   }
 

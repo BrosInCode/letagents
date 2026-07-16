@@ -6,6 +6,7 @@ import {
   managedAgentRootPathForRoom,
   managedAgentRepoStatusForRoom,
   preferredManagedAgentRepoRootPath,
+  supervisedProviderLaunchPolicy,
 } from "../src/domain/managed-agents";
 import { roomWithInheritedProjectContext } from "../src/domain/room-project-context";
 
@@ -154,4 +155,12 @@ test("Add Agent never replaces a durable local project root with stale repo stat
     durableProjectRootPath: "/project/local-folder",
     homePath: "/Users/emmy",
   }), "/project/local-folder");
+});
+
+test("supervised Claude permission profiles become explicit native CLI policies", () => {
+  assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "read_only"), { permissionMode: "plan" });
+  assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "ask_before_write"), { permissionMode: "default" });
+  assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "full_access"), { permissionMode: "bypassPermissions" });
+  assert.throws(() => supervisedProviderLaunchPolicy("claude-code", null), /Choose an available Claude Code permission profile/);
+  assert.equal(supervisedProviderLaunchPolicy("codex", "full_access"), undefined);
 });

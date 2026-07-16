@@ -80,6 +80,10 @@ export {
 } from "./runtime/presence.js";
 export { roomScopedApiCall } from "./runtime/room-api.js";
 export {
+  bindSupervisedWorkerSession,
+  checkpointSupervisedWorkerCursor,
+} from "./runtime/supervisor-bridge.js";
+export {
   autoJoinFromContext,
   buildJoinResponse,
   createInviteRoom,

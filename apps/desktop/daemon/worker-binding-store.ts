@@ -9,13 +9,14 @@ export interface WorkerSessionBinding {
   agent_session_id: string;
   agent_session_token: string;
   api_url: string;
+  room_cursor: string | null;
   last_sequence: number;
   last_observed_at_ms: number;
   updated_at: string;
 }
 
 type StoredBindings = { version: 1; bindings: Record<string, WorkerSessionBinding> };
-type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "last_sequence" | "last_observed_at_ms" | "updated_at">;
+type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at">;
 
 /**
  * Daemon-private worker credentials. These deliberately live outside the
@@ -43,12 +44,139 @@ export class WorkerBindingStore {
       const binding: WorkerSessionBinding = {
         ...input,
         api_url: new URL(input.api_url).origin,
+        room_cursor: prior?.agent_session_id === input.agent_session_id
+          ? prior.room_cursor ?? null
+          : null,
         last_sequence: prior?.agent_session_id === input.agent_session_id ? prior.last_sequence : 0,
         last_observed_at_ms: prior?.agent_session_id === input.agent_session_id && Number.isSafeInteger(prior.last_observed_at_ms) ? prior.last_observed_at_ms : 0,
         updated_at: new Date().toISOString(),
       };
       await this.write({ version: 1, bindings: { ...stored.bindings, [input.entry_id]: binding } });
       return binding;
+    });
+  }
+
+  /**
+   * Verify one retained credential while it still belongs to its terminal
+   * predecessor, then atomically carry it onto an exact resumed execution.
+   * The transport callback runs under the credential-store mutex and receives
+   * the old binding read-only; rejection or timeout performs no durable write.
+   */
+  async verifyAndAdvanceExecutionGeneration<T extends { accepted: boolean }>(input: {
+    entryId: string;
+    roomId: string;
+    workAttemptId: string;
+    fromExecutionGenerationId: string;
+    toExecutionGenerationId: string;
+    agentSessionId: string;
+  }, operation: (publication: {
+    binding: Readonly<WorkerSessionBinding>;
+    sequence: number;
+    observed_at: string;
+  }) => Promise<T>): Promise<{ binding: WorkerSessionBinding; advanced: boolean; accepted: boolean }> {
+    for (const [field, value] of Object.entries(input)) {
+      if (!value.trim()) throw new Error(`Worker binding generation rollover ${field} is required.`);
+    }
+    if (input.fromExecutionGenerationId === input.toExecutionGenerationId) {
+      throw new Error("Worker binding generation rollover requires a successor execution generation.");
+    }
+    return this.serialize(async () => {
+      const stored = await this.load();
+      const prior = stored.bindings[input.entryId];
+      if (!prior
+        || prior.entry_id !== input.entryId
+        || prior.room_id !== input.roomId
+        || prior.work_attempt_id !== input.workAttemptId
+        || prior.agent_session_id !== input.agentSessionId) {
+        throw new Error("Worker binding generation rollover does not match the durable worker identity.");
+      }
+      // A newer runtime can win the race by formally binding the same exact
+      // successor while compatibility recovery is in flight.
+      if (prior.execution_generation_id === input.toExecutionGenerationId) {
+        return { binding: prior, advanced: false, accepted: true };
+      }
+      if (prior.execution_generation_id !== input.fromExecutionGenerationId) {
+        throw new Error("Worker binding generation rollover does not match its terminal predecessor.");
+      }
+      const nowMs = Date.now();
+      const priorObservedAtMs = Number.isSafeInteger(prior.last_observed_at_ms) ? prior.last_observed_at_ms : 0;
+      const effectiveObservedAtMs = Math.max(nowMs, priorObservedAtMs + 1);
+      const sequence = Math.max(prior.last_sequence + 1, effectiveObservedAtMs);
+      const observed_at = new Date(effectiveObservedAtMs).toISOString();
+      const result = await operation({ binding: prior, sequence, observed_at });
+      if (!result.accepted) return { binding: prior, advanced: false, accepted: false };
+      const binding: WorkerSessionBinding = {
+        ...prior,
+        execution_generation_id: input.toExecutionGenerationId,
+        last_sequence: sequence,
+        last_observed_at_ms: effectiveObservedAtMs,
+        updated_at: observed_at,
+      };
+      await this.write({ version: 1, bindings: { ...stored.bindings, [input.entryId]: binding } });
+      return { binding, advanced: true, accepted: true };
+    });
+  }
+
+  async checkpointCursor(
+    entryId: string,
+    agentSessionId: string,
+    executionGenerationId: string,
+    roomCursor: string,
+  ): Promise<WorkerSessionBinding> {
+    for (const [field, value] of Object.entries({ entryId, agentSessionId, executionGenerationId, roomCursor })) {
+      if (!value.trim()) throw new Error(`Worker cursor checkpoint ${field} is required.`);
+    }
+    return this.serialize(async () => {
+      const stored = await this.load();
+      const prior = stored.bindings[entryId];
+      if (!prior
+        || prior.agent_session_id !== agentSessionId
+        || prior.execution_generation_id !== executionGenerationId) {
+        throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
+      }
+      if (prior.room_cursor === roomCursor) return prior;
+      const binding: WorkerSessionBinding = {
+        ...prior,
+        room_cursor: roomCursor,
+        updated_at: new Date().toISOString(),
+      };
+      await this.write({ version: 1, bindings: { ...stored.bindings, [entryId]: binding } });
+      return binding;
+    });
+  }
+
+  /**
+   * Compatibility path for native observation of a published-runtime poll.
+   * Unlike the formal MCP response checkpoint, this evidence is one poll
+   * behind and may arrive late, so it may only advance a numeric room cursor.
+   */
+  async checkpointCursorMonotonic(
+    entryId: string,
+    agentSessionId: string,
+    executionGenerationId: string,
+    roomCursor: string,
+  ): Promise<{ binding: WorkerSessionBinding; advanced: boolean }> {
+    const candidateNumber = parseRoomMessageNumber(roomCursor);
+    if (candidateNumber === null) throw new Error("Compatibility worker cursor must be a numeric room message id.");
+    return this.serialize(async () => {
+      const stored = await this.load();
+      const prior = stored.bindings[entryId];
+      if (!prior
+        || prior.agent_session_id !== agentSessionId
+        || prior.execution_generation_id !== executionGenerationId) {
+        throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
+      }
+      const priorNumber = parseRoomMessageNumber(prior.room_cursor);
+      if (prior.room_cursor !== null && (priorNumber === null || candidateNumber <= priorNumber)) {
+        return { binding: prior, advanced: false };
+      }
+      const binding: WorkerSessionBinding = {
+        ...prior,
+        room_cursor: roomCursor,
+        updated_at: new Date().toISOString(),
+      };
+      await this.write({ version: 1, bindings: { ...stored.bindings, [entryId]: binding } });
+      return { binding, advanced: true };
     });
   }
 
@@ -141,4 +269,12 @@ export class WorkerBindingStore {
     await previous;
     try { return await operation(); } finally { release(); }
   }
+}
+
+function parseRoomMessageNumber(value: string | null): number | null {
+  if (!value) return null;
+  const match = /^msg_(\d+)$/.exec(value);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }

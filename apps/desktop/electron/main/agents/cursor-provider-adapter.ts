@@ -28,6 +28,7 @@ import {
   defaultSignalProcess,
   delay,
   safeStreamPayload,
+  sameProcessBirthIdentity,
   type ProviderProcessExit,
 } from "./provider-evidence.js";
 
@@ -746,7 +747,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (identity === undefined) {
       throw new Error("Cursor attach is ambiguous; the recorded process identity cannot be verified.");
     }
-    if (identity === null || identity !== connection.processIdentity) {
+    if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) {
       // Verifiably gone (a recycled pid is NOT it and is never signalled).
       return null;
     }
@@ -756,7 +757,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (identityBeforeKill === undefined) {
       throw new Error("Cursor attach is ambiguous; the orphaned turn child's termination could not be verified.");
     }
-    if (identityBeforeKill !== null && identityBeforeKill === connection.processIdentity) {
+    if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
       this.deps.signalProcess(pid, "SIGKILL");
       await this.awaitIdentityGone(pid, connection.processIdentity);
     }
@@ -766,7 +767,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private async awaitIdentityGone(pid: number, processIdentity: string): Promise<void> {
     while (true) {
       const identity = this.deps.getProcessIdentity(pid);
-      if (identity === null || (typeof identity === "string" && identity !== processIdentity)) return;
+      if (identity === null || (typeof identity === "string" && !sameProcessBirthIdentity(identity, processIdentity))) return;
       await delay(50);
     }
   }
@@ -784,7 +785,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (graceful) return;
     if (processIdentity) {
       const identity = this.deps.getProcessIdentity(pid);
-      if (identity !== null && identity !== processIdentity) return;
+      if (identity === undefined || identity === null || !sameProcessBirthIdentity(identity, processIdentity)) return;
     }
     this.deps.signalProcess(pid, "SIGKILL");
     await exited;

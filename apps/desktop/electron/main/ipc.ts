@@ -829,8 +829,16 @@ export function registerDesktopIpcHandlers(
       if (storage.effectiveMode !== "cloud") {
         throw new Error("Supervised agents are not available in local-only rooms yet. Publish or join a cloud room, or use the existing local agent path.");
       }
-      if (input.providerId !== "codex") {
-        throw new Error(`Supervised ${input.providerId} is capability-gated: only the Codex native adapter currently proves durable attach, terminal evidence, and activity streaming.`);
+      if (input.providerId !== "codex" && input.providerId !== "claude-code") {
+        throw new Error(`Supervised ${input.providerId} is capability-gated: no daemon-native lifecycle adapter is available.`);
+      }
+      if (input.providerId === "claude-code" && input.permissionProfileId === "ask_before_write") {
+        throw new Error("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged into the desktop or room. Choose Read-only or Full access.");
+      }
+      if (input.providerId === "claude-code") {
+        // Repair legacy `npx -y letagents` configs before the daemon launches
+        // inside a pristine managed checkout named `letagents`.
+        await refreshInstalledLetAgentsMcpServerAuth();
       }
       // Claim the lane durably first. Every legacy start consults this daemon
       // fence, so no new legacy owner may appear while transfer is in flight.
@@ -849,6 +857,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
+      if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
       return updated;
     },

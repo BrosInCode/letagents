@@ -2,6 +2,7 @@ import { appendFile, mkdir, rename, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { Transition } from "./types.js";
+import { redactCredentialText } from "./credential-redaction.js";
 
 export class AuditLog {
   constructor(readonly path: string, private readonly maxBytes = 1024 * 1024) {}
@@ -9,7 +10,13 @@ export class AuditLog {
   async append(transition: Transition): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     await this.rotateIfNeeded();
-    await appendFile(this.path, `${JSON.stringify(transition)}\n`, { encoding: "utf8", mode: 0o600 });
+    const sanitized: Transition = {
+      ...transition,
+      entry_id: redactCredentialText(transition.entry_id).value,
+      cause: redactCredentialText(transition.cause).value,
+      actor: redactCredentialText(transition.actor).value,
+    };
+    await appendFile(this.path, `${JSON.stringify(sanitized)}\n`, { encoding: "utf8", mode: 0o600 });
   }
 
   private async rotateIfNeeded(): Promise<void> {

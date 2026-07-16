@@ -15,13 +15,13 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../ipc-types.js";
 import { desktopRoot } from "./paths.js";
-import { defaultGetProcessIdentity } from "./agents/provider-evidence.js";
+import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.7";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.13";
 const REQUEST_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
@@ -174,9 +174,13 @@ export class SupervisorDaemonClient {
       observed_state: "absent",
       condition: "none",
       permission_profile_id: input.permissionProfileId ?? null,
-      provider_launch_policy: input.providerId === "codex" && (!input.permissionProfileId || input.permissionProfileId === "full_access")
+      // A caller-supplied policy belongs to the selected native provider. Do
+      // not reinterpret it as a LetAgents permission profile on its way to
+      // the daemon. The Codex default remains only for the existing UI that
+      // has not supplied an explicit provider policy yet.
+      provider_launch_policy: input.launchPolicy ?? (input.providerId === "codex" && (!input.permissionProfileId || input.permissionProfileId === "full_access")
         ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }
-        : {},
+        : {}),
       created_by: "desktop",
       created_at: now,
       source_repo_path: input.repoRootPath,
@@ -424,7 +428,7 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
 }
 
 function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
-  return {
+  return sanitizeDesktopActivityEvent({
     observedAt: event.observed_at,
     sequence: event.sequence,
     provider: event.provider,
@@ -436,22 +440,57 @@ function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
     payloadTruncated: event.payload_truncated,
     payloadRedacted: event.payload_redacted,
     durablePayloadRef: event.durable_payload_ref,
-  };
+  });
 }
 
 function wireActivity(event: DesktopSupervisorActivityEvent): WireActivityEvent {
+  const safe = sanitizeDesktopActivityEvent(event);
   return {
-    observed_at: event.observedAt,
-    sequence: event.sequence,
-    provider: event.provider,
-    kind: event.kind,
-    method: event.method,
-    summary: event.summary,
-    status: event.status,
-    payload: event.payload,
-    payload_truncated: event.payloadTruncated,
-    payload_redacted: event.payloadRedacted,
-    durable_payload_ref: event.durablePayloadRef,
+    observed_at: safe.observedAt,
+    sequence: safe.sequence,
+    provider: safe.provider,
+    kind: safe.kind,
+    method: safe.method,
+    summary: safe.summary,
+    status: safe.status,
+    payload: safe.payload,
+    payload_truncated: safe.payloadTruncated,
+    payload_redacted: safe.payloadRedacted,
+    durable_payload_ref: safe.durablePayloadRef,
+  };
+}
+
+function sanitizeDesktopActivityEvent(event: DesktopSupervisorActivityEvent): DesktopSupervisorActivityEvent {
+  const payload = safeStreamPayload(event.payload);
+  const provider = redactCredentialText(event.provider);
+  const kind = redactCredentialText(event.kind);
+  const method = redactCredentialText(event.method);
+  const summary = redactCredentialText(event.summary);
+  const durableRef = event.durablePayloadRef === null ? null : redactCredentialText(event.durablePayloadRef);
+  const bound = (value: string, max: number) => {
+    if (value.length <= max) return value;
+    const markerStart = value.lastIndexOf("[REDACTED]", max);
+    if (markerStart >= 0 && markerStart < max && markerStart + "[REDACTED]".length > max) return value.slice(-max);
+    return value.slice(0, max);
+  };
+  const providerValue = bound(provider.value, 160);
+  const kindValue = bound(kind.value, 160);
+  const methodValue = bound(method.value, 500);
+  const summaryValue = bound(summary.value, 500);
+  const durableValue = durableRef ? bound(durableRef.value, 2_048) : null;
+  return {
+    ...event,
+    provider: providerValue,
+    kind: kindValue,
+    method: methodValue,
+    summary: summaryValue,
+    payload: payload.payload,
+    payloadTruncated: event.payloadTruncated || payload.payloadTruncated
+      || provider.value.length > providerValue.length || kind.value.length > kindValue.length
+      || method.value.length > methodValue.length || summary.value.length > summaryValue.length
+      || (durableRef?.value.length ?? 0) > (durableValue?.length ?? 0),
+    payloadRedacted: event.payloadRedacted || payload.payloadRedacted || provider.redacted || kind.redacted || method.redacted || summary.redacted || durableRef?.redacted === true,
+    durablePayloadRef: durableValue,
   };
 }
 
@@ -486,19 +525,19 @@ export async function publishSupervisorActivity(input: {
   const { value: redactedPayload, redacted } = redactActivityPayload(input.payload ?? { summary: input.summary });
   const serialized = safeJson(redactedPayload);
   const truncated = serialized.length > 8_192;
-  const event: DesktopSupervisorActivityEvent = {
+  const event = sanitizeDesktopActivityEvent({
     observedAt: new Date().toISOString(),
     sequence,
     provider: input.provider,
     kind: input.kind,
     method: input.method,
-    summary: input.summary.slice(0, 500),
+    summary: input.summary,
     status: input.status,
     payload: truncated ? `${serialized.slice(0, 8_192)}…` : redactedPayload,
     payloadTruncated: truncated,
     payloadRedacted: redacted,
     durablePayloadRef: null,
-  };
+  });
   const entry = await supervisorDaemonClient.appendActivity(input.entryId, event);
   activityEmitter.emit("activity", { entryId: input.entryId, event });
   return entry;
@@ -513,7 +552,11 @@ function redactActivityPayload(payload: unknown): { value: unknown; redacted: bo
       return "[redacted]";
     }
     if (depth > 8) { redacted = true; return "[truncated-depth]"; }
-    if (typeof value === "string") return value.length > 4_096 ? (redacted = true, `${value.slice(0, 4_096)}…`) : value;
+    if (typeof value === "string") {
+      const safe = redactCredentialText(value);
+      redacted ||= safe.redacted;
+      return safe.value.length > 4_096 ? (redacted = true, `${safe.value.slice(0, 4_096)}…`) : safe.value;
+    }
     if (typeof value === "bigint") return value.toString();
     if (!value || typeof value !== "object") return value;
     if (seen.has(value)) { redacted = true; return "[circular]"; }

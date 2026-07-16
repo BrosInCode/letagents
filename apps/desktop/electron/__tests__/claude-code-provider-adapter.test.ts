@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   ClaudeCodeProviderAdapter,
   claudeCliEnv,
   claudeLaunchPolicyArgs,
+  createEphemeralClaudeMcpConfig,
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
 } from "../main/agents/claude-code-provider-adapter.js";
@@ -13,7 +19,7 @@ import type {
   ProviderStreamEvent,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
-import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 // Fake-child harness proving the P2a adapter honors every #765 liveness
 // invariant with no live `claude` binary: birth-identity fencing, control-loss
@@ -104,12 +110,19 @@ function birthIdentity(pid: number): string {
 
 function createHarness(options: HarnessOptions = {}) {
   const children: FakeClaudeChild[] = [];
-  const launches: Array<{ claudeBin: string; args: string[]; cwd: string }> = [];
+  const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 4100;
+  let mcpConfigDisposals = 0;
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
+    async createLetAgentsMcpConfig() {
+      return {
+        path: "/private/tmp/letagents-claude-mcp-test/mcp.json",
+        async dispose() { mcpConfigDisposals += 1; },
+      };
+    },
     launchChild(input) {
       launches.push(input);
       const pid = options.pid === undefined ? nextPid++ : options.pid;
@@ -174,7 +187,14 @@ function createHarness(options: HarnessOptions = {}) {
     now: () => new Date(1_700_000_000_000).toISOString(),
   };
 
-  return { children, launches, signals, identities, dependencies };
+  return {
+    children,
+    launches,
+    signals,
+    identities,
+    dependencies,
+    get mcpConfigDisposals() { return mcpConfigDisposals; },
+  };
 }
 
 function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
@@ -190,6 +210,28 @@ function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRe
 
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+function waitForChildOutput(child: ReturnType<typeof spawn>, marker: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const onData = (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+      if (!output.includes(marker)) return;
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onExit = () => { cleanup(); reject(new Error(`child exited before '${marker}'`)); };
+    const cleanup = () => {
+      child.stdout?.off("data", onData);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    child.stdout?.on("data", onData);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
 }
 
 // The evidence module's grace timers are deliberately unref'd; when a test's
@@ -247,12 +289,87 @@ test("spawn launches the headless CLI with verbatim policy flags, verifies the w
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
 });
 
+test("Claude supervised launch passes the exact daemon generation bridge to its LetAgents MCP workplace", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    supervisorEntryId: "manifest_exact",
+    supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact",
+  }));
+  assert.deepEqual(harness.launches[0]?.env, {
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "manifest_exact",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+  });
+  const args = harness.launches[0]!.args;
+  assert.equal(args.includes("--strict-mcp-config"), true);
+  assert.equal(argValue(args, "--mcp-config"), "/private/tmp/letagents-claude-mcp-test/mcp.json");
+  assert.equal(JSON.stringify(args).includes("test-worker-token"), false, "worker auth never enters process argv");
+  assert.equal(harness.mcpConfigDisposals, 1, "ephemeral MCP config is removed after init");
+});
+
+test("managed Claude MCP config is private, official-runtime-only, and ephemeral outside the worktree", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-claude-mcp-test-"));
+  try {
+    const config = await createEphemeralClaudeMcpConfig({
+      LETAGENTS_API_URL: "https://letagents.example",
+      LETAGENTS_TOKEN: "test-worker-token",
+    }, root);
+    const parsed = JSON.parse(await readFile(config.path, "utf8"));
+    assert.deepEqual(parsed, {
+      mcpServers: {
+        letagents: {
+          command: "npx",
+          args: ["-y", "--package=letagents-runtime@npm:letagents", "letagents"],
+          env: {
+            LETAGENTS_API_URL: "https://letagents.example",
+            LETAGENTS_TOKEN: "test-worker-token",
+          },
+        },
+      },
+    });
+    assert.equal((await stat(config.path)).mode & 0o777, 0o600);
+    await config.dispose();
+    await assert.rejects(access(config.path));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("repo-tracked legacy .mcp.json cannot override the supervised Claude workplace", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "letagents-managed-workspace-"));
+  try {
+    await writeFile(join(workspace, ".mcp.json"), JSON.stringify({
+      mcpServers: {
+        letagents: {
+          command: "npx",
+          args: ["-y", "letagents"],
+          cwd: workspace,
+        },
+      },
+    }));
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    await adapter.spawn(spawnRequest({ cwd: workspace }));
+    const args = harness.launches[0]!.args;
+    assert.equal(args.includes("--strict-mcp-config"), true);
+    assert.equal(argValue(args, "--mcp-config"), "/private/tmp/letagents-claude-mcp-test/mcp.json");
+    assert.equal(argValue(args, "--mcp-config")!.startsWith(workspace), false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("launch policy is opaque but shape-checked: reserved flags and non-object policies are rejected before launch", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { resume: "sess-x" } })), /reserved flag 'resume'/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { sessionId: "sess-x" } })), /reserved flag 'sessionId'/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { noSessionPersistence: true } })), /reserved flag 'noSessionPersistence'/, "a policy may not disable the continuation");
+  await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { mcpConfig: "/tmp/other.json" } })), /reserved flag 'mcpConfig'/);
+  await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { strictMcpConfig: false } })), /reserved flag 'strictMcpConfig'/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: "bypassPermissions" })), /native CLI options object/);
   await assert.rejects(adapter.spawn(spawnRequest({ launchPolicy: { hooks: { PreToolUse: [] } } })), /must be a scalar/);
   assert.equal(harness.launches.length, 0, "nothing launched for a rejected policy");
@@ -278,6 +395,7 @@ test("a CLI without the LetAgents workplace is terminated with no orphan", async
   await assert.rejects(adapter.spawn(spawnRequest()), /refusing to launch without the room workplace/);
   assert.deepEqual(harness.signals[0], { pid: 4100, signal: "SIGTERM" });
   assert.equal(harness.children[0]!.alive, false, "the fresh child was terminated and awaited");
+  assert.equal(harness.mcpConfigDisposals, 1, "startup refusal removes the private MCP config");
 });
 
 test("startup identity failure terminates and awaits the known fresh child", async () => {
@@ -298,7 +416,7 @@ test("a silent CLI that never reports init is refused as unobservable, with no o
   assert.equal(harness.children[0]!.alive, false);
 });
 
-test("observed crash emits one synthesized terminal payload and makes attach absent", async () => {
+test("observed crash emits one synthesized terminal payload and makes attach terminal evidence", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
@@ -312,11 +430,39 @@ test("observed crash emits one synthesized terminal payload and makes attach abs
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "crashed");
   assert.equal(handle.observedState(), "failed");
-  assert.equal(await adapter.attach({
+  const attachment = await adapter.attach({
     workAttemptId: "wa-claude-1",
     providerContinuationId: handle.providerContinuationId!,
     providerConnection: handle.providerConnection,
-  }), null);
+  });
+  assert.equal(attachment && "state" in attachment ? attachment.state : null, "terminal");
+  assert.equal(attachment && "state" in attachment ? attachment.terminal.terminalCause : null, "crashed");
+});
+
+test("durable birth identity remains stable when a provider rewrites its process title", { skip: process.platform === "win32" }, async () => {
+  const child = spawn(process.execPath, ["-e", [
+    "process.stdout.write('ready\\n')",
+    "process.stdin.once('data', () => { process.title = 'claude'; process.stdout.write('changed\\n') })",
+    "setInterval(() => {}, 1000)",
+  ].join(";")], { stdio: ["pipe", "pipe", "ignore"] });
+  try {
+    await waitForChildOutput(child, "ready");
+    const before = defaultGetProcessIdentity(child.pid!);
+    child.stdin!.write("change\n");
+    await waitForChildOutput(child, "changed");
+    const after = defaultGetProcessIdentity(child.pid!);
+    assert.equal(typeof before, "string");
+    assert.equal(after, before, "mutable argv/title is excluded from process birth identity");
+    assert.equal(
+      sameProcessBirthIdentity(after!, `${before} /usr/local/bin/claude --print --verbose`),
+      true,
+      "2.0.12 recognizes a pre-upgrade identity that appended mutable argv",
+    );
+  } finally {
+    const exited = once(child, "exit");
+    child.kill("SIGTERM");
+    await exited;
+  }
 });
 
 test("stop orders SIGTERM before the observed terminal and escalates to SIGKILL after grace", async () => {
@@ -373,18 +519,25 @@ test("a quiet child stays working: no signals, no terminal, no state decay", asy
 });
 
 test("a recycled pid can neither authenticate an attach nor be signalled", async () => {
-  const harness = createHarness();
+  const originalBirth = "Wed Jul 15 23:42:10 2026";
+  const recycledBirth = "Thu Jul 16 00:01:22 2026";
+  const harness = createHarness({ identities: new Map([[4100, originalBirth]]) });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
 
   const fresh = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  harness.identities.set(4100, "some-other-birth-2");
+  harness.identities.set(4100, recycledBirth);
   const attached = await fresh.attach({
     workAttemptId: "wa-claude-1",
     providerContinuationId: handle.providerContinuationId!,
-    providerConnection: { kind: "claude_cli", pid: 4100, processIdentity: birthIdentity(4100) },
+    providerConnection: {
+      kind: "claude_cli",
+      pid: 4100,
+      processIdentity: `${originalBirth} /opt/homebrew/bin/claude --print --verbose`,
+    },
   });
-  assert.equal(attached, null, "the recorded child is proven absent");
+  assert.equal(attached && "state" in attached ? attached.state : null, "terminal", "the recorded child is proven absent");
+  assert.equal(attached && "state" in attached ? attached.terminal.terminalCause : null, "crashed");
   assert.deepEqual(harness.signals, [], "the recycled pid was never signalled");
 });
 
@@ -406,8 +559,9 @@ test("pid-less or unverifiable durable endpoints stay ambiguous and restart-bloc
   assert.deepEqual(harness.signals, []);
 });
 
-test("attach to a live unreachable orphan fences it (TERM, identity recheck, KILL) before reporting absent", async () => {
-  const harness = createHarness({ dieOnSigterm: false });
+test("attach to a live unreachable orphan fences it (TERM, identity recheck, KILL) before reporting terminal", async () => {
+  const stableBirth = "Wed Jul 15 23:42:10 2026";
+  const harness = createHarness({ dieOnSigterm: false, identities: new Map([[4100, stableBirth]]) });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
   const handle = await adapter.spawn(spawnRequest());
 
@@ -416,10 +570,15 @@ test("attach to a live unreachable orphan fences it (TERM, identity recheck, KIL
   const attached = await withLoopAlive(fresh.attach({
     workAttemptId: "wa-claude-1",
     providerContinuationId: handle.providerContinuationId!,
-    providerConnection: { kind: "claude_cli", pid: 4100, processIdentity: birthIdentity(4100) },
+    providerConnection: {
+      kind: "claude_cli",
+      pid: 4100,
+      processIdentity: `${stableBirth} /opt/homebrew/bin/claude --print --verbose --session-id old`,
+    },
   }));
 
-  assert.equal(attached, null, "after fencing, the lane is provably absent for bounded recovery");
+  assert.equal(attached && "state" in attached ? attached.state : null, "terminal", "fencing returns durable terminal evidence for bounded recovery");
+  assert.equal(attached && "state" in attached ? attached.terminal.terminalCause : null, "killed");
   assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"], "exact-child fence ordering");
   assert.equal(harness.identities.get(4100), null, "the orphan is verifiably gone before recovery may proceed");
   assert.equal(harness.launches.length, 1, "fencing never launches a second writer");
@@ -435,12 +594,22 @@ test("resume presents the recorded continuation and asserts the spike-proven sam
   assert.equal(adapter.capabilities().survivesRestart, false, "bounded recovery, not survival");
   const handle = await adapter.resume(
     { workAttemptId: "wa-claude-1", providerContinuationId: "sess-old" },
-    spawnRequest(),
+    spawnRequest({
+      supervisorWorkerSession: {
+        agentSessionId: "agent_session_exact",
+        roomCursor: "msg_2819",
+      },
+    }),
   );
   const args = harness.launches[0]!.args;
   assert.ok(args.join(" ").includes("--resume sess-old"), "the recorded continuation is presented to the CLI");
   assert.equal(args.includes("--session-id"), false, "resume does not mint a competing identity");
   assert.equal(handle.providerContinuationId, "sess-old", "the SAME session id continues");
+  const resumePrompt = (JSON.parse(harness.children[0]!.written[0]!) as { message: { content: Array<{ text: string }> } }).message.content[0]!.text;
+  assert.match(resumePrompt, /agent_session_exact/);
+  assert.match(resumePrompt, /msg_2819/);
+  assert.match(resumePrompt, /Do not call register_agent_session/);
+  assert.doesNotMatch(resumePrompt, /Suggested codename|Call set_agent_name/);
 
   // A CLI that resumes a DIFFERENT session is refused and the fresh child is
   // terminated — a stranger conversation must never become this work attempt's
@@ -505,4 +674,25 @@ test("result messages settle the observed state to idle and publish activity evi
   child.emit({ type: "result", subtype: "success", result: "done", num_turns: 3 });
   await flush();
   assert.equal(handle.observedState(), "idle");
+});
+
+test("error result messages settle the observed state to failed", async () => {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new ClaudeCodeProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => stream.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  harness.children[0]!.emit({
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    result: "native provider failure",
+  });
+  await flush();
+
+  assert.equal(handle.observedState(), "failed");
+  assert.equal(stream.at(-1)?.kind, "error");
+  assert.equal(stream.at(-1)?.method, "result/error_during_execution");
 });

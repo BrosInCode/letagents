@@ -11,6 +11,9 @@ import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
   SupervisorDaemonClient,
+  onSupervisorActivity,
+  publishSupervisorActivity,
+  supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
@@ -109,6 +112,36 @@ async function closeServer(server: Server | null, socketPath: string): Promise<v
   await unlink(socketPath).catch(() => undefined);
 }
 
+test("local supervisor activity subscribers receive only the canonical redacted event", async () => {
+  const canary = "canary-not-a-real-emitter-secret-123456789";
+  const originalAppend = supervisorDaemonClient.appendActivity;
+  let sentToDaemon: unknown;
+  let emitted: unknown;
+  (supervisorDaemonClient as unknown as { appendActivity: (id: string, event: unknown) => Promise<unknown> }).appendActivity = async (_id, event) => {
+    sentToDaemon = event;
+    return {};
+  };
+  const unsubscribe = onSupervisorActivity((event) => { emitted = event; });
+  try {
+    await publishSupervisorActivity({
+      entryId: "credential_emitter",
+      provider: `provider Authorization: Bearer ${canary}`,
+      kind: `kind clientSecret=${canary}`,
+      method: `method Authorization: Basic ${canary}`,
+      summary: `${"x".repeat(470)} Authorization: Bearer ${canary}`,
+      status: "working",
+      payload: { output: JSON.stringify({ clientSecret: canary }) },
+    });
+    assert.doesNotMatch(JSON.stringify(sentToDaemon), new RegExp(canary));
+    assert.doesNotMatch(JSON.stringify(emitted), new RegExp(canary));
+    assert.match(JSON.stringify(emitted), /REDACTED/i);
+    assert.match((emitted as { event: { summary: string } }).event.summary, /Authorization: Bearer \[REDACTED\]/);
+  } finally {
+    unsubscribe();
+    (supervisorDaemonClient as unknown as { appendActivity: typeof originalAppend }).appendActivity = originalAppend;
+  }
+});
+
 test("Electron client uses a healthy daemon and maps manifest/attempt data", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -126,6 +159,23 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const second = await client.create({ ...createInput, creationRequestId: "request_bravo", displayName: "Second durable Codex" });
     assert.notEqual(second.id, created.id, "a new Start request creates an independent same-provider agent");
     assert.equal(wire.entries.length, 2);
+    const activityCanary = "canary-not-a-real-renderer-secret-123456789";
+    wire.entries[0]!.activity = [{
+      observed_at: "2026-01-01T00:00:01.000Z",
+      sequence: 1,
+      provider: "claude-code",
+      kind: "tool_result",
+      method: `tool Authorization: Bearer ${activityCanary}`,
+      summary: `LETAGENTS_TOKEN=${activityCanary}`,
+      status: "working",
+      payload: { output: JSON.stringify({ LETAGENTS_TOKEN: activityCanary }) },
+      payload_truncated: false,
+      payload_redacted: false,
+      durable_payload_ref: null,
+    }];
+    const rendererSafe = (await client.list(created.roomId)).find((candidate) => candidate.id === created.id)!;
+    assert.doesNotMatch(JSON.stringify(rendererSafe.activity), new RegExp(activityCanary));
+    assert.equal(rendererSafe.activity[0]?.payloadRedacted, true);
     Object.assign(wire.entries[0], {
       work_attempt_id: "attempt_alpha",
       provider_ref: {
@@ -169,6 +219,18 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const listed = await client.list(created.roomId);
     assert.equal(listed.find((entry) => entry.id === second.id)?.desiredState, "running", "stopping one same-provider agent does not affect its peer");
     assert.equal((await client.readAttempt(created.id)).workspacePath, null);
+    await client.create({
+      roomIdentifier: "git-room:github.com:owner/claude-repo",
+      displayName: "Durable Claude",
+      providerId: "claude-code",
+      charter: "Keep polling.",
+      repoRootPath: "/tmp/claude-work",
+      launchPolicy: { permissionMode: "acceptEdits", model: "sonnet" },
+    });
+    assert.deepEqual(
+      wire.entries.find((candidate) => candidate.provider === "claude-code")?.provider_launch_policy,
+      { permissionMode: "acceptEdits", model: "sonnet" },
+    );
     const reservation = await client.reserveLegacyLane("room_legacy_client", "codex", "legacy_client");
     assert.equal(reservation.owner_pid, process.pid);
     assert.equal((await client.activateLegacyLane("legacy_client", "legacy_session_client")).state, "active");

@@ -15,6 +15,7 @@ const agentProviders: DesktopAgentProvider[] = [
     capabilities: [
       "external_mcp",
       "desktop_managed_runtime",
+      "supervised_runtime",
       "auth_preflight",
       "turn_control",
     ],

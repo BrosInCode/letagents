@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 import {
@@ -13,6 +16,7 @@ import {
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
+  type ProviderAttachTerminal,
   type ProviderConnectionRef,
   type ProviderContinuationRef,
   type ProviderHandle,
@@ -31,10 +35,15 @@ import {
   delay,
   errorMessage,
   observeFencedExit,
+  sameProcessBirthIdentity,
   safeStreamPayload,
   terminateFreshLaunch,
   type ProviderProcessExit,
 } from "./provider-evidence.js";
+import {
+  getJsonLetAgentsMcpServerFromRaw,
+  LETAGENTS_NPX_ARGS,
+} from "../mcp-config.js";
 
 // P2a (plan v10 §4.8/§6): Claude Code through its NATIVE harness. The legacy
 // managed-Claude engine runs the Agent SDK in-process inside Electron — no OS
@@ -69,7 +78,8 @@ export interface ClaudeCliChild {
 }
 
 export interface ClaudeCodeProviderAdapterDependencies {
-  launchChild(input: { claudeBin: string; args: string[]; cwd: string }): ClaudeCliChild;
+  launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild;
+  createLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
@@ -129,6 +139,12 @@ const RESERVED_POLICY_KEYS = new Set([
   // a policy must not silently disable the continuation.
   "noSessionPersistence",
   "no-session-persistence",
+  // The managed workplace is injected explicitly so project-level .mcp.json
+  // files cannot shadow it or exfiltrate its worker credential.
+  "mcpConfig",
+  "mcp-config",
+  "strictMcpConfig",
+  "strict-mcp-config",
 ]);
 
 function camelToKebab(key: string): string {
@@ -171,10 +187,16 @@ function claudeStreamKind(message: ClaudeStreamMessage): ProviderStreamEventKind
   if (type === "assistant") return "text_delta";
   if (type === "user") return "tool_lifecycle";
   if (type === "tool_use_summary") return "tool_lifecycle";
-  if (type === "result") return "turn_lifecycle";
+  if (type === "result") return isClaudeFailedResult(message) ? "error" : "turn_lifecycle";
   if (type === "system") return "provider_event";
   if (/error/i.test(type)) return "error";
   return "provider_event";
+}
+
+function isClaudeFailedResult(message: ClaudeStreamMessage): boolean {
+  if (message.type !== "result") return false;
+  if ((message as { is_error?: unknown }).is_error === true) return true;
+  return typeof message.subtype === "string" && /(?:error|failed)/i.test(message.subtype);
 }
 
 function streamMethod(message: ClaudeStreamMessage): string {
@@ -228,12 +250,12 @@ function userStreamJsonLine(text: string): string {
  * session"), so a supervisor that itself runs under Claude Code must not leak
  * that marker into the worker. Nothing else is scrubbed or curated.
  */
-export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const { CLAUDECODE: _omitted, ...env } = base;
+export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const { CLAUDECODE: _omitted, ...env } = { ...base, ...overrides };
   return env;
 }
 
-function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string }): ClaudeCliChild {
+function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild {
   const child = spawn(input.claudeBin, input.args, {
     cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
@@ -241,7 +263,9 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     // targets -pid first) reaps the CLI's descendants too, and the child is not
     // torn down as a side effect of the supervisor's own stdio going away.
     detached: process.platform !== "win32",
-    env: claudeCliEnv(),
+    // Inherits the user's configured LetAgents MCP workplace and adds only
+    // the daemon generation bridge consumed by that MCP process.
+    env: claudeCliEnv(process.env, input.env),
   });
 
   const lineListeners = new Set<(line: string) => void>();
@@ -316,8 +340,57 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
   };
 }
 
+export async function createEphemeralClaudeMcpConfig(
+  mcpEnv: Record<string, string>,
+  temporaryRoot = tmpdir(),
+): Promise<{ path: string; dispose(): Promise<void> }> {
+  const directory = await mkdtemp(join(temporaryRoot, "letagents-claude-mcp-"));
+  const configPath = join(directory, "mcp.json");
+  await writeFile(configPath, JSON.stringify({
+    mcpServers: {
+      letagents: {
+        command: "npx",
+        args: [...LETAGENTS_NPX_ARGS],
+        env: mcpEnv,
+      },
+    },
+  }), { encoding: "utf8", mode: 0o600 });
+  let disposed = false;
+  return {
+    path: configPath,
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+async function defaultCreateLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }> {
+  const candidates = [
+    join(homedir(), ".claude", "settings.json"),
+    join(homedir(), ".claude.json"),
+  ];
+  for (const path of candidates) {
+    try {
+      const server = getJsonLetAgentsMcpServerFromRaw(await readFile(path, "utf8"));
+      const env = server?.env;
+      const apiUrl = env?.LETAGENTS_API_URL?.trim();
+      if (!apiUrl) continue;
+      const mcpEnv: Record<string, string> = { LETAGENTS_API_URL: apiUrl };
+      const token = env?.LETAGENTS_TOKEN?.trim();
+      if (token) mcpEnv.LETAGENTS_TOKEN = token;
+      return createEphemeralClaudeMcpConfig(mcpEnv);
+    } catch {
+      // A malformed/missing secondary Claude config does not hide a valid one.
+    }
+  }
+  throw new Error("Claude's repaired LetAgents MCP environment is unavailable.");
+}
+
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   launchChild: defaultLaunchChild,
+  createLetAgentsMcpConfig: defaultCreateLetAgentsMcpConfig,
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
@@ -357,7 +430,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly initTimeoutMs: number;
   private readonly stopGraceMs: number;
   private readonly handles = new Map<string, ClaudeProviderHandle>();
-  private readonly pendingAttaches = new Map<string, Promise<ProviderHandle | null>>();
+  private readonly pendingAttaches = new Map<string, Promise<ProviderHandle | ProviderAttachTerminal | null>>();
   private readonly exitPromises = new WeakMap<ClaudeProviderHandle, Promise<ProviderTerminalPayload>>();
 
   constructor(options: ClaudeCodeProviderAdapterOptions = {}) {
@@ -397,7 +470,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
    * to bounded recovery without ever risking a second writer. Unverifiable
    * state throws ambiguous and blocks replacement.
    */
-  async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | null> {
+  async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
     const handle = this.handles.get(ref.workAttemptId);
     if (handle && !handle.terminal && handle.providerContinuationId === ref.providerContinuationId) {
       return handle;
@@ -408,7 +481,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
     const pending = this.pendingAttaches.get(ref.workAttemptId);
     if (pending) return pending;
-    const attaching = this.fenceRecordedChild(connection).finally(() => {
+    const attaching = this.fenceRecordedChild(connection, ref.providerContinuationId).finally(() => {
       if (this.pendingAttaches.get(ref.workAttemptId) === attaching) {
         this.pendingAttaches.delete(ref.workAttemptId);
       }
@@ -498,6 +571,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
 
     const policyArgs = claudeLaunchPolicyArgs(req.launchPolicy);
+    const managedMcpConfig = await this.deps.createLetAgentsMcpConfig();
+    // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
+    // the managed room workplace. The short-lived 0600 config lives outside
+    // the worktree, its path (never its credential) enters argv, and it is
+    // deleted as soon as Claude reports the initialized MCP workplace.
     // The spike (msg_1382) proved both identity paths: a minted --session-id is
     // honored verbatim on fresh spawns, and --resume continues the SAME session
     // id. Either way the continuation is asserted against init below.
@@ -507,15 +585,32 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       "--verbose",
       "--input-format", "stream-json",
       "--output-format", "stream-json",
+      "--strict-mcp-config",
+      "--mcp-config", managedMcpConfig.path,
       ...policyArgs,
       ...(resumeRef ? ["--resume", resumeRef.providerContinuationId] : ["--session-id", expectedSessionId]),
     ];
-    const child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd });
+    const supervisorEnv = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
+      ? {
+        LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
+        LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
+        LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
+        LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+      }
+      : undefined;
+    let child: ClaudeCliChild;
+    try {
+      child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: supervisorEnv });
+    } catch (error) {
+      await managedMcpConfig.dispose();
+      throw error;
+    }
 
     if (child.pid === null) {
       // Node exposes no safe signalling target in this state. Fail closed until
       // the launch itself proves terminal instead of retrying beside an orphan.
       await child.exited;
+      await managedMcpConfig.dispose();
       throw new Error(
         "Claude CLI launch did not expose a process id; refusing to start an unfenceable writer.",
       );
@@ -524,6 +619,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (typeof processIdentity !== "string" || !processIdentity) {
       child.markIntentionalClose();
       await terminateFreshLaunch(child, this.deps, this.stopGraceMs);
+      await managedMcpConfig.dispose();
       throw new Error(
         "Claude CLI process identity could not be verified; refusing to start an unfenceable writer.",
       );
@@ -575,6 +671,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         maxMinutes: 0,
         providerLabel: "Claude Code",
         runtimeKey: "claude-code",
+        ...(resumeRef && req.supervisorWorkerSession
+          ? { resumeWorker: req.supervisorWorkerSession }
+          : {}),
       });
       child.writeLine(userStreamJsonLine(prompt));
 
@@ -639,13 +738,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       throw error;
     } finally {
       if (initTimer) clearTimeout(initTimer);
+      await managedMcpConfig.dispose();
     }
   }
 
   /** The attach-path fence for a recorded child this adapter cannot reattach. */
   private async fenceRecordedChild(
     connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
-  ): Promise<null> {
+    providerContinuationId: string,
+  ): Promise<ProviderAttachTerminal> {
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
         "Claude CLI attach is ambiguous; the durable endpoint has no verified process identity.",
@@ -657,10 +758,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         "Claude CLI attach is ambiguous; the recorded process identity cannot be verified.",
       );
     }
-    if (identity === null || identity !== connection.processIdentity) {
+    if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) {
       // The recorded child is verifiably gone (a recycled pid is NOT it and is
       // never signalled). Proven absent — bounded recovery may proceed.
-      return null;
+      return this.attachTerminal(providerContinuationId, null, "crashed");
     }
     // The exact recorded child is still alive but unreachable (its stdio died
     // with the previous supervisor). It may still be writing the workspace, so
@@ -673,11 +774,29 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         "Claude CLI attach is ambiguous; the orphaned child's termination could not be verified.",
       );
     }
-    if (identityBeforeKill !== null && identityBeforeKill === connection.processIdentity) {
+    if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
       this.deps.signalProcess(connection.pid, "SIGKILL");
       await this.deps.observeProcessExit(connection.pid, connection.processIdentity);
+      return this.attachTerminal(providerContinuationId, "SIGKILL", "killed");
     }
-    return null;
+    return this.attachTerminal(providerContinuationId, "SIGTERM", "stopped");
+  }
+
+  private attachTerminal(
+    providerContinuationId: string,
+    signal: string | null,
+    terminalCause: ProviderTerminalPayload["terminalCause"],
+  ): ProviderAttachTerminal {
+    return {
+      state: "terminal",
+      terminal: {
+        endedAt: this.deps.now(),
+        exitCode: null,
+        signal,
+        terminalCause,
+        providerContinuationId,
+      },
+    };
   }
 
   private consumeLine(handle: ClaudeProviderHandle, line: string): void {
@@ -688,7 +807,20 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
     this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message));
     const type = typeof message.type === "string" ? message.type : "";
+    if (handle.state === "failed") return;
     if (type === "result") {
+      if (isClaudeFailedResult(message)) {
+        handle.state = "failed";
+        this.publishActivity(handle, {
+          source: "native_harness",
+          method: streamMethod(message),
+          summary: "Turn failed",
+          status: "blocked",
+          checking: "Claude Code reported a terminal turn failure.",
+          next_action: "Awaiting supervised recovery.",
+        });
+        return;
+      }
       handle.state = "idle";
       this.publishActivity(handle, {
         source: "native_harness",

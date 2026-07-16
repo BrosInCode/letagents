@@ -5,6 +5,8 @@ import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   appendIncludePromptOnly,
   buildAgentDeliveryHeaders,
+  bindSupervisedWorkerSession,
+  checkpointSupervisedWorkerCursor,
   currentRoom,
   ensureAgentIdentity,
   getFallbackProjectId,
@@ -370,6 +372,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const identity = await ensureAgentIdentity();
       const sessionRoomId = targetRoomId ?? currentRoom?.room_id ?? localRoomId ?? null;
       const agentSession = resolveWaitAgentSession(sessionRoomId, agent_session_id);
+      if (agentSession) await bindSupervisedWorkerSession(agentSession);
       const maxPollMs = getPollTimeoutCapMs();
       const serverTimeout = Math.min(
         Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
@@ -406,7 +409,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
           includeTaskOwnerLeases: !replayingExistingMessages,
         });
         const routing = filterSilentActivationMessages(messages);
-        touchRoomSession(effectiveLocalRoomId, routing.last_observed_message_id ?? getLastMessageId(result));
+        const observedCursor = routing.last_observed_message_id ?? getLastMessageId(result);
+        touchRoomSession(effectiveLocalRoomId, observedCursor);
+        if (agentSession && observedCursor) await checkpointSupervisedWorkerCursor(agentSession, observedCursor);
         const threadContext = await collectThreadContextMessages({
           messages: routing.messages,
           localRoomId: effectiveLocalRoomId,
@@ -538,7 +543,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       }
 
       if (targetRoomId) {
-        touchRoomSession(targetRoomId, routing.last_observed_message_id ?? getLastMessageId(output));
+        const observedCursor = routing.last_observed_message_id ?? getLastMessageId(output);
+        touchRoomSession(targetRoomId, observedCursor);
+        if (agentSession && observedCursor) await checkpointSupervisedWorkerCursor(agentSession, observedCursor);
       }
       await syncRoomPresence(
         targetRoomId ?? currentRoom?.room_id ?? null,

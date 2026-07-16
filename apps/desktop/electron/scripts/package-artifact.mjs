@@ -23,8 +23,9 @@ await promisify(execFile)("npm", ["ci", "--omit=dev", "--ignore-scripts", "--pre
 const required = [
   "dist-electron/main.js",
   "dist-electron/main/agents/codex-provider-adapter.js",
+  "dist-electron/main/agents/claude-code-provider-adapter.js",
   "dist-daemon/main.js",
-  "dist-daemon/codex-provider-port.js",
+  "dist-daemon/provider-action-port-router.js",
   "dist-renderer/index.html",
   "node_modules/vue/package.json",
 ];
