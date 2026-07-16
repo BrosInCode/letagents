@@ -4,10 +4,12 @@ import { isAbsolute } from "node:path";
 /**
  * Build development-only per-launch MCP entry overrides for supervised Codex smoke tests.
  *
- * Preserves the user's installed auth/env and adds no bearer credential. In packaged
- * (production) builds this always returns an empty array. When entryPath is provided in
- * a non-packaged build, the Codex MCP server entry is replaced with a local built artefact
- * without touching the global ~/.codex config or publishing npm.
+ * Preserves the user's installed auth/env and adds no bearer credential. The caller is
+ * responsible for gating invocation: the daemon only supplies entryPath when BOTH
+ * LETAGENTS_DESKTOP_DEV_SERVER_URL and LETAGENTS_DEV_MCP_SERVER_ENTRY are set AND the
+ * provider is Codex. This function itself validates the path but does not re-check those
+ * gates. When entryPath is provided, the Codex MCP server entry is replaced with the
+ * local built artefact without touching the global ~/.codex config or publishing npm.
  *
  * The returned overrides set only `command` and `args`; `cwd` is always added by the
  * existing codexMcpWorkplaceConfigOverrides path and is never duplicated here.
