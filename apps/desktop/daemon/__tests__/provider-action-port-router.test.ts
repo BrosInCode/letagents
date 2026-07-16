@@ -18,6 +18,7 @@ import type {
 } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -152,40 +153,102 @@ test("provider router selects the native adapter by manifest provider and fences
   );
 });
 
-test("provider router forwards devMcpServerEntryPath from ProviderActionSpawn to the adapter spawn", async () => {
-  let capturedSpawn: ProviderActionSpawn | null = null;
-  const adapter: NativeProviderAdapter = {
-    capabilities: () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: true }),
-    async spawn(input) {
-      capturedSpawn = input;
-      return nativeHandle("codex", input.workAttemptId, "thread-dev");
-    },
+test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {
+  assert.equal(devMcpServerEntryFromEnv({}), null, "both absent → null");
+  assert.equal(devMcpServerEntryFromEnv({ LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://localhost:3000" }), null, "entry absent → null");
+  assert.equal(devMcpServerEntryFromEnv({ LETAGENTS_DEV_MCP_SERVER_ENTRY: "/abs/server.js" }), null, "dev-url absent → null");
+  assert.equal(devMcpServerEntryFromEnv({ LETAGENTS_DESKTOP_DEV_SERVER_URL: "  " }), null, "whitespace-only dev-url → null");
+  assert.equal(devMcpServerEntryFromEnv({ LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://localhost:3000", LETAGENTS_DEV_MCP_SERVER_ENTRY: "relative/path.js" }), null, "relative entry → null");
+  assert.equal(
+    devMcpServerEntryFromEnv({ LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://localhost:3000", LETAGENTS_DEV_MCP_SERVER_ENTRY: "/absolute/path/server.js" }),
+    "/absolute/path/server.js",
+    "both gates set with absolute path → path",
+  );
+});
+
+test("daemon spawn includes devMcpServerEntryPath when both env gates are set, omits it otherwise", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-dev-spawn-gate-"));
+  const source = join(root, "source");
+  await mkdir(source);
+  await execFileAsync("git", ["init", source]);
+  await execFileAsync("git", ["-C", source, "config", "user.email", "devgate@example.invalid"]);
+  await execFileAsync("git", ["-C", source, "config", "user.name", "Dev Gate Test"]);
+  await writeFile(join(source, "README.md"), "dev gate\n");
+  await execFileAsync("git", ["-C", source, "add", "README.md"]);
+  await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
+  await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
+
+  const capturedSpawns: ProviderActionSpawn[] = [];
+  const exitListeners2 = new Map<string, Set<(t: ProviderActionTerminal) => void>>();
+  function devHandle(workAttemptId: string) {
+    const pid = 7000 + capturedSpawns.length;
+    return { workAttemptId, pid, providerContinuationId: "dev-thread", providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `dev:${pid}` }, observedState: () => "working" as const };
+  }
+  const devAdapter: NativeProviderAdapter = {
+    capabilities: () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+    async spawn(input) { capturedSpawns.push(input); return devHandle(input.workAttemptId); },
     async attach() { return null; },
-    async resume(_ref, input) { return nativeHandle("codex", input.workAttemptId, "thread-dev"); },
+    async resume(_ref, input) { return devHandle(input.workAttemptId); },
     async poke() {},
-    async stop(handle) { return { endedAt: "2026-07-15T00:00:00.000Z", exitCode: 0, signal: null, terminalCause: "exited" as const, providerContinuationId: handle.providerContinuationId }; },
-    onExit: () => () => {},
+    async stop(handle) {
+      const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
+      queueMicrotask(() => exitListeners2.get(handle.workAttemptId)?.forEach((l) => l(terminal)));
+      return terminal;
+    },
+    onExit(handle, listener) {
+      const set = exitListeners2.get(handle.workAttemptId) ?? new Set();
+      set.add(listener);
+      exitListeners2.set(handle.workAttemptId, set);
+      return () => set.delete(listener);
+    },
     onStream: () => () => {},
   };
-  const router = new ProviderActionPortRouter({ codex: async () => adapter });
-  await router.spawn({
-    provider: "codex",
-    workAttemptId: "dev-attempt",
-    roomId: "room",
-    cwd: "/tmp/dev",
-    launchPolicy: {},
-    devMcpServerEntryPath: "/absolute/path/to/dist/mcp/server.js",
-  });
-  assert.equal(capturedSpawn?.devMcpServerEntryPath, "/absolute/path/to/dist/mcp/server.js");
-  // Absent field must not be forwarded as undefined noise.
-  let capturedNoEntry: ProviderActionSpawn | null = null;
-  const adapter2: NativeProviderAdapter = {
-    ...adapter,
-    async spawn(input) { capturedNoEntry = input; return nativeHandle("codex", input.workAttemptId, "thread-no-dev"); },
+
+  const savedUrl = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+  const savedEntry = process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY;
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
-  const router2 = new ProviderActionPortRouter({ codex: async () => adapter2 });
-  await router2.spawn({ provider: "codex", workAttemptId: "no-dev-attempt", roomId: "room", cwd: "/tmp/no-dev", launchPolicy: {} });
-  assert.equal(capturedNoEntry?.devMcpServerEntryPath, undefined);
+  const entry: DaemonManifestEntry = {
+    id: "dev_gate_supervised", room_id: "room", display_name: "DevAgent", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
+    permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "default" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+  };
+
+  // Gate 1: both env vars set → field present in spawn
+  process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = "http://localhost:3000";
+  process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = "/absolute/dist/mcp/server.js";
+  const router1 = new ProviderActionPortRouter({ "claude-code": async () => devAdapter });
+  const daemon1 = new SupervisorDaemon(paths, "darwin", router1, true);
+  try {
+    await daemon1.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "dev-gate spawn");
+    assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js", "both gates set: devMcpServerEntryPath must be forwarded to adapter");
+  } finally {
+    await daemon1.stop();
+  }
+
+  // Gate 2: dev-url absent → field absent
+  delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+  process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = "/absolute/dist/mcp/server.js";
+  capturedSpawns.length = 0;
+  const paths2 = { ...paths, lockPath: join(root, "daemon2.lock"), socketPath: join(root, "daemon2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl") };
+  const router2 = new ProviderActionPortRouter({ "claude-code": async () => devAdapter });
+  const daemon2 = new SupervisorDaemon(paths2, "darwin", router2, true);
+  try {
+    await daemon2.start();
+    assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: { ...entry, id: "dev_gate_supervised_2" } })).ok, true);
+    await eventually(async () => ((await daemonRequest(paths2.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "no-dev-url spawn");
+    assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "missing dev-url gate: devMcpServerEntryPath must be absent");
+  } finally {
+    await daemon2.stop();
+    if (savedUrl === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+    else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = savedUrl;
+    if (savedEntry === undefined) delete process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY;
+    else process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = savedEntry;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("provider router public handle reads the native observed state live", async () => {

@@ -15,6 +15,7 @@ import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 
@@ -743,6 +744,7 @@ export class SupervisorDaemon {
           roomCursor: priorBinding.room_cursor ?? null,
         }
         : null;
+      const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
       const spawn = {
         workAttemptId: attempt.work_attempt_id,
         roomId: entry.room_id,
@@ -755,6 +757,7 @@ export class SupervisorDaemon {
         supervisorSocketPath: this.socket.path,
         supervisorExecutionGenerationId: execution.execution_generation_id,
         ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
+        ...(devMcpServerEntryPath ? { devMcpServerEntryPath } : {}),
       };
       const ref = entry.provider_ref ? this.providerRef(entry) : null;
       let resumed = false;
