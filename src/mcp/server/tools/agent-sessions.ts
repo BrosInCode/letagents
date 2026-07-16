@@ -37,7 +37,7 @@ import {
   requireValidWorkerBearerRuntime,
   workerModeDisabledToolResult,
 } from "../runtime/worker-bearer.js";
-import { bindSupervisedWorkerSession } from "../runtime/supervisor-bridge.js";
+import { bindSupervisedWorkerSessionWithContext } from "../runtime/supervisor-bridge.js";
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
@@ -65,7 +65,7 @@ export function registerAgentSessionTools(server: McpServer): void {
       cwd: z
         .string()
         .optional()
-        .describe("Working directory used to detect the worker's active git branch. Defaults to the MCP server's working directory."),
+        .describe("Worker working directory used for branch detection and exact supervised Codex binding. Defaults to the MCP server's working directory."),
     },
     async ({ room_id, session_kind, runtime, display_name, cwd }) => {
       const targetRoomId = getTargetRoomId(room_id);
@@ -188,7 +188,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         throw new Error("Agent session registration response was missing session credentials.");
       }
 
-      const session = saveAgentSession({
+      let session = saveAgentSession({
         session_id: sessionId,
         session_token: sessionToken,
         room_id: typeof created.room_id === "string" ? created.room_id : apiRoomId,
@@ -212,7 +212,17 @@ export function registerAgentSessionTools(server: McpServer): void {
         ended_at: typeof created.ended_at === "string" ? created.ended_at : null,
       });
 
-      await bindSupervisedWorkerSession(session);
+      const supervisorBinding = await bindSupervisedWorkerSessionWithContext(
+        session,
+        process.env,
+        { cwd: cwd?.trim() || process.cwd() },
+      );
+      if (supervisorBinding.supervisorContextCwd) {
+        session = saveAgentSession({
+          ...session,
+          supervisor_context_cwd: supervisorBinding.supervisorContextCwd,
+        });
+      }
       scheduleCodexRuntimeStreamBridgeBind(session);
 
       return {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +26,15 @@ type SupervisorCoordinates = {
   workAttemptId: string;
   executionGenerationId: string;
 };
+type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
+  supervisorContextCwd: string | null;
+};
+
+export type SupervisedWorkerBindingResult = {
+  bound: boolean;
+  /** Validated, canonical, non-secret route suitable for protected local state. */
+  supervisorContextCwd: string | null;
+};
 
 /** Bind the exact worker credential minted by registration to its daemon lane. */
 export async function bindSupervisedWorkerSession(
@@ -33,8 +42,21 @@ export async function bindSupervisedWorkerSession(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<boolean> {
+  return (await bindSupervisedWorkerSessionWithContext(session, env, options)).bound;
+}
+
+/**
+ * Bind and return the validated file-backed route, when one was used.
+ * Registration persists this route so later wait/checkpoint calls do not fall
+ * back to an unrelated long-lived MCP process cwd.
+ */
+export async function bindSupervisedWorkerSessionWithContext(
+  session: StoredAgentSessionState,
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+): Promise<SupervisedWorkerBindingResult> {
   const coordinates = await resolveSupervisorCoordinates(session, env, options);
-  if (!coordinates) return false;
+  if (!coordinates) return { bound: false, supervisorContextCwd: null };
   const { entryId, socketPath, workAttemptId, executionGenerationId } = coordinates;
   if (session.session_kind !== "worker") throw new Error("A supervised provider must register a worker session.");
 
@@ -65,7 +87,7 @@ export async function bindSupervisedWorkerSession(
   }, timeoutMs);
   if (!response.ok) throw new Error(response.error || "Supervisor rejected the worker session binding.");
   if (response.version !== protocolVersion) throw new Error("Supervisor binding response used an unexpected protocol version.");
-  return true;
+  return { bound: true, supervisorContextCwd: coordinates.supervisorContextCwd };
 }
 
 /** Persist the room-delivery cursor beside the daemon-private exact worker credential. */
@@ -111,7 +133,7 @@ async function resolveSupervisorCoordinates(
   session: StoredAgentSessionState,
   env: NodeJS.ProcessEnv,
   options: SupervisorBridgeOptions,
-): Promise<SupervisorCoordinates | null> {
+): Promise<ResolvedSupervisorCoordinates | null> {
   const environmentCoordinates: SupervisorCoordinates = {
     entryId: env.LETAGENTS_SUPERVISOR_ENTRY_ID?.trim() ?? "",
     socketPath: env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim() ?? "",
@@ -123,9 +145,13 @@ async function resolveSupervisorCoordinates(
   if (hasEnvironmentCoordinates && values.some((value) => !value)) {
     throw new Error("Supervised worker bridge environment is incomplete.");
   }
-  if (hasEnvironmentCoordinates) return environmentCoordinates;
+  if (hasEnvironmentCoordinates) {
+    return { ...environmentCoordinates, supervisorContextCwd: null };
+  }
 
-  const context = await readCodexSupervisorContext(options.cwd ?? process.cwd());
+  const context = await readCodexSupervisorContext(
+    options.cwd ?? session.supervisor_context_cwd ?? process.cwd(),
+  );
   if (!context) return null;
   if (!/^codex(?::|$)/i.test(session.runtime.trim())) {
     throw new Error("Codex supervisor bridge context cannot bind a non-Codex worker session.");
@@ -139,7 +165,9 @@ async function resolveSupervisorCoordinates(
   };
 }
 
-async function readCodexSupervisorContext(cwd: string): Promise<(Omit<SupervisorCoordinates, "socketPath"> & { roomId: string }) | null> {
+async function readCodexSupervisorContext(cwd: string): Promise<(
+  Omit<SupervisorCoordinates, "socketPath"> & { roomId: string; supervisorContextCwd: string }
+) | null> {
   const path = join(cwd, SUPERVISOR_CONTEXT_FILE);
   let encoded: string;
   try {
@@ -184,7 +212,7 @@ async function readCodexSupervisorContext(cwd: string): Promise<(Omit<Supervisor
   if (marker.workAttemptId !== coordinates.workAttemptId) {
     throw new Error("Codex supervisor bridge context does not match the daemon-owned worktree.");
   }
-  return coordinates;
+  return { ...coordinates, supervisorContextCwd: await realpath(cwd) };
 }
 
 async function readWorkAttemptMarker(cwd: string): Promise<{ workAttemptId: string }> {

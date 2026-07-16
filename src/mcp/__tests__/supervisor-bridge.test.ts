@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import type { StoredAgentSessionState } from "../local-state.js";
-import { bindSupervisedWorkerSession, checkpointSupervisedWorkerCursor } from "../server/runtime/supervisor-bridge.js";
+import { toPublicAgentSession } from "../server/runtime/agent-sessions.js";
+import {
+  bindSupervisedWorkerSession,
+  bindSupervisedWorkerSessionWithContext,
+  checkpointSupervisedWorkerCursor,
+} from "../server/runtime/supervisor-bridge.js";
 
 const session: StoredAgentSessionState = {
   session_id: "agent_session_exact",
@@ -53,7 +58,10 @@ test("Codex supervisor context binds and checkpoints through an MCP process with
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
     await writeSupervisorContext(root, "generation_first");
     const options = { cwd: root, trustedDaemonSocketPath: socketPath };
-    assert.equal(await bindSupervisedWorkerSession(session, {}, options), true);
+    assert.deepEqual(await bindSupervisedWorkerSessionWithContext(session, {}, options), {
+      bound: true,
+      supervisorContextCwd: await realpath(root),
+    });
     assert.equal(await checkpointSupervisedWorkerCursor(session, "msg_2819", {}, options), true);
     assert.deepEqual(requests.filter((request) => request.method === "supervisor.bind_worker_session")[0]?.params, {
       entry_id: "manifest_exact",
@@ -92,6 +100,62 @@ test("Codex supervisor context binds and checkpoints through an MCP process with
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validated supervisor cwd survives MCP restart for bind and cursor checkpoint", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-persisted-"));
+  const unrelated = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-process-cwd-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2 }
+        : { accepted: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact");
+    const persistedSession: StoredAgentSessionState = {
+      ...session,
+      supervisor_context_cwd: root,
+    };
+
+    const publicSession = toPublicAgentSession(persistedSession);
+    assert.equal(publicSession?.supervisor_context_cwd, undefined);
+    assert.doesNotMatch(JSON.stringify(publicSession), /session-secret|supervisor-context-persisted/,
+      "neither worker authority nor the local supervisor route enters public projections");
+
+    assert.equal(await bindSupervisedWorkerSession(persistedSession, {}, {
+      trustedDaemonSocketPath: socketPath,
+    }), true, "restart binds from the validated session route rather than process.cwd");
+    assert.equal(await checkpointSupervisedWorkerCursor(persistedSession, "msg_restart", {}, {
+      trustedDaemonSocketPath: socketPath,
+    }), true, "later room polls checkpoint through the same durable route");
+
+    const bind = requests.find((request) => request.method === "supervisor.bind_worker_session");
+    const checkpoint = requests.find((request) => request.method === "supervisor.checkpoint_worker_cursor");
+    assert.equal(bind?.params.agent_session_id, session.session_id);
+    assert.equal(checkpoint?.params.agent_session_id, session.session_id);
+    assert.doesNotMatch(JSON.stringify(checkpoint), /session-secret/, "cursor checkpoint never carries worker authority");
+
+    assert.equal(await bindSupervisedWorkerSession({
+      ...persistedSession,
+      supervisor_context_cwd: unrelated,
+    }, {}, { trustedDaemonSocketPath: socketPath }), false, "an unrelated persisted route cannot inherit the binding");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+    await rm(unrelated, { recursive: true, force: true });
   }
 });
 
