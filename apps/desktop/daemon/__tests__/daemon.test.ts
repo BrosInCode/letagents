@@ -2684,6 +2684,13 @@ test("generation handoff reattaches the same provider and publishes its supervis
     });
     assert.equal(staleBind.ok, false, "a terminal predecessor generation cannot bind a worker session");
     assert.match(staleBind.error ?? "", /terminal/);
+    const wrongAttemptBind = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
+      entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_unrelated",
+      work_attempt_id: randomUUID(), execution_generation_id: recoveredGenerationId,
+      agent_session_token: "unrelated-secret", api_url: apiUrl,
+    });
+    assert.equal(wrongAttemptBind.ok, false, "another work attempt cannot bind through a copied stable context");
+    assert.match(wrongAttemptBind.error ?? "", /work attempt/);
     const resumedAttempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { restart_count: number; execution_generations: Array<{ terminal: unknown }> };
     assert.equal(resumedAttempt.restart_count, 2);
     assert.ok(resumedAttempt.execution_generations[0]?.terminal, "the predecessor terminal remains immutable after resume");
