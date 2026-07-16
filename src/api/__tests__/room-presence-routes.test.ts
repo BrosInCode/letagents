@@ -8,7 +8,10 @@ const {
   isSuppressibleDisconnectedPresence,
   registerRoomPresenceRoutes,
 } = await import("../routes/rooms/presence/index.js");
-const { desktopManagedPausePresence } = await import("../routes/rooms/presence/agent-session-routes.js");
+const {
+  desktopManagedPausePresence,
+  normalizeReplayedAgentDisplayName,
+} = await import("../routes/rooms/presence/agent-session-routes.js");
 
 test("desktop closed-room pauses stay distinct from agent failures", () => {
   assert.deepEqual(desktopManagedPausePresence({ availability: "room_closed" }), {
@@ -19,6 +22,14 @@ test("desktop closed-room pauses stay distinct from agent failures", () => {
     status: "blocked",
     statusText: "Needs attention",
   });
+});
+
+test("replayed collision suffixes normalize to the canonical agent display name", () => {
+  assert.equal(normalizeReplayedAgentDisplayName("SilverHarbor 2", "SilverHarbor"), "SilverHarbor");
+  assert.equal(normalizeReplayedAgentDisplayName("SilverHarbor 2 1 1 1", "SilverHarbor"), "SilverHarbor");
+  assert.equal(normalizeReplayedAgentDisplayName("SilverHarbor East", "SilverHarbor"), "SilverHarbor East");
+  assert.equal(normalizeReplayedAgentDisplayName("Agent 47", "Agent"), "Agent");
+  assert.equal(normalizeReplayedAgentDisplayName("Agent 47A", "Agent"), "Agent 47A");
 });
 
 function createDeps() {

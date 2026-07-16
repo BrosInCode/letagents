@@ -44,6 +44,20 @@ export function desktopManagedPausePresence(input: {
   };
 }
 
+export function normalizeReplayedAgentDisplayName(
+  requestedDisplayName: string,
+  canonicalDisplayName: string
+): string {
+  const canonical = canonicalDisplayName.trim();
+  const requested = requestedDisplayName.trim();
+  if (!canonical || !requested.startsWith(`${canonical} `)) return requested;
+
+  const suffix = requested.slice(canonical.length).trim();
+  return suffix && suffix.split(/\s+/).every((part) => /^\d+$/.test(part))
+    ? canonical
+    : requested;
+}
+
 export function registerAgentSessionRoutes(
   app: Express,
   deps: RoomPresenceRouteDeps
@@ -118,9 +132,15 @@ export function registerAgentSessionRoutes(
       const requestedTokens = requestedDisplayName.toLowerCase().split(/[\s_-]+/).filter((token) => token.length > 0);
       const isGenericName = !requestedDisplayName || requestedTokens.every((token) => genericKeywords.has(token));
 
+      const canonicalDisplayName = agent.display_name.trim();
+      const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
+        requestedDisplayName,
+        canonicalDisplayName
+      );
+
       let baseDisplayName = isGenericName
         ? pickLocalCodename(agent.canonical_key).display_name
-        : (requestedDisplayName || agent.display_name);
+        : (normalizedRequestedDisplayName || canonicalDisplayName);
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
       const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
@@ -135,6 +155,27 @@ export function registerAgentSessionRoutes(
         ...activeParticipants.map((participant) => participant.display_name),
         ...activeSessionsForIdentity.map((session) => session.display_name),
       ]);
+
+      // Participant rows are durable room history, not proof that a label is
+      // still live. A restarted worker using the same canonical identity may
+      // reclaim its base label once no active session for that identity holds
+      // it. Never reclaim a label that belongs to a human or another agent:
+      // genuinely concurrent/same-name peers still need disambiguation.
+      if (requestedSessionKind === "worker") {
+        const baseHeldByThisIdentity = activeSessionsForIdentity.some(
+          (session) => normalizeReplayedAgentDisplayName(
+            session.display_name,
+            canonicalDisplayName
+          ) === baseDisplayName
+        );
+        const baseBelongsToAnotherParticipant = activeParticipants.some(
+          (participant) => participant.display_name === baseDisplayName
+            && (participant.kind !== "agent" || participant.agent_key !== agent.canonical_key)
+        );
+        if (!baseHeldByThisIdentity && !baseBelongsToAnotherParticipant) {
+          usedDisplayNames.delete(baseDisplayName);
+        }
+      }
 
       // Burst workers resume the name their instance used last time instead
       // of minting a numbered variant: the persistent participant record
