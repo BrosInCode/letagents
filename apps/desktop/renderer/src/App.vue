@@ -336,7 +336,7 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
-import { roomWithInheritedProjectContext } from "./domain/room-project-context";
+import { resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -372,6 +372,10 @@ import { desktopIpc } from "./ipc/index.js";
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
 const repoStatus = ref<RepoStatus | null>(null);
+// Canonical status of the launched desktop workspace, used only to identity-match
+// a repo-backed room's self-heal target so it never inherits an unrelated repo.
+const workspaceRepoStatus = ref<RepoStatus | null>(null);
+let workspaceRepoStatusRootPath: string | null = null;
 const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
@@ -661,11 +665,26 @@ async function refreshActiveRepoStatus(): Promise<void> {
 }
 
 function activeProjectRootPath(): string | null {
-  const identifier = normalizeRoomIdentifier(selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier);
-  if (!identifier) return null;
-  return recentRootRooms.value.find(
-    (room) => normalizeRoomIdentifier(room.identifier) === identifier
-  )?.rootPath || null;
+  return resolveActiveProjectRootPath({
+    activeRootIdentifier: selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier,
+    // A repo-backed root room whose durable root was lost self-heals from the
+    // workspace ONLY when their canonical Git identity matches; otherwise it
+    // fails closed so a focus room never launches in an unrelated repo.
+    activeRootGitRoom: rootRoomSnapshot.value?.room?.gitRoom || null,
+    recentRootRooms: recentRootRooms.value,
+    workspaceRepoStatus: workspaceRepoStatus.value,
+  });
+}
+
+async function refreshWorkspaceRepoStatus(force = false): Promise<void> {
+  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
+  if (!workspaceRoot) return;
+  // Re-probe on force (e.g. window focus) so a branch/worktree switch can't leave
+  // a stale identity authorizing the wrong ref; otherwise load once per workspace.
+  if (!force && workspaceRepoStatusRootPath === workspaceRoot && workspaceRepoStatus.value) return;
+  workspaceRepoStatusRootPath = workspaceRoot;
+  const status = await desktopIpc.repos.getStatus(workspaceRoot).catch(() => null);
+  if (workspaceRepoStatusRootPath === workspaceRoot) workspaceRepoStatus.value = status;
 }
 
 async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
@@ -701,6 +720,7 @@ function scheduleFocusedRepoStatusRefresh(delayMs = 150): void {
 
 function refreshForegroundData(): void {
   scheduleFocusedRepoStatusRefresh();
+  void refreshWorkspaceRepoStatus(true);
   void refreshSidebarRoomMetadata();
 }
 
@@ -1626,6 +1646,14 @@ watch(
   () => selectedRootRoomIdentifier.value,
   (roomIdentifier) => {
     rememberStoredString(selectedRootRoomStorageKey, roomIdentifier);
+  },
+  { immediate: true }
+);
+
+watch(
+  () => appInfo.value?.workspaceRoot || null,
+  () => {
+    void refreshWorkspaceRepoStatus();
   },
   { immediate: true }
 );
