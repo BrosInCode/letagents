@@ -19,7 +19,7 @@ import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
-import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
+import { acquireWorkspaceFence, withWorkspaceFence, WorkspaceFenceError } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure } from "../reconciler-state.js";
@@ -3331,6 +3331,80 @@ test("a live fence in an unrelated repository does not starve safe GC", async ()
     const live = await acquireWorkspaceFence(unrelated, "other-supervisor", 1, "shared");
     try { assert.deepEqual(await store.garbageCollect(0), [attempt.work_attempt_id]); }
     finally { await live.release(); }
+  } finally { await env.cleanup(); }
+});
+
+test("a retained repo-shared fence does not block provisioning a sibling workspace", async () => {
+  // task_62 regression: active generation A retains a repo-shared fence; provisioning
+  // a DISTINCT sibling workspace B in the same repo namespace must succeed (independent
+  // workspace concurrency), where before it paused B with "Workspace mutation is fenced".
+  const env = await fixture();
+  try {
+    const repoRoot = join(env.root, "worktrees", "repo");
+    const a = join(repoRoot, "attempt-a");
+    const b = join(repoRoot, "attempt-b");
+    await mkdir(a, { recursive: true });
+    await mkdir(b, { recursive: true });
+    const shared = await acquireWorkspaceFence(a, "gen-a", 1, "shared");
+    try {
+      let provisioned = false;
+      await withWorkspaceFence(b, async () => { provisioned = true; });
+      assert.equal(provisioned, true, "sibling workspace B provisions while A retains its repo-shared fence");
+    } finally { await shared.release(); }
+  } finally { await env.cleanup(); }
+});
+
+test("target-exclusive provisioning still excludes a concurrent op on the same workspace", async () => {
+  const env = await fixture();
+  try {
+    const b = join(env.root, "worktrees", "repo", "attempt-b");
+    await mkdir(b, { recursive: true });
+    const held = await acquireWorkspaceFence(b, "prov-1", 0, "exclusive", "target");
+    try {
+      await assert.rejects(acquireWorkspaceFence(b, "prov-2", 0, "exclusive", "target"), WorkspaceFenceError);
+    } finally { await held.release(); }
+  } finally { await env.cleanup(); }
+});
+
+test("repository-wide GC still requires exclusive authority against live generations", async () => {
+  const env = await fixture();
+  try {
+    const repoRoot = join(env.root, "worktrees", "repo");
+    const a = join(repoRoot, "attempt-a");
+    const b = join(repoRoot, "attempt-b");
+    await mkdir(a, { recursive: true });
+    await mkdir(b, { recursive: true });
+    const shared = await acquireWorkspaceFence(a, "gen-a", 1, "shared");
+    try {
+      // Repo-exclusive GC cannot be granted while a live generation retains authority.
+      await assert.rejects(acquireWorkspaceFence(a, "gc", 0, "exclusive"), WorkspaceFenceError);
+    } finally { await shared.release(); }
+    // While repo-exclusive GC holds, even a distinct sibling provisioning is fenced.
+    const gc = await acquireWorkspaceFence(a, "gc", 0, "exclusive");
+    try {
+      await assert.rejects(withWorkspaceFence(b, async () => undefined), WorkspaceFenceError);
+    } finally { await gc.release(); }
+  } finally { await env.cleanup(); }
+});
+
+test("a stale-PID fence record is pruned and does not block acquisition", async () => {
+  const env = await fixture();
+  try {
+    const repoRoot = join(env.root, "worktrees", "repo");
+    const b = join(repoRoot, "attempt-b");
+    await mkdir(b, { recursive: true });
+    const fenceDir = join(repoRoot, ".letagents-supervisor-workspace.fences");
+    await mkdir(fenceDir, { recursive: true, mode: 0o700 });
+    // A genuinely dead pid: spawn a process and wait for it to exit.
+    const dead = spawn(process.execPath, ["-e", "process.exit(0)"]);
+    await new Promise((resolve) => dead.on("close", resolve));
+    await writeFile(join(fenceDir, "exclusive-stale.json"), JSON.stringify({
+      owner: "dead-generation", generation: 0, pid: dead.pid, workspace_path: b,
+      mode: "exclusive", scope: "repo", created_at: new Date().toISOString(),
+    }));
+    let provisioned = false;
+    await withWorkspaceFence(b, async () => { provisioned = true; });
+    assert.equal(provisioned, true, "a stale repo-exclusive record is pruned, not honored as live authority");
   } finally { await env.cleanup(); }
 });
 
