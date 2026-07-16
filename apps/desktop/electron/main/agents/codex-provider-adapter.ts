@@ -11,6 +11,7 @@ import {
   type ThreadReadResult,
   type TurnStartResult,
 } from "./codex-rpc-client.js";
+import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import {
   summarizeCodexRuntimeNotification,
@@ -84,6 +85,8 @@ export interface CodexProviderAdapterDependencies {
       execution_generation_id: string;
     },
   ): Promise<void>;
+  /** True when running inside a packaged Electron build; dev MCP entry overrides are disabled. */
+  isPackaged(): boolean;
   now(): string;
 }
 
@@ -225,6 +228,7 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
+  isPackaged: () => false,
   now: () => new Date().toISOString(),
 };
 
@@ -415,10 +419,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
         execution_generation_id: req.supervisorExecutionGenerationId!,
       });
     }
+    const devOverrides = req.devMcpServerEntryPath
+      ? await buildCodexDevMcpEntryOverrides(req.devMcpServerEntryPath, this.deps.isPackaged())
+      : [];
     const serverUrl = await this.deps.resolveServerUrl();
     const launch = this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
-      configOverrides: codexMcpWorkplaceConfigOverrides(req.cwd),
+      configOverrides: [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
       ...(req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId ? {
         env: {
           LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
