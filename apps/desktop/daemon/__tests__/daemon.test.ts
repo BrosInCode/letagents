@@ -13,7 +13,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { SupervisorDaemon, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
+import { SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -33,6 +33,81 @@ const TEST_PROCESS_IDENTITY = execFileSync(
   ["-p", String(process.pid), "-o", "lstart=", "-o", "command="],
   { encoding: "utf8" },
 ).trim();
+
+test("legacy lane owner liveness compares the stable process birth prefix, not the whole ps line", () => {
+  // Repro of the supervised Start reserve->activate failure: Electron records the
+  // owner identity as start-time only (defaultGetProcessIdentity = `ps -o lstart=`),
+  // but the daemon previously read `lstart + command` and compared whole strings, so
+  // a live owner never matched and its reservation was pruned before activate.
+  const recorded = "Wed Jul 16 02:22:00 2026";
+  // Same live process, read start-time-only, is the same birth identity -> stays live.
+  assert.equal(sameProcessBirthIdentity("Wed Jul 16 02:22:00 2026", recorded), true);
+  // ps column padding varies; the stable prefix normalizes whitespace.
+  assert.equal(sameProcessBirthIdentity("Wed Jul 16  02:22:00 2026", recorded), true);
+  // Pre-2.0.12 identities appended the mutable command; the stable prefix still
+  // matches a start-time-only read (live-upgrade compatibility), both directions.
+  assert.equal(sameProcessBirthIdentity(
+    "Wed Jul 16 02:22:00 2026",
+    "Wed Jul 16 02:22:00 2026 /Applications/LetAgents.app/Contents/MacOS/Electron",
+  ), true);
+  assert.equal(sameProcessBirthIdentity("Wed Jul 16 02:22:00 2026 node dist-daemon/main.js", recorded), true);
+  // A different start time (PID reuse) is a different process and must read dead.
+  assert.equal(sameProcessBirthIdentity("Wed Jul 16 09:00:00 2026", recorded), false);
+});
+
+test("a reserved legacy lane owner recorded with a start-time-only identity survives reserve->activate->release", async () => {
+  // Product-sequence regression for the supervised Start reserve->activate failure.
+  // Electron records the owner identity as start-time only (defaultGetProcessIdentity
+  // = `ps -o lstart=`). This live test process is the owner, so liveness is real and
+  // deterministic. Pre-fix, isProcessOwnerLive read `lstart + command` and compared
+  // whole strings, so the start-time-only recorded identity never matched and
+  // liveLegacyLaneOwners pruned the reservation before activate -> activate threw
+  // "Unknown legacy lane reservation". The birth-prefix comparison keeps it live.
+  // Verified to FAIL on ea06a21f and PASS on the fix.
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+    workerBindingsPath: join(env.root, "worker-bindings.json"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    const ownerIdentity = execFileSync("/bin/ps", ["-p", String(process.pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+    assert.ok(ownerIdentity.length > 0);
+    const reservationId = randomUUID();
+    const reserve = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
+      reservation_id: reservationId,
+      room_id: "room_legacy",
+      provider: "codex",
+      owner_pid: process.pid,
+      owner_process_identity: ownerIdentity,
+    });
+    assert.equal(reserve.ok, true);
+    const activate = await daemonRequest(paths.socketPath, "lane.activate_legacy", {
+      reservation_id: reservationId,
+      session_id: "session_legacy",
+    });
+    assert.equal(activate.ok, true, `activate failed: ${activate.error ?? ""}`);
+    const activeOwners = (await new ManifestStore(paths.manifestPath).load()).legacy_lane_owners ?? [];
+    const active = activeOwners.find((candidate) => candidate.reservation_id === reservationId);
+    assert.equal(active?.state, "active");
+    assert.equal(active?.session_id, "session_legacy");
+
+    // Full lifecycle: release must succeed and durably drop the owner so the fix
+    // cannot silently break the release path.
+    const release = await daemonRequest(paths.socketPath, "lane.release_legacy", { reservation_id: reservationId });
+    assert.equal(release.ok, true, `release failed: ${release.error ?? ""}`);
+    assert.equal((release.result as { released?: boolean }).released, true);
+    const afterRelease = (await new ManifestStore(paths.manifestPath).load()).legacy_lane_owners ?? [];
+    assert.equal(afterRelease.some((candidate) => candidate.reservation_id === reservationId), false);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
 
 test("supervised native stream extracts only explicit LetAgents wait cursors", () => {
   const base = {
