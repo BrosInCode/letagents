@@ -163,10 +163,7 @@ export function registerAgentSessionRoutes(
       // genuinely concurrent/same-name peers still need disambiguation.
       if (requestedSessionKind === "worker") {
         const baseHeldByThisIdentity = activeSessionsForIdentity.some(
-          (session) => normalizeReplayedAgentDisplayName(
-            session.display_name,
-            canonicalDisplayName
-          ) === baseDisplayName
+          (session) => session.display_name === baseDisplayName
         );
         const baseBelongsToAnotherParticipant = activeParticipants.some(
           (participant) => participant.display_name === baseDisplayName
