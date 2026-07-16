@@ -70,6 +70,7 @@
 }
 
 .room-activity-page {
+  min-width: 0;
   padding-top: 18px;
 }
 
