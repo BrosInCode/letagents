@@ -459,6 +459,22 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     [],
     "a historical control identity never claims that an unbound worker is typing or working",
   );
+  assert.deepEqual(
+    supervisedAgentWorkIndicators([{
+      ...working,
+      observedState: "idle",
+      nativeLiveness: { state: "idle", observedAt: "2026-07-15T18:00:02.000Z", detail: "claude-code · assistant" },
+      activity: [...working.activity, {
+        ...working.activity[0]!,
+        observedAt: "2026-07-15T18:00:02.000Z",
+        sequence: 8,
+        summary: "claude-code · assistant",
+        status: "idle",
+      }],
+    }], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
+    [],
+    "a newer idle poll clears an older working indicator instead of leaving it stuck",
+  );
 });
 
 test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
