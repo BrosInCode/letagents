@@ -135,6 +135,12 @@ export interface ProviderSpawnRequest {
     agentSessionId: string;
     roomCursor: string | null;
   };
+  /**
+   * Development-only: absolute path to a locally built MCP server entry (e.g.
+   * dist/mcp/server.js) for supervised Codex smoke tests. Silently ignored in packaged
+   * builds. Never place a bearer credential or socket path in this field.
+   */
+  devMcpServerEntryPath?: string;
 }
 
 export interface ProviderHandle {

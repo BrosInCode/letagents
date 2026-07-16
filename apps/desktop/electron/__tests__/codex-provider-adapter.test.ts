@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -128,6 +128,7 @@ function createHarness(options: {
   threadReadTimesOut?: boolean;
   identityUnavailableAtLaunch?: boolean;
   exitOnSignal?: boolean;
+  isPackaged?: boolean;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -198,6 +199,7 @@ function createHarness(options: {
     writeSupervisorBridgeContext: async (cwd, context) => {
       supervisorBridgeContexts.push({ cwd, context });
     },
+    isPackaged: () => options.isPackaged ?? false,
     now: () => `2026-07-15T00:00:${String(clock++).padStart(2, "0")}.000Z`,
   };
 
@@ -374,6 +376,101 @@ test("Codex supervisor bridge context is owner-only, atomic, and contains no wor
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Codex dev MCP entry override adds exact command/args/cwd overrides in non-packaged builds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-codex-dev-mcp-entry-"));
+  try {
+    const entryPath = join(root, "server.js");
+    await writeFile(entryPath, "// stub");
+    const harness = createHarness({ isPackaged: false });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    await adapter.spawn(spawnRequest({ devMcpServerEntryPath: entryPath }));
+    assert.deepEqual(harness.launchOptions[0]?.options.configOverrides, [
+      ...codexMcpWorkplaceConfigOverrides(spawnRequest().cwd),
+      `mcp_servers.letagents.command=${JSON.stringify("node")}`,
+      `mcp_servers.letagents.args=${JSON.stringify([entryPath])}`,
+    ]);
+    assert.equal(
+      harness.launchOptions[0]?.options.configOverrides.some((value) =>
+        /token|authorization|bearer|password/i.test(value),
+      ),
+      false,
+      "dev entry override must not inject any credential",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex dev MCP entry override is silently ignored in packaged builds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-codex-dev-mcp-packaged-"));
+  try {
+    const entryPath = join(root, "server.js");
+    await writeFile(entryPath, "// stub");
+    const harness = createHarness({ isPackaged: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    await adapter.spawn(spawnRequest({ devMcpServerEntryPath: entryPath }));
+    assert.deepEqual(
+      harness.launchOptions[0]?.options.configOverrides,
+      codexMcpWorkplaceConfigOverrides(spawnRequest().cwd),
+      "packaged build must leave registry path unchanged",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex dev MCP entry override fails closed for relative, missing, and non-file inputs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-codex-dev-mcp-invalid-"));
+  try {
+    const harness = createHarness({ isPackaged: false });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+
+    await assert.rejects(
+      adapter.spawn(spawnRequest({ devMcpServerEntryPath: "relative/path/server.js" })),
+      /must be absolute/,
+      "relative path must fail closed",
+    );
+    assert.deepEqual(harness.launchOptions, [], "no app-server launch on relative path");
+
+    await assert.rejects(
+      adapter.spawn(spawnRequest({ devMcpServerEntryPath: join(root, "nonexistent.js") })),
+      /does not exist/,
+      "missing file must fail closed",
+    );
+
+    const dirPath = join(root, "subdir");
+    await mkdir(dirPath);
+    await assert.rejects(
+      adapter.spawn(spawnRequest({ devMcpServerEntryPath: dirPath })),
+      /must be a regular built file/,
+      "directory must fail closed",
+    );
+
+    const symlinkTarget = join(root, "target.js");
+    await writeFile(symlinkTarget, "// target");
+    const symlinkPath = join(root, "link.js");
+    await symlink(symlinkTarget, symlinkPath);
+    await assert.rejects(
+      adapter.spawn(spawnRequest({ devMcpServerEntryPath: symlinkPath })),
+      /must be a regular built file/,
+      "symlink must fail closed",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex dev MCP entry is absent by default and does not affect the baseline cwd-only override", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest());
+  assert.deepEqual(
+    harness.launchOptions[0]?.options.configOverrides,
+    codexMcpWorkplaceConfigOverrides(spawnRequest().cwd),
+    "baseline spawn must produce only the cwd override",
+  );
 });
 
 test("Codex resume reopens the exact native thread and preserves the same launch policy", async () => {
