@@ -336,7 +336,7 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
-import { resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -665,12 +665,26 @@ async function refreshActiveRepoStatus(): Promise<void> {
 }
 
 function activeProjectRootPath(): string | null {
+  // Derive the project context from the sidebar group that actually contains the
+  // active room, NOT the last-opened global root snapshot (which can be a stale,
+  // unrelated non-repo room). This is what keeps a focus room attached to its
+  // real repo project. Fall back to the global root only when the active entry is
+  // in no repo-backed group.
+  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
+  // Presence-based, not nullish: if the active room IS in a group, that group is
+  // authoritative even when it's a non-repo group (null identifier/gitRoom) — a
+  // grouped non-repo room must not inherit a stale repo snapshot. Fall back to the
+  // global root only when the active entry is in no group at all.
   return resolveActiveProjectRootPath({
-    activeRootIdentifier: selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier,
-    // A repo-backed root room whose durable root was lost self-heals from the
+    activeRootIdentifier: context
+      ? context.roomIdentifier
+      : selectedRootRoomIdentifier.value ?? rootRoomSnapshot.value?.roomIdentifier,
+    // A repo-backed room whose durable root was lost self-heals from the
     // workspace ONLY when their canonical Git identity matches; otherwise it
     // fails closed so a focus room never launches in an unrelated repo.
-    activeRootGitRoom: rootRoomSnapshot.value?.room?.gitRoom || null,
+    activeRootGitRoom: context
+      ? context.gitRoom
+      : rootRoomSnapshot.value?.room?.gitRoom ?? null,
     recentRootRooms: recentRootRooms.value,
     workspaceRepoStatus: workspaceRepoStatus.value,
   });

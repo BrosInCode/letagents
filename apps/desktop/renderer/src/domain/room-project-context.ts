@@ -79,6 +79,34 @@ export function gitRoomIdentityKeys(
  * supervised agent in a valid-but-unrelated repository. A room with no repo
  * context at all also resolves to null.
  */
+/**
+ * The repo-room project context for whichever room is active, derived from the
+ * sidebar project GROUP that actually contains that room — its parent repo room
+ * identifier + gitRoom. This is the authoritative source of a focus room's
+ * project: it groups a focus room under its repo regardless of which unrelated
+ * room happens to be the last-opened global "root" snapshot. Returns null when
+ * the active entry belongs to no repo-backed project group (e.g. a standalone
+ * non-repo room), so callers fall back / require selection.
+ */
+export function activeRepoRoomContext(
+  activeEntryId: string | null | undefined,
+  groups: ReadonlyArray<{
+    parent: { id: string; roomIdentifier: string | null; gitRoom?: DesktopRoomInfo["gitRoom"] };
+    branchRooms: ReadonlyArray<{ id: string }>;
+    focusRooms: ReadonlyArray<{ id: string }>;
+  }>,
+): { roomIdentifier: string | null; gitRoom: DesktopRoomInfo["gitRoom"] } | null {
+  const id = (activeEntryId || "").trim();
+  if (!id) return null;
+  for (const group of groups) {
+    const contains = group.parent.id === id
+      || group.branchRooms.some((room) => room.id === id)
+      || group.focusRooms.some((room) => room.id === id);
+    if (contains) return { roomIdentifier: group.parent.roomIdentifier, gitRoom: group.parent.gitRoom ?? null };
+  }
+  return null;
+}
+
 export function resolveActiveProjectRootPath(input: {
   activeRootIdentifier: string | null | undefined;
   activeRootGitRoom?: DesktopRoomInfo["gitRoom"] | null;
