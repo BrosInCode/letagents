@@ -3160,6 +3160,130 @@ test("GC replays every pending tombstone and refuses a Git identity mismatch", a
   } finally { await env.cleanup(); }
 });
 
+test("a retained live generation permits provisioning a distinct sibling workspace", async () => {
+  const env = await fixture();
+  try {
+    const bare = join(env.root, "repos", "repo.git");
+    const provisioner = new WorkspaceProvisioner(env.root, async (args) => {
+      if (args[0] === "clone") await mkdir(args.at(-1)!, { recursive: true });
+      else if (args.includes("worktree") && args.includes("add")) await mkdir(args.at(-2)!, { recursive: true });
+      if (args.includes("--is-bare-repository")) return "true";
+      if (args.includes("remote") && args.includes("get-url")) return "https://example.invalid/repo.git";
+      if (args.includes("cat-file")) return "ok";
+      if (args.includes("rev-parse")) return args.includes("--git-common-dir") ? bare : TEST_OID;
+      return "";
+    });
+    const firstId = randomUUID();
+    const first = await provisioner.provision({
+      repo: "repo",
+      workAttemptId: firstId,
+      taskId: "first",
+      remoteUrl: "https://example.invalid/repo.git",
+      revision: TEST_OID,
+    });
+    const retained = await acquireWorkspaceFence(first.path, "live-supervisor", 1, "shared");
+    try {
+      const secondId = randomUUID();
+      const second = await provisioner.provision({
+        repo: "repo",
+        workAttemptId: secondId,
+        taskId: "second",
+        remoteUrl: "https://example.invalid/repo.git",
+        revision: TEST_OID,
+      });
+      assert.equal(second.path, join(env.root, "worktrees", "repo", secondId));
+      assert.equal((await stat(second.path)).isDirectory(), true);
+    } finally { await retained.release(); }
+  } finally { await env.cleanup(); }
+});
+
+test("target-exclusive provisioning remains mutually exclusive for the same workspace", async () => {
+  const env = await fixture();
+  try {
+    const target = join(env.root, "worktrees", "repo", randomUUID());
+    const sibling = join(env.root, "worktrees", "repo", randomUUID());
+    let siblingRan = false;
+    await withWorkspaceFence(target, async () => {
+      await assert.rejects(() => withWorkspaceFence(target, async () => undefined), /fenced by a live supervisor generation/);
+      await assert.rejects(
+        () => acquireWorkspaceFence(target, "generation-during-provision", 1, "shared"),
+        /fenced by a live supervisor generation/,
+      );
+      await withWorkspaceFence(sibling, async () => { siblingRan = true; });
+    });
+    assert.equal(siblingRan, true, "a distinct target remains independently provisionable");
+
+    siblingRan = false;
+    const retained = await acquireWorkspaceFence(target, "live-generation", 1, "shared");
+    try {
+      await assert.rejects(() => withWorkspaceFence(target, async () => undefined), /fenced by a live supervisor generation/);
+      await withWorkspaceFence(sibling, async () => { siblingRan = true; });
+    } finally { await retained.release(); }
+    assert.equal(siblingRan, true, "a sibling remains provisionable beside a retained generation");
+  } finally { await env.cleanup(); }
+});
+
+test("repo-exclusive GC authority conflicts with every live fence in both acquisition orders", async () => {
+  const env = await fixture();
+  try {
+    const active = join(env.root, "worktrees", "repo", randomUUID());
+    const doomed = join(env.root, "worktrees", "repo", randomUUID());
+    const retained = await acquireWorkspaceFence(active, "live-supervisor", 1, "shared");
+    try {
+      await assert.rejects(
+        () => acquireWorkspaceFence(doomed, "gc", 1, "exclusive", "repo"),
+        /fenced by a live supervisor generation/,
+      );
+    } finally { await retained.release(); }
+
+    const gc = await acquireWorkspaceFence(doomed, "gc", 1, "exclusive", "repo");
+    try {
+      await assert.rejects(
+        () => withWorkspaceFence(active, async () => undefined),
+        /fenced by a live supervisor generation/,
+      );
+      await assert.rejects(
+        () => acquireWorkspaceFence(active, "successor-supervisor", 2, "shared"),
+        /fenced by a live supervisor generation/,
+      );
+    } finally { await gc.release(); }
+  } finally { await env.cleanup(); }
+});
+
+test("workspace fences remove stale PIDs and treat live pre-scope records as repo-wide", async () => {
+  const env = await fixture();
+  try {
+    const target = join(env.root, "worktrees", "repo", randomUUID());
+    const sibling = join(env.root, "worktrees", "repo", randomUUID());
+    const directory = join(dirname(target), ".letagents-supervisor-workspace.fences");
+    await mkdir(directory, { recursive: true });
+    const legacyRecord = (pid: number) => JSON.stringify({
+      owner: "legacy-daemon",
+      generation: 1,
+      pid,
+      workspace_path: target,
+      mode: "exclusive",
+      created_at: "2026-07-16T00:00:00.000Z",
+    });
+
+    const stalePath = join(directory, "exclusive-stale.json");
+    await writeFile(stalePath, legacyRecord(2_147_483_647));
+    let ran = false;
+    await withWorkspaceFence(target, async () => { ran = true; });
+    assert.equal(ran, true);
+    assert.equal((await readdir(directory)).includes("exclusive-stale.json"), false);
+
+    const livePath = join(directory, "exclusive-live-legacy.json");
+    await writeFile(livePath, legacyRecord(process.pid));
+    try {
+      await assert.rejects(
+        () => withWorkspaceFence(sibling, async () => undefined),
+        /fenced by a live supervisor generation/,
+      );
+    } finally { await rm(livePath, { force: true }); }
+  } finally { await env.cleanup(); }
+});
+
 test("workspace fences and terminal attestation protect clean GC", async () => {
   const env = await fixture();
   try {
