@@ -1,11 +1,19 @@
 .desktop-activity-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
   align-items: stretch;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
 }
 
 .desktop-activity-layout[data-empty="true"] {
-  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
+}
+
+.desktop-activity-layout:not(:has(> .desktop-activity-detail)) {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .desktop-activity-groups {
@@ -28,6 +36,8 @@
 .desktop-activity-group {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  overflow: hidden;
   padding: 10px;
 }
 
@@ -105,7 +115,10 @@
 }
 
 .desktop-activity-roster-item {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   width: 100%;
+  min-width: 0;
   min-height: 56px;
   padding: 8px 10px;
   border: 1px solid transparent;
@@ -389,13 +402,19 @@
   white-space: nowrap;
 }
 
-.desktop-activity-roster-item small,
-.desktop-activity-row-meta small {
+.desktop-activity-roster-item > span:not(.desktop-activity-avatar):not(.desktop-activity-row-meta) small {
   display: block;
-  overflow: hidden;
   color: var(--text-tertiary);
   font-size: 0.8rem;
-  text-overflow: ellipsis;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.desktop-activity-row-meta small {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
   white-space: nowrap;
 }
 
@@ -404,7 +423,8 @@
   justify-items: end;
   gap: 4px;
   margin-left: auto;
-  max-width: 42%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .desktop-activity-row-meta .state-pill {

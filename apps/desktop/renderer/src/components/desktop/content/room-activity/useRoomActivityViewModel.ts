@@ -49,7 +49,9 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
     for (const message of props.messages) {
       const actor = message.actorLabel || message.agentIdentity?.actorLabel || (!isHumanMessage(message) ? message.sender : null);
       if (!actor) continue;
-      grouped.set(actor, [...(grouped.get(actor) || []), message]);
+      const messages = grouped.get(actor);
+      if (messages) messages.push(message);
+      else grouped.set(actor, [message]);
     }
     return grouped;
   });
