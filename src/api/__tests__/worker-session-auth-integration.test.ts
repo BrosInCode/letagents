@@ -779,9 +779,28 @@ test(
     assert.notEqual(thirdSession.display_name, "MistyMorrow");
     assert.equal(thirdSession.display_name, "MistyMorrow 1");
 
+    // If the base holder ends while a suffixed sibling remains active, the
+    // base is free. A restarted worker must reclaim it instead of treating
+    // the sibling's suffix as proof that the base itself is occupied.
+    await endRoomAgentSession!({ session_id: restartedSession.session_id! });
+    const overlapRestart = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        {
+          ...registrationBody,
+          agent_instance_id: "burst-instance-overlap-restart",
+          display_name: "MistyMorrow 2 1 1",
+        },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(overlapRestart.statusCode, 201, JSON.stringify(overlapRestart.body));
+    const overlapRestartSession = overlapRestart.body as { session_id?: string; display_name?: string };
+    assert.equal(overlapRestartSession.display_name, "MistyMorrow");
+
     // An explicit DIFFERENT name is a deliberate rename: resumption must not
     // overwrite it.
-    await endRoomAgentSession!({ session_id: restartedSession.session_id! });
+    await endRoomAgentSession!({ session_id: overlapRestartSession.session_id! });
     const renamed = await invoke(
       registerHandler,
       ownerTokenRequest(
