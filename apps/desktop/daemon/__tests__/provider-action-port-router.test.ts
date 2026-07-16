@@ -152,6 +152,42 @@ test("provider router selects the native adapter by manifest provider and fences
   );
 });
 
+test("provider router forwards devMcpServerEntryPath from ProviderActionSpawn to the adapter spawn", async () => {
+  let capturedSpawn: ProviderActionSpawn | null = null;
+  const adapter: NativeProviderAdapter = {
+    capabilities: () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: true }),
+    async spawn(input) {
+      capturedSpawn = input;
+      return nativeHandle("codex", input.workAttemptId, "thread-dev");
+    },
+    async attach() { return null; },
+    async resume(_ref, input) { return nativeHandle("codex", input.workAttemptId, "thread-dev"); },
+    async poke() {},
+    async stop(handle) { return { endedAt: "2026-07-15T00:00:00.000Z", exitCode: 0, signal: null, terminalCause: "exited" as const, providerContinuationId: handle.providerContinuationId }; },
+    onExit: () => () => {},
+    onStream: () => () => {},
+  };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  await router.spawn({
+    provider: "codex",
+    workAttemptId: "dev-attempt",
+    roomId: "room",
+    cwd: "/tmp/dev",
+    launchPolicy: {},
+    devMcpServerEntryPath: "/absolute/path/to/dist/mcp/server.js",
+  });
+  assert.equal(capturedSpawn?.devMcpServerEntryPath, "/absolute/path/to/dist/mcp/server.js");
+  // Absent field must not be forwarded as undefined noise.
+  let capturedNoEntry: ProviderActionSpawn | null = null;
+  const adapter2: NativeProviderAdapter = {
+    ...adapter,
+    async spawn(input) { capturedNoEntry = input; return nativeHandle("codex", input.workAttemptId, "thread-no-dev"); },
+  };
+  const router2 = new ProviderActionPortRouter({ codex: async () => adapter2 });
+  await router2.spawn({ provider: "codex", workAttemptId: "no-dev-attempt", roomId: "room", cwd: "/tmp/no-dev", launchPolicy: {} });
+  assert.equal(capturedNoEntry?.devMcpServerEntryPath, undefined);
+});
+
 test("provider router public handle reads the native observed state live", async () => {
   let observedState: "working" | "idle" | "failed" = "working";
   const calls: string[] = [];
