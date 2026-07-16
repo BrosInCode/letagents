@@ -13,7 +13,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { SupervisorDaemon, supervisedWaitCursorFromProviderEvent } from "../main.js";
+import { SupervisorDaemon, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -58,6 +58,18 @@ test("supervised native stream extracts only explicit LetAgents wait cursors", (
       }] },
     },
   }), "msg_3064");
+  assert.deepEqual(supervisedWaitEvidenceFromProviderEvent({
+    ...base,
+    payload: {
+      type: "tool_use",
+      name: "wait_for_messages",
+      input: { after_message_id: "msg_3065", agent_session_id: "agent_session_exact" },
+    },
+  }), { roomCursor: "msg_3065", agentSessionId: "agent_session_exact" });
+  assert.equal(supervisedWaitCursorFromProviderEvent({
+    ...base,
+    payload: { type: "tool_use", name: "wait_for_messages", input: { after_message_id: "msg_3065" } },
+  }), null, "a cursor without exact worker-session evidence is unusable");
   assert.equal(supervisedWaitCursorFromProviderEvent({
     ...base,
     payload: { type: "assistant", message: { content: [{ type: "text", text: "wait_for_messages after msg_999" }] } },
@@ -2180,6 +2192,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
   let continuation = "thread-durable";
   let sequence = 0;
   let resumeCount = 0;
+  let resumeSupported = true;
   const resumeRequests: Array<Parameters<ProviderActionPort["resume"]>[1]> = [];
   const streamListeners = new Set<(event: any) => void>();
   const exitListeners = new Set<(terminal: any) => void>();
@@ -2196,7 +2209,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     });
   };
   const port = (): ProviderActionPort => ({
-    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    capabilities: async () => ({ resume: resumeSupported, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async (request) => {
       workAttemptId = request.workAttemptId;
       launchChild();
@@ -2261,7 +2274,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(boundProjection.workplace_liveness?.state, "reachable", "fresh exact binding marks the MCP workplace reachable");
     assert.doesNotMatch(JSON.stringify(boundProjection), /session-secret|api_url/, "renderer projection never exposes worker authority");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.bound"), "initial daemon worker binding activity");
-    const emitCompatWaitCursor = (roomCursor: string) => {
+    const emitCompatWaitCursor = (roomCursor: string, agentSessionId: string | null = "agent_session_exact") => {
       for (const listener of streamListeners) listener({
         workAttemptId,
         providerContinuationId: continuation,
@@ -2275,7 +2288,10 @@ test("generation handoff reattaches the same provider and publishes its supervis
           message: { content: [{
             type: "tool_use",
             name: "mcp__letagents__wait_for_messages",
-            input: { after_message_id: roomCursor, agent_session_id: "agent_session_exact" },
+            input: {
+              after_message_id: roomCursor,
+              ...(agentSessionId ? { agent_session_id: agentSessionId } : {}),
+            },
           }] },
         },
         payloadTruncated: false,
@@ -2404,7 +2420,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
       entry_id: "supervised_handoff", work_attempt_id: workAttemptId,
       execution_generation_id: executionGenerationId, agent_session_id: "agent_session_exact",
-      room_cursor: "msg_cursor_exact",
+      room_cursor: "msg_2822",
     })).ok, true);
     const recoveredProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
     assert.equal(recoveredProjection.observed_state, "working");
@@ -2420,7 +2436,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
       entry_id: "supervised_handoff", work_attempt_id: workAttemptId,
       execution_generation_id: executionGenerationId, agent_session_id: "agent_session_exact",
-      room_cursor: "msg_cursor_exact",
+      room_cursor: "msg_2822",
     })).ok, true);
     const checkpointsAfterNoop = ((await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: unknown[] }).checkpoints.length;
     assert.equal(checkpointsAfterNoop, checkpointsBeforeNoop, "an unchanged poll cursor appends no durability checkpoint");
@@ -2440,20 +2456,97 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "running" });
     await eventually(async () => {
       const resumed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-      return resumed.observed_state === "working" && resumed.condition === "none" && resumed.provider_ref?.execution_generation_id !== stoppedGenerationId;
-    }, "intentional stop resumes under a successor execution generation");
-    const resumed = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
-    assert.equal(resumed.id, "supervised_handoff");
-    assert.equal(resumed.work_attempt_id, workAttemptId, "resume preserves the durable work attempt");
-    assert.equal(resumed.provider_ref?.provider_continuation_id, continuation, "resume preserves provider continuation identity");
-    assert.notEqual(resumed.provider_ref?.provider_connection?.pid, stoppedPid, "resume installs the replacement provider process");
+      return resumed.observed_state === "recovering" && resumed.condition === "coordination_blocked" && resumed.provider_ref?.execution_generation_id !== stoppedGenerationId;
+    }, "intentional stop resumes under a successor awaiting exact wait proof");
+    const awaitingWait = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(awaitingWait.id, "supervised_handoff");
+    assert.equal(awaitingWait.work_attempt_id, workAttemptId, "resume preserves the durable work attempt");
+    assert.equal(awaitingWait.provider_ref?.provider_continuation_id, continuation, "resume preserves provider continuation identity");
+    assert.notEqual(awaitingWait.provider_ref?.provider_connection?.pid, stoppedPid, "resume installs the replacement provider process");
+    assert.equal(awaitingWait.worker_binding, null, "predecessor authority is not projected onto an unproven successor");
     assert.equal(resumeCount, 1);
     assert.deepEqual(resumeRequests[0]?.supervisorWorkerSession, {
       agentSessionId: "agent_session_exact",
-      roomCursor: "msg_cursor_exact",
+      roomCursor: "msg_2822",
     }, "resume receives the exact prior worker identity and cursor without its secret");
     assert.doesNotMatch(JSON.stringify(resumeRequests[0]), /session-secret/, "provider request never receives worker session authority");
-    const resumedGenerationId = resumed.provider_ref!.execution_generation_id;
+    const resumedGenerationId = awaitingWait.provider_ref!.execution_generation_id;
+    const predecessorBeforeProof = await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff");
+    assert.equal(predecessorBeforeProof?.execution_generation_id, stoppedGenerationId, "private credential remains on its terminal predecessor before verification");
+    const stagingInternals = second as unknown as {
+      stageWorkerBindingAfterResume: (
+        manifestEntry: DaemonManifestEntry,
+        binding: NonNullable<typeof predecessorBeforeProof>,
+        successorExecutionGenerationId: string,
+        providerHandle: ReturnType<typeof handle>,
+      ) => Promise<void>;
+    };
+    await assert.rejects(stagingInternals.stageWorkerBindingAfterResume(
+      {
+        ...awaitingWait,
+        provider_ref: { ...awaitingWait.provider_ref!, provider_continuation_id: "thread-changed" },
+      },
+      predecessorBeforeProof!,
+      resumedGenerationId,
+      { ...handle(), workAttemptId, providerContinuationId: "thread-changed" },
+    ), /different provider continuation/, "restart reconstruction cannot carry a credential across a changed provider continuation");
+    await second.stop();
+    second = new SupervisorDaemon(paths, "darwin", port(), true);
+    await second.start();
+    await eventually(async () => {
+      const reattached = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+      return reattached.provider_ref?.execution_generation_id === resumedGenerationId
+        && reattached.observed_state === "recovering"
+        && reattached.condition === "coordination_blocked"
+        && reattached.worker_binding === null
+        && streamListeners.size === 1
+        && (second as unknown as { pendingResumeBindings: Map<string, unknown> }).pendingResumeBindings.has("supervised_handoff");
+    }, "daemon restart reconstructs the staged successor before its first wait");
+    assert.equal(resumeCount, 1, "staging reconstruction attaches the single live successor without another resume");
+    assert.equal((await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id, stoppedGenerationId, "restart-window reconstruction preserves predecessor authority until proof");
+    const activityBeforeInvalidWaits = awaitingWait.activity?.length ?? 0;
+    emitCompatWaitCursor("msg_2823", "agent_session_peer");
+    emitCompatWaitCursor("msg_2823", null);
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length ?? 0) >= activityBeforeInvalidWaits + 2, "invalid successor wait evidence persisted without authority");
+    const afterInvalidWaits = await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff");
+    assert.equal(afterInvalidWaits?.execution_generation_id, stoppedGenerationId, "mismatched or missing wait identity cannot roll the predecessor credential");
+    assert.equal(afterInvalidWaits?.room_cursor, "msg_2822", "mismatched or missing wait identity cannot advance the cursor");
+    assert.equal((((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!.condition, "coordination_blocked");
+
+    rejectNativeActivity = true;
+    const verificationRequestsBeforeReject = nativeRequests.filter((request) => request.body.method === "native_harness.resumed_binding").length;
+    emitCompatWaitCursor("msg_2823");
+    await eventually(async () => nativeRequests.filter((request) => request.body.method === "native_harness.resumed_binding").length > verificationRequestsBeforeReject, "rejected retained credential verification");
+    await eventually(async () => /credential verification failed/.test((((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!.last_error ?? ""), "rejected verification coordination latch");
+    const afterRejectedVerification = await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff");
+    assert.equal(afterRejectedVerification?.execution_generation_id, stoppedGenerationId, "API rejection preserves the terminal predecessor binding");
+    assert.equal(afterRejectedVerification?.room_cursor, "msg_2822", "API rejection cannot checkpoint the successor cursor");
+    const stickyInternals = second as unknown as { requestConvergence: (entryId: string) => void };
+    stickyInternals.requestConvergence("supervised_handoff");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!.condition, "coordination_blocked", "a second convergence cannot clear failed compatibility coordination");
+
+    rejectNativeActivity = false;
+    const verificationRequestsBeforeRetry = nativeRequests.filter((request) => request.body.method === "native_harness.resumed_binding").length;
+    emitCompatWaitCursor("msg_2823");
+    await eventually(async () => nativeRequests.filter((request) => request.body.method === "native_harness.resumed_binding").length > verificationRequestsBeforeRetry, "retried retained credential verification");
+    await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id === resumedGenerationId, "verified successor credential-store rollover");
+    await eventually(async () => {
+      const projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+      return projection.observed_state === "working"
+        && projection.condition === "none"
+        && projection.worker_binding?.execution_generation_id === resumedGenerationId;
+    }, "first exact successor wait restores the worker binding");
+    const autoRestoredProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(autoRestoredProjection.worker_binding?.agent_session_id, "agent_session_exact", "published runtimes resume without re-registering the worker session");
+    assert.equal(autoRestoredProjection.worker_binding?.execution_generation_id, resumedGenerationId, "private worker authority rolls only onto the exact successor generation");
+    assert.equal(autoRestoredProjection.workplace_liveness?.state, "reachable");
+    await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.resumed_binding"), "resumed binding credential verification");
+    await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.room_cursor === "msg_2823", "zero-register resumed compatibility cursor");
+    await eventually(async () => {
+      const resumedAttempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: Array<{ room_cursor: string | null }> };
+      return resumedAttempt.checkpoints.at(-1)?.room_cursor === "msg_2823";
+    }, "zero-register resumed durable cursor");
     const rebound = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
       entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
       work_attempt_id: workAttemptId, execution_generation_id: resumedGenerationId,
@@ -2468,7 +2561,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
       entry_id: "supervised_handoff", work_attempt_id: workAttemptId,
       execution_generation_id: resumedGenerationId, agent_session_id: "agent_session_exact",
-      room_cursor: "msg_cursor_after_resume",
+      room_cursor: "msg_2824",
     })).ok, true);
     for (const listener of streamListeners) listener({
       workAttemptId,
@@ -2485,16 +2578,25 @@ test("generation handoff reattaches the same provider and publishes its supervis
     });
     await eventually(async () => {
       const recovered = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
-      return recovered.observed_state === "working"
+      return recovered.observed_state === "recovering"
+        && recovered.condition === "coordination_blocked"
         && recovered.provider_ref?.execution_generation_id !== resumedGenerationId;
-    }, "terminal provider turn enters a bounded resume generation");
-    const recovered = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
-    const recoveredGenerationId = recovered.provider_ref!.execution_generation_id;
+    }, "terminal provider turn enters a bounded resume generation awaiting wait proof");
+    const recoveredAwaitingWait = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
+    const recoveredGenerationId = recoveredAwaitingWait.provider_ref!.execution_generation_id;
     assert.equal(resumeCount, 2);
     assert.deepEqual(resumeRequests[1]?.supervisorWorkerSession, {
       agentSessionId: "agent_session_exact",
-      roomCursor: "msg_cursor_after_resume",
+      roomCursor: "msg_2824",
     });
+    assert.equal((await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id, resumedGenerationId);
+    emitCompatWaitCursor("msg_2825");
+    await eventually(async () => {
+      const recovered = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+      return recovered.observed_state === "working"
+        && recovered.condition === "none"
+        && recovered.worker_binding?.execution_generation_id === recoveredGenerationId;
+    }, "terminal-turn successor exact wait restores coordination");
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
       entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
       work_attempt_id: workAttemptId, execution_generation_id: recoveredGenerationId,
@@ -2526,9 +2628,30 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "running" });
     await eventually(async () => {
       const resumedAfterHandoff = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return resumedAfterHandoff.observed_state === "recovering" && resumedAfterHandoff.condition === "coordination_blocked";
+    }, "replacement daemon resumes the stopped work attempt awaiting wait proof");
+    emitCompatWaitCursor("msg_2826");
+    await eventually(async () => {
+      const resumedAfterHandoff = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return resumedAfterHandoff.observed_state === "working" && resumedAfterHandoff.condition === "none";
-    }, "replacement daemon resumes the stopped work attempt");
+    }, "replacement daemon exact wait restores the stopped work attempt");
     assert.equal(resumeCount, 3);
+
+    const exactGenerationBeforeFreshStart = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!.provider_ref!.execution_generation_id;
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "stopped" });
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped"), "fresh-start negative terminal predecessor");
+    resumeSupported = false;
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "running" });
+    await eventually(async () => {
+      const fresh = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+      return fresh.provider_ref?.execution_generation_id !== exactGenerationBeforeFreshStart
+        && fresh.observed_state === "recovering"
+        && fresh.condition === "coordination_blocked"
+        && fresh.worker_binding === null;
+    }, "fresh spawn with a terminal predecessor credential fails closed awaiting formal bind");
+    assert.equal(resumeCount, 3, "fresh-spawn negative does not masquerade as native resume");
+    assert.equal((third as unknown as { pendingResumeBindings: Map<string, unknown> }).pendingResumeBindings.has("supervised_handoff"), false, "fresh spawn cannot enter compatibility rollover");
+    assert.equal((await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id, exactGenerationBeforeFreshStart, "fresh spawn preserves terminal predecessor authority without rolling it");
   } finally {
     await third?.stop().catch(() => undefined);
     await second?.stop().catch(() => undefined);
@@ -3031,16 +3154,47 @@ test("worker binding cursor survives an exact-session generation rebind and fenc
     await store.checkpointCursor("entry_exact", "agent_session_exact", "execution_1", "msg_2822");
     assert.equal((await store.checkpointCursorMonotonic("entry_exact", "agent_session_exact", "execution_1", "msg_2821")).advanced, false);
     assert.equal((await store.get("entry_exact"))?.room_cursor, "msg_2822", "a newer formal response checkpoint wins over delayed compatibility evidence");
-    const rebound = await store.bind({
-      entry_id: "entry_exact",
-      room_id: "focus_37",
-      work_attempt_id: "attempt_exact",
-      execution_generation_id: "execution_2",
-      agent_session_id: "agent_session_exact",
-      agent_session_token: "session-secret",
-      api_url: "https://letagents.chat",
+    let verifiedPredecessorGeneration: string | null = null;
+    const reboundResult = await store.verifyAndAdvanceExecutionGeneration({
+      entryId: "entry_exact",
+      roomId: "focus_37",
+      workAttemptId: "attempt_exact",
+      fromExecutionGenerationId: "execution_1",
+      toExecutionGenerationId: "execution_2",
+      agentSessionId: "agent_session_exact",
+    }, async ({ binding }) => {
+      verifiedPredecessorGeneration = binding.execution_generation_id;
+      return { accepted: true };
     });
+    const rebound = reboundResult.binding;
+    assert.equal(verifiedPredecessorGeneration, "execution_1", "credential verification runs before durable generation mutation");
     assert.equal(rebound.room_cursor, "msg_2822");
+    assert.equal(rebound.agent_session_token, "session-secret", "generation rollover can preserve but never replace private authority");
+    let racedVerificationCalled = false;
+    assert.equal((await store.verifyAndAdvanceExecutionGeneration({
+      entryId: "entry_exact", roomId: "focus_37", workAttemptId: "attempt_exact",
+      fromExecutionGenerationId: "execution_1", toExecutionGenerationId: "execution_2",
+      agentSessionId: "agent_session_exact",
+    }, async () => { racedVerificationCalled = true; return { accepted: true }; })).binding.execution_generation_id, "execution_2", "a formal bind winning the successor race is idempotent");
+    assert.equal(racedVerificationCalled, false);
+    const rejectedRollover = await store.verifyAndAdvanceExecutionGeneration({
+      entryId: "entry_exact", roomId: "focus_37", workAttemptId: "attempt_exact",
+      fromExecutionGenerationId: "execution_2", toExecutionGenerationId: "execution_3",
+      agentSessionId: "agent_session_exact",
+    }, async () => ({ accepted: false }));
+    assert.equal(rejectedRollover.advanced, false);
+    assert.equal((await store.get("entry_exact"))?.execution_generation_id, "execution_2", "rejected verification preserves predecessor authority");
+    await assert.rejects(store.verifyAndAdvanceExecutionGeneration({
+      entryId: "entry_exact", roomId: "focus_37", workAttemptId: "attempt_exact",
+      fromExecutionGenerationId: "execution_2", toExecutionGenerationId: "execution_3",
+      agentSessionId: "agent_session_exact",
+    }, async () => { throw new Error("verification timeout"); }), /verification timeout/);
+    assert.equal((await store.get("entry_exact"))?.execution_generation_id, "execution_2", "verification timeout preserves predecessor authority");
+    await assert.rejects(store.verifyAndAdvanceExecutionGeneration({
+      entryId: "entry_exact", roomId: "focus_other", workAttemptId: "attempt_exact",
+      fromExecutionGenerationId: "execution_2", toExecutionGenerationId: "execution_3",
+      agentSessionId: "agent_session_exact",
+    }, async () => ({ accepted: true })), /does not match the durable worker identity/);
     await assert.rejects(
       store.checkpointCursor("entry_exact", "agent_session_exact", "execution_1", "msg_stale"),
       /does not match the active supervised binding/,

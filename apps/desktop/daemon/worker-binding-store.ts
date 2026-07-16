@@ -56,6 +56,67 @@ export class WorkerBindingStore {
     });
   }
 
+  /**
+   * Verify one retained credential while it still belongs to its terminal
+   * predecessor, then atomically carry it onto an exact resumed execution.
+   * The transport callback runs under the credential-store mutex and receives
+   * the old binding read-only; rejection or timeout performs no durable write.
+   */
+  async verifyAndAdvanceExecutionGeneration<T extends { accepted: boolean }>(input: {
+    entryId: string;
+    roomId: string;
+    workAttemptId: string;
+    fromExecutionGenerationId: string;
+    toExecutionGenerationId: string;
+    agentSessionId: string;
+  }, operation: (publication: {
+    binding: Readonly<WorkerSessionBinding>;
+    sequence: number;
+    observed_at: string;
+  }) => Promise<T>): Promise<{ binding: WorkerSessionBinding; advanced: boolean; accepted: boolean }> {
+    for (const [field, value] of Object.entries(input)) {
+      if (!value.trim()) throw new Error(`Worker binding generation rollover ${field} is required.`);
+    }
+    if (input.fromExecutionGenerationId === input.toExecutionGenerationId) {
+      throw new Error("Worker binding generation rollover requires a successor execution generation.");
+    }
+    return this.serialize(async () => {
+      const stored = await this.load();
+      const prior = stored.bindings[input.entryId];
+      if (!prior
+        || prior.entry_id !== input.entryId
+        || prior.room_id !== input.roomId
+        || prior.work_attempt_id !== input.workAttemptId
+        || prior.agent_session_id !== input.agentSessionId) {
+        throw new Error("Worker binding generation rollover does not match the durable worker identity.");
+      }
+      // A newer runtime can win the race by formally binding the same exact
+      // successor while compatibility recovery is in flight.
+      if (prior.execution_generation_id === input.toExecutionGenerationId) {
+        return { binding: prior, advanced: false, accepted: true };
+      }
+      if (prior.execution_generation_id !== input.fromExecutionGenerationId) {
+        throw new Error("Worker binding generation rollover does not match its terminal predecessor.");
+      }
+      const nowMs = Date.now();
+      const priorObservedAtMs = Number.isSafeInteger(prior.last_observed_at_ms) ? prior.last_observed_at_ms : 0;
+      const effectiveObservedAtMs = Math.max(nowMs, priorObservedAtMs + 1);
+      const sequence = Math.max(prior.last_sequence + 1, effectiveObservedAtMs);
+      const observed_at = new Date(effectiveObservedAtMs).toISOString();
+      const result = await operation({ binding: prior, sequence, observed_at });
+      if (!result.accepted) return { binding: prior, advanced: false, accepted: false };
+      const binding: WorkerSessionBinding = {
+        ...prior,
+        execution_generation_id: input.toExecutionGenerationId,
+        last_sequence: sequence,
+        last_observed_at_ms: effectiveObservedAtMs,
+        updated_at: observed_at,
+      };
+      await this.write({ version: 1, bindings: { ...stored.bindings, [input.entryId]: binding } });
+      return { binding, advanced: true, accepted: true };
+    });
+  }
+
   async checkpointCursor(
     entryId: string,
     agentSessionId: string,
