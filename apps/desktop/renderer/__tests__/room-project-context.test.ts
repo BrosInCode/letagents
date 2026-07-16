@@ -8,7 +8,7 @@ import {
   preferredManagedAgentRepoRootPath,
   supervisedProviderLaunchPolicy,
 } from "../src/domain/managed-agents";
-import { canonicalRepoIdentity, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "../src/domain/room-project-context";
+import { activeRepoRoomContext, canonicalRepoIdentity, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "../src/domain/room-project-context";
 
 const projectGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
   provider: "git",
@@ -287,6 +287,88 @@ test("resolveActiveProjectRootPath fails closed when a branch-scoped workspace i
     workspaceRepoStatus: workspaceStatus(
       "git-room:github.com:someoneelse/otherrepo:branch:c3RhZ2luZw",
       "/Users/emmy/Projects/other",
+    ),
+  }), null);
+});
+
+const skyLakeGroup = {
+  parent: {
+    id: "room:parent:github.com/brosincode/letagents",
+    roomIdentifier: "github.com/brosincode/letagents",
+    gitRoom: githubGitRoom,
+  },
+  branchRooms: [] as { id: string }[],
+  focusRooms: [{ id: "room:focus:focus_37" }],
+};
+
+test("activeRepoRoomContext resolves a focus room to its project-group parent, ignoring the stale global root", () => {
+  const ctx = activeRepoRoomContext("room:focus:focus_37", [
+    { parent: { id: "room:parent:frost-spring", roomIdentifier: "frost-spring", gitRoom: null }, branchRooms: [], focusRooms: [] },
+    skyLakeGroup,
+  ]);
+  assert.equal(ctx?.roomIdentifier, "github.com/brosincode/letagents");
+  assert.equal(ctx?.gitRoom, githubGitRoom);
+});
+
+test("activeRepoRoomContext returns null when the active entry is in no project group", () => {
+  assert.equal(activeRepoRoomContext("room:focus:orphan", [skyLakeGroup]), null);
+  assert.equal(activeRepoRoomContext(null, [skyLakeGroup]), null);
+});
+
+test("RiverRiver repro: grouped focus room heals from a staging workspace despite a stale non-repo selected root", () => {
+  // focus_37 is grouped under the sky-lake repo project even though the last-opened
+  // global root is the unrelated non-repo frost-spring. Deriving context from the
+  // group yields the repo gitRoom, so the branch-scoped staging workspace self-heals
+  // to the repo root — no per-focus folder prompt.
+  const ctx = activeRepoRoomContext("room:focus:focus_37", [skyLakeGroup]);
+  assert.equal(resolveActiveProjectRootPath({
+    activeRootIdentifier: ctx?.roomIdentifier,
+    activeRootGitRoom: ctx?.gitRoom,
+    recentRootRooms: [
+      { identifier: "frost-spring", rootPath: null },
+      { identifier: "github.com/brosincode/letagents", rootPath: null },
+    ],
+    workspaceRepoStatus: workspaceStatus(
+      "git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw",
+      "/Users/emmy/Projects/letagents",
+    ),
+  }), "/Users/emmy/Projects/letagents");
+});
+
+test("RiverRiver repro: an unrelated workspace repo still fails closed for the grouped focus room", () => {
+  const ctx = activeRepoRoomContext("room:focus:focus_37", [skyLakeGroup]);
+  assert.equal(resolveActiveProjectRootPath({
+    activeRootIdentifier: ctx?.roomIdentifier,
+    activeRootGitRoom: ctx?.gitRoom,
+    recentRootRooms: [{ identifier: "github.com/brosincode/letagents", rootPath: null }],
+    workspaceRepoStatus: workspaceStatus(
+      "git-room:github.com:someoneelse/otherrepo:branch:c3RhZ2luZw",
+      "/Users/emmy/Projects/other",
+    ),
+  }), null);
+});
+
+test("a grouped non-repo room keeps its own null context and never inherits a stale repo root", () => {
+  // Boundary: the active room is explicitly in a NON-repo group. activeRepoRoomContext
+  // returns a present-but-null context, so App.vue's presence check (ctx ? … : fallback)
+  // uses it instead of falling through to a stale repo snapshot. A null gitRoom then
+  // resolves to null — no stale-repo inheritance even with a repo workspace present.
+  const nonRepoGroup = {
+    parent: { id: "room:parent:frost-spring", roomIdentifier: "frost-spring", gitRoom: null },
+    branchRooms: [] as { id: string }[],
+    focusRooms: [{ id: "room:focus:focus_99" }],
+  };
+  const ctx = activeRepoRoomContext("room:focus:focus_99", [skyLakeGroup, nonRepoGroup]);
+  assert.notEqual(ctx, null);
+  assert.equal(ctx?.roomIdentifier, "frost-spring");
+  assert.equal(ctx?.gitRoom, null);
+  assert.equal(resolveActiveProjectRootPath({
+    activeRootIdentifier: ctx ? ctx.roomIdentifier : "github.com/brosincode/letagents",
+    activeRootGitRoom: ctx ? ctx.gitRoom : githubGitRoom,
+    recentRootRooms: [{ identifier: "frost-spring", rootPath: null }],
+    workspaceRepoStatus: workspaceStatus(
+      "git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw",
+      "/Users/emmy/Projects/letagents",
     ),
   }), null);
 });
