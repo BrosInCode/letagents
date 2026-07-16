@@ -741,6 +741,30 @@ test(
     );
     assert.notEqual(secondSession.session_id, firstSession.session_id);
 
+    // A daemon restart may use a new runtime instance id and may replay the
+    // server-assigned, already-decorated label from an older collision. The
+    // canonical identity is unchanged, so neither difference may compound
+    // the suffix across sequential registrations.
+    await endRoomAgentSession!({ session_id: secondSession.session_id! });
+    const restarted = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        {
+          ...registrationBody,
+          agent_instance_id: "burst-instance-after-restart",
+          display_name: "MistyMorrow 2 1 1 1",
+        },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(restarted.statusCode, 201, JSON.stringify(restarted.body));
+    const restartedSession = restarted.body as { session_id?: string; display_name?: string };
+    assert.equal(
+      restartedSession.display_name,
+      "MistyMorrow",
+      "restart normalizes accumulated collision suffixes back to the canonical label"
+    );
+
     // A DIFFERENT instance while the name is actively held still gets a
     // numbered variant — the live-collision path is unchanged.
     const third = await invoke(
@@ -753,10 +777,11 @@ test(
     assert.equal(third.statusCode, 201, JSON.stringify(third.body));
     const thirdSession = third.body as { display_name?: string };
     assert.notEqual(thirdSession.display_name, "MistyMorrow");
+    assert.equal(thirdSession.display_name, "MistyMorrow 1");
 
     // An explicit DIFFERENT name is a deliberate rename: resumption must not
     // overwrite it.
-    await endRoomAgentSession!({ session_id: secondSession.session_id! });
+    await endRoomAgentSession!({ session_id: restartedSession.session_id! });
     const renamed = await invoke(
       registerHandler,
       ownerTokenRequest(
