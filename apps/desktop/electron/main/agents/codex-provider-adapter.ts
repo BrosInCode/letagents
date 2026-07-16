@@ -45,6 +45,7 @@ import {
   errorMessage,
   observeFencedExit,
   safeStreamPayload,
+  sameProcessBirthIdentity,
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
@@ -554,7 +555,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (currentIdentity === undefined) {
         throw new Error("durable endpoint process identity cannot be verified");
       }
-      if (currentIdentity !== connection.processIdentity) {
+      if (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity)) {
         throw new Error("durable endpoint process identity no longer matches its recorded birth");
       }
       const observedExit = this.deps.observeProcessExit(
@@ -595,7 +596,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         && connection.pid !== null
         && connection.processIdentity
         && currentIdentity !== undefined
-        && currentIdentity !== connection.processIdentity
+        && (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity))
       ) return null;
       throw new Error(
         `Codex app-server attach is ambiguous; refusing to launch a second writer: ${errorMessage(error)}`,

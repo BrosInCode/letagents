@@ -12,6 +12,7 @@ export type ProviderActionRef = { workAttemptId: string; providerContinuationId:
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; provider?: string; agentDisplayName?: string; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null } };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
+export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal };
 export type ProviderActionAttachment = { state: "attached"; handle: ProviderActionHandle } | { state: "absent" } | { state: "ambiguous"; reason: string };
 export type ProviderActionStreamEvent = {
   workAttemptId: string;
@@ -30,7 +31,7 @@ export type ProviderActionStreamEvent = {
 export interface ProviderActionPort {
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
-  attach(ref: ProviderActionRef): Promise<ProviderActionHandle | null>;
+  attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
   /** Recover an intent journaled before dispatch, never by spawning a second child. */
   attachAction(actionId: string, workAttemptId: string): Promise<ProviderActionAttachment>;
   resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle>;

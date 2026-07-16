@@ -1,5 +1,6 @@
 import type {
   ProviderActionAttachment,
+  ProviderActionAttachTerminal,
   ProviderActionCapabilities,
   ProviderActionHandle,
   ProviderActionPort,
@@ -20,7 +21,7 @@ type NativeHandle = {
 export type NativeProviderAdapter = {
   capabilities(): ProviderActionCapabilities;
   spawn(input: ProviderActionSpawn): Promise<NativeHandle>;
-  attach(input: ProviderActionRef): Promise<NativeHandle | null>;
+  attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
@@ -63,7 +64,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return publicHandle(handle);
   }
 
-  async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | null> {
+  async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null> {
     const remembered = this.handles.get(ref.workAttemptId);
     const provider = this.resolveProvider(
       remembered?.provider,
@@ -72,7 +73,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     );
     if (remembered) return publicHandle(remembered.handle);
     const handle = await (await this.adapter(provider)).attach(ref);
-    if (!handle) return null;
+    if (!handle || isAttachTerminal(handle)) return handle;
     this.handles.set(ref.workAttemptId, { provider, handle });
     return publicHandle(handle);
   }
@@ -166,6 +167,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     }
     return remembered;
   }
+}
+
+function isAttachTerminal(value: NativeHandle | ProviderActionAttachTerminal): value is ProviderActionAttachTerminal {
+  return "state" in value && value.state === "terminal";
 }
 
 function providerFromConnection(connection: ProviderActionRef["providerConnection"]): string | null {

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +19,7 @@ import type {
   ProviderStreamEvent,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
-import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 // Fake-child harness proving the P2a adapter honors every #765 liveness
 // invariant with no live `claude` binary: birth-identity fencing, control-loss
@@ -210,6 +212,28 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 10));
 }
 
+function waitForChildOutput(child: ReturnType<typeof spawn>, marker: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const onData = (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+      if (!output.includes(marker)) return;
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onExit = () => { cleanup(); reject(new Error(`child exited before '${marker}'`)); };
+    const cleanup = () => {
+      child.stdout?.off("data", onData);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    child.stdout?.on("data", onData);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
 // The evidence module's grace timers are deliberately unref'd; when a test's
 // only pending work is such a timer the loop would drain, so hold it open.
 async function withLoopAlive<T>(work: Promise<T>): Promise<T> {
@@ -392,7 +416,7 @@ test("a silent CLI that never reports init is refused as unobservable, with no o
   assert.equal(harness.children[0]!.alive, false);
 });
 
-test("observed crash emits one synthesized terminal payload and makes attach absent", async () => {
+test("observed crash emits one synthesized terminal payload and makes attach terminal evidence", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
@@ -406,11 +430,39 @@ test("observed crash emits one synthesized terminal payload and makes attach abs
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "crashed");
   assert.equal(handle.observedState(), "failed");
-  assert.equal(await adapter.attach({
+  const attachment = await adapter.attach({
     workAttemptId: "wa-claude-1",
     providerContinuationId: handle.providerContinuationId!,
     providerConnection: handle.providerConnection,
-  }), null);
+  });
+  assert.equal(attachment && "state" in attachment ? attachment.state : null, "terminal");
+  assert.equal(attachment && "state" in attachment ? attachment.terminal.terminalCause : null, "crashed");
+});
+
+test("durable birth identity remains stable when a provider rewrites its process title", { skip: process.platform === "win32" }, async () => {
+  const child = spawn(process.execPath, ["-e", [
+    "process.stdout.write('ready\\n')",
+    "process.stdin.once('data', () => { process.title = 'claude'; process.stdout.write('changed\\n') })",
+    "setInterval(() => {}, 1000)",
+  ].join(";")], { stdio: ["pipe", "pipe", "ignore"] });
+  try {
+    await waitForChildOutput(child, "ready");
+    const before = defaultGetProcessIdentity(child.pid!);
+    child.stdin!.write("change\n");
+    await waitForChildOutput(child, "changed");
+    const after = defaultGetProcessIdentity(child.pid!);
+    assert.equal(typeof before, "string");
+    assert.equal(after, before, "mutable argv/title is excluded from process birth identity");
+    assert.equal(
+      sameProcessBirthIdentity(after!, `${before} /usr/local/bin/claude --print --verbose`),
+      true,
+      "2.0.12 recognizes a pre-upgrade identity that appended mutable argv",
+    );
+  } finally {
+    const exited = once(child, "exit");
+    child.kill("SIGTERM");
+    await exited;
+  }
 });
 
 test("stop orders SIGTERM before the observed terminal and escalates to SIGKILL after grace", async () => {
@@ -467,18 +519,25 @@ test("a quiet child stays working: no signals, no terminal, no state decay", asy
 });
 
 test("a recycled pid can neither authenticate an attach nor be signalled", async () => {
-  const harness = createHarness();
+  const originalBirth = "Wed Jul 15 23:42:10 2026";
+  const recycledBirth = "Thu Jul 16 00:01:22 2026";
+  const harness = createHarness({ identities: new Map([[4100, originalBirth]]) });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
 
   const fresh = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  harness.identities.set(4100, "some-other-birth-2");
+  harness.identities.set(4100, recycledBirth);
   const attached = await fresh.attach({
     workAttemptId: "wa-claude-1",
     providerContinuationId: handle.providerContinuationId!,
-    providerConnection: { kind: "claude_cli", pid: 4100, processIdentity: birthIdentity(4100) },
+    providerConnection: {
+      kind: "claude_cli",
+      pid: 4100,
+      processIdentity: `${originalBirth} /opt/homebrew/bin/claude --print --verbose`,
+    },
   });
-  assert.equal(attached, null, "the recorded child is proven absent");
+  assert.equal(attached && "state" in attached ? attached.state : null, "terminal", "the recorded child is proven absent");
+  assert.equal(attached && "state" in attached ? attached.terminal.terminalCause : null, "crashed");
   assert.deepEqual(harness.signals, [], "the recycled pid was never signalled");
 });
 
@@ -500,8 +559,9 @@ test("pid-less or unverifiable durable endpoints stay ambiguous and restart-bloc
   assert.deepEqual(harness.signals, []);
 });
 
-test("attach to a live unreachable orphan fences it (TERM, identity recheck, KILL) before reporting absent", async () => {
-  const harness = createHarness({ dieOnSigterm: false });
+test("attach to a live unreachable orphan fences it (TERM, identity recheck, KILL) before reporting terminal", async () => {
+  const stableBirth = "Wed Jul 15 23:42:10 2026";
+  const harness = createHarness({ dieOnSigterm: false, identities: new Map([[4100, stableBirth]]) });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
   const handle = await adapter.spawn(spawnRequest());
 
@@ -510,10 +570,15 @@ test("attach to a live unreachable orphan fences it (TERM, identity recheck, KIL
   const attached = await withLoopAlive(fresh.attach({
     workAttemptId: "wa-claude-1",
     providerContinuationId: handle.providerContinuationId!,
-    providerConnection: { kind: "claude_cli", pid: 4100, processIdentity: birthIdentity(4100) },
+    providerConnection: {
+      kind: "claude_cli",
+      pid: 4100,
+      processIdentity: `${stableBirth} /opt/homebrew/bin/claude --print --verbose --session-id old`,
+    },
   }));
 
-  assert.equal(attached, null, "after fencing, the lane is provably absent for bounded recovery");
+  assert.equal(attached && "state" in attached ? attached.state : null, "terminal", "fencing returns durable terminal evidence for bounded recovery");
+  assert.equal(attached && "state" in attached ? attached.terminal.terminalCause : null, "killed");
   assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"], "exact-child fence ordering");
   assert.equal(harness.identities.get(4100), null, "the orphan is verifiably gone before recovery may proceed");
   assert.equal(harness.launches.length, 1, "fencing never launches a second writer");

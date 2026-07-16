@@ -84,6 +84,41 @@ export class WorkerBindingStore {
     });
   }
 
+  /**
+   * Compatibility path for native observation of a published-runtime poll.
+   * Unlike the formal MCP response checkpoint, this evidence is one poll
+   * behind and may arrive late, so it may only advance a numeric room cursor.
+   */
+  async checkpointCursorMonotonic(
+    entryId: string,
+    agentSessionId: string,
+    executionGenerationId: string,
+    roomCursor: string,
+  ): Promise<{ binding: WorkerSessionBinding; advanced: boolean }> {
+    const candidateNumber = parseRoomMessageNumber(roomCursor);
+    if (candidateNumber === null) throw new Error("Compatibility worker cursor must be a numeric room message id.");
+    return this.serialize(async () => {
+      const stored = await this.load();
+      const prior = stored.bindings[entryId];
+      if (!prior
+        || prior.agent_session_id !== agentSessionId
+        || prior.execution_generation_id !== executionGenerationId) {
+        throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
+      }
+      const priorNumber = parseRoomMessageNumber(prior.room_cursor);
+      if (prior.room_cursor !== null && (priorNumber === null || candidateNumber <= priorNumber)) {
+        return { binding: prior, advanced: false };
+      }
+      const binding: WorkerSessionBinding = {
+        ...prior,
+        room_cursor: roomCursor,
+        updated_at: new Date().toISOString(),
+      };
+      await this.write({ version: 1, bindings: { ...stored.bindings, [entryId]: binding } });
+      return { binding, advanced: true };
+    });
+  }
+
   async publish<T extends { accepted: boolean }>(
     entryId: string,
     observedAtMs: number,
@@ -173,4 +208,12 @@ export class WorkerBindingStore {
     await previous;
     try { return await operation(); } finally { release(); }
   }
+}
+
+function parseRoomMessageNumber(value: string | null): number | null {
+  if (!value) return null;
+  const match = /^msg_(\d+)$/.exec(value);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }

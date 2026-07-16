@@ -74,9 +74,13 @@ export function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void 
 
 export function defaultGetProcessIdentity(pid: number): string | null | undefined {
   try {
+    // argv/command is mutable (`claude` rewrites its process title after init),
+    // so it cannot be part of a durable birth identity. PID is carried beside
+    // this value; the kernel-recorded start time distinguishes PID reuse while
+    // remaining stable for the process lifetime.
     const identity = execFileSync(
       "/bin/ps",
-      ["-p", String(pid), "-o", "lstart=", "-o", "command="],
+      ["-p", String(pid), "-o", "lstart="],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     ).trim();
     return identity || undefined;
@@ -90,6 +94,21 @@ export function defaultGetProcessIdentity(pid: number): string | null | undefine
   }
 }
 
+const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
+
+/**
+ * Compare the stable birth portion of a process identity. Before daemon 2.0.12
+ * identities also appended mutable argv; accepting that legacy prefix makes a
+ * live upgrade safe while all newly persisted identities are start-time only.
+ */
+export function sameProcessBirthIdentity(
+  current: string,
+  recorded: string,
+): boolean {
+  const stable = (value: string) => value.trim().match(PS_LONG_START_PREFIX)?.[0].replace(/\s+/g, " ") ?? value.trim();
+  return stable(current) === stable(recorded);
+}
+
 export async function defaultObserveProcessExit(
   pid: number,
   processIdentity: string,
@@ -98,7 +117,7 @@ export async function defaultObserveProcessExit(
     const currentIdentity = defaultGetProcessIdentity(pid);
     if (
       currentIdentity === null
-      || (typeof currentIdentity === "string" && currentIdentity !== processIdentity)
+      || (typeof currentIdentity === "string" && !sameProcessBirthIdentity(currentIdentity, processIdentity))
     ) return { type: "exit", code: null, signal: null };
     await delay(1_000);
   }
@@ -207,7 +226,7 @@ export function observeFencedExit<E extends ProviderProcessExit>(
         const identityBeforeTerm = deps.getProcessIdentity(pid);
         if (
           identityBeforeTerm === null
-          || (typeof identityBeforeTerm === "string" && identityBeforeTerm !== processIdentity)
+          || (typeof identityBeforeTerm === "string" && !sameProcessBirthIdentity(identityBeforeTerm, processIdentity))
         ) {
           finish({ type: "exit", code: null, signal: null });
           return;
@@ -221,7 +240,7 @@ export function observeFencedExit<E extends ProviderProcessExit>(
         const identityBeforeKill = deps.getProcessIdentity(pid);
         if (
           identityBeforeKill === null
-          || (typeof identityBeforeKill === "string" && identityBeforeKill !== processIdentity)
+          || (typeof identityBeforeKill === "string" && !sameProcessBirthIdentity(identityBeforeKill, processIdentity))
         ) {
           finish({ type: "exit", code: null, signal: null });
           return;

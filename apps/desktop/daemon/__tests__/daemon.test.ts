@@ -13,7 +13,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { SupervisorDaemon } from "../main.js";
+import { SupervisorDaemon, supervisedWaitCursorFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -25,6 +25,7 @@ import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure } from "../reconciler-state.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
+import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
 
 const execFileAsync = promisify(execFile);
 const TEST_PROCESS_IDENTITY = execFileSync(
@@ -32,6 +33,40 @@ const TEST_PROCESS_IDENTITY = execFileSync(
   ["-p", String(process.pid), "-o", "lstart=", "-o", "command="],
   { encoding: "utf8" },
 ).trim();
+
+test("supervised native stream extracts only explicit LetAgents wait cursors", () => {
+  const base = {
+    workAttemptId: "attempt",
+    providerContinuationId: "continuation",
+    observedAt: new Date().toISOString(),
+    sequence: 1,
+    provider: "claude-code",
+    kind: "text_delta",
+    method: "assistant",
+    payloadTruncated: false,
+    payloadRedacted: false,
+    durablePayloadRef: null,
+  };
+  assert.equal(supervisedWaitCursorFromProviderEvent({
+    ...base,
+    payload: {
+      type: "assistant",
+      message: { content: [{
+        type: "tool_use",
+        name: "mcp__letagents__wait_for_messages",
+        input: { after_message_id: "msg_3064", agent_session_id: "agent_session_exact" },
+      }] },
+    },
+  }), "msg_3064");
+  assert.equal(supervisedWaitCursorFromProviderEvent({
+    ...base,
+    payload: { type: "assistant", message: { content: [{ type: "text", text: "wait_for_messages after msg_999" }] } },
+  }), null, "free text cannot advance durable room progress");
+  assert.equal(supervisedWaitCursorFromProviderEvent({
+    ...base,
+    payload: { type: "assistant", message: { content: [{ type: "tool_use", name: "mcp__other__wait_for_messages", input: { after_message_id: "not-a-message" } }] } },
+  }), null, "malformed cursors are ignored");
+});
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
@@ -1963,6 +1998,144 @@ test("daemon start deterministically removes crash-orphaned reserved legacy lane
   }
 });
 
+test("restart fences a title-mutated orphan, durably closes its generation, and resumes one successor", async () => {
+  const env = await fixture();
+  const source = join(env.root, "source");
+  await mkdir(source);
+  await execFileAsync("git", ["init", source]);
+  await execFileAsync("git", ["-C", source, "config", "user.email", "daemon@example.invalid"]);
+  await execFileAsync("git", ["-C", source, "config", "user.name", "Daemon Test"]);
+  await writeFile(join(source, "README.md"), "durable\n");
+  await execFileAsync("git", ["-C", source, "add", "README.md"]);
+  await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
+  await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    workerBindingsPath: join(env.root, "worker-bindings.json"),
+  };
+  const continuation = "claude-session-durable";
+  let activeChild: ChildProcess | null = null;
+  let originalPid: number | null = null;
+  let recordedBirthIdentity: string | null = null;
+  let workAttemptId = "";
+  let fencedBeforeTerminalEvidence = false;
+  let resumeCount = 0;
+
+  const launch = async (mutateTitle: boolean) => {
+    const script = mutateTitle
+      ? "setTimeout(() => { process.title = 'claude'; }, 50); setInterval(() => {}, 1000)"
+      : "setInterval(() => {}, 1000)";
+    activeChild = spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+    await eventually(async () => typeof defaultGetProcessIdentity(activeChild!.pid!) === "string", "provider birth identity");
+    return activeChild;
+  };
+  const publicHandle = () => ({
+    workAttemptId,
+    pid: activeChild?.pid ?? null,
+    providerContinuationId: continuation,
+    providerConnection: {
+      kind: "claude_cli" as const,
+      pid: activeChild?.pid ?? null,
+      processIdentity: defaultGetProcessIdentity(activeChild!.pid!) ?? null,
+    },
+    observedState: "working" as const,
+  });
+  const firstPort: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+    spawn: async (request) => {
+      workAttemptId = request.workAttemptId;
+      await launch(true);
+      originalPid = activeChild!.pid!;
+      recordedBirthIdentity = defaultGetProcessIdentity(originalPid);
+      return publicHandle();
+    },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("first daemon must not resume"); },
+    poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: continuation }),
+    onExit: async () => () => {},
+  };
+  const secondPort: ProviderActionPort = {
+    capabilities: firstPort.capabilities,
+    spawn: async () => { throw new Error("durable Claude continuation must resume, not spawn"); },
+    attach: async (ref) => {
+      assert.equal(ref.providerContinuationId, continuation);
+      assert.equal(ref.providerConnection?.processIdentity, recordedBirthIdentity);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      assert.equal(defaultGetProcessIdentity(originalPid!), recordedBirthIdentity, "process title mutation cannot change birth identity");
+      const exited = new Promise<void>((resolve) => activeChild!.once("exit", () => resolve()));
+      activeChild!.kill("SIGTERM");
+      await exited;
+      assert.equal(defaultGetProcessIdentity(originalPid!), null, "old writer is gone before terminal evidence crosses the adapter boundary");
+      fencedBeforeTerminalEvidence = true;
+      return {
+        state: "terminal",
+        terminal: { endedAt: new Date().toISOString(), exitCode: null, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: continuation },
+      };
+    },
+    attachAction: async () => ({ state: "absent" }),
+    resume: async (ref) => {
+      assert.equal(fencedBeforeTerminalEvidence, true);
+      assert.equal(ref.providerContinuationId, continuation);
+      const persisted = JSON.parse(await readFile(paths.attemptsPath, "utf8")) as { attempts: Array<{ execution_generations: Array<{ terminal: unknown }> }> };
+      assert.notEqual(persisted.attempts[0]!.execution_generations[0]!.terminal, null, "old generation is durable terminal before successor launch");
+      resumeCount += 1;
+      await launch(false);
+      return publicHandle();
+    },
+    poke: async () => {},
+    stop: firstPort.stop,
+    onExit: async () => () => {},
+  };
+
+  const first = new SupervisorDaemon(paths, "darwin", firstPort, true);
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id: "supervised_claude_fence",
+      room_id: "focus_37",
+      provider: "claude-code",
+      observed_state: "absent",
+      source_repo_path: source,
+      workspace_path: null,
+      work_attempt_id: null,
+      provider_launch_policy: { permissionMode: "acceptEdits" },
+    } });
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working"), "first Claude generation");
+    const original = ((await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_claude_fence" })).result as { execution_generations: Array<{ execution_generation_id: string }> });
+    assert.equal(original.execution_generations.length, 1);
+    const originalGenerationId = original.execution_generations[0]!.execution_generation_id;
+
+    await first.stop();
+    second = new SupervisorDaemon(paths, "darwin", secondPort, true);
+    await second.start();
+    await eventually(async () => {
+      const manifest = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      return manifest.observed_state === "working" && manifest.provider_ref?.execution_generation_id !== originalGenerationId;
+    }, "bounded successor resume", 8_000);
+    const recovered = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_claude_fence" })).result as {
+      execution_generations: Array<{ terminal: { terminal_cause: string } | null }>;
+    };
+    assert.equal(fencedBeforeTerminalEvidence, true);
+    assert.equal(recovered.execution_generations.length, 2, "recovery mints exactly one successor generation");
+    assert.equal(recovered.execution_generations[0]!.terminal?.terminal_cause, "stopped");
+    assert.equal(recovered.execution_generations[1]!.terminal, null);
+    assert.equal(resumeCount, 1);
+  } finally {
+    await first.stop().catch(() => undefined);
+    await second?.stop().catch(() => undefined);
+    if (activeChild?.pid) {
+      try { activeChild.kill("SIGKILL"); } catch {}
+    }
+    await env.cleanup();
+  }
+});
+
 test("generation handoff reattaches the same provider and publishes its supervised native stream to the exact worker endpoint", async () => {
   const env = await fixture();
   const nativeRequests: Array<{ headers: import("node:http").IncomingHttpHeaders; body: any }> = [];
@@ -2085,10 +2258,52 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(boundProjection.worker_binding?.work_attempt_id, workAttemptId);
     assert.equal(boundProjection.worker_binding?.execution_generation_id, executionGenerationId);
     assert.equal(boundProjection.last_worker_binding?.agent_session_id, "agent_session_exact");
+    assert.equal(boundProjection.workplace_liveness?.state, "reachable", "fresh exact binding marks the MCP workplace reachable");
     assert.doesNotMatch(JSON.stringify(boundProjection), /session-secret|api_url/, "renderer projection never exposes worker authority");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.bound"), "initial daemon worker binding activity");
+    const emitCompatWaitCursor = (roomCursor: string) => {
+      for (const listener of streamListeners) listener({
+        workAttemptId,
+        providerContinuationId: continuation,
+        observedAt: new Date().toISOString(),
+        sequence: ++sequence,
+        provider: "claude-code",
+        kind: "text_delta",
+        method: "assistant",
+        payload: {
+          type: "assistant",
+          message: { content: [{
+            type: "tool_use",
+            name: "mcp__letagents__wait_for_messages",
+            input: { after_message_id: roomCursor, agent_session_id: "agent_session_exact" },
+          }] },
+        },
+        payloadTruncated: false,
+        payloadRedacted: false,
+        durablePayloadRef: null,
+      });
+    };
+    emitCompatWaitCursor("msg_2818");
+    await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
+    await eventually(async () => {
+      const attempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: Array<{ room_cursor: string | null }> };
+      return attempt.checkpoints.at(-1)?.room_cursor === "msg_2818";
+    }, "published-runtime durable wait cursor checkpoint");
+    const nativeCursorAttempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: Array<{ room_cursor: string | null }> };
+    assert.equal(nativeCursorAttempt.checkpoints.at(-1)?.room_cursor, "msg_2818");
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
+      entry_id: "supervised_handoff", work_attempt_id: workAttemptId,
+      execution_generation_id: executionGenerationId, agent_session_id: "agent_session_exact",
+      room_cursor: "msg_2820",
+    })).ok, true);
+    emitCompatWaitCursor("msg_2819");
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 2), "delayed compatibility cursor evidence");
+    const formalCursorWins = await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff");
+    assert.equal(formalCursorWins?.room_cursor, "msg_2820", "delayed compatibility evidence cannot regress the formal response cursor");
+    const formalCursorAttempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: Array<{ room_cursor: string | null }> };
+    assert.equal(formalCursorAttempt.checkpoints.at(-1)?.room_cursor, "msg_2820", "durable attempt progress follows the same serialized no-regression order");
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "tool_lifecycle", method: "item/toolCall/started", payload: { tool: "test" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
-    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 1), "first native stream event");
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 3), "first native stream event after cursor evidence");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "item/toolCall/started"), "daemon-supervised stream HTTP publication");
     const published = nativeRequests.find((request) => request.body.method === "item/toolCall/started")!;
     assert.equal(published.headers.authorization, undefined, "daemon never persists or sends owner/optional bearer authority");
@@ -2124,7 +2339,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
       assert.ok(Date.parse(orderedPublications[index]!.observed_at) > Date.parse(orderedPublications[index - 1]!.observed_at));
     }
     assert.equal(maxNativeRequestsInFlight, 1, "the durable publication mutex remains held through fetch completion");
-    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 4), "serialized local native events");
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 6), "serialized local native events");
 
     await first.stop();
     assert.doesNotThrow(() => process.kill(originalPid!, 0), "provider survives daemon handoff");
@@ -2132,17 +2347,29 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await second.start();
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working"), "replacement daemon attach");
     await eventually(async () => streamListeners.size === 1, "replacement native stream subscription");
+    await daemonRequest(paths.socketPath, "manifest.update_workplace_liveness", {
+      id: "supervised_handoff",
+      state: "unknown",
+      detail: "replacement daemon awaiting exact persisted bind",
+      observed_at: new Date().toISOString(),
+    });
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
+      entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
+      work_attempt_id: workAttemptId, execution_generation_id: executionGenerationId,
+      agent_session_token: "session-secret", api_url: apiUrl,
+    })).ok, true);
     const after = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(after.provider_ref?.provider_connection?.pid, originalPid);
     assert.equal(after.provider_ref?.provider_continuation_id, continuation);
     assert.equal((after as DaemonManifestEntryView).worker_binding?.agent_session_id, "agent_session_exact", "daemon handoff preserves the public exact-session projection");
+    assert.equal(after.workplace_liveness?.state, "reachable", "idempotent persisted bind restores workplace reachability after daemon replacement");
     sequence = 0; // A freshly attached adapter has a fresh local counter.
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "item_lifecycle", method: "item/completed", payload: {}, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
-    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 5), "reattached stream event");
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 7), "reattached stream event");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "item/completed"), "replacement daemon native stream publication");
-    assert.equal(after.activity?.at(-1)?.sequence, 4);
+    assert.equal(after.activity?.at(-1)?.sequence, 6);
     const withReattachedStream = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
-    assert.equal(withReattachedStream.activity?.at(-1)?.sequence, 5, "daemon preserves global activity ordering across adapter counter reset");
+    assert.equal(withReattachedStream.activity?.at(-1)?.sequence, 7, "daemon preserves global activity ordering across adapter counter reset");
     const firstPublished = nativeRequests.find((request) => request.body.method === "item/toolCall/started")!;
     const reattachedPublished = nativeRequests.find((request) => request.body.method === "item/completed")!;
     assert.ok(reattachedPublished.body.sequence > firstPublished.body.sequence, "durable publisher sequence survives daemon generation handoff");
@@ -2153,7 +2380,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await eventually(async () => !/agent_session_exact/.test(await readFile(paths.workerBindingsPath, "utf8")), "stale worker binding removal");
     const requestsAfterFence = nativeRequests.length;
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/must-not-publish-after-fence", payload: {}, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
-    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 7), "local post-fence stream evidence");
+    await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 9), "local post-fence stream evidence");
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(nativeRequests.length, requestsAfterFence, "successor rejection fences later native publications");
 
@@ -2798,6 +3025,12 @@ test("worker binding cursor survives an exact-session generation rebind and fenc
     internals.write = async (value) => { writes += 1; await originalWrite(value); };
     await store.checkpointCursor("entry_exact", "agent_session_exact", "execution_1", "msg_2819");
     assert.equal(writes, 0, "a repeated empty poll cursor performs no credential-store write");
+    assert.equal((await store.checkpointCursorMonotonic("entry_exact", "agent_session_exact", "execution_1", "msg_2820")).advanced, true);
+    assert.equal((await store.checkpointCursorMonotonic("entry_exact", "agent_session_exact", "execution_1", "msg_2818")).advanced, false);
+    assert.equal((await store.get("entry_exact"))?.room_cursor, "msg_2820", "out-of-order compatibility evidence cannot regress progress");
+    await store.checkpointCursor("entry_exact", "agent_session_exact", "execution_1", "msg_2822");
+    assert.equal((await store.checkpointCursorMonotonic("entry_exact", "agent_session_exact", "execution_1", "msg_2821")).advanced, false);
+    assert.equal((await store.get("entry_exact"))?.room_cursor, "msg_2822", "a newer formal response checkpoint wins over delayed compatibility evidence");
     const rebound = await store.bind({
       entry_id: "entry_exact",
       room_id: "focus_37",
@@ -2807,7 +3040,7 @@ test("worker binding cursor survives an exact-session generation rebind and fenc
       agent_session_token: "session-secret",
       api_url: "https://letagents.chat",
     });
-    assert.equal(rebound.room_cursor, "msg_2819");
+    assert.equal(rebound.room_cursor, "msg_2822");
     await assert.rejects(
       store.checkpointCursor("entry_exact", "agent_session_exact", "execution_1", "msg_stale"),
       /does not match the active supervised binding/,
@@ -2822,7 +3055,7 @@ test("worker binding cursor survives an exact-session generation rebind and fenc
       api_url: "https://letagents.chat",
     });
     await store.checkpointCursor("entry_peer_b", "agent_session_peer_b", "execution_peer_b", "msg_peer_b");
-    assert.equal((await store.get("entry_exact"))?.room_cursor, "msg_2819", "peer B cannot advance peer A's same-room cursor");
+    assert.equal((await store.get("entry_exact"))?.room_cursor, "msg_2822", "peer B cannot advance peer A's same-room cursor");
     assert.equal((await store.get("entry_peer_b"))?.room_cursor, "msg_peer_b");
 
     const replacementIdentity = await store.bind({

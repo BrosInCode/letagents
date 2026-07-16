@@ -90,7 +90,7 @@ export type ProviderConnectionRef =
     kind: "codex_app_server";
     url: string;
     pid: number | null;
-    /** Stable process birth/command identity; prevents PID-reuse death laundering. */
+    /** Stable process birth identity; prevents PID-reuse death laundering. */
     processIdentity?: string | null;
   }
   | {
@@ -147,6 +147,18 @@ export interface ProviderHandle {
   readonly providerConnection?: ProviderConnectionRef | null;
   observedState(): ProviderObservedState;
 }
+
+/**
+ * Positive terminal evidence discovered while recovering a durable endpoint.
+ * Some native harnesses cannot reattach after their supervisor dies. They may
+ * nevertheless prove the recorded writer absent (or fence it first). Returning
+ * that evidence lets durability close the old generation before a successor is
+ * minted; plain null means only "not attached" and carries no death proof.
+ */
+export type ProviderAttachTerminal = {
+  state: "terminal";
+  terminal: ProviderTerminalPayload;
+};
 
 export interface ProviderStopOptions {
   /** Skip the graceful window and force-kill immediately. */
@@ -211,10 +223,10 @@ export interface ProviderAdapter {
 
   /**
    * Reattach to a child that is still alive (e.g. after a desktop restart)
-   * WITHOUT relaunching it. Returns null if no live process matches the ref —
-   * the reconciler then decides whether to resume() or treat it as terminal.
+   * WITHOUT relaunching it. A terminal result is positive evidence that the
+   * recorded writer is gone; null alone is not terminal evidence.
    */
-  attach(ref: ProviderContinuationRef): Promise<ProviderHandle | null>;
+  attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null>;
 
   /**
    * Relaunch continuing the prior session. Requires capabilities().resume; for a

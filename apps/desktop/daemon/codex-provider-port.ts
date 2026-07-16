@@ -1,5 +1,6 @@
 import type {
   ProviderActionAttachment,
+  ProviderActionAttachTerminal,
   ProviderActionCapabilities,
   ProviderActionHandle,
   ProviderActionPort,
@@ -20,7 +21,7 @@ type NativeHandle = {
 type NativeAdapter = {
   capabilities(): ProviderActionCapabilities;
   spawn(input: ProviderActionSpawn): Promise<NativeHandle>;
-  attach(input: ProviderActionRef): Promise<NativeHandle | null>;
+  attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
@@ -71,11 +72,11 @@ export class CodexProviderActionPort implements ProviderActionPort {
     return publicHandle(handle);
   }
 
-  async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | null> {
+  async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null> {
     const current = this.handles.get(ref.workAttemptId);
     if (current) return publicHandle(current);
     const handle = await (await this.adapter()).attach(ref);
-    if (!handle) return null;
+    if (!handle || isAttachTerminal(handle)) return handle;
     this.handles.set(ref.workAttemptId, handle);
     return publicHandle(handle);
   }
@@ -125,4 +126,8 @@ export class CodexProviderActionPort implements ProviderActionPort {
     }
     return native;
   }
+}
+
+function isAttachTerminal(value: NativeHandle | ProviderActionAttachTerminal): value is ProviderActionAttachTerminal {
+  return "state" in value && value.state === "terminal";
 }

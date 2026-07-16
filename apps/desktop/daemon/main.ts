@@ -9,7 +9,7 @@ import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-
 import { WorkDurabilityStore } from "./durability-store.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
-import type { ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal } from "./provider-action-port.js";
+import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal } from "./provider-action-port.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
@@ -65,6 +65,40 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
   return "working";
 }
 
+/**
+ * Compatibility cursor evidence for the currently published MCP runtime.
+ * Its explicit wait cursor is the worker's assertion that every earlier room
+ * message was consumed, even when that runtime predates the daemon checkpoint
+ * RPC. Newer runtimes also call the RPC; checkpointing is idempotent below.
+ */
+export function supervisedWaitCursorFromProviderEvent(event: ProviderActionStreamEvent): string | null {
+  const visit = (value: unknown, depth: number): string | null => {
+    if (depth > 8 || !value || typeof value !== "object") return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const cursor = visit(item, depth + 1);
+        if (cursor) return cursor;
+      }
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    const input = record.input;
+    const name = typeof record.name === "string" ? record.name : "";
+    if (record.type === "tool_use"
+      && (name === "wait_for_messages" || name === "mcp__letagents__wait_for_messages")
+      && input && typeof input === "object" && !Array.isArray(input)) {
+      const cursor = (input as Record<string, unknown>).after_message_id;
+      if (typeof cursor === "string" && /^msg_\d+$/.test(cursor)) return cursor;
+    }
+    for (const child of Object.values(record)) {
+      const cursor = visit(child, depth + 1);
+      if (cursor) return cursor;
+    }
+    return null;
+  };
+  return visit(event.payload, 0);
+}
+
 export class SupervisorDaemon {
   private manifestGeneration = 0;
   private readonly singleton: DaemonSingleton;
@@ -83,6 +117,7 @@ export class SupervisorDaemon {
   private readonly liveDisposers = new Map<string, Array<() => void>>();
   private readonly convergenceRequests = new Map<string, Promise<void>>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
+  private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -755,11 +790,40 @@ export class SupervisorDaemon {
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === ref.execution_generation_id);
     if (!execution) throw new Error("Manifest provider reference has no matching durable execution generation.");
     if (execution.terminal) return null;
-    const handle = await this.providerPort!.attach(this.providerRef(entry));
-    if (!handle) return null;
+    const attachment = await this.providerPort!.attach(this.providerRef(entry));
+    if (!attachment) return null;
+    if (this.isAttachTerminal(attachment)) {
+      const terminal = attachment.terminal;
+      if (terminal.providerContinuationId && terminal.providerContinuationId !== ref.provider_continuation_id) {
+        throw new Error("Provider attach terminal evidence belongs to a different durable continuation.");
+      }
+      await this.durability.recordTerminal(ref.work_attempt_id, execution.execution_generation_id, {
+        ...this.terminalPayload(terminal, execution.actor),
+        actor: execution.actor,
+        generation: execution.generation,
+      });
+      // A no-handle attach result used to strand this generation forever. The
+      // explicit terminal evidence proves the writer absent (or fenced), so it
+      // is now safe to release workspace authority before bounded resume.
+      await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, execution.execution_generation_id);
+      if (entry.desired_state === "stopped") {
+        const binding = await this.workerBindings.get(entry.id);
+        if (binding?.execution_generation_id === execution.execution_generation_id) {
+          await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
+        }
+      }
+      return null;
+    }
+    const handle = attachment;
     await this.durability.recoverExecutionFence(ref.work_attempt_id);
     await this.installProviderHandle(entry.id, handle, ref.execution_generation_id);
     return handle;
+  }
+
+  private isAttachTerminal(
+    attachment: ProviderActionHandle | ProviderActionAttachTerminal,
+  ): attachment is ProviderActionAttachTerminal {
+    return "state" in attachment && attachment.state === "terminal";
   }
 
   private async ensureWorkAttempt(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
@@ -858,6 +922,8 @@ export class SupervisorDaemon {
       durable_payload_ref: event.durablePayloadRef,
     });
     await this.appendActivity(entryId, sanitizedEvent);
+    const waitCursor = supervisedWaitCursorFromProviderEvent(event);
+    if (waitCursor) await this.checkpointObservedWaitCursor(entry, waitCursor);
     if (lifecycle === "failed" && entry.observed_state !== "failed") {
       await this.transition(entryId, "failed", entry.condition, `provider stream terminal failure: ${sanitizedEvent.method}`, "daemon-provider-stream");
     }
@@ -885,6 +951,28 @@ export class SupervisorDaemon {
     }
   }
 
+  private async checkpointObservedWaitCursor(entry: DaemonManifestEntry, roomCursor: string): Promise<void> {
+    await this.serializeCursorCheckpoint(entry.id, async () => {
+      const executionGenerationId = entry.provider_ref?.execution_generation_id;
+      if (!entry.work_attempt_id || !executionGenerationId) return;
+      const binding = await this.workerBindings.get(entry.id);
+      if (!binding
+        || binding.work_attempt_id !== entry.work_attempt_id
+        || binding.execution_generation_id !== executionGenerationId) return;
+      const checkpoint = await this.workerBindings.checkpointCursorMonotonic(
+        entry.id,
+        binding.agent_session_id,
+        executionGenerationId,
+        roomCursor,
+      );
+      if (!checkpoint.advanced) return;
+      await this.durability.checkpoint(entry.work_attempt_id, {
+        room_cursor: roomCursor,
+        provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
+      });
+    });
+  }
+
   private enqueueProviderStream(entryId: string, handle: ProviderActionHandle, event: ProviderActionStreamEvent): Promise<void> {
     const previous = this.providerStreamQueues.get(entryId) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(() => this.handleProviderStream(entryId, handle, event)).finally(() => {
@@ -892,6 +980,16 @@ export class SupervisorDaemon {
     });
     this.providerStreamQueues.set(entryId, next);
     return next;
+  }
+
+  private serializeCursorCheckpoint<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.cursorCheckpointQueues.get(entryId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(() => undefined, () => undefined).finally(() => {
+      if (this.cursorCheckpointQueues.get(entryId) === tail) this.cursorCheckpointQueues.delete(entryId);
+    });
+    this.cursorCheckpointQueues.set(entryId, tail);
+    return result;
   }
 
   private fenceTerminalProviderHandleOnce(handle: ProviderActionHandle, actionId: string): Promise<void> {
@@ -930,14 +1028,15 @@ export class SupervisorDaemon {
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
     const currentBinding = await this.workerBindings.get(input.entry_id);
-    if (currentBinding
+    const normalizedApiUrl = new URL(input.api_url).origin;
+    const exactCurrentBinding = Boolean(currentBinding
       && currentBinding.execution_generation_id === input.execution_generation_id
       && currentBinding.agent_session_id === input.agent_session_id
       && currentBinding.agent_session_token === input.agent_session_token
-      && currentBinding.api_url === new URL(input.api_url).origin) {
-      return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
-    }
-    const binding = await this.workerBindings.bind(input);
+      && currentBinding.api_url === normalizedApiUrl);
+    const binding = exactCurrentBinding && currentBinding
+      ? currentBinding
+      : await this.workerBindings.bind(input);
     this.liveBindingIdentities.set(input.entry_id, {
       agentSessionId: binding.agent_session_id,
       executionGenerationId: binding.execution_generation_id,
@@ -946,18 +1045,21 @@ export class SupervisorDaemon {
     await this.updateManifestEntry(input.entry_id, (current) => ({
       ...current,
       // A successful exact-generation bind proves that an ambiguous live
-      // provider regained its MCP control route. Clear only this coordination
-      // latch; quarantine and native terminal failures stay authoritative.
+      // provider has its MCP control route. Restore workplace reachability on
+      // fresh and persisted-idempotent binds; clear only the coordination
+      // latch, while quarantine and native terminal failures stay authoritative.
+      workplace_liveness: {
+        state: "reachable" as const,
+        observed_at: new Date().toISOString(),
+        detail: exactCurrentBinding
+          ? "exact supervised worker session binding confirmed"
+          : "supervised worker session bound",
+      },
       ...(current.desired_state === "running" && current.condition === "coordination_blocked"
         ? {
           observed_state: "working" as const,
           condition: "none" as const,
           last_error: null,
-          workplace_liveness: {
-            state: "reachable" as const,
-            observed_at: binding.updated_at,
-            detail: "exact supervised worker session rebound",
-          },
         }
         : {}),
       last_worker_binding: {
@@ -967,37 +1069,41 @@ export class SupervisorDaemon {
         updated_at: binding.updated_at,
       },
     }));
-    await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
+    if (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable") {
+      await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
+    }
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
 
   private async checkpointWorkerCursor(input: { entry_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; room_cursor: string }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {
-    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
-    if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
-    if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker cursor work attempt does not match the supervised manifest entry.");
-    const attempt = await this.durability.getAttempt(input.work_attempt_id);
-    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
-    if (!execution || execution.terminal) throw new Error("Worker cursor execution generation is absent or terminal.");
-    const currentBinding = await this.workerBindings.get(input.entry_id);
-    if (!currentBinding
-      || currentBinding.agent_session_id !== input.agent_session_id
-      || currentBinding.execution_generation_id !== input.execution_generation_id) {
-      throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
-    }
-    if (currentBinding.room_cursor === input.room_cursor) {
+    return this.serializeCursorCheckpoint(input.entry_id, async () => {
+      const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
+      if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
+      if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker cursor work attempt does not match the supervised manifest entry.");
+      const attempt = await this.durability.getAttempt(input.work_attempt_id);
+      const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
+      if (!execution || execution.terminal) throw new Error("Worker cursor execution generation is absent or terminal.");
+      const currentBinding = await this.workerBindings.get(input.entry_id);
+      if (!currentBinding
+        || currentBinding.agent_session_id !== input.agent_session_id
+        || currentBinding.execution_generation_id !== input.execution_generation_id) {
+        throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
+      }
+      if (currentBinding.room_cursor === input.room_cursor) {
+        return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
+      }
+      await this.workerBindings.checkpointCursor(
+        input.entry_id,
+        input.agent_session_id,
+        input.execution_generation_id,
+        input.room_cursor,
+      );
+      await this.durability.checkpoint(input.work_attempt_id, {
+        room_cursor: input.room_cursor,
+        provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
+      });
       return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
-    }
-    await this.workerBindings.checkpointCursor(
-      input.entry_id,
-      input.agent_session_id,
-      input.execution_generation_id,
-      input.room_cursor,
-    );
-    await this.durability.checkpoint(input.work_attempt_id, {
-      room_cursor: input.room_cursor,
-      provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
     });
-    return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
   }
 
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {

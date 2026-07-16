@@ -16,6 +16,7 @@ import {
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
+  type ProviderAttachTerminal,
   type ProviderConnectionRef,
   type ProviderContinuationRef,
   type ProviderHandle,
@@ -34,6 +35,7 @@ import {
   delay,
   errorMessage,
   observeFencedExit,
+  sameProcessBirthIdentity,
   safeStreamPayload,
   terminateFreshLaunch,
   type ProviderProcessExit,
@@ -428,7 +430,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly initTimeoutMs: number;
   private readonly stopGraceMs: number;
   private readonly handles = new Map<string, ClaudeProviderHandle>();
-  private readonly pendingAttaches = new Map<string, Promise<ProviderHandle | null>>();
+  private readonly pendingAttaches = new Map<string, Promise<ProviderHandle | ProviderAttachTerminal | null>>();
   private readonly exitPromises = new WeakMap<ClaudeProviderHandle, Promise<ProviderTerminalPayload>>();
 
   constructor(options: ClaudeCodeProviderAdapterOptions = {}) {
@@ -468,7 +470,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
    * to bounded recovery without ever risking a second writer. Unverifiable
    * state throws ambiguous and blocks replacement.
    */
-  async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | null> {
+  async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
     const handle = this.handles.get(ref.workAttemptId);
     if (handle && !handle.terminal && handle.providerContinuationId === ref.providerContinuationId) {
       return handle;
@@ -479,7 +481,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
     const pending = this.pendingAttaches.get(ref.workAttemptId);
     if (pending) return pending;
-    const attaching = this.fenceRecordedChild(connection).finally(() => {
+    const attaching = this.fenceRecordedChild(connection, ref.providerContinuationId).finally(() => {
       if (this.pendingAttaches.get(ref.workAttemptId) === attaching) {
         this.pendingAttaches.delete(ref.workAttemptId);
       }
@@ -743,7 +745,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   /** The attach-path fence for a recorded child this adapter cannot reattach. */
   private async fenceRecordedChild(
     connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
-  ): Promise<null> {
+    providerContinuationId: string,
+  ): Promise<ProviderAttachTerminal> {
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
         "Claude CLI attach is ambiguous; the durable endpoint has no verified process identity.",
@@ -755,10 +758,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         "Claude CLI attach is ambiguous; the recorded process identity cannot be verified.",
       );
     }
-    if (identity === null || identity !== connection.processIdentity) {
+    if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) {
       // The recorded child is verifiably gone (a recycled pid is NOT it and is
       // never signalled). Proven absent — bounded recovery may proceed.
-      return null;
+      return this.attachTerminal(providerContinuationId, null, "crashed");
     }
     // The exact recorded child is still alive but unreachable (its stdio died
     // with the previous supervisor). It may still be writing the workspace, so
@@ -771,11 +774,29 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         "Claude CLI attach is ambiguous; the orphaned child's termination could not be verified.",
       );
     }
-    if (identityBeforeKill !== null && identityBeforeKill === connection.processIdentity) {
+    if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
       this.deps.signalProcess(connection.pid, "SIGKILL");
       await this.deps.observeProcessExit(connection.pid, connection.processIdentity);
+      return this.attachTerminal(providerContinuationId, "SIGKILL", "killed");
     }
-    return null;
+    return this.attachTerminal(providerContinuationId, "SIGTERM", "stopped");
+  }
+
+  private attachTerminal(
+    providerContinuationId: string,
+    signal: string | null,
+    terminalCause: ProviderTerminalPayload["terminalCause"],
+  ): ProviderAttachTerminal {
+    return {
+      state: "terminal",
+      terminal: {
+        endedAt: this.deps.now(),
+        exitCode: null,
+        signal,
+        terminalCause,
+        providerContinuationId,
+      },
+    };
   }
 
   private consumeLine(handle: ClaudeProviderHandle, line: string): void {
