@@ -116,6 +116,27 @@ export function supervisedWaitCursorFromProviderEvent(event: ProviderActionStrea
   return supervisedWaitEvidenceFromProviderEvent(event)?.roomCursor ?? null;
 }
 
+const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
+
+/**
+ * Compare the stable birth portion of a process identity. Electron records the
+ * owner identity as `ps -o lstart=` (start time only) via defaultGetProcessIdentity
+ * because argv/command is mutable; the daemon must therefore compare on that same
+ * stable start-time prefix rather than whole-string equality, or a live owner reads
+ * dead and its reservation is dropped before activate. Accepting a legacy prefix
+ * (pre-2.0.12 identities also appended argv/command) keeps a live upgrade safe.
+ * This mirrors sameProcessBirthIdentity in electron/main/agents/provider-evidence.ts;
+ * the daemon tsconfig rootDir forbids importing it, so keep the two in sync.
+ */
+export function sameProcessBirthIdentity(current: string, recorded: string): boolean {
+  // When ps output does not match the expected start-time prefix (unexpected/
+  // malformed), fall back to exact-match rather than treating everything as equal.
+  // This deliberately errs toward "not the same process"; isProcessOwnerLive's outer
+  // kill(0) EPERM/ESRCH check is the safety net for genuinely-live-but-unreadable pids.
+  const stable = (value: string) => value.trim().match(PS_LONG_START_PREFIX)?.[0].replace(/\s+/g, " ") ?? value.trim();
+  return stable(current) === stable(recorded);
+}
+
 export class SupervisorDaemon {
   private manifestGeneration = 0;
   private readonly singleton: DaemonSingleton;
@@ -460,12 +481,16 @@ export class SupervisorDaemon {
 
   private isProcessOwnerLive(pid: number, expectedIdentity: string): boolean {
     try {
+      // Read the start-time-only identity to match how Electron records the owner
+      // (defaultGetProcessIdentity). Compare the stable birth prefix, not the whole
+      // string — a live owner whose recorded identity omits the mutable command must
+      // still read live, or its reservation is wrongly pruned before activate.
       const identity = execFileSync(
         "/bin/ps",
-        ["-p", String(pid), "-o", "lstart=", "-o", "command="],
+        ["-p", String(pid), "-o", "lstart="],
         { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
       ).trim();
-      return Boolean(identity) && identity === expectedIdentity;
+      return Boolean(identity) && sameProcessBirthIdentity(identity, expectedIdentity);
     } catch (error) {
       try {
         process.kill(pid, 0);
