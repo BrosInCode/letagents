@@ -67,7 +67,11 @@ export function preferredManagedAgentRepoRootPath(
  * probe. A verified live status still wins so branch rooms select their exact
  * worktree. When that probe is absent or stale, the durable root recorded when
  * the project room was opened keeps focus rooms attached to the same project.
- * Rooms with no project context use the OS home directory deterministically.
+ * A repo-backed room (has a gitRoom or a durable project root) whose root cannot
+ * be resolved returns null so the caller requires an explicit repo selection —
+ * it must never fall back to HOME, which is not a repo and would make the daemon
+ * convergence block. Only rooms with no project context use the OS home
+ * directory deterministically.
  */
 export function managedAgentRootPathForRoom(input: {
   room: Pick<DesktopRoomInfo, "gitRoom">;
@@ -88,6 +92,10 @@ export function managedAgentRootPathForRoom(input: {
   if (verifiedRoot) return verifiedRoot;
 
   if (durableProjectRoot) return durableProjectRoot;
+
+  // A repo-backed room whose root could not be resolved must require an explicit
+  // repo selection rather than silently launching against HOME.
+  if (hasProjectContext) return null;
 
   return input.homePath?.trim() || null;
 }
