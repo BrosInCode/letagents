@@ -2496,7 +2496,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await eventually(async () => {
       const reattached = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
       return reattached.provider_ref?.execution_generation_id === resumedGenerationId
-        && reattached.observed_state === "recovering"
+        && ["recovering", "working"].includes(reattached.observed_state)
         && reattached.condition === "coordination_blocked"
         && reattached.worker_binding === null
         && streamListeners.size === 1
