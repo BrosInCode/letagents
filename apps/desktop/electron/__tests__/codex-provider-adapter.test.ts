@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type {
@@ -12,6 +15,10 @@ import {
   type CodexProviderAdapterDependencies,
 } from "../main/agents/codex-provider-adapter.js";
 import type { RpcNotification } from "../main/agents/codex-rpc-client.js";
+import {
+  CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE,
+  writeCodexSupervisorBridgeContext,
+} from "../main/agents/codex-supervisor-bridge-context.js";
 import type {
   ProviderActivityEvent,
   ProviderSpawnRequest,
@@ -130,6 +137,10 @@ function createHarness(options: {
     codexBin: string;
     options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> };
   }> = [];
+  const supervisorBridgeContexts: Array<{
+    cwd: string;
+    context: Parameters<CodexProviderAdapterDependencies["writeSupervisorBridgeContext"]>[1];
+  }> = [];
   let nextPid = 4100;
   let nextThread = 1;
   let clock = 0;
@@ -184,6 +195,9 @@ function createHarness(options: {
       }
       return launch.exited;
     },
+    writeSupervisorBridgeContext: async (cwd, context) => {
+      supervisorBridgeContexts.push({ cwd, context });
+    },
     now: () => `2026-07-15T00:00:${String(clock++).padStart(2, "0")}.000Z`,
   };
 
@@ -193,6 +207,7 @@ function createHarness(options: {
     clients,
     signals,
     launchOptions,
+    supervisorBridgeContexts,
     setIdentityObservable: (observable: boolean) => { identityObservable = observable; },
   };
 }
@@ -316,6 +331,49 @@ test("Codex supervised launch passes only its daemon generation binding to the M
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
   });
+  assert.deepEqual(harness.supervisorBridgeContexts, [{
+    cwd: "/tmp/letagents-work-attempt",
+    context: {
+      entry_id: "manifest_exact",
+      room_id: "focus_37",
+      work_attempt_id: spawnRequest().workAttemptId,
+      execution_generation_id: "execution_exact",
+    },
+  }]);
+});
+
+test("Codex supervised launch fails closed before app-server start when bridge coordinates are partial", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(
+    adapter.spawn(spawnRequest({ supervisorEntryId: "manifest_exact" })),
+    /coordinates are incomplete/,
+  );
+  assert.deepEqual(harness.supervisorBridgeContexts, []);
+  assert.deepEqual(harness.launchOptions, []);
+});
+
+test("Codex supervisor bridge context is owner-only, atomic, and contains no worker credential", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-codex-supervisor-context-"));
+  try {
+    const base = {
+      entry_id: "manifest_exact",
+      room_id: "focus_37",
+      work_attempt_id: spawnRequest().workAttemptId,
+    };
+    await writeCodexSupervisorBridgeContext(root, { ...base, execution_generation_id: "generation_first" });
+    await writeCodexSupervisorBridgeContext(root, { ...base, execution_generation_id: "generation_resumed" });
+
+    const path = join(root, CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE);
+    const encoded = await readFile(path, "utf8");
+    assert.equal(JSON.parse(encoded).execution_generation_id, "generation_resumed");
+    assert.doesNotMatch(encoded, /session_token|session-secret|authorization/i);
+    assert.doesNotMatch(encoded, /socket_path/, "repo-controlled context cannot select the credential transport");
+    assert.equal((await lstat(path)).mode & 0o777, 0o600);
+    assert.deepEqual(await readdir(root), [CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE], "atomic rewrite leaves no temporary context");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Codex resume reopens the exact native thread and preserves the same launch policy", async () => {

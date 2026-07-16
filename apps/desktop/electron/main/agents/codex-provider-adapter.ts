@@ -11,6 +11,7 @@ import {
   type ThreadReadResult,
   type TurnStartResult,
 } from "./codex-rpc-client.js";
+import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -74,6 +75,15 @@ export interface CodexProviderAdapterDependencies {
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<CodexAppServerExit>;
+  writeSupervisorBridgeContext(
+    cwd: string,
+    context: {
+      entry_id: string;
+      room_id: string;
+      work_attempt_id: string;
+      execution_generation_id: string;
+    },
+  ): Promise<void>;
   now(): string;
 }
 
@@ -214,6 +224,7 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
+  writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
   now: () => new Date().toISOString(),
 };
 
@@ -386,6 +397,24 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
 
     const policy = normalizeLaunchPolicy(req.launchPolicy);
+    const supervisorCoordinates = [
+      req.supervisorEntryId,
+      req.supervisorSocketPath,
+      req.supervisorExecutionGenerationId,
+    ];
+    const hasSupervisorCoordinate = supervisorCoordinates.some((value) => Boolean(value?.trim()));
+    const hasCompleteSupervisorCoordinates = supervisorCoordinates.every((value) => Boolean(value?.trim()));
+    if (hasSupervisorCoordinate && !hasCompleteSupervisorCoordinates) {
+      throw new Error("Codex supervisor bridge coordinates are incomplete.");
+    }
+    if (hasCompleteSupervisorCoordinates) {
+      await this.deps.writeSupervisorBridgeContext(req.cwd, {
+        entry_id: req.supervisorEntryId!,
+        room_id: req.roomId,
+        work_attempt_id: req.workAttemptId,
+        execution_generation_id: req.supervisorExecutionGenerationId!,
+      });
+    }
     const serverUrl = await this.deps.resolveServerUrl();
     const launch = this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
