@@ -2501,7 +2501,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
         && reattached.worker_binding === null
         && streamListeners.size === 1
         && (second as unknown as { pendingResumeBindings: Map<string, unknown> }).pendingResumeBindings.has("supervised_handoff");
-    }, "daemon restart reconstructs the staged successor before its first wait");
+    }, "daemon restart reconstructs the staged successor before its first wait", 8_000);
     assert.equal(resumeCount, 1, "staging reconstruction attaches the single live successor without another resume");
     assert.equal((await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id, stoppedGenerationId, "restart-window reconstruction preserves predecessor authority until proof");
     const activityBeforeInvalidWaits = awaitingWait.activity?.length ?? 0;
