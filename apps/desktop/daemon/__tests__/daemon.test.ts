@@ -13,7 +13,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
+import { isSupervisedWaitProviderEvent, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -153,6 +153,42 @@ test("supervised native stream extracts only explicit LetAgents wait cursors", (
     ...base,
     payload: { type: "assistant", message: { content: [{ type: "tool_use", name: "mcp__other__wait_for_messages", input: { after_message_id: "not-a-message" } }] } },
   }), null, "malformed cursors are ignored");
+});
+
+test("supervised native stream classifies structured Claude and Codex room waits as quiet polling", () => {
+  const base = {
+    workAttemptId: "attempt",
+    providerContinuationId: "continuation",
+    observedAt: new Date().toISOString(),
+    sequence: 1,
+    provider: "claude-code" as const,
+    kind: "tool_lifecycle" as const,
+    method: "assistant",
+    payloadTruncated: false,
+    payloadRedacted: false,
+    durablePayloadRef: null,
+  };
+  assert.equal(isSupervisedWaitProviderEvent({
+    ...base,
+    payload: { type: "tool_use", name: "mcp__letagents__wait_for_messages", input: {} },
+  }), true);
+  assert.equal(isSupervisedWaitProviderEvent({
+    ...base,
+    provider: "codex",
+    method: "item/mcpToolCall/progress",
+    payload: { item: { tool: "wait_for_messages" } },
+  }), true);
+  assert.equal(isSupervisedWaitProviderEvent({
+    ...base,
+    kind: "text_delta",
+    payload: { type: "assistant", message: { content: [{ type: "text", text: "call wait_for_messages next" }] } },
+  }), false, "free text cannot hide genuine user-facing work");
+  assert.equal(isSupervisedWaitProviderEvent({
+    ...base,
+    provider: "codex",
+    method: "item/mcpToolCall/progress",
+    payload: { item: { tool: "read_messages" } },
+  }), false, "other room tools remain visible as real work");
 });
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
@@ -2376,6 +2412,9 @@ test("generation handoff reattaches the same provider and publishes its supervis
     };
     emitCompatWaitCursor("msg_2818");
     await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
+    const pollingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
+    assert.equal(pollingProjection.observed_state, "idle", "Claude room polling is reachable but not projected as active work");
+    assert.equal(pollingProjection.activity?.at(-1)?.status, "idle");
     await eventually(async () => {
       const attempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: Array<{ room_cursor: string | null }> };
       return attempt.checkpoints.at(-1)?.room_cursor === "msg_2818";
@@ -2396,6 +2435,8 @@ test("generation handoff reattaches the same provider and publishes its supervis
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "tool_lifecycle", method: "item/toolCall/started", payload: { tool: "test" }, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 3), "first native stream event after cursor evidence");
     await eventually(async () => nativeRequests.some((request) => request.body.method === "item/toolCall/started"), "daemon-supervised stream HTTP publication");
+    const workingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
+    assert.equal(workingProjection.observed_state, "working", "real Codex tool work restores the active projection");
     const published = nativeRequests.find((request) => request.body.method === "item/toolCall/started")!;
     assert.equal(published.headers.authorization, undefined, "daemon never persists or sends owner/optional bearer authority");
     assert.equal(published.body.agent_session_id, "agent_session_exact");

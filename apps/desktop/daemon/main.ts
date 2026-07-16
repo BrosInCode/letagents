@@ -76,6 +76,28 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
 }
 
 /**
+ * Recognize a structured LetAgents room wait across native provider payloads.
+ * Free text is deliberately ignored: only an actual tool-use envelope (Claude)
+ * or an MCP tool lifecycle event (Codex and compatible adapters) can make the
+ * supervised worker project as quietly polling.
+ */
+export function isSupervisedWaitProviderEvent(event: ProviderActionStreamEvent): boolean {
+  const isWaitName = (value: unknown): boolean => typeof value === "string"
+    && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages");
+  const visit = (value: unknown, depth: number): boolean => {
+    if (depth > 8 || !value || typeof value !== "object") return false;
+    if (Array.isArray(value)) return value.some((item) => visit(item, depth + 1));
+    const record = value as Record<string, unknown>;
+    if (record.type === "tool_use" && isWaitName(record.name)) return true;
+    if (/mcpToolCall/i.test(event.method)) {
+      if ([record.tool, record.name, record.toolName, record.tool_name].some(isWaitName)) return true;
+    }
+    return Object.values(record).some((child) => visit(child, depth + 1));
+  };
+  return visit(event.payload, 0);
+}
+
+/**
  * Compatibility cursor evidence for the currently published MCP runtime.
  * Its explicit wait cursor is the worker's assertion that every earlier room
  * message was consumed, even when that runtime predates the daemon checkpoint
@@ -1151,9 +1173,10 @@ export class SupervisorDaemon {
     // Provider-local stream counters may restart when a replacement daemon
     // attaches. Persist a daemon-global monotonic sequence for the manifest.
     const sequence = Math.max((entry.activity?.at(-1)?.sequence ?? 0) + 1, event.sequence);
+    const quietlyPolling = isSupervisedWaitProviderEvent(event);
     const status: DaemonActivityEvent["status"] = lifecycle === "failed"
       ? "blocked"
-      : lifecycle === "terminal" ? "idle" : lifecycle;
+      : lifecycle === "terminal" || quietlyPolling ? "idle" : lifecycle;
     const sanitizedEvent = sanitizeDaemonActivityEvent({
       observed_at: event.observedAt,
       sequence,
@@ -1194,7 +1217,7 @@ export class SupervisorDaemon {
     }
     const liveBinding = this.liveBindingIdentities.get(entryId);
     if (liveBinding?.executionGenerationId === entry.provider_ref?.execution_generation_id) {
-      await this.publishNativeActivity(entryId, sanitizedEvent.method, lifecycle === "working" ? "working" : "idle", event.observedAt).catch(() => undefined);
+      await this.publishNativeActivity(entryId, sanitizedEvent.method, lifecycle === "working" && !quietlyPolling ? "working" : "idle", event.observedAt).catch(() => undefined);
     }
     if ((lifecycle === "failed" || lifecycle === "terminal")
       && this.liveHandles.get(entryId) === handle
