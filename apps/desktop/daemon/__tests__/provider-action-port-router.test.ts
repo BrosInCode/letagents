@@ -166,7 +166,7 @@ test("devMcpServerEntryFromEnv returns path only when both env gates are set", (
   );
 });
 
-test("daemon spawn includes devMcpServerEntryPath when both env gates are set, omits it otherwise", async () => {
+test("daemon spawn includes devMcpServerEntryPath for codex when both env gates are set, omits it otherwise", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-dev-spawn-gate-"));
   const source = join(root, "source");
   await mkdir(source);
@@ -179,70 +179,96 @@ test("daemon spawn includes devMcpServerEntryPath when both env gates are set, o
   await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
 
   const capturedSpawns: ProviderActionSpawn[] = [];
-  const exitListeners2 = new Map<string, Set<(t: ProviderActionTerminal) => void>>();
+  const exitListeners3 = new Map<string, Set<(t: ProviderActionTerminal) => void>>();
+  let nextDevPid = 7000;
   function devHandle(workAttemptId: string) {
-    const pid = 7000 + capturedSpawns.length;
+    const pid = nextDevPid++;
     return { workAttemptId, pid, providerContinuationId: "dev-thread", providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `dev:${pid}` }, observedState: () => "working" as const };
   }
-  const devAdapter: NativeProviderAdapter = {
-    capabilities: () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
-    async spawn(input) { capturedSpawns.push(input); return devHandle(input.workAttemptId); },
-    async attach() { return null; },
-    async resume(_ref, input) { return devHandle(input.workAttemptId); },
-    async poke() {},
-    async stop(handle) {
-      const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
-      queueMicrotask(() => exitListeners2.get(handle.workAttemptId)?.forEach((l) => l(terminal)));
-      return terminal;
-    },
-    onExit(handle, listener) {
-      const set = exitListeners2.get(handle.workAttemptId) ?? new Set();
-      set.add(listener);
-      exitListeners2.set(handle.workAttemptId, set);
-      return () => set.delete(listener);
-    },
-    onStream: () => () => {},
-  };
+  function makeDevAdapter(): NativeProviderAdapter {
+    return {
+      capabilities: () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
+      async spawn(input) { capturedSpawns.push(input); return devHandle(input.workAttemptId); },
+      async attach() { return null; },
+      async resume(_ref, input) { return devHandle(input.workAttemptId); },
+      async poke() {},
+      async stop(handle) {
+        const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
+        queueMicrotask(() => exitListeners3.get(handle.workAttemptId)?.forEach((l) => l(terminal)));
+        return terminal;
+      },
+      onExit(handle, listener) {
+        const set = exitListeners3.get(handle.workAttemptId) ?? new Set();
+        set.add(listener);
+        exitListeners3.set(handle.workAttemptId, set);
+        return () => set.delete(listener);
+      },
+      onStream: () => () => {},
+    };
+  }
 
   const savedUrl = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
   const savedEntry = process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY;
-  const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
-    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
-  };
-  const entry: DaemonManifestEntry = {
-    id: "dev_gate_supervised", room_id: "room", display_name: "DevAgent", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
-    permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "default" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
-  };
-
-  // Gate 1: both env vars set → field present in spawn
-  process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = "http://localhost:3000";
-  process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = "/absolute/dist/mcp/server.js";
-  const router1 = new ProviderActionPortRouter({ "claude-code": async () => devAdapter });
-  const daemon1 = new SupervisorDaemon(paths, "darwin", router1, true);
   try {
-    await daemon1.start();
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "dev-gate spawn");
-    assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js", "both gates set: devMcpServerEntryPath must be forwarded to adapter");
-  } finally {
-    await daemon1.stop();
-  }
+    // Case 1: both env gates set + codex provider → field present
+    process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = "http://localhost:3000";
+    process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = "/absolute/dist/mcp/server.js";
+    capturedSpawns.length = 0;
+    const paths1 = {
+      lockPath: join(root, "d1.lock"), socketPath: join(root, "d1.sock"), manifestPath: join(root, "manifest1.json"), auditPath: join(root, "audit1.jsonl"),
+      attemptsPath: join(root, "attempts1.json"), attemptsRoot: join(root, "attempts1"), workspaceRoot: root,
+    };
+    const codexEntry: DaemonManifestEntry = {
+      id: "dev_gate_codex", room_id: "room", display_name: "CodexAgent", provider: "codex", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
+      permission_profile_id: "ask_before_write", provider_launch_policy: { promptForInstallation: false }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+    };
+    const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    try {
+      await daemon1.start();
+      assert.equal((await daemonRequest(paths1.socketPath, "manifest.put", { entry: codexEntry })).ok, true);
+      await eventually(async () => ((await daemonRequest(paths1.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "codex dev-gate spawn");
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js", "codex + both gates: devMcpServerEntryPath must reach adapter");
+    } finally {
+      await daemon1.stop();
+    }
 
-  // Gate 2: dev-url absent → field absent
-  delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
-  process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = "/absolute/dist/mcp/server.js";
-  capturedSpawns.length = 0;
-  const paths2 = { ...paths, lockPath: join(root, "daemon2.lock"), socketPath: join(root, "daemon2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl") };
-  const router2 = new ProviderActionPortRouter({ "claude-code": async () => devAdapter });
-  const daemon2 = new SupervisorDaemon(paths2, "darwin", router2, true);
-  try {
-    await daemon2.start();
-    assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: { ...entry, id: "dev_gate_supervised_2" } })).ok, true);
-    await eventually(async () => ((await daemonRequest(paths2.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "no-dev-url spawn");
-    assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "missing dev-url gate: devMcpServerEntryPath must be absent");
+    // Case 2: both env gates set + claude-code provider → field absent (provider gate)
+    capturedSpawns.length = 0;
+    const paths2 = {
+      lockPath: join(root, "d2.lock"), socketPath: join(root, "d2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
+      attemptsPath: join(root, "attempts2.json"), attemptsRoot: join(root, "attempts2"), workspaceRoot: root,
+    };
+    const claudeEntry: DaemonManifestEntry = {
+      id: "dev_gate_claude", room_id: "room", display_name: "ClaudeAgent", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
+      permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "default" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+    };
+    const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter() }), true);
+    try {
+      await daemon2.start();
+      assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: claudeEntry })).ok, true);
+      await eventually(async () => ((await daemonRequest(paths2.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "claude dev-gate spawn");
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "claude-code + both gates: devMcpServerEntryPath must be absent (provider gate)");
+    } finally {
+      await daemon2.stop();
+    }
+
+    // Case 3: dev-url gate absent + codex provider → field absent (env gate)
+    delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+    capturedSpawns.length = 0;
+    const paths3 = {
+      lockPath: join(root, "d3.lock"), socketPath: join(root, "d3.sock"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
+      attemptsPath: join(root, "attempts3.json"), attemptsRoot: join(root, "attempts3"), workspaceRoot: root,
+    };
+    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    try {
+      await daemon3.start();
+      assert.equal((await daemonRequest(paths3.socketPath, "manifest.put", { entry: { ...codexEntry, id: "dev_gate_codex_nourl" } })).ok, true);
+      await eventually(async () => ((await daemonRequest(paths3.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "codex no-dev-url spawn");
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "codex + missing dev-url: devMcpServerEntryPath must be absent");
+    } finally {
+      await daemon3.stop();
+    }
   } finally {
-    await daemon2.stop();
     if (savedUrl === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
     else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = savedUrl;
     if (savedEntry === undefined) delete process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY;
