@@ -1,14 +1,31 @@
 import { randomUUID } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import type { StoredAgentSessionState } from "../../local-state.js";
 
 const NEGOTIATION_PROTOCOL_VERSION = 1;
 const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2]);
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const SUPERVISOR_CONTEXT_FILE = ".letagents-supervisor-context.json";
+const WORK_ATTEMPT_MARKER_FILE = ".letagents-work-attempt.json";
+const MAX_SUPERVISOR_CONTEXT_BYTES = 4 * 1024;
 
 type SupervisorResponse = { version?: number; id?: string; ok?: boolean; error?: string; result?: unknown };
-type SupervisorBridgeOptions = { requestTimeoutMs?: number };
+type SupervisorBridgeOptions = {
+  requestTimeoutMs?: number;
+  cwd?: string;
+  /** Tests may inject a private socket; production always uses the canonical local daemon path. */
+  trustedDaemonSocketPath?: string;
+};
+type SupervisorCoordinates = {
+  entryId: string;
+  socketPath: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+};
 
 /** Bind the exact worker credential minted by registration to its daemon lane. */
 export async function bindSupervisedWorkerSession(
@@ -16,12 +33,9 @@ export async function bindSupervisedWorkerSession(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<boolean> {
-  const entryId = env.LETAGENTS_SUPERVISOR_ENTRY_ID?.trim();
-  const socketPath = env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim();
-  const workAttemptId = env.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID?.trim();
-  const executionGenerationId = env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID?.trim();
-  if (!entryId && !socketPath && !workAttemptId && !executionGenerationId) return false;
-  if (!entryId || !socketPath || !workAttemptId || !executionGenerationId) throw new Error("Supervised worker bridge environment is incomplete.");
+  const coordinates = await resolveSupervisorCoordinates(session, env, options);
+  if (!coordinates) return false;
+  const { entryId, socketPath, workAttemptId, executionGenerationId } = coordinates;
   if (session.session_kind !== "worker") throw new Error("A supervised provider must register a worker session.");
 
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -61,12 +75,9 @@ export async function checkpointSupervisedWorkerCursor(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<boolean> {
-  const entryId = env.LETAGENTS_SUPERVISOR_ENTRY_ID?.trim();
-  const socketPath = env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim();
-  const workAttemptId = env.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID?.trim();
-  const executionGenerationId = env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID?.trim();
-  if (!entryId && !socketPath && !workAttemptId && !executionGenerationId) return false;
-  if (!entryId || !socketPath || !workAttemptId || !executionGenerationId) throw new Error("Supervised worker bridge environment is incomplete.");
+  const coordinates = await resolveSupervisorCoordinates(session, env, options);
+  if (!coordinates) return false;
+  const { entryId, socketPath, workAttemptId, executionGenerationId } = coordinates;
   if (session.session_kind !== "worker") throw new Error("A supervised provider must use a worker session.");
   if (!roomCursor.trim()) throw new Error("Supervised worker cursor is required.");
 
@@ -78,6 +89,7 @@ export async function checkpointSupervisedWorkerCursor(
   }, timeoutMs);
   if (!negotiation.ok) throw new Error(negotiation.error || "Supervisor protocol negotiation failed.");
   const protocolVersion = negotiationProtocolVersion(negotiation.result);
+  if (negotiation.version !== protocolVersion) throw new Error("Supervisor negotiation response version does not match its negotiated protocol.");
   const response = await supervisorRequest(socketPath, {
     version: protocolVersion,
     id: randomUUID(),
@@ -93,6 +105,116 @@ export async function checkpointSupervisedWorkerCursor(
   if (!response.ok) throw new Error(response.error || "Supervisor rejected the worker cursor checkpoint.");
   if (response.version !== protocolVersion) throw new Error("Supervisor cursor checkpoint response used an unexpected protocol version.");
   return true;
+}
+
+async function resolveSupervisorCoordinates(
+  session: StoredAgentSessionState,
+  env: NodeJS.ProcessEnv,
+  options: SupervisorBridgeOptions,
+): Promise<SupervisorCoordinates | null> {
+  const environmentCoordinates: SupervisorCoordinates = {
+    entryId: env.LETAGENTS_SUPERVISOR_ENTRY_ID?.trim() ?? "",
+    socketPath: env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim() ?? "",
+    workAttemptId: env.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID?.trim() ?? "",
+    executionGenerationId: env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID?.trim() ?? "",
+  };
+  const values = Object.values(environmentCoordinates);
+  const hasEnvironmentCoordinates = values.some((value) => Boolean(value));
+  if (hasEnvironmentCoordinates && values.some((value) => !value)) {
+    throw new Error("Supervised worker bridge environment is incomplete.");
+  }
+  if (hasEnvironmentCoordinates) return environmentCoordinates;
+
+  const context = await readCodexSupervisorContext(options.cwd ?? process.cwd());
+  if (!context) return null;
+  if (!/^codex(?::|$)/i.test(session.runtime.trim())) {
+    throw new Error("Codex supervisor bridge context cannot bind a non-Codex worker session.");
+  }
+  if (context.roomId !== session.room_id) {
+    throw new Error("Codex supervisor bridge context does not match the worker room.");
+  }
+  return {
+    ...context,
+    socketPath: options.trustedDaemonSocketPath ?? join(homedir(), ".letagents", "daemon.sock"),
+  };
+}
+
+async function readCodexSupervisorContext(cwd: string): Promise<(Omit<SupervisorCoordinates, "socketPath"> & { roomId: string }) | null> {
+  const path = join(cwd, SUPERVISOR_CONTEXT_FILE);
+  let encoded: string;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_SUPERVISOR_CONTEXT_BYTES) {
+      throw new Error("Codex supervisor bridge context must be a small regular file.");
+    }
+    encoded = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(encoded);
+  } catch {
+    throw new Error("Codex supervisor bridge context is not valid JSON.");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Codex supervisor bridge context is malformed.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.version !== 1 || record.provider !== "codex") {
+    throw new Error("Codex supervisor bridge context has an unsupported identity.");
+  }
+  const required = {
+    entryId: record.entry_id,
+    roomId: record.room_id,
+    workAttemptId: record.work_attempt_id,
+    executionGenerationId: record.execution_generation_id,
+  };
+  for (const [field, candidate] of Object.entries(required)) {
+    if (typeof candidate !== "string" || !candidate.trim()) {
+      throw new Error(`Codex supervisor bridge context ${field} is required.`);
+    }
+  }
+  const coordinates = Object.fromEntries(
+    Object.entries(required).map(([field, candidate]) => [field, (candidate as string).trim()]),
+  ) as Omit<SupervisorCoordinates, "socketPath"> & { roomId: string };
+  const marker = await readWorkAttemptMarker(cwd);
+  if (marker.workAttemptId !== coordinates.workAttemptId) {
+    throw new Error("Codex supervisor bridge context does not match the daemon-owned worktree.");
+  }
+  return coordinates;
+}
+
+async function readWorkAttemptMarker(cwd: string): Promise<{ workAttemptId: string }> {
+  const path = join(cwd, WORK_ATTEMPT_MARKER_FILE);
+  let encoded: string;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_SUPERVISOR_CONTEXT_BYTES) {
+      throw new Error("Daemon work-attempt marker must be a small regular file.");
+    }
+    encoded = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("Codex supervisor bridge context is outside a daemon-owned worktree.");
+    }
+    throw error;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(encoded);
+  } catch {
+    throw new Error("Daemon work-attempt marker is not valid JSON.");
+  }
+  const workAttemptId = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>).work_attempt_id
+    : null;
+  if ((value as Record<string, unknown> | null)?.version !== 1 || typeof workAttemptId !== "string" || !workAttemptId.trim()) {
+    throw new Error("Daemon work-attempt marker is malformed.");
+  }
+  return { workAttemptId: workAttemptId.trim() };
 }
 
 function negotiationProtocolVersion(result: unknown): number {

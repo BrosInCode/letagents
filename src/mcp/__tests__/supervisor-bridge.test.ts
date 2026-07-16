@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +25,154 @@ const session: StoredAgentSessionState = {
 };
 
 test("supervisor bridge is inert outside a daemon-supervised provider", async () => {
-  assert.equal(await bindSupervisedWorkerSession(session, {}), false);
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-absent-"));
+  try {
+    assert.equal(await bindSupervisedWorkerSession(session, {}, { cwd: root }), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex supervisor context binds and checkpoints through an MCP process without supervisor env", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate" ? { protocol_version: 2 } : { accepted: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_first");
+    const options = { cwd: root, trustedDaemonSocketPath: socketPath };
+    assert.equal(await bindSupervisedWorkerSession(session, {}, options), true);
+    assert.equal(await checkpointSupervisedWorkerCursor(session, "msg_2819", {}, options), true);
+    assert.deepEqual(requests.filter((request) => request.method === "supervisor.bind_worker_session")[0]?.params, {
+      entry_id: "manifest_exact",
+      room_id: session.room_id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_first",
+      agent_session_id: session.session_id,
+      agent_session_token: session.session_token,
+      api_url: "https://letagents.chat",
+    });
+    assert.deepEqual(requests.filter((request) => request.method === "supervisor.checkpoint_worker_cursor")[0]?.params, {
+      entry_id: "manifest_exact",
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_first",
+      agent_session_id: session.session_id,
+      room_cursor: "msg_2819",
+    });
+    assert.doesNotMatch(JSON.stringify(await readContext(root)), /session-secret/, "stable context never persists worker authority");
+
+    await writeSupervisorContext(root, "generation_resumed");
+    assert.equal(await bindSupervisedWorkerSession(session, {}, options), true);
+    const binds = requests.filter((request) => request.method === "supervisor.bind_worker_session");
+    assert.equal(binds[1]?.params.execution_generation_id, "generation_resumed", "restart rewrites the exact live generation");
+
+    await assert.rejects(
+      () => bindSupervisedWorkerSession(session, { LETAGENTS_SUPERVISOR_ENTRY_ID: "partial" }, options),
+      /environment is incomplete/,
+      "partial ambient coordinates never fall through to the file",
+    );
+    await writeFile(join(root, ".letagents-supervisor-context.json"), "{");
+    assert.equal(
+      await bindSupervisedWorkerSession(session, supervisedEnv(socketPath), options),
+      true,
+      "complete ambient coordinates remain authoritative over file fallback",
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex supervisor context fails closed for partial, cross-room, and unrelated worker contexts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-invalid-"));
+  const unrelated = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-unrelated-"));
+  try {
+    await writeFile(join(root, ".letagents-supervisor-context.json"), JSON.stringify({ version: 1, provider: "codex", entry_id: "manifest_exact" }));
+    await assert.rejects(() => bindSupervisedWorkerSession(session, {}, { cwd: root }), /is required/);
+
+    await writeSupervisorContext(root, "generation_exact", "focus_other");
+    await assert.rejects(() => bindSupervisedWorkerSession(session, {}, { cwd: root }), /does not match the worker room/);
+
+    await writeSupervisorContext(root, "generation_exact");
+    await assert.rejects(
+      () => bindSupervisedWorkerSession({ ...session, runtime: "claude-code" }, {}, { cwd: root }),
+      /cannot bind a non-Codex/,
+    );
+    await writeFile(join(root, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, work_attempt_id: "attempt_other" }));
+    await assert.rejects(
+      () => bindSupervisedWorkerSession(session, {}, { cwd: root }),
+      /does not match the daemon-owned worktree/,
+    );
+    assert.equal(await bindSupervisedWorkerSession(session, {}, { cwd: unrelated }), false, "another MCP cwd cannot inherit the binding context");
+
+    const contextPath = join(root, ".letagents-supervisor-context.json");
+    await rm(contextPath);
+    const symlinkTarget = join(root, "attacker-context.json");
+    await writeFile(symlinkTarget, JSON.stringify({ version: 1, provider: "codex" }));
+    await symlink(symlinkTarget, contextPath);
+    await assert.rejects(() => bindSupervisedWorkerSession(session, {}, { cwd: root }), /small regular file/);
+    await rm(contextPath);
+    await writeFile(contextPath, "x".repeat(4 * 1024 + 1));
+    await assert.rejects(() => bindSupervisedWorkerSession(session, {}, { cwd: root }), /small regular file/);
+    await writeFile(contextPath, "{");
+    await assert.rejects(() => bindSupervisedWorkerSession(session, {}, { cwd: root }), /not valid JSON/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(unrelated, { recursive: true, force: true });
+  }
+});
+
+test("worktree context cannot redirect a freshly minted worker credential to an attacker socket", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-socket-"));
+  const trustedSocketPath = join(root, "trusted.sock");
+  const attackerSocketPath = join(root, "attacker.sock");
+  const trustedRequests: any[] = [];
+  const attackerRequests: any[] = [];
+  const serverFor = (requests: any[]) => createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate" ? { protocol_version: 2 } : { bound: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  const trusted = serverFor(trustedRequests);
+  const attacker = serverFor(attackerRequests);
+  try {
+    await Promise.all([
+      new Promise<void>((resolve, reject) => { trusted.once("error", reject); trusted.listen(trustedSocketPath, resolve); }),
+      new Promise<void>((resolve, reject) => { attacker.once("error", reject); attacker.listen(attackerSocketPath, resolve); }),
+    ]);
+    await writeSupervisorContext(root, "generation_exact", session.room_id, { socket_path: attackerSocketPath });
+    assert.equal(await bindSupervisedWorkerSession(session, {}, {
+      cwd: root,
+      trustedDaemonSocketPath: trustedSocketPath,
+    }), true);
+    assert.equal(attackerRequests.length, 0, "repo-controlled socket_path receives no request or worker credential");
+    assert.match(JSON.stringify(trustedRequests), /session-secret/);
+  } finally {
+    await Promise.all([
+      new Promise<void>((resolve) => trusted.close(() => resolve())),
+      new Promise<void>((resolve) => attacker.close(() => resolve())),
+    ]);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("supervisor bridge binds only the exact worker session credential over the daemon socket", async () => {
@@ -189,4 +336,29 @@ function supervisedEnv(socketPath: string): NodeJS.ProcessEnv {
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_exact",
     LETAGENTS_API_URL: "https://letagents.chat",
   };
+}
+
+async function writeSupervisorContext(
+  root: string,
+  executionGenerationId: string,
+  roomId = session.room_id,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  await writeFile(join(root, ".letagents-work-attempt.json"), JSON.stringify({
+    version: 1,
+    work_attempt_id: "attempt_exact",
+  }));
+  await writeFile(join(root, ".letagents-supervisor-context.json"), JSON.stringify({
+    version: 1,
+    provider: "codex",
+    entry_id: "manifest_exact",
+    room_id: roomId,
+    work_attempt_id: "attempt_exact",
+    execution_generation_id: executionGenerationId,
+    ...extra,
+  }));
+}
+
+async function readContext(root: string): Promise<unknown> {
+  return JSON.parse(await readFile(join(root, ".letagents-supervisor-context.json"), "utf8"));
 }
