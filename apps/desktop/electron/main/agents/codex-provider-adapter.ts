@@ -1,5 +1,3 @@
-import { createRequire } from "node:module";
-
 import {
   launchCodexAppServer,
   resolveCodexAppServerUrl,
@@ -87,8 +85,6 @@ export interface CodexProviderAdapterDependencies {
       execution_generation_id: string;
     },
   ): Promise<void>;
-  /** True when running inside a packaged Electron build; dev MCP entry overrides are disabled. */
-  isPackaged(): boolean;
   now(): string;
 }
 
@@ -219,8 +215,6 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
   }
 }
 
-const _require = createRequire(import.meta.url);
-
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
   launchServer: (serverUrl, codexBin, options) =>
@@ -232,16 +226,6 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
-  isPackaged: () => {
-    try {
-      const electron = _require("electron") as unknown;
-      if (typeof electron === "object" && electron !== null) {
-        const { app } = electron as { app?: { isPackaged?: boolean } };
-        if (typeof app?.isPackaged === "boolean") return app.isPackaged;
-      }
-    } catch { /* daemon or test context: no electron module */ }
-    return false;
-  },
   now: () => new Date().toISOString(),
 };
 
@@ -433,7 +417,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       });
     }
     const devOverrides = req.devMcpServerEntryPath
-      ? await buildCodexDevMcpEntryOverrides(req.devMcpServerEntryPath, this.deps.isPackaged())
+      ? await buildCodexDevMcpEntryOverrides(req.devMcpServerEntryPath)
       : [];
     const serverUrl = await this.deps.resolveServerUrl();
     const launch = this.deps.launchServer(serverUrl, this.codexBin, {

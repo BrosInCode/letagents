@@ -14,9 +14,7 @@ import { isAbsolute } from "node:path";
  */
 export async function buildCodexDevMcpEntryOverrides(
   entryPath: string,
-  isPackaged: boolean,
 ): Promise<string[]> {
-  if (isPackaged) return [];
   if (!isAbsolute(entryPath)) {
     throw new Error("Codex dev MCP entry path must be absolute.");
   }
