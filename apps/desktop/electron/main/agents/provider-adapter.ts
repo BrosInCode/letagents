@@ -137,8 +137,10 @@ export interface ProviderSpawnRequest {
   };
   /**
    * Development-only: absolute path to a locally built MCP server entry (e.g.
-   * dist/mcp/server.js) for supervised Codex smoke tests. Silently ignored in packaged
-   * builds. Never place a bearer credential or socket path in this field.
+   * dist/mcp/server.js) for supervised Codex smoke tests. Production safety is
+   * caller-enforced: the daemon emits this field only for Codex when BOTH
+   * LETAGENTS_DESKTOP_DEV_SERVER_URL and LETAGENTS_DEV_MCP_SERVER_ENTRY are set.
+   * Never place a bearer credential or socket path in this field.
    */
   devMcpServerEntryPath?: string;
 }
