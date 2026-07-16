@@ -757,7 +757,7 @@ export class SupervisorDaemon {
         supervisorSocketPath: this.socket.path,
         supervisorExecutionGenerationId: execution.execution_generation_id,
         ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
-        ...(devMcpServerEntryPath ? { devMcpServerEntryPath } : {}),
+        ...(devMcpServerEntryPath && entry.provider === "codex" ? { devMcpServerEntryPath } : {}),
       };
       const ref = entry.provider_ref ? this.providerRef(entry) : null;
       let resumed = false;
