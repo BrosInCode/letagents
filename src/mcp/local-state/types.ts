@@ -97,6 +97,15 @@ export interface StoredAgentIdentityLeaseState {
 export interface StoredAgentSessionState {
   session_id: string;
   session_token: string;
+  /**
+   * Canonical daemon-owned worktree used to resolve the non-secret Codex
+   * supervisor context after the MCP process or room loop restarts.
+   *
+   * This path is persisted only after the context has been validated and an
+   * exact worker bind has succeeded. It is deliberately omitted from public
+   * agent-session projections.
+   */
+  supervisor_context_cwd?: string | null;
   room_id: string;
   session_kind: "worker" | "controller";
   runtime: string;
