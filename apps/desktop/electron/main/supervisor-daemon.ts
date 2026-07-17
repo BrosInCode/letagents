@@ -25,6 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // actually contains this desktop build's fixes.
 export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.14";
 const REQUEST_TIMEOUT_MS = 3_000;
+const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
 const activitySequences = new Map<string, number>();
@@ -108,6 +109,8 @@ export interface SupervisorDaemonLifecycleOptions {
   spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
   terminateDaemon?: (pid: number) => void;
   handoffTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  turnControlRequestTimeoutMs?: number;
   now?: () => Date;
 }
 
@@ -119,6 +122,8 @@ export class SupervisorDaemonClient {
   private readonly daemonWorkingDirectory: string;
   private readonly terminateDaemon: (pid: number) => void;
   private readonly handoffTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly turnControlRequestTimeoutMs: number;
   private readonly now: () => Date;
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
@@ -127,6 +132,8 @@ export class SupervisorDaemonClient {
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
     this.terminateDaemon = options.terminateDaemon ?? ((pid) => process.kill(pid, "SIGTERM"));
     this.handoffTimeoutMs = options.handoffTimeoutMs ?? START_TIMEOUT_MS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
       const child = spawn(process.execPath, [scriptPath], {
@@ -250,7 +257,7 @@ export class SupervisorDaemonClient {
       execution_generation_id: input.executionGenerationId,
       action_id: input.actionId,
       correction: input.correction ?? null,
-    });
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
   }
 
   async readAttempt(id: string): Promise<DesktopSupervisorAttemptDetail> {
@@ -350,7 +357,12 @@ export class SupervisorDaemonClient {
     await this.waitForSocketDown();
   }
 
-  private request<T = unknown>(method: string, params?: unknown, version = SUPERVISOR_DAEMON_PROTOCOL_VERSION): Promise<T> {
+  private request<T = unknown>(
+    method: string,
+    params?: unknown,
+    version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    timeoutMs = this.requestTimeoutMs,
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);
@@ -363,7 +375,7 @@ export class SupervisorDaemonClient {
         if (error) reject(error); else resolve(value as T);
       };
       socket.setEncoding("utf8");
-      socket.setTimeout(REQUEST_TIMEOUT_MS, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
+      socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
       socket.once("error", (error) => finish(error));
       socket.on("data", (chunk: string) => {
         buffer += chunk;

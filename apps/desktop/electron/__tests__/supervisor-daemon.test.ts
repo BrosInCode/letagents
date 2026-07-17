@@ -34,6 +34,7 @@ async function startWireDaemon(
   generation: number,
   onPrepare?: () => void,
   implementationVersion = SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+  controlTurnDelayMs = 0,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
@@ -45,6 +46,7 @@ async function startWireDaemon(
       if (!buffer.includes("\n")) return;
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as { id: string; method: string; params?: Record<string, any> };
       let result: unknown;
+      let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
         result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
@@ -61,6 +63,20 @@ async function startWireDaemon(
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         entry.desired_state = request.params!.desired_state;
         result = entry;
+      } else if (request.method === "manifest.control_turn") {
+        responseDelayMs = controlTurnDelayMs;
+        result = {
+          entryId: request.params!.id,
+          workAttemptId: request.params!.work_attempt_id,
+          executionGenerationId: request.params!.execution_generation_id,
+          actionId: request.params!.action_id,
+          capability: "native_interrupt",
+          interrupted: true,
+          resumed: Boolean(request.params!.correction),
+          state: request.params!.correction ? "working" : "idle",
+          duplicate: false,
+          stages: ["delivered", "interrupting", "applied", "resumed"],
+        };
       } else if (request.method === "lane.reserve_legacy") {
         const owner = {
           reservation_id: request.params!.reservation_id,
@@ -98,7 +114,9 @@ async function startWireDaemon(
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
       }
-      socket.end(`${JSON.stringify({ version, id: request.id, ok: true, result })}\n`);
+      const response = `${JSON.stringify({ version, id: request.id, ok: true, result })}\n`;
+      if (responseDelayMs) setTimeout(() => socket.end(response), responseDelayMs);
+      else socket.end(response);
     });
   });
   await mkdir(dirname(socketPath), { recursive: true });
@@ -139,6 +157,42 @@ test("local supervisor activity subscribers receive only the canonical redacted 
   } finally {
     unsubscribe();
     (supervisorDaemonClient as unknown as { appendActivity: typeof originalAppend }).appendActivity = originalAppend;
+  }
+});
+
+test("turn control keeps the client socket alive beyond the generic request timeout", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    3,
+    undefined,
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    50,
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      requestTimeoutMs: 20,
+      turnControlRequestTimeoutMs: 100,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    const result = await client.controlTurn({
+      entryId: "entry_exact",
+      workAttemptId: "attempt_exact",
+      executionGenerationId: "generation_exact",
+      actionId: "action_exact",
+      correction: "Use the corrected direction",
+    });
+    assert.equal(result.actionId, "action_exact");
+    assert.deepEqual(result.stages, ["delivered", "interrupting", "applied", "resumed"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
   }
 });
 
