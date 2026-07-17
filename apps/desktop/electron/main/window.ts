@@ -1,6 +1,7 @@
 import electron from "electron";
 import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -92,6 +93,9 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
     return;
   }
 
+  const agentDetailScreenshotPath = process.env.LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT?.trim() || null;
+  window.setMinimumSize(360, 480);
+
   if (process.env.LETAGENTS_DESKTOP_SMOKE_DEBUG === "1") {
     window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
       console.log(`LETAGENTS_DESKTOP_CONSOLE ${level} ${sourceId}:${line} ${message}`);
@@ -135,6 +139,8 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           agentSenderButton: false,
           agentDetailModal: false,
           agentDetailModalLayout: false,
+          agentDetailModalNarrowLayout: false,
+          agentDetailStopZoneNarrowLayout: false,
           localSessionPill: false,
           localStopControl: false,
           stopTurnKeepsLocalSession: false,
@@ -412,6 +418,71 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         result.publishedReasoning = detailText().includes("Smoke reasoning stream") &&
           detailText().includes("Verifying the published reasoning panel.");
 
+        const narrowDialog = document.querySelector('[data-testid="desktop-agent-detail-modal"] .desktop-agent-detail-modal');
+        const narrowTitle = narrowDialog?.querySelector('.desktop-agent-detail-header h3');
+        const narrowProvider = narrowDialog?.querySelector('[data-testid="desktop-agent-detail-provider-identity"] > span:last-child');
+        const narrowRepo = narrowDialog?.querySelector('[data-testid="desktop-agent-detail-managed-session"] > p');
+        if (narrowTitle) narrowTitle.textContent = "MapleRidge with a deliberately long supervised agent identity that must not consume the viewport";
+        if (narrowProvider) narrowProvider.textContent = "Codex · provider-model-with-an-extremely-long-version-and-capability-label";
+        if (narrowRepo) narrowRepo.textContent = "/a/deliberately/long/workspace/path/that/must/wrap/without/creating/horizontal/overflow/in/the/agent/modal";
+        const narrowDangerZone = narrowDialog?.querySelector('[data-testid="desktop-agent-detail-stop-agent-zone"]');
+        if (narrowDangerZone && !narrowDangerZone.querySelector('[data-testid="desktop-agent-detail-stop-agent-error"]')) {
+          const narrowError = document.createElement('p');
+          narrowError.className = 'desktop-agent-detail-error';
+          narrowError.dataset.testid = 'desktop-agent-detail-stop-agent-error';
+          narrowError.setAttribute('role', 'alert');
+          narrowError.textContent = 'A deliberately long provider failure explains that the supervised runtime could not stop and remains retryable without overflowing this narrow dialog.';
+          narrowDangerZone.append(narrowError);
+        }
+
+        window.resizeTo(360, 480);
+        await waitFor("minimum agent detail viewport", () => window.innerWidth <= 390 && window.innerHeight <= 520);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        result.agentDetailModalNarrowLayout = (() => {
+          const backdrop = document.querySelector('[data-testid="desktop-agent-detail-modal"]');
+          const dialog = backdrop?.querySelector('.desktop-agent-detail-modal');
+          const header = backdrop?.querySelector('.desktop-agent-detail-header');
+          const body = backdrop?.querySelector('.desktop-agent-detail-body');
+          const close = backdrop?.querySelector('button.desktop-modal-close[aria-label="Close agent detail dialog"]');
+          const horizontalOverflow = dialog instanceof HTMLElement && dialog.scrollWidth > dialog.clientWidth + 1;
+          const nestedScrollRegions = Array.from(dialog?.querySelectorAll('*') || []).filter((element) => {
+            if (!(element instanceof HTMLElement) || element === body) return false;
+            const overflowY = getComputedStyle(element).overflowY;
+            return (overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight + 1;
+          });
+          if (body instanceof HTMLElement) body.scrollTop = body.scrollHeight;
+          return rectInsideViewport(dialog) &&
+            rectInsideViewport(header) &&
+            rectInsideViewport(close) &&
+            body instanceof HTMLElement &&
+            body.clientHeight >= 120 &&
+            !horizontalOverflow &&
+            nestedScrollRegions.length === 0;
+        })();
+
+        const stopAgentZone = document.querySelector('[data-testid="desktop-agent-detail-stop-agent-zone"]');
+        stopAgentZone?.scrollIntoView({ block: "center" });
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        result.agentDetailStopZoneNarrowLayout = (() => {
+          const actions = stopAgentZone?.querySelector('.desktop-agent-detail-danger-actions');
+          const stopButton = stopAgentZone?.querySelector('[data-testid="desktop-agent-detail-stop-agent"]');
+          const error = stopAgentZone?.querySelector('[data-testid="desktop-agent-detail-stop-agent-error"]');
+          const buttonRect = rectFor(stopButton);
+          return rectInsideViewport(stopAgentZone) &&
+            rectInsideViewport(stopButton) &&
+            rectInsideViewport(error) &&
+            Boolean(buttonRect && buttonRect.height >= 44) &&
+            actions instanceof HTMLElement &&
+            actions.scrollWidth <= actions.clientWidth + 1;
+        })();
+
+        if (${Boolean(agentDetailScreenshotPath)}) {
+          return { ...result, agentDetailScreenshotReady: true };
+        }
+
+        window.resizeTo(1440, 920);
+        await waitFor("restored agent detail viewport", () => window.innerWidth >= 1180);
+
         const detailClose = document.querySelector(
           '[data-testid="desktop-agent-detail-modal"] button.desktop-modal-close[aria-label="Close agent detail dialog"]'
         );
@@ -438,7 +509,14 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         return result;
       })()`,
       true,
-    ).then((result: Record<string, boolean>) => {
+    ).then(async (result: Record<string, boolean>) => {
+      if (agentDetailScreenshotPath && result.agentDetailScreenshotReady) {
+        const image = await window.webContents.capturePage();
+        await writeFile(agentDetailScreenshotPath, image.toPNG());
+        console.log(`LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT ${agentDetailScreenshotPath}`);
+        app.exit(0);
+        return;
+      }
       console.log(`LETAGENTS_DESKTOP_SMOKE ${JSON.stringify(result)}`);
       app.exit(Object.values(result).every(Boolean) ? 0 : 1);
     }).catch((error: unknown) => {

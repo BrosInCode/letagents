@@ -27,12 +27,13 @@
                 :title="isPrimaryAgentRunning ? 'Agent is running' : 'Agent is not currently running'"
                 aria-hidden="true"
               />
-              <h3 :id="titleId">{{ target.displayName }}</h3>
+              <h3 :id="titleId" :title="target.displayName">{{ target.displayName }}</h3>
               <div
                 v-if="providerIdentity"
                 class="desktop-agent-detail-provider-identity"
                 data-testid="desktop-agent-detail-provider-identity"
                 :aria-label="`Provider: ${providerIdentity.accessibleLabel}`"
+                :title="providerIdentity.accessibleLabel"
               >
                 <ProviderBadge :label="providerIdentity.label" />
                 <span>{{ providerIdentity.accessibleLabel }}</span>
@@ -40,6 +41,7 @@
               <div
                 v-if="matchingManagedSessions.length"
                 class="desktop-agent-detail-agent-actions"
+                role="group"
                 aria-label="Agent controls"
               >
                 <button
@@ -76,7 +78,7 @@
                 </button>
               </div>
             </div>
-            <p>{{ identityLine }}</p>
+            <p :title="identityLine">{{ identityLine }}</p>
           </div>
           <div class="desktop-agent-detail-header-actions">
             <span
