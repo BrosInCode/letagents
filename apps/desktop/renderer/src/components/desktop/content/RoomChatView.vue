@@ -37,6 +37,7 @@
           :github-activity-available="githubEventsAvailable"
           :room-loading="roomLoading"
           :search-query="searchQuery"
+          :task-reference-ids="taskReferenceIds"
           :initial-scroll-top="initialScrollTop"
           @load-older="emit('load-older')"
           @open-agent="openAgentModal"
@@ -45,6 +46,7 @@
           @quote-reply="quoteReply"
           @quote-selection="quoteSelectedText"
           @open-github-event="emit('open-github-event', $event)"
+          @open-task="emit('open-task', $event)"
           @scroll-position="emit('scroll-position', $event)"
         />
 
@@ -149,10 +151,12 @@
         :loading-older-replies="loadingOlderThreadReplies"
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
+        :task-reference-ids="taskReferenceIds"
         @close="closeThread"
         @open-image="openImageViewer"
         @open-agent="openAgentModal"
         @open-github-event="emit('open-github-event', $event)"
+        @open-task="emit('open-task', $event)"
         @jump-message="jumpToMessage"
         @load-older-replies="loadOlderThreadReplies"
         @pick-attachments="pickThreadAttachments"
@@ -249,6 +253,7 @@ const emit = defineEmits<{
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
   "open-events": [];
+  "open-task": [taskId: string];
   "dismiss-event-preview": [messageId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
@@ -263,6 +268,9 @@ interface RoomReplyTarget extends DesktopRoomMessage {
 }
 
 const threadLayoutAnimationMs = 250;
+const taskReferenceIds = computed<ReadonlySet<string>>(() =>
+  new Set(props.tasks.map((task) => task.id))
+);
 const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
 const replyTarget = ref<RoomReplyTarget | null>(null);

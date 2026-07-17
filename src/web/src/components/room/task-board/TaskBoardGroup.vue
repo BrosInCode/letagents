@@ -18,6 +18,7 @@
         :updating="updatingTask === task.id"
         :updatingLease="updatingLeaseTask === task.id"
         :updatingReviewLease="updatingReviewLeaseTask === task.id"
+        :selected="selectedTaskId === task.id"
         @updateStatus="(taskId, status) => emit('updateStatus', taskId, status)"
         @leaseAction="emit('leaseAction', $event)"
         @reviewLeaseAction="emit('reviewLeaseAction', $event)"
@@ -45,6 +46,7 @@ defineProps<{
   updatingTask: string | null
   updatingLeaseTask: string | null
   updatingReviewLeaseTask: string | null
+  selectedTaskId?: string | null
 }>()
 
 const emit = defineEmits<{

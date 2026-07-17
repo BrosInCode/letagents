@@ -42,6 +42,23 @@ test('renderMessageContent preserves collision-safe owner/agent mention handles'
   )
 })
 
+test('renderMessageContent links known task references to the Board', () => {
+  assert.equal(
+    renderMessageContent('Continue task_42, not task_99.', new Set(['task_42'])),
+    '<p>Continue <button class="task-reference-link" type="button" data-task-reference-id="task_42" title="Open task_42 on the Board">task_42</button>, not task_99.</p>',
+  )
+})
+
+test('renderMessageContent does not link task references inside code or URLs', () => {
+  assert.equal(
+    renderMessageContent(
+      'Use `task_42` or https://example.com/task_42 before task_7',
+      new Set(['task_42', 'task_7']),
+    ),
+    '<p>Use <code>task_42</code> or <a href="https://example.com/task_42" target="_blank" rel="noopener noreferrer">https://example.com/task_42</a> before <button class="task-reference-link" type="button" data-task-reference-id="task_7" title="Open task_7 on the Board">task_7</button></p>',
+  )
+})
+
 test('renderMessageContent renders safe block markdown', () => {
   assert.equal(
     renderMessageContent([

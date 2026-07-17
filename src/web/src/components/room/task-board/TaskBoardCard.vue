@@ -1,5 +1,11 @@
 <template>
-  <div class="task-card">
+  <div
+    class="task-card"
+    :class="{ selected }"
+    :data-board-task-id="task.id"
+    :aria-current="selected ? 'true' : undefined"
+    tabindex="-1"
+  >
     <div class="task-card-header">
       <div class="task-heading">
         <span
@@ -123,6 +129,7 @@ const props = defineProps<{
   updatingLease: boolean
   updatingReviewLease: boolean
   githubStatus: TaskGitHubArtifactStatus | null
+  selected?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -152,6 +159,16 @@ const focusable = computed(() => canFocusTask(props.task))
 
 .task-card:hover {
   border-color: rgba(255, 255, 255, 0.12);
+}
+
+.task-card.selected {
+  border-color: color-mix(in srgb, var(--blue, #60a5fa) 62%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue, #60a5fa) 12%, transparent);
+}
+
+.task-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue, #60a5fa) 72%, transparent);
+  outline-offset: 2px;
 }
 
 .task-card-header {

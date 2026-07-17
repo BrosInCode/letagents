@@ -126,6 +126,7 @@
       @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
+      @open-task="openBoardTask"
       @dismiss-event-preview="dismissComposerGitHubEventPreview"
       @scroll-position="rememberChatScrollPosition"
       @thread-read="handleThreadRead"
@@ -148,7 +149,7 @@
         @open-thread="openInboxThread"
         @clear-item="clearInboxItem"
         @restore-item="restoreInboxItem"
-        @open-task="openInboxTask"
+        @open-task="openBoardTask"
         @open-github-event="openInboxGitHubEvent"
         @open-reasoning="openReasoningInspector"
       />
@@ -190,7 +191,7 @@
         @load-older="loadOlderGitHubEvents"
         @install-github="installGitHubIntegration"
         @clear-task-filter="eventsTaskFilterId = null"
-        @open-task="openBoardTaskFromEvents"
+        @open-task="openBoardTask"
         @close-selected-event="eventsSelectedEventId = null"
       />
 
@@ -1177,7 +1178,7 @@ function handleThreadRead(threadRootId: string, summary: DesktopRoomThreadInboxP
   };
 }
 
-function openInboxTask(taskId: string): void {
+function openBoardTask(taskId: string): void {
   boardSelectedTaskId.value = taskId;
   activeTab.value = "board";
 }
@@ -1253,11 +1254,6 @@ function openArtifactsForTask(taskId: string): void {
   artifactTimelineTaskFilterId.value = taskId;
   activityHistoryRequest.value += 1;
   activeTab.value = "activity";
-}
-
-function openBoardTaskFromEvents(taskId: string): void {
-  boardSelectedTaskId.value = taskId;
-  activeTab.value = "board";
 }
 
 async function openGitHubEventFromChat(url: string): Promise<void> {

@@ -83,6 +83,7 @@
       :creatingAdHocFocusRoom="creatingAdHocFocusRoom"
       :sharingFocusResult="sharingFocusResult"
       :updatingFocusSettings="updatingFocusSettings"
+      :selectedBoardTaskId="selectedBoardTaskId"
       :loadActivityHistory="loadActivityHistory"
       :clearDisconnectedParticipants="clearDisconnectedParticipants"
       @loadOlder="loadOlderMessages"
@@ -94,6 +95,7 @@
       @leaseAction="handleTaskLeaseAction"
       @reviewLeaseAction="handleTaskReviewLeaseAction"
       @focusTask="handleFocusTask"
+      @openTask="openBoardTask"
       @selectFocusTask="focusDraftTaskId = $event"
       @createAdHocFocusRoom="handleCreateAdHocFocusRoom"
       @openFocusRoom="handleOpenFocusRoom"
@@ -227,6 +229,10 @@ const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
 const roomTabPanelsRef = ref<InstanceType<typeof RoomTabPanels> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
+const selectedBoardTaskId = computed(() => {
+  const taskId = typeof route.query.task === 'string' ? route.query.task : ''
+  return tasks.value.some(task => task.id === taskId) ? taskId : null
+})
 const {
   activeTab,
   tabTransitionName,
@@ -250,6 +256,17 @@ const {
 } = useRoomImages(messages)
 
 const matchCount = computed(() => roomTabPanelsRef.value?.matchCount ?? 0)
+
+function openBoardTask(taskId: string) {
+  setActiveTab('board')
+  void router.push({
+    query: {
+      ...route.query,
+      view: 'board',
+      task: taskId,
+    },
+  })
+}
 const {
   senderName,
   roomTitle,

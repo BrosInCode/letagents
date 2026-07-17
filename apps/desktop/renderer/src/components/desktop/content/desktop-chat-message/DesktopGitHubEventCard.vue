@@ -39,7 +39,17 @@
         <span class="desktop-github-chip">{{ event.kindLabel }}</span>
         <span v-if="event.statusLabel" class="desktop-github-chip is-status">{{ event.statusLabel }}</span>
         <span v-if="event.repository" class="desktop-github-chip is-repo">{{ event.repository }}</span>
-        <span v-if="event.taskId" class="desktop-github-chip is-task">{{ event.taskId }}</span>
+        <button
+          v-if="event.taskId && taskLinkEnabled"
+          class="desktop-github-chip is-task is-interactive"
+          type="button"
+          :title="`Open ${event.taskId} on the Board`"
+          :data-task-reference-id="event.taskId"
+          @click="$emit('open-task', event.taskId)"
+        >
+          {{ event.taskId }}
+        </button>
+        <span v-else-if="event.taskId" class="desktop-github-chip is-task">{{ event.taskId }}</span>
       </div>
       <strong>{{ event.headline }}</strong>
       <p v-if="event.detail">{{ event.detail }}</p>
@@ -65,9 +75,11 @@ import type { GitHubEventPresentation } from "./types";
 
 defineProps<{
   event: GitHubEventPresentation;
+  taskLinkEnabled?: boolean;
 }>();
 
 defineEmits<{
   "open-event": [url: string];
+  "open-task": [taskId: string];
 }>();
 </script>
