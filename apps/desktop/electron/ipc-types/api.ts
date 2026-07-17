@@ -305,6 +305,10 @@ export interface DesktopApi {
     resolveTurnControl: (input: DesktopSupervisorTurnControlResolutionInput) => Promise<DesktopSupervisorManifestEntry>;
     readAttempt: (id: string) => Promise<DesktopSupervisorAttemptDetail>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
+    /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
+    onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;
+    /** Replay a launch's facts after `afterSequence` (for modal reopen/restore). */
+    getLaunchEvents: (launchId: string, afterSequence?: number | null) => Promise<import("./launch-events.js").DesktopLaunchEvent[]>;
   };
   diagnostics: {
     getSnapshot: () => Promise<DiagnosticsSnapshot>;

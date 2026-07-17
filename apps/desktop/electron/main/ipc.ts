@@ -1,6 +1,7 @@
 import electron from "electron";
 import type { IpcMain } from "electron";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 import type {
   DesktopActivityEntry,
@@ -147,6 +148,13 @@ import {
 import { emitToMainWindow } from "./window.js";
 import { transferSupervisorOwnership } from "./supervisor-ownership.js";
 import {
+  classifyLaunchFailure,
+  emitLaunchEvent,
+  getLaunchEvents,
+  LaunchBlockedError,
+  onLaunchEvent,
+} from "./launch-events.js";
+import {
   desktopSmokeControlTurn,
   desktopSmokeSupervisorEntries,
   isDesktopSmokeCheck,
@@ -230,6 +238,18 @@ import {
 
 const { ipcMain } = electron as typeof import("electron");
 let supervisorActivityBridgeRegistered = false;
+let supervisorLaunchBridgeRegistered = false;
+
+/** A launch id shared by the durable entry (`supervised_<id>`) and every launch
+ * fact. Must satisfy the daemon's creation-request-id shape; fall back to a
+ * fresh id when the renderer did not supply a usable one. */
+function normalizeLaunchId(creationRequestId?: string | null): string {
+  const candidate = creationRequestId?.trim();
+  if (candidate && /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(candidate)) {
+    return candidate;
+  }
+  return randomUUID();
+}
 
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
@@ -831,41 +851,99 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle(
     "desktop:supervisor:create-agent",
-    async (_event, input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> => {
-      const storage = await getDesktopRoomStorage(input.roomIdentifier);
-      if (storage.effectiveMode !== "cloud") {
-        throw new Error("Supervised agents are not available in local-only rooms yet. Publish or join a cloud room, or use the existing local agent path.");
+    async (_event, rawInput: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> => {
+      // Pin the launch id up front so every launch fact — and the durable entry
+      // id (`supervised_<launchId>`) — shares one stable key across retries and
+      // reopen. The renderer normally supplies it; fall back defensively.
+      const launchId = normalizeLaunchId(rawInput.creationRequestId);
+      const input: DesktopSupervisorCreateInput = { ...rawInput, creationRequestId: launchId };
+      const entryId = `supervised_${launchId}`;
+      const provider = input.providerId;
+      const roomIdentifier = input.roomIdentifier;
+      const launchFact = (
+        type: Parameters<typeof emitLaunchEvent>[0]["type"],
+        extra: { entryId?: string | null; detail?: string | null; recovery?: import("./launch-events.js").EmitLaunchEventInput["recovery"]; durable?: boolean } = {},
+      ): void => {
+        emitLaunchEvent({ launchId, roomIdentifier, provider, type, ...extra });
+      };
+      // The user clicked Start: the first server-side fact of this launch.
+      launchFact("launch.requested", { entryId, detail: "You asked LetAgents to add this agent." });
+      try {
+        const storage = await getDesktopRoomStorage(roomIdentifier);
+        if (storage.effectiveMode !== "cloud") {
+          throw new LaunchBlockedError("Supervised agents need a cloud room. Publish or join a cloud room, or use the existing local agent path.", "choose_project");
+        }
+        if (provider !== "codex" && provider !== "claude-code") {
+          throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
+        }
+        if (provider === "claude-code" && input.permissionProfileId === "ask_before_write") {
+          throw new LaunchBlockedError("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged. Choose Read-only or Full access.", "retry");
+        }
+        if (provider === "claude-code") {
+          // Repair legacy `npx -y letagents` configs before the daemon launches
+          // inside a pristine managed checkout named `letagents`.
+          await refreshInstalledLetAgentsMcpServerAuth();
+        }
+        // Contact the background supervisor first so its (un)availability is an
+        // honest, owner-visible fact rather than a hidden part of the claim.
+        try {
+          await supervisorDaemonClient.ensureRunning();
+        } catch (error) {
+          throw new LaunchBlockedError("LetAgents could not reach background agent management. Make sure the app can start its background service, then try again.", "reconnect");
+        }
+        launchFact("supervisor.connected", { entryId, detail: "Background agent management is available." });
+        // Claim the lane durably first. Every legacy start consults this daemon
+        // fence, so no new legacy owner may appear while transfer is in flight.
+        return await transferSupervisorOwnership({
+          claim: async () => {
+            const manifest = await supervisorDaemonClient.create(input);
+            // The paused ownership claim is now persisted: setup survives an app
+            // restart from here on.
+            launchFact("agent.saved", { entryId: manifest.id, detail: "Your request is recorded and will survive an app restart.", durable: true });
+            return manifest;
+          },
+          listLegacy: () => listDesktopManagedAgentSessions(roomIdentifier)
+            .filter((session) => session.providerId === provider && !session.supervisorEntryId),
+          stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
+          // Activation is the second durable CAS. The daemon, not Electron,
+          // launches the native provider and remains authoritative after quit.
+          activate: async (manifest) => {
+            const activated = await supervisorDaemonClient.setDesiredState(manifest.id, "running");
+            launchFact("launch.activated", { entryId: manifest.id, detail: "LetAgents is now responsible for starting this agent.", durable: true });
+            return activated;
+          },
+          rollback: (manifest) => supervisorDaemonClient.setDesiredState(manifest.id, "stopped").then(() => undefined),
+        });
+      } catch (error) {
+        const failure = classifyLaunchFailure(error);
+        launchFact(failure.type, { entryId, detail: failure.detail, recovery: failure.recovery });
+        throw error;
       }
-      if (input.providerId !== "codex" && input.providerId !== "claude-code") {
-        throw new Error(`Supervised ${input.providerId} is capability-gated: no daemon-native lifecycle adapter is available.`);
-      }
-      if (input.providerId === "claude-code" && input.permissionProfileId === "ask_before_write") {
-        throw new Error("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged into the desktop or room. Choose Read-only or Full access.");
-      }
-      if (input.providerId === "claude-code") {
-        // Repair legacy `npx -y letagents` configs before the daemon launches
-        // inside a pristine managed checkout named `letagents`.
-        await refreshInstalledLetAgentsMcpServerAuth();
-      }
-      // Claim the lane durably first. Every legacy start consults this daemon
-      // fence, so no new legacy owner may appear while transfer is in flight.
-      return transferSupervisorOwnership({
-        claim: () => supervisorDaemonClient.create(input),
-        listLegacy: () => listDesktopManagedAgentSessions(input.roomIdentifier)
-          .filter((session) => session.providerId === input.providerId && !session.supervisorEntryId),
-        stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
-        // Activation is the second durable CAS. The daemon, not Electron,
-        // launches the native provider and remains authoritative after quit.
-        activate: (manifest) => supervisorDaemonClient.setDesiredState(manifest.id, "running"),
-        rollback: (manifest) => supervisorDaemonClient.setDesiredState(manifest.id, "stopped").then(() => undefined),
-      });
     },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:get-launch-events",
+    async (_event, launchId: string, afterSequence?: number | null) =>
+      getLaunchEvents(launchId, afterSequence ?? null),
   );
   targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
       if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
+      // Retiring a launch (Cancel launch / Stop agent) is the one intentional
+      // terminal fact; the launch id is the entry id without its prefix.
+      if (desiredState === "stopped" && id.startsWith("supervised_")) {
+        emitLaunchEvent({
+          launchId: id.slice("supervised_".length),
+          entryId: id,
+          roomIdentifier: updated.roomId,
+          provider: updated.provider,
+          type: "launch.cancelled",
+          detail: "You stopped this launch.",
+          durable: true,
+        });
+      }
       return updated;
     },
   );
@@ -886,6 +964,10 @@ export function registerDesktopIpcHandlers(
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;
     onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));
+  }
+  if (!supervisorLaunchBridgeRegistered) {
+    supervisorLaunchBridgeRegistered = true;
+    onLaunchEvent((event) => emitToMainWindow("desktop:supervisor:launch-event", event));
   }
   targetIpcMain.handle(
     "desktop:workers:list-managed-agent-sessions",
