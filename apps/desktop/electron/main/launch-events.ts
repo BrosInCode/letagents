@@ -127,19 +127,19 @@ export class LaunchBlockedError extends Error {
  * still thrown to the caller for diagnostics).
  */
 /**
- * True when a supervised entry has EVER bound a room identity — durable,
- * monotonic evidence that the launch succeeded past registration. Binding state
- * only advances none → active → historical and never returns to "none", so this
- * is a historical fact, unlike instantaneous readiness (a ready agent that later
- * degrades to unreachable/recovering is still a launched agent). Stopping such
- * an agent is a lifecycle event, not a cancelled launch, so `launch.cancelled`
- * must not be emitted for it. Kept consistent with the renderer journey's
- * `everBound` check.
+ * True when a supervised entry has EVER reached ready — durable, monotonic
+ * evidence (the daemon stamps `readyReachedAt` once and never clears it) that
+ * the launch succeeded. This is stronger than "ever bound": a bound-but-never-
+ * reachable, pre-ready attempt has no ready stamp, so cancelling it is correctly
+ * a cancelled launch; while a ready agent that later degrades to
+ * unreachable/recovering keeps its stamp, so stopping it is a lifecycle event
+ * (not a cancelled launch). Kept consistent with the renderer journey's
+ * `everReady` check.
  */
-export function supervisedLaunchEverBound(
-  entry: Pick<DesktopSupervisorManifestEntry, "agentSessionBindingState">,
+export function supervisedLaunchEverReady(
+  entry: Pick<DesktopSupervisorManifestEntry, "readyReachedAt">,
 ): boolean {
-  return entry.agentSessionBindingState !== "none";
+  return entry.readyReachedAt != null;
 }
 
 export function classifyLaunchFailure(error: unknown): {

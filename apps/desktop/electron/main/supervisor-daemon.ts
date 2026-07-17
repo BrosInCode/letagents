@@ -24,7 +24,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.16";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.17";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -69,6 +69,7 @@ type WireEntry = {
   } | null;
   workplace_liveness?: { state: string; observed_at: string | null; detail: string | null };
   native_liveness?: { state: string; observed_at: string | null; detail: string | null };
+  ready_reached_at?: string | null;
   activity?: WireActivityEvent[];
   reconciliation?: { exit_timestamps_ms?: number[]; last_terminal?: Record<string, unknown> };
   turn_control?: {
@@ -486,6 +487,7 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
       observedAt: entry.native_liveness?.observed_at ?? null,
       detail: entry.native_liveness?.detail ?? null,
     },
+    readyReachedAt: entry.ready_reached_at ?? null,
     restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
     lastTerminal: entry.reconciliation?.last_terminal ?? null,
     activity: (entry.activity ?? []).map(mapActivity),

@@ -410,6 +410,9 @@ export interface DesktopSupervisorManifestEntry {
   providerPid: number | null;
   workplaceLiveness: DesktopSupervisorLivenessAxis;
   nativeLiveness: DesktopSupervisorLivenessAxis;
+  /** First time this entry reached ready (bound + reachable + running +
+   * unblocked); set once, never cleared. Null/absent if it never reached ready. */
+  readyReachedAt?: string | null;
   restartCount: number;
   lastTerminal: Record<string, unknown> | null;
   activity: DesktopSupervisorActivityEvent[];

@@ -180,9 +180,10 @@ test("a user cancel is a cancelled journey, not a failure", () => {
   assert.equal(view.phases.filter((phase) => phase.state === "failed").length, 0);
 });
 
-test("a manifest auth block surfaces a sign-in recovery", () => {
+test("a manifest auth block surfaces a sign-in recovery when a command exists", () => {
   const view = foldLaunchJourney({
     entry: entry({ observedState: "recovering", condition: "auth_blocked", workspacePath: "/tmp/wt", providerPid: 10 }),
+    hasSignInCommand: true,
   });
   assert.equal(view.failed, true);
   assert.equal(view.status, "failed");
@@ -245,7 +246,7 @@ test("a retry after failure clears the prior terminal and progresses (finding 1)
   assert.equal(view.phases.filter((phase) => phase.state === "failed").length, 0);
 });
 
-test("stopping a ready (bound) agent reads as stopped, not launch cancelled (finding 3)", () => {
+test("stopping an agent that reached ready reads as stopped, not launch cancelled (finding 3)", () => {
   const view = foldLaunchJourney({
     entry: entry({
       displayName: "SilverCanyon",
@@ -253,6 +254,7 @@ test("stopping a ready (bound) agent reads as stopped, not launch cancelled (fin
       observedState: "absent",
       agentSessionId: "agent_session_9",
       agentSessionBindingState: "historical",
+      readyReachedAt: "2026-07-17T00:05:00.000Z",
       workspacePath: "/tmp/wt",
       providerPid: null,
     }),
@@ -262,12 +264,29 @@ test("stopping a ready (bound) agent reads as stopped, not launch cancelled (fin
   assert.match(view.headline, /stopped/i);
 });
 
-test("cancelling a not-yet-bound launch still reads as launch cancelled (finding 3)", () => {
+test("cancelling a launch that never reached ready reads as launch cancelled (finding 3)", () => {
+  // Bound-but-never-ready (no ready stamp) must still be a cancelled launch.
   const view = foldLaunchJourney({
-    entry: entry({ desiredState: "stopped", observedState: "absent", agentSessionBindingState: "none" }),
+    entry: entry({
+      desiredState: "stopped",
+      observedState: "absent",
+      agentSessionBindingState: "historical",
+      readyReachedAt: null,
+    }),
   });
   assert.equal(view.stopped, true);
   assert.match(view.headline, /cancelled/i);
+});
+
+test("the sign_in recovery is only offered when a provider sign-in command exists (finding 2b)", () => {
+  const blocked = entry({
+    observedState: "recovering",
+    condition: "auth_blocked",
+    workspacePath: "/tmp/wt",
+    providerPid: 10,
+  });
+  assert.equal(foldLaunchJourney({ entry: blocked, hasSignInCommand: true }).recovery, "sign_in");
+  assert.equal(foldLaunchJourney({ entry: blocked, hasSignInCommand: false }).recovery, "retry");
 });
 
 test("a terminal cancelled/stopped outcome leaves zero active steps and marks the boundary Cancelled (finding 4)", () => {
