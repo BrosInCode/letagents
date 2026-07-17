@@ -381,6 +381,7 @@ export async function createRoomAgentSession(input: {
   agent_key: string;
   agent_instance_id?: string | null;
   display_name: string;
+  assigned_base_display_name?: string | null;
   owner_account_id: string;
   owner_label: string;
   ide_label: string;
@@ -410,6 +411,7 @@ export async function createRoomAgentSession(input: {
     agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id ?? null,
     display_name: input.display_name,
+    assigned_base_display_name: input.assigned_base_display_name ?? null,
     owner_account_id: input.owner_account_id,
     supervisor_grant_id: input.supervisor_grant_id ?? null,
     owner_label: input.owner_label,
@@ -590,28 +592,6 @@ export async function getLastEndedWorkerSessionDisplayName(input: {
     .limit(1);
 
   return row?.display_name ?? null;
-}
-
-/**
- * Every distinct worker-session display name this identity has ever used in the
- * room (active or ended). Used as provenance when normalizing a replayed
- * decorated label: a trailing numeric group is only a server-appended collision
- * suffix if the stripped base is a label the identity actually held here.
- */
-export async function getWorkerSessionDisplayNamesForIdentity(input: {
-  room_id: string;
-  agent_key: string;
-}): Promise<string[]> {
-  const rows = await db
-    .selectDistinct({ display_name: room_agent_sessions.display_name })
-    .from(room_agent_sessions)
-    .where(and(
-      eq(room_agent_sessions.room_id, input.room_id),
-      eq(room_agent_sessions.agent_key, input.agent_key),
-      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
-    ));
-
-  return rows.map((row) => row.display_name).filter((name): name is string => typeof name === "string");
 }
 
 export async function getRoomAgentSessionByCredentials(input: {
