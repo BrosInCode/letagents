@@ -290,7 +290,14 @@
 
 .sidebar-actions {
   display: grid;
-  gap: 16px;
+}
+
+.sidebar-room-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .sidebar-cta {
@@ -336,12 +343,17 @@
 }
 
 .sidebar-section {
+  display: grid;
+  flex: 1 1 0;
   grid-template-rows: max-content minmax(0, 1fr);
   align-content: stretch;
   gap: 6px;
   min-height: 0;
-  margin-top: 8px;
   overflow: hidden;
+}
+
+.sidebar-section:not(:has(.project-list)) {
+  flex: 0 0 auto;
 }
 
 .sidebar-section-header {
