@@ -410,16 +410,6 @@ test(
       ide_label: "Codex",
       transport: "long_poll",
     });
-    const firstPresence = await invoke(
-      handlers.post.get("/^\\/rooms\\/(.+)\\/presence$/"),
-      ownerTokenRequest({
-        status: "working",
-        status_text: "first SwiftCrest transport",
-        ...sessionCredentials(firstSession),
-      }, { params: { 0: room.id } }),
-    );
-    assert.equal(firstPresence.statusCode, 200, JSON.stringify(firstPresence.body));
-
     const registrationBody = {
       actor_key: worker.agent_key,
       actor_label: worker.actor_label,
@@ -937,6 +927,15 @@ test(
       ide_label: "Agent",
       transport: "long_poll",
     });
+    const firstPresence = await invoke(
+      handlers.post.get("/^\\/rooms\\/(.+)\\/presence$/"),
+      ownerTokenRequest({
+        status: "working",
+        status_text: "first SwiftCrest transport",
+        ...sessionCredentials(firstSession),
+      }, { params: { 0: room.id } }),
+    );
+    assert.equal(firstPresence.statusCode, 200, JSON.stringify(firstPresence.body));
 
     // The exact prior credential is the reconnect proof. It rotates behind
     // the instance fence and keeps the base display name.
