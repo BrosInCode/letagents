@@ -475,6 +475,7 @@ import {
   canStopManagedAgentTurn,
   exactSupervisorEntriesForTarget,
   managedAgentProviderIdentityForTarget,
+  managedAgentSessionMatchesSupervisorTarget,
   managedAgentSessionMatchesTarget,
   managedAgentSessionMatchesReasoning,
   managedAgentSessionDisplayName,
@@ -573,13 +574,21 @@ const reasoningRows = computed(() =>
 );
 
 const matchingManagedSessions = computed(() => {
-  const activeSessions = managedSessions.value.filter(isVisibleManagedAgentSession);
+  const activeSessions = managedSessions.value.filter((session) =>
+    isVisibleManagedAgentSession(session) || Boolean(session.supervisorEntryId)
+  );
   if (!props.target) return [];
 
   const reasoningSession = latestReasoning.value;
   return activeSessions.filter((session) =>
     managedAgentSessionMatchesTarget(session, props.target!) ||
-    managedAgentSessionMatchesReasoning(session, reasoningSession)
+    managedAgentSessionMatchesReasoning(session, reasoningSession) ||
+    managedAgentSessionMatchesSupervisorTarget(
+      session,
+      supervisorEntries.value,
+      props.target!.agentSessionId,
+      knownSupervisorEntryIds.value,
+    )
   );
 });
 const directMatchingSupervisorEntries = computed(() =>
