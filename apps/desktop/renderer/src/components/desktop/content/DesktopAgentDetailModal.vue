@@ -29,6 +29,15 @@
               />
               <h3 :id="titleId">{{ target.displayName }}</h3>
               <div
+                v-if="providerIdentity"
+                class="desktop-agent-detail-provider-identity"
+                data-testid="desktop-agent-detail-provider-identity"
+                :aria-label="`Provider: ${providerIdentity.accessibleLabel}`"
+              >
+                <ProviderBadge :label="providerIdentity.label" />
+                <span>{{ providerIdentity.accessibleLabel }}</span>
+              </div>
+              <div
                 v-if="matchingManagedSessions.length"
                 class="desktop-agent-detail-agent-actions"
                 aria-label="Agent controls"
@@ -104,6 +113,14 @@
                 <div>
                   <strong>{{ managedAgentSessionStatusLabel(session) }}</strong>
                   <small>{{ managedAgentSessionDisplayName(session) }}</small>
+                  <div
+                    v-if="providerIdentity && session.supervisorEntryId === providerIdentity.supervisorEntryId"
+                    class="desktop-agent-detail-session-provider"
+                    data-testid="desktop-agent-detail-managed-provider"
+                  >
+                    <ProviderBadge :label="providerIdentity.label" />
+                    <small>{{ providerIdentity.accessibleLabel }}</small>
+                  </div>
                 </div>
                 <div
                   v-if="session.failure"
@@ -337,6 +354,7 @@ import {
   isVisibleManagedAgentSession,
   canStopManagedAgentTurn,
   exactSupervisorEntriesForTarget,
+  managedAgentProviderIdentityForTarget,
   managedAgentSessionMatchesTarget,
   managedAgentSessionMatchesReasoning,
   managedAgentSessionDisplayName,
@@ -349,6 +367,7 @@ import {
 import { formatShortDateTime } from "../../../domain/time";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
+import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
 import { desktopIpc } from "../../../ipc/index.js";
 import {
   currentFocusableElement,
@@ -463,6 +482,12 @@ const matchingSupervisorEntries = computed(() => {
       || [...labels].some((label) => label.startsWith(`${displayName} |`));
   });
 });
+const providerIdentity = computed(() => managedAgentProviderIdentityForTarget(
+  supervisorEntries.value,
+  matchingManagedSessions.value,
+  props.target?.agentSessionId,
+  knownSupervisorEntryIds.value,
+));
 const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
 );

@@ -40,6 +40,7 @@ import {
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
   managedAgentPermissionRequestTargetLabel,
+  managedAgentProviderIdentityForTarget,
   managedAgentSessionMatchesRoom,
   managedAgentSessionMatchesReasoning,
   managedAgentSessionMatchesTarget,
@@ -415,6 +416,82 @@ test("a rebound room session resolves one exact supervisor entry without a local
     ], [], "agent_session_403", ["supervised_second"]).map((entry) => entry.id),
     ["supervised_second"],
     "a previously exact entry remains controllable when restart temporarily clears its worker binding",
+  );
+});
+
+test("provider identity presentation follows exact active and historical supervisor bindings", () => {
+  const codex = supervisorEntry({
+    id: "supervised_codex",
+    provider: "codex",
+    model: "gpt-5.3-codex",
+    agentSessionId: "agent_session_codex",
+    agentSessionBindingState: "active",
+  });
+  const claude = supervisorEntry({
+    id: "supervised_claude",
+    provider: "claude-code",
+    model: null,
+    agentSessionId: "agent_session_claude",
+    agentSessionBindingState: "historical",
+  });
+
+  assert.deepEqual(
+    managedAgentProviderIdentityForTarget([codex, claude], [], "agent_session_codex"),
+    {
+      supervisorEntryId: "supervised_codex",
+      providerId: "codex",
+      label: "Codex",
+      model: "gpt-5.3-codex",
+      accessibleLabel: "Codex · gpt-5.3-codex",
+      bindingState: "active",
+    },
+  );
+  assert.equal(
+    managedAgentProviderIdentityForTarget([codex, claude], [], "agent_session_claude")?.accessibleLabel,
+    "Claude Code",
+  );
+});
+
+test("provider identity fails closed for unbound, external, and ambiguous same-label peers", () => {
+  const codex = supervisorEntry({
+    id: "supervised_codex",
+    displayName: "Shared agent",
+    provider: "codex",
+    agentSessionId: null,
+  });
+  const claude = supervisorEntry({
+    id: "supervised_claude",
+    displayName: "Shared agent",
+    provider: "claude-code",
+    agentSessionId: null,
+  });
+
+  assert.equal(managedAgentProviderIdentityForTarget([codex, claude], [], null), null);
+  assert.equal(managedAgentProviderIdentityForTarget([], [], "external_session"), null);
+  assert.equal(
+    managedAgentProviderIdentityForTarget([codex, claude], [{ supervisorEntryId: "supervised_codex" }], null)?.label,
+    "Codex",
+  );
+});
+
+test("provider identity remains exact while a relaunch temporarily clears its room binding", () => {
+  const relaunched = supervisorEntry({
+    id: "supervised_relaunch",
+    provider: "claude-code",
+    model: "claude-opus-4-1",
+    agentSessionId: null,
+    agentSessionBindingState: "historical",
+    executionGenerationId: "generation_2",
+  });
+
+  assert.equal(
+    managedAgentProviderIdentityForTarget(
+      [relaunched],
+      [],
+      "agent_session_previous",
+      ["supervised_relaunch"],
+    )?.accessibleLabel,
+    "Claude Code · claude-opus-4-1",
   );
 });
 

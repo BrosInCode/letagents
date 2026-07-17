@@ -1178,6 +1178,31 @@
   margin-left: 0;
 }
 
+.desktop-agent-detail-provider-identity,
+.desktop-agent-detail-session-provider {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.desktop-agent-detail-provider-identity > span:last-child,
+.desktop-agent-detail-session-provider > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-agent-detail-session-provider {
+  margin-top: 6px;
+}
+
+.desktop-agent-detail-session-provider > small {
+  margin-top: 0;
+}
+
 .desktop-agent-detail-status-pulse {
   position: relative;
   flex: 0 0 auto;
