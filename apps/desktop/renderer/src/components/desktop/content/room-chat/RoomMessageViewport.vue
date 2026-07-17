@@ -343,7 +343,9 @@ watch(
 const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value));
 
 watch(
-  () => props.localAgentWork.map((work) => `${work.id}:${work.summary}`).join("|"),
+  // Key off the rate-limited displayed set (not raw props) so scroll effects
+  // share the coalesced echo cadence instead of firing on every native event.
+  () => displayedAgentWork.value.map((work) => `${work.id}:${work.summary}`).join("|"),
   async (nextKey, previousKey) => {
     if (nextKey === previousKey) {
       return;
