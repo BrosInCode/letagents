@@ -238,6 +238,8 @@ const api: DesktopApi = {
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
     setDesiredState: (id, desiredState) => ipcRenderer.invoke("desktop:supervisor:set-desired-state", id, desiredState),
+    controlTurn: (input) => ipcRenderer.invoke("desktop:supervisor:control-turn", input),
+    resolveTurnControl: (input) => ipcRenderer.invoke("desktop:supervisor:resolve-turn-control", input),
     readAttempt: (id) => ipcRenderer.invoke("desktop:supervisor:read-attempt", id),
     onActivity: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

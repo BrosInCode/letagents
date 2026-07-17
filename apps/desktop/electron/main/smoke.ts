@@ -8,6 +8,9 @@ import type {
   DesktopAccountRoomEntry,
   DesktopAuthStatus,
   DesktopRoomSnapshot,
+  DesktopSupervisorManifestEntry,
+  DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import {
   localChatDatabasePath,
@@ -20,6 +23,7 @@ const smokeCodexWorkerSessionId = "worker_smoke_codex";
 const smokeCodexLiveSessionId = "local_smoke_codex";
 const smokeCodexReasoningSessionId = "reasoning_smoke_codex";
 let smokeUserDataPath: string | null = null;
+let smokeTurnControl: DesktopSupervisorManifestEntry["turnControl"] = null;
 
 function electronApp(): App {
   const app = (electron as { app?: App }).app;
@@ -48,6 +52,7 @@ export function configureDesktopSmokeEnvironment(): void {
 
 export function seedDesktopSmokeState(): void {
   if (!isDesktopSmokeCheck()) return;
+  smokeTurnControl = null;
 
   const userDataPath = electronApp().getPath("userData");
   mkdirSync(userDataPath, { recursive: true });
@@ -365,4 +370,84 @@ export function desktopSmokeAccountRooms(): DesktopAccountRoomEntry[] {
       focusRooms: [],
     },
   ];
+}
+
+export function desktopSmokeSupervisorEntries(): DesktopSupervisorManifestEntry[] {
+  const now = new Date().toISOString();
+  return [{
+    id: "supervisor_smoke_codex",
+    roomId: smokeRoomIdentifier,
+    displayName: "MapleRidge",
+    provider: "codex",
+    model: "gpt-5-codex",
+    charter: "Exercise native turn control without replacing the supervised agent.",
+    desiredState: "running",
+    observedState: "working",
+    condition: "none",
+    lastError: null,
+    permissionProfileId: "full_access",
+    createdBy: "desktop-smoke",
+    createdAt: now,
+    workspacePath: process.cwd(),
+    workAttemptId: "attempt_smoke_codex",
+    agentSessionId: smokeCodexWorkerSessionId,
+    agentSessionBindingState: "active",
+    bindingUpdatedAt: now,
+    executionGenerationId: "execution_smoke_codex",
+    providerContinuationId: "thread_smoke_codex",
+    providerPid: process.pid,
+    workplaceLiveness: { state: "active", observedAt: now, detail: "Smoke room binding" },
+    nativeLiveness: { state: "active", observedAt: now, detail: "Smoke provider turn" },
+    restartCount: 0,
+    lastTerminal: null,
+    activity: [],
+    turnControl: smokeTurnControl,
+  }];
+}
+
+export function desktopSmokeControlTurn(
+  input: DesktopSupervisorTurnControlInput,
+): DesktopSupervisorTurnControlResult {
+  const entry = desktopSmokeSupervisorEntries()[0];
+  if (
+    input.entryId !== entry.id ||
+    input.workAttemptId !== entry.workAttemptId ||
+    input.executionGenerationId !== entry.executionGenerationId
+  ) {
+    throw new Error("Smoke turn-control fence mismatch.");
+  }
+  if (input.correction?.trim() === "Reject the stale smoke control.") {
+    throw new Error("Smoke stale generation rejected before provider dispatch.");
+  }
+  const correction = input.correction?.trim() || null;
+  const result: DesktopSupervisorTurnControlResult = {
+    entryId: entry.id,
+    workAttemptId: entry.workAttemptId!,
+    executionGenerationId: entry.executionGenerationId!,
+    actionId: input.actionId,
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: Boolean(correction),
+    state: correction ? "working" : "idle",
+    duplicate: false,
+    stages: correction
+      ? ["delivered", "interrupting", "applied", "resumed"]
+      : ["delivered", "interrupting", "applied"],
+  };
+  const now = new Date().toISOString();
+  smokeTurnControl = {
+    actionId: input.actionId,
+    workAttemptId: input.workAttemptId,
+    executionGenerationId: input.executionGenerationId,
+    status: "completed",
+    capability: result.capability,
+    interrupted: result.interrupted,
+    resumed: result.resumed,
+    state: result.state,
+    stages: result.stages,
+    error: null,
+    recordedAt: now,
+    updatedAt: now,
+  };
+  return result;
 }

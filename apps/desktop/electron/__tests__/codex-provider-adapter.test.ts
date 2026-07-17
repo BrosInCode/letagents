@@ -32,6 +32,7 @@ class FakeRpc implements CodexAdapterRpc {
   readonly requests: RecordedRequest[] = [];
   connected = false;
   closed = false;
+  turnStatus = "completed";
   private readonly disconnectListeners = new Set<() => void>();
 
   constructor(
@@ -74,6 +75,10 @@ class FakeRpc implements CodexAdapterRpc {
     if (method === "turn/start") {
       return { turn: { id: `turn-${this.threadId}` } } as T;
     }
+    if (method === "turn/interrupt") {
+      this.turnStatus = "interrupted";
+      return {} as T;
+    }
     if (method === "thread/read") {
       if (this.options.threadReadTimesOut) {
         throw new Error("Codex app-server request timed out: thread/read");
@@ -86,7 +91,7 @@ class FakeRpc implements CodexAdapterRpc {
           status: { type: "idle" },
           turns: [{
             id: `turn-${this.threadId}`,
-            status: "completed",
+            status: this.turnStatus,
             items: [{ type: "agentMessage", text: "Transcript checkpoint persisted." }],
           }],
         },
@@ -298,6 +303,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     transcriptAccess: true,
     permissionPromptBridging: false,
     survivesRestart: true,
+    turnControl: "native_interrupt",
   });
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
 });
@@ -315,6 +321,32 @@ test("Codex fresh spawn does not let a fatal placeholder resume probe block thre
     ["mcpServerStatus/list", "thread/start", "turn/start", "thread/read"],
   );
   assert.deepEqual(harness.signals, []);
+});
+
+test("Codex turn control interrupts the exact turn and resumes the same thread with the correction", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  client.turnStatus = "inProgress";
+
+  const result = await adapter.controlTurn!(handle, "Use the corrected acceptance criteria.");
+
+  assert.deepEqual(result, {
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: true,
+    state: "working",
+  });
+  const interrupt = client.requests.find((request) => request.method === "turn/interrupt");
+  assert.deepEqual(interrupt?.params, { threadId: "thread-1", turnId: "turn-thread-1" });
+  const redirected = client.requests.filter((request) => request.method === "turn/start").at(-1)!;
+  assert.equal((redirected.params as { threadId: string }).threadId, "thread-1");
+  assert.equal(
+    (redirected.params as { input: Array<{ text: string }> }).input[0]?.text,
+    "Use the corrected acceptance criteria.",
+  );
+  assert.equal(handle.providerContinuationId, "thread-1");
 });
 
 test("Codex supervised launch passes only its daemon generation binding to the MCP child", async () => {

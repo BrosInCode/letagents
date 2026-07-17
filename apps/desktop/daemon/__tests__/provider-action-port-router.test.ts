@@ -19,6 +19,8 @@ import type {
 import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
+import { ManifestStore } from "../manifest-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +58,7 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
       transcriptAccess: true,
       permissionPromptBridging: false,
       survivesRestart: provider === "codex",
+      turnControl: "native_interrupt",
     }),
     async spawn(input: ProviderActionSpawn) {
       calls.push(`${provider}:spawn:${input.workAttemptId}`);
@@ -74,6 +77,11 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
       return handle;
     },
     async poke(handle, message) { calls.push(`${provider}:poke:${handle.workAttemptId}:${message}`); },
+    async controlTurn(handle, correction, options) {
+      await options?.markDispatched?.();
+      calls.push(`${provider}:control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
+    },
     async stop(handle): Promise<ProviderActionTerminal> {
       calls.push(`${provider}:stop:${handle.workAttemptId}`);
       return { endedAt: "2026-07-15T00:00:00.000Z", exitCode: 0, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: handle.providerContinuationId };
@@ -100,13 +108,23 @@ test("provider router selects the native adapter by manifest provider and fences
   const router = new ProviderActionPortRouter({
     codex: async () => fakeAdapter("codex", calls),
     "claude-code": async () => fakeAdapter("claude-code", calls),
+    cursor: async () => {
+      const adapter = fakeAdapter("claude-code", calls);
+      return {
+        ...adapter,
+        async spawn(input) {
+          if (!input.agentDisplayName?.trim()) throw new Error("Cursor requires the durable agent display name.");
+          return adapter.spawn(input);
+        },
+      };
+    },
   });
   const claudeSpawn: ProviderActionSpawn = {
     provider: "claude-code", workAttemptId: "claude-attempt", roomId: "room", cwd: "/tmp/claude", launchPolicy: { permissionMode: "acceptEdits" }, actionId: "launch-claude",
   };
 
   assert.deepEqual(await router.capabilities("claude-attempt", "claude-code"), {
-    resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false,
+    resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt",
   });
   const handle = await router.spawn(claudeSpawn);
   assert.equal(handle.providerConnection?.kind, "claude_cli");
@@ -121,10 +139,14 @@ test("provider router selects the native adapter by manifest provider and fences
     { ...claudeSpawn, actionId: "resume-claude" },
   );
   await router.poke(resumed, "continue", { actionId: "poke-claude" });
+  assert.deepEqual(await router.controlTurn(resumed, "redirect", { actionId: "control-claude" }), {
+    capability: "native_interrupt", interrupted: true, resumed: true, state: "working",
+  });
   assert.deepEqual(calls, [
     "claude-code:spawn:claude-attempt",
     "claude-code:resume:claude-attempt",
     "claude-code:poke:claude-attempt:continue",
+    "claude-code:control:claude-attempt:redirect",
   ]);
 
   await assert.rejects(
@@ -149,8 +171,15 @@ test("provider router selects the native adapter by manifest provider and fences
   );
   await assert.rejects(
     router.spawn({ ...claudeSpawn, provider: "cursor" }),
-    /No supervised native adapter is available for cursor/,
+    /requires the durable agent display name/,
   );
+  const cursor = await router.spawn({
+    ...claudeSpawn,
+    provider: "cursor",
+    workAttemptId: "cursor-attempt",
+    agentDisplayName: "Durable Cursor Agent",
+  });
+  assert.equal(cursor.providerContinuationId, "continuation:cursor-attempt");
 });
 
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {
@@ -315,12 +344,29 @@ test("daemon convergence drives Claude through the router across stop and same-a
   const calls: string[] = [];
   let nextPid = 5000;
   let continuation = "claude-continuation";
+  let rejectControlAfterDispatch = false;
+  let proveControlNotApplied = false;
+  let sawAcceptedControlBeforeProvider = false;
   const adapter: NativeProviderAdapter = {
-    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
     async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async attach() { calls.push("attach"); return null; },
     async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async poke() { throw new Error("Claude poke is intentionally unavailable"); },
+    async controlTurn(handle, correction, options) {
+      await options?.markDispatched?.();
+      calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      const current = (await new ManifestStore(paths.manifestPath).load()).entries.find((candidate) => candidate.id === entry.id);
+      sawAcceptedControlBeforeProvider = current?.turn_control?.status === "dispatching"
+        && current.turn_control.stages.length === 0;
+      if (proveControlNotApplied) {
+        throw Object.assign(new Error("provider proved the native effect was not applied"), {
+          turnControlOutcome: "not_applied" as const,
+        });
+      }
+      if (rejectControlAfterDispatch) throw new Error("injected ambiguous provider outcome");
+      return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
+    },
     async stop(handle) {
       calls.push(`stop:${handle.workAttemptId}`);
       const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
@@ -350,6 +396,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   const paths = {
     lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+    workerBindingsPath: join(root, "worker-bindings.json"),
   };
   const daemon = new SupervisorDaemon(paths, "darwin", router, true);
   const entry: DaemonManifestEntry = {
@@ -364,6 +411,76 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.equal(first.provider_ref?.provider_connection?.kind, "claude_cli");
     assert.ok(first.work_attempt_id);
     const firstGeneration = first.provider_ref?.execution_generation_id;
+    assert.ok(firstGeneration);
+    await new WorkerBindingStore(paths.workerBindingsPath).bind({
+      entry_id: entry.id,
+      room_id: entry.room_id,
+      work_attempt_id: first.work_attempt_id!,
+      execution_generation_id: firstGeneration!,
+      agent_session_id: "agent_session_exact",
+      agent_session_token: "test-session-token",
+      api_url: "https://letagents.test",
+    });
+    const controlParams = {
+      id: entry.id,
+      work_attempt_id: first.work_attempt_id,
+      execution_generation_id: firstGeneration,
+      action_id: "human-control-1",
+      correction: "Use the revised direction",
+    };
+    const controlled = await daemonRequest(paths.socketPath, "manifest.control_turn", controlParams);
+    assert.equal(controlled.ok, true);
+    assert.deepEqual(controlled.result, {
+      entryId: entry.id,
+      workAttemptId: first.work_attempt_id,
+      executionGenerationId: firstGeneration,
+      actionId: "human-control-1",
+      duplicate: false,
+      stages: ["delivered", "interrupting", "applied", "resumed"],
+      capability: "native_interrupt",
+      interrupted: true,
+      resumed: true,
+      state: "working",
+    });
+    const duplicate = await daemonRequest(paths.socketPath, "manifest.control_turn", controlParams);
+    assert.equal((duplicate.result as { duplicate: boolean }).duplicate, true, "durable action id makes transport retries idempotent");
+    const stale = await daemonRequest(paths.socketPath, "manifest.control_turn", { ...controlParams, action_id: "human-control-stale", execution_generation_id: "wrong-generation" });
+    assert.equal(stale.ok, false);
+    assert.match(stale.error ?? "", /stale or incomplete/);
+    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 1, "duplicate and stale requests never reach the provider");
+    assert.equal(sawAcceptedControlBeforeProvider, true, "native dispatch is durably fenced and carries no optimistic ack stages");
+    proveControlNotApplied = true;
+    const retryableParams = { ...controlParams, action_id: "human-control-retryable", correction: "Retry only after proof" };
+    const provenNotApplied = await daemonRequest(paths.socketPath, "manifest.control_turn", retryableParams);
+    assert.equal(provenNotApplied.ok, false);
+    assert.match(provenNotApplied.error ?? "", /proved the native effect was not applied/);
+    const retryableJournal = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
+    assert.equal(retryableJournal?.status, "retryable");
+    assert.deepEqual(retryableJournal?.stages, []);
+    proveControlNotApplied = false;
+    const safeRetry = await daemonRequest(paths.socketPath, "manifest.control_turn", retryableParams);
+    assert.equal(safeRetry.ok, true, "the exact correction is dispatchable again only after definitive non-application");
+    assert.equal((safeRetry.result as { duplicate?: boolean }).duplicate, false);
+    rejectControlAfterDispatch = true;
+    const uncertainParams = { ...controlParams, action_id: "human-control-uncertain", correction: "Do not replay this correction" };
+    const uncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
+    assert.equal(uncertain.ok, false);
+    assert.match(uncertain.error ?? "", /injected ambiguous provider outcome/);
+    rejectControlAfterDispatch = false;
+    const retryUncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
+    assert.equal(retryUncertain.ok, false);
+    assert.match(retryUncertain.error ?? "", /durably dispatched.*unresolved.*not replayed/i);
+    const competing = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      ...uncertainParams,
+      action_id: "human-control-competing",
+    });
+    assert.equal(competing.ok, false);
+    assert.match(competing.error ?? "", /unresolved.*refusing a second action/i);
+    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 4, "an ambiguous accepted effect is never dispatched twice");
+    const journaled = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
+    assert.equal(journaled?.status, "uncertain");
+    assert.deepEqual(journaled?.stages, []);
+    await new WorkerBindingStore(paths.workerBindingsPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "Claude router stop");
@@ -380,6 +497,123 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(calls.some((call) => call.startsWith("spawn:")));
     assert.ok(calls.some((call) => call.startsWith("stop:")));
     assert.ok(calls.some((call) => call.startsWith("resume:")));
+  } finally {
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native dispatch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-control-restart-"));
+  const calls: string[] = [];
+  const adapter = fakeAdapter("claude-code", calls);
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+    workerBindingsPath: join(root, "worker-bindings.json"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", router, false);
+  const recordedAt = new Date().toISOString();
+  const entry: DaemonManifestEntry = {
+    id: "restart_control", room_id: "room", display_name: "Claude", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "working", condition: "none",
+    permission_profile_id: "full_access", created_by: "test", created_at: recordedAt,
+    work_attempt_id: "attempt_exact",
+    provider_ref: {
+      work_attempt_id: "attempt_exact",
+      provider_continuation_id: "session_exact",
+      execution_generation_id: "generation_exact",
+      provider_connection: { kind: "claude_cli", pid: 4242, processIdentity: "claude:4242" },
+    },
+    turn_control: {
+      action_id: "action_dispatching_before_crash",
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      has_correction: true,
+      status: "dispatching",
+      capability: "native_interrupt",
+      interrupted: null,
+      resumed: null,
+      state: null,
+      stages: [],
+      error: null,
+      recorded_at: recordedAt,
+      updated_at: recordedAt,
+    },
+  };
+  const preparedEntry: DaemonManifestEntry = {
+    ...entry,
+    id: "restart_prepared_control",
+    turn_control: {
+      ...entry.turn_control!,
+      action_id: "action_prepared_before_crash",
+      status: "prepared",
+    },
+  };
+  const appliedEntry: DaemonManifestEntry = {
+    ...entry,
+    id: "restart_applied_control",
+    turn_control: {
+      ...entry.turn_control!,
+      action_id: "action_operator_verified_applied",
+    },
+  };
+  try {
+    await new ManifestStore(paths.manifestPath).write(0, [entry, preparedEntry, appliedEntry]);
+    await daemon.start();
+    const recoveredEntries = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    const recovered = recoveredEntries.find((candidate) => candidate.id === entry.id)?.turn_control;
+    const prepared = recoveredEntries.find((candidate) => candidate.id === preparedEntry.id)?.turn_control;
+    assert.equal(recovered?.status, "uncertain");
+    assert.match(recovered?.error ?? "", /after native dispatch began/i);
+    assert.equal(prepared?.status, "retryable");
+    assert.match(prepared?.error ?? "", /before native dispatch.*safe to retry/i);
+    const replay = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: entry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_dispatching_before_crash",
+      correction: "one correction",
+    });
+    assert.equal(replay.ok, false);
+    assert.match(replay.error ?? "", /durably dispatched.*unresolved.*not replayed/i);
+    assert.equal(calls.some((call) => call.includes(":control:")), false);
+    const resolved = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
+      id: entry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_dispatching_before_crash",
+      resolution: "not_applied",
+    });
+    assert.equal(resolved.ok, true);
+    const resolvedEntry = resolved.result as DaemonManifestEntry;
+    assert.equal(resolvedEntry.turn_control?.status, "retryable");
+    assert.equal(resolvedEntry.activity?.at(-1)?.method, "supervisor/resolve-turn-control");
+    assert.deepEqual(resolvedEntry.activity?.at(-1)?.payload, {
+      action_id: "action_dispatching_before_crash",
+      resolution: "not_applied",
+    });
+    const appliedResolution = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
+      id: appliedEntry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_operator_verified_applied",
+      resolution: "applied",
+    });
+    assert.equal(appliedResolution.ok, true);
+    const operatorApplied = appliedResolution.result as DaemonManifestEntry;
+    assert.equal(operatorApplied.turn_control?.status, "completed");
+    assert.deepEqual(operatorApplied.turn_control?.stages, ["already_applied"]);
+    assert.equal(operatorApplied.activity?.at(-1)?.method, "supervisor/resolve-turn-control");
+    const appliedDuplicate = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: appliedEntry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_operator_verified_applied",
+      correction: "one correction",
+    });
+    assert.equal(appliedDuplicate.ok, true);
+    assert.equal((appliedDuplicate.result as { duplicate?: boolean }).duplicate, true);
   } finally {
     await daemon.stop();
     await rm(root, { recursive: true, force: true });

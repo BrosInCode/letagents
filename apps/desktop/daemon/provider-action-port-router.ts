@@ -8,6 +8,7 @@ import type {
   ProviderActionSpawn,
   ProviderActionStreamEvent,
   ProviderActionTerminal,
+  ProviderTurnControlResult,
 } from "./provider-action-port.js";
 
 type NativeHandle = {
@@ -24,6 +25,7 @@ export type NativeProviderAdapter = {
   attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
+  controlTurn(handle: NativeHandle, correction?: string | null, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -102,6 +104,15 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
   }
 
+  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
+    const remembered = this.required(handle);
+    const result = await (await this.adapter(remembered.provider)).controlTurn(remembered.handle, correction, {
+      markDispatched: options?.markDispatched,
+    });
+    if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
+    return result;
+  }
+
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {
     const remembered = this.required(handle);
     const terminal = await (await this.adapter(remembered.provider)).stop(remembered.handle, options);
@@ -132,6 +143,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (provider === "claude-code") {
         const module = await import(new URL("../dist-electron/main/agents/claude-code-provider-adapter.js", import.meta.url).href) as { ClaudeCodeProviderAdapter?: new () => NativeProviderAdapter };
         if (module.ClaudeCodeProviderAdapter) return new module.ClaudeCodeProviderAdapter();
+      }
+      if (provider === "cursor") {
+        const module = await import(new URL("../dist-electron/main/agents/cursor-provider-adapter.js", import.meta.url).href) as { CursorProviderAdapter?: new () => NativeProviderAdapter };
+        if (module.CursorProviderAdapter) return new module.CursorProviderAdapter();
       }
       throw new Error(`No supervised native adapter is available for ${provider}.`);
     })();

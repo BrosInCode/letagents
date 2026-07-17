@@ -413,6 +413,20 @@ export interface DesktopSupervisorManifestEntry {
   restartCount: number;
   lastTerminal: Record<string, unknown> | null;
   activity: DesktopSupervisorActivityEvent[];
+  turnControl: {
+    actionId: string;
+    workAttemptId: string;
+    executionGenerationId: string;
+    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
+    capability: "native_interrupt" | "restart_resume" | "unsupported";
+    interrupted: boolean | null;
+    resumed: boolean | null;
+    state: "idle" | "working" | null;
+    stages: DesktopSupervisorTurnControlResult["stages"];
+    error: string | null;
+    recordedAt: string;
+    updatedAt: string;
+  } | null;
 }
 
 export interface DesktopSupervisorCreateInput {
@@ -427,6 +441,37 @@ export interface DesktopSupervisorCreateInput {
   /** Opaque, provider-native CLI/app-server options. The daemon forwards this unchanged. */
   launchPolicy?: unknown;
   repoRootPath: string;
+}
+
+export interface DesktopSupervisorTurnControlInput {
+  entryId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  /** Stable for one click/retry; a distinct human action gets a new id. */
+  actionId: string;
+  /** Null/blank is the non-destructive Stop-turn primitive. */
+  correction?: string | null;
+}
+
+export interface DesktopSupervisorTurnControlResult {
+  entryId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  actionId: string;
+  capability: "native_interrupt" | "restart_resume" | "unsupported";
+  interrupted: boolean;
+  resumed: boolean;
+  state: "idle" | "working";
+  duplicate: boolean;
+  stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
+}
+
+export interface DesktopSupervisorTurnControlResolutionInput {
+  entryId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  actionId: string;
+  resolution: "not_applied" | "applied";
 }
 
 export interface DesktopSupervisorAttemptDetail {

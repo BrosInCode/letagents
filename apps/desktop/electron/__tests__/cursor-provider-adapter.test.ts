@@ -288,6 +288,30 @@ test("poke delivers at the boundary: refused mid-turn, runs a --resume turn when
   assert.equal(handle.pid, 5201, "the new turn's live pid is claimed while it runs");
 });
 
+test("Cursor turn control fences only the live turn child and resumes the same session without attempt terminal", async () => {
+  const harness = createHarness();
+  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const terminals: ProviderTerminalPayload[] = [];
+  adapter.onExit(handle, (terminal) => terminals.push(terminal));
+
+  const result = await withLoopAlive(adapter.controlTurn!(handle, "Apply the corrected direction."));
+
+  assert.deepEqual(result, {
+    capability: "restart_resume",
+    interrupted: true,
+    resumed: true,
+    state: "working",
+  });
+  assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }]);
+  assert.deepEqual(terminals, [], "turn-child interruption never becomes attempt-terminal evidence");
+  assert.equal(harness.launches.length, 2);
+  assert.ok(harness.launches[1]!.args.join(" ").includes("--resume sess-cursor-1"));
+  assert.equal(harness.launches[1]!.args.at(-1), "Apply the corrected direction.");
+  assert.equal(handle.providerContinuationId, "sess-cursor-1");
+  assert.equal(handle.observedState(), "working");
+});
+
 test("resume presents the recorded session and a stranger session id mid-stream is a protocol violation", async () => {
   const harness = createHarness();
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });

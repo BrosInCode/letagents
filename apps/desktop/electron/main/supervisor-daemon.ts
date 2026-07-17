@@ -13,6 +13,9 @@ import type {
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResolutionInput,
+  DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import { desktopRoot } from "./paths.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
@@ -21,8 +24,9 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.13";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.14";
 const REQUEST_TIMEOUT_MS = 3_000;
+const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
 const activitySequences = new Map<string, number>();
@@ -67,6 +71,20 @@ type WireEntry = {
   native_liveness?: { state: string; observed_at: string | null; detail: string | null };
   activity?: WireActivityEvent[];
   reconciliation?: { exit_timestamps_ms?: number[]; last_terminal?: Record<string, unknown> };
+  turn_control?: {
+    action_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
+    capability: "native_interrupt" | "restart_resume" | "unsupported";
+    interrupted: boolean | null;
+    resumed: boolean | null;
+    state: "idle" | "working" | null;
+    stages: DesktopSupervisorTurnControlResult["stages"];
+    error: string | null;
+    recorded_at: string;
+    updated_at: string;
+  } | null;
 };
 type WireActivityEvent = {
   observed_at: string;
@@ -106,6 +124,8 @@ export interface SupervisorDaemonLifecycleOptions {
   spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
   terminateDaemon?: (pid: number) => void;
   handoffTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  turnControlRequestTimeoutMs?: number;
   now?: () => Date;
 }
 
@@ -117,6 +137,8 @@ export class SupervisorDaemonClient {
   private readonly daemonWorkingDirectory: string;
   private readonly terminateDaemon: (pid: number) => void;
   private readonly handoffTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly turnControlRequestTimeoutMs: number;
   private readonly now: () => Date;
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
@@ -125,6 +147,8 @@ export class SupervisorDaemonClient {
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
     this.terminateDaemon = options.terminateDaemon ?? ((pid) => process.kill(pid, "SIGTERM"));
     this.handoffTimeoutMs = options.handoffTimeoutMs ?? START_TIMEOUT_MS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
       const child = spawn(process.execPath, [scriptPath], {
@@ -240,6 +264,28 @@ export class SupervisorDaemonClient {
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
   }
 
+  async controlTurn(input: DesktopSupervisorTurnControlInput): Promise<DesktopSupervisorTurnControlResult> {
+    await this.ensureRunning();
+    return this.request<DesktopSupervisorTurnControlResult>("manifest.control_turn", {
+      id: input.entryId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      action_id: input.actionId,
+      correction: input.correction ?? null,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+  }
+
+  async resolveTurnControl(input: DesktopSupervisorTurnControlResolutionInput): Promise<DesktopSupervisorManifestEntry> {
+    await this.ensureRunning();
+    return mapEntry(await this.request<WireEntry>("manifest.resolve_turn_control", {
+      id: input.entryId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      action_id: input.actionId,
+      resolution: input.resolution,
+    }));
+  }
+
   async readAttempt(id: string): Promise<DesktopSupervisorAttemptDetail> {
     await this.ensureRunning();
     const detail = await this.request<Record<string, unknown>>("attempt.read", { id });
@@ -337,7 +383,12 @@ export class SupervisorDaemonClient {
     await this.waitForSocketDown();
   }
 
-  private request<T = unknown>(method: string, params?: unknown, version = SUPERVISOR_DAEMON_PROTOCOL_VERSION): Promise<T> {
+  private request<T = unknown>(
+    method: string,
+    params?: unknown,
+    version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    timeoutMs = this.requestTimeoutMs,
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);
@@ -350,7 +401,7 @@ export class SupervisorDaemonClient {
         if (error) reject(error); else resolve(value as T);
       };
       socket.setEncoding("utf8");
-      socket.setTimeout(REQUEST_TIMEOUT_MS, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
+      socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
       socket.once("error", (error) => finish(error));
       socket.on("data", (chunk: string) => {
         buffer += chunk;
@@ -424,6 +475,20 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
     lastTerminal: entry.reconciliation?.last_terminal ?? null,
     activity: (entry.activity ?? []).map(mapActivity),
+    turnControl: entry.turn_control ? {
+      actionId: entry.turn_control.action_id,
+      workAttemptId: entry.turn_control.work_attempt_id,
+      executionGenerationId: entry.turn_control.execution_generation_id,
+      status: entry.turn_control.status,
+      capability: entry.turn_control.capability,
+      interrupted: entry.turn_control.interrupted,
+      resumed: entry.turn_control.resumed,
+      state: entry.turn_control.state,
+      stages: entry.turn_control.stages,
+      error: entry.turn_control.error,
+      recordedAt: entry.turn_control.recorded_at,
+      updatedAt: entry.turn_control.updated_at,
+    } : null,
   };
 }
 

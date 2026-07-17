@@ -18,6 +18,9 @@ import {
   type ProviderObservedState,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
+  type ProviderTurnControlResult,
+  type ProviderTurnControlOptions,
+  ProviderTurnControlError,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -103,6 +106,7 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   // Between turns there is no process at all; after a daemon restart the lane
   // resumes via the session id. Bounded recovery, not survival (§4.8).
   survivesRestart: false,
+  turnControl: "restart_resume",
 };
 
 // Flags the adapter owns. Everything else in the launch policy is the user's
@@ -258,6 +262,8 @@ interface LiveTurn {
   sawInit: boolean;
   sawResult: boolean;
   resultWasError: boolean;
+  interruptRequested: boolean;
+  completion?: Promise<void>;
 }
 
 // The empirically proven usage-limit signature (task_38 spike, msg_1708):
@@ -402,6 +408,58 @@ export class CursorProviderAdapter implements ProviderAdapter {
       );
     }
     await this.beginTurn(handle, message, handle.providerContinuationId);
+  }
+
+  async controlTurn(
+    providerHandle: ProviderHandle,
+    correction?: string | null,
+    options: ProviderTurnControlOptions = {},
+  ): Promise<ProviderTurnControlResult> {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.terminal) throw new Error("Cursor continuation is terminal; no turn can be controlled.");
+    const text = correction?.trim() || null;
+    const turn = handle.liveTurn;
+    if (turn) {
+      const identity = this.deps.getProcessIdentity(turn.pid);
+      if (typeof identity !== "string" || !sameProcessBirthIdentity(identity, turn.processIdentity)) {
+        throw new Error("Cursor turn identity is stale; refusing to interrupt a different process.");
+      }
+      try {
+        await options.markDispatched?.();
+        const dispatchIdentity = this.deps.getProcessIdentity(turn.pid);
+        if (handle.liveTurn !== turn
+          || typeof dispatchIdentity !== "string"
+          || !sameProcessBirthIdentity(dispatchIdentity, turn.processIdentity)) {
+          throw new ProviderTurnControlError(
+            "Cursor turn ended before the child interrupt was dispatched.",
+            "not_applied",
+          );
+        }
+        turn.interruptRequested = true;
+        this.deps.signalProcess(turn.pid, "SIGTERM");
+      } catch (error) {
+        turn.interruptRequested = false;
+        throw error;
+      }
+      const graceful = await Promise.race([
+        turn.child.exited.then(() => true),
+        delay(this.stopGraceMs).then(() => false),
+      ]);
+      if (!graceful) this.deps.signalProcess(turn.pid, "SIGKILL");
+      await turn.child.exited;
+      await turn.completion;
+      if (handle.terminal) throw new Error("Cursor turn interruption unexpectedly ended the supervised attempt.");
+    }
+    if (text) {
+      if (!turn) await options.markDispatched?.();
+      await this.beginTurn(handle, text, handle.providerContinuationId);
+    }
+    return {
+      capability: "restart_resume",
+      interrupted: Boolean(turn),
+      resumed: Boolean(text),
+      state: text ? "working" : "idle",
+    };
   }
 
   async stop(
@@ -550,6 +608,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       sawInit: false,
       sawResult: false,
       resultWasError: false,
+      interruptRequested: false,
     };
     handle.liveTurn = turn;
     handle.state = "working";
@@ -617,7 +676,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
       throw new Error("cursor-agent init carried no session id; refusing an unverifiable continuation.");
     }
 
-    void this.completeTurn(handle, turn, unsubscribe);
+    turn.completion = this.completeTurn(handle, turn, unsubscribe);
+    void turn.completion;
   }
 
   /** Await the turn's real exit and apply the honest end state. */
@@ -634,6 +694,22 @@ export class CursorProviderAdapter implements ProviderAdapter {
     unsubscribe();
     if (handle.liveTurn === turn) handle.liveTurn = null;
     if (handle.terminal) return;
+
+    if (turn.interruptRequested) {
+      // Cursor has no in-turn channel, so the exact turn child is fenced and
+      // the durable session is resumed for any correction. This is explicitly
+      // TURN-terminal, never ATTEMPT-terminal.
+      handle.state = "idle";
+      this.publishActivity(handle, {
+        source: "native_harness",
+        method: "turn/interrupted",
+        summary: "Turn interrupted; continuation preserved",
+        status: "idle",
+        checking: "",
+        next_action: "awaiting redirected work",
+      });
+      return;
+    }
 
     if (exit.type === "error" || handle.stopRequested || handle.protocolError || !turn.sawResult) {
       // A launch error, a requested stop, a session-identity violation, or a

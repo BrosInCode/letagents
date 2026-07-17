@@ -138,6 +138,10 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           localSessionPill: false,
           localStopControl: false,
           stopTurnKeepsLocalSession: false,
+          supervisorTurnControl: false,
+          supervisorTurnControlRejectTruthful: false,
+          supervisorTurnControlLadder: false,
+          supervisorTurnControlPersists: false,
           agentInspectionStatus: false,
           activityAgentControls: false,
           publishedReasoning: false
@@ -331,9 +335,12 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           const panels = Array.from(modal?.querySelectorAll(".desktop-agent-detail-panel") || []);
           const stopButton = modal?.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]');
           return rectInsideViewport(modal) &&
-            panels.length === 2 &&
-            panels.every(rectInsideViewport) &&
-            rectsDoNotOverlap(panels[0], panels[1]) &&
+            panels.length === 3 &&
+            panels.every((panel) => {
+              const rect = rectFor(panel);
+              return Boolean(rect && rect.width > 0 && rect.height > 0);
+            }) &&
+            panels.every((panel, index) => panels.slice(index + 1).every((other) => rectsDoNotOverlap(panel, other))) &&
             rectInsideViewport(stopButton);
         })();
         const detailText = () => document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent || "";
@@ -354,6 +361,50 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')
         );
         result.stopTurnKeepsLocalSession = true;
+        await waitFor("supervisor turn control", () =>
+          detailText().includes("Steer this agent") &&
+          detailText().includes("Native interrupt · preserves this provider session") &&
+          document.querySelector('[data-testid="desktop-agent-stop-turn"]') &&
+          document.querySelector('[data-testid="desktop-agent-steer"]')
+        );
+        const turnControl = document.querySelector('[data-testid="desktop-agent-turn-control"]');
+        turnControl?.scrollIntoView({ block: "center" });
+        await waitFor("visible supervisor turn control", () => rectInsideViewport(turnControl));
+        result.supervisorTurnControl = true;
+        const steerInput = document.querySelector('#supervisor-steer-supervisor_smoke_codex');
+        if (steerInput instanceof HTMLTextAreaElement) {
+          const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+          valueSetter?.call(steerInput, "Reject the stale smoke control.");
+          steerInput.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "Reject the stale smoke control." }));
+        }
+        let steerButton = await waitFor("enabled supervisor steer", () => {
+          const button = document.querySelector('[data-testid="desktop-agent-steer"]');
+          return button instanceof HTMLButtonElement && !button.disabled ? button : null;
+        });
+        steerButton.click();
+        await waitFor("truthful rejected supervisor control", () =>
+          detailText().includes("Smoke stale generation rejected before provider dispatch.") &&
+          !detailText().includes("Delivered") &&
+          !detailText().includes("Interrupting current turn")
+        );
+        result.supervisorTurnControlRejectTruthful = true;
+        if (steerInput instanceof HTMLTextAreaElement) {
+          const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+          valueSetter?.call(steerInput, "Use the corrected smoke instruction.");
+          steerInput.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "Use the corrected smoke instruction." }));
+        }
+        steerButton = await waitFor("re-enabled supervisor steer", () => {
+          const button = document.querySelector('[data-testid="desktop-agent-steer"]');
+          return button instanceof HTMLButtonElement && !button.disabled ? button : null;
+        });
+        steerButton.click();
+        await waitFor("supervisor turn control ladder", () =>
+          detailText().includes("Delivered") &&
+          detailText().includes("Interrupting current turn") &&
+          detailText().includes("Applied") &&
+          detailText().includes("Resumed same session")
+        );
+        result.supervisorTurnControlLadder = true;
         await waitFor("agent inspection status", () =>
           detailText().includes("App-server offline") || detailText().includes("Public transcript preview")
         );
@@ -378,6 +429,11 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent?.includes("MapleRidge")
         );
         result.activityAgentControls = true;
+        await waitFor("persisted supervisor turn-control ladder", () => {
+          const text = document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent || "";
+          return text.includes("Delivered") && text.includes("Resumed same session");
+        });
+        result.supervisorTurnControlPersists = true;
 
         return result;
       })()`,
