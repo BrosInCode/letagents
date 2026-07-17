@@ -70,14 +70,18 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
     (payload.thread as Record<string, unknown> | undefined)?.status,
     (payload.turn as Record<string, unknown> | undefined)?.status,
     (payload.latestTurn as Record<string, unknown> | undefined)?.status,
+    (payload.item as Record<string, unknown> | undefined)?.status,
   ].flatMap(nestedStatus);
   const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
   const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
   const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
+  const failedItem = /^item\/completed$/i.test(method)
+    && Boolean((payload.item as Record<string, unknown> | undefined)?.error);
   if (failedMethod
     || failedResult
-    || failedStatus && /^(?:result|turn|thread)(?:\/|$)/i.test(method)
-    || event.kind === "error" && /^(?:result|turn|thread)(?:\/|$)/i.test(method)) return "failed";
+    || failedItem
+    || failedStatus && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)
+    || event.kind === "error" && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)) return "failed";
   if (/^(?:result(?:\/success)?|turn\/completed|thread\/completed)$/i.test(method)) return "terminal";
   if (/(?:completed|finished|idle|stopped|interrupted)$/i.test(method)) return "idle";
   return "working";
@@ -97,12 +101,143 @@ export function isSupervisedWaitProviderEvent(event: ProviderActionStreamEvent):
     if (Array.isArray(value)) return value.some((item) => visit(item, depth + 1));
     const record = value as Record<string, unknown>;
     if (record.type === "tool_use" && isWaitName(record.name)) return true;
-    if (/mcpToolCall/i.test(event.method)) {
+    if (event.method === "item/started" && record.type === "mcpToolCall") {
       if ([record.tool, record.name, record.toolName, record.tool_name].some(isWaitName)) return true;
     }
     return Object.values(record).some((child) => visit(child, depth + 1));
   };
   return visit(event.payload, 0);
+}
+
+type PollActivityLike = Pick<ProviderActionStreamEvent, "method" | "payload">;
+
+function supervisedWaitToolUseIds(event: PollActivityLike): Set<string> {
+  const ids = new Set<string>();
+  const isWaitName = (value: unknown): boolean => typeof value === "string"
+    && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages");
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 8 || !value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const waitTool = record.type === "tool_use" && isWaitName(record.name)
+      || event.method === "item/started" && record.type === "mcpToolCall"
+        && [record.tool, record.name, record.toolName, record.tool_name].some(isWaitName);
+    if (waitTool) {
+      for (const candidate of [record.id, record.tool_use_id, record.callId, record.call_id, record.toolCallId, record.tool_call_id]) {
+        if (typeof candidate === "string" && candidate.trim()) ids.add(candidate.trim());
+      }
+    }
+    for (const child of Object.values(record)) visit(child, depth + 1);
+  };
+  visit(event.payload, 0);
+  return ids;
+}
+
+function parsedWaitResult(value: unknown, depth = 0): { empty: boolean } | null {
+  if (depth > 8 || value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+    try { return parsedWaitResult(JSON.parse(trimmed), depth + 1); } catch { return null; }
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const result = parsedWaitResult(item, depth + 1);
+      if (result) return result;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (record.is_error === true || record.error) return null;
+  if (Array.isArray(record.messages)) return { empty: record.messages.length === 0 };
+  for (const key of ["content", "text", "tool_use_result", "result", "structuredContent", "output"]) {
+    const result = parsedWaitResult(record[key], depth + 1);
+    if (result) return result;
+  }
+  return null;
+}
+
+function supervisedToolResults(event: PollActivityLike): Array<{ toolUseId: string; empty: boolean }> {
+  const results: Array<{ toolUseId: string; empty: boolean }> = [];
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 8 || !value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.type === "tool_result" && typeof record.tool_use_id === "string") {
+      const parsed = parsedWaitResult(record);
+      if (parsed) results.push({ toolUseId: record.tool_use_id, empty: parsed.empty });
+    }
+    if (event.method === "item/completed"
+      && record.type === "mcpToolCall"
+      && typeof record.id === "string"
+      && record.status !== "failed"
+      && !record.error) {
+      const parsed = parsedWaitResult(record.result);
+      if (parsed) results.push({ toolUseId: record.id, empty: parsed.empty });
+    }
+    for (const child of Object.values(record)) visit(child, depth + 1);
+  };
+  visit(event.payload, 0);
+  return results;
+}
+
+function isThinkingOnlyAssistantEvent(event: PollActivityLike): boolean {
+  if (event.method !== "assistant" || !event.payload || typeof event.payload !== "object") return false;
+  const payload = event.payload as Record<string, unknown>;
+  const message = payload.message;
+  if (!message || typeof message !== "object") return false;
+  const content = (message as Record<string, unknown>).content;
+  return Array.isArray(content) && content.length > 0 && content.every((item) =>
+    item && typeof item === "object" && (item as Record<string, unknown>).type === "thinking");
+}
+
+function correlatedWaitResult(event: PollActivityLike, history: readonly PollActivityLike[]): "empty" | "nonempty" | null {
+  const waitIds = new Set(history.flatMap((candidate) => [...supervisedWaitToolUseIds(candidate)]));
+  const correlated = supervisedToolResults(event).filter((result) => waitIds.has(result.toolUseId));
+  if (correlated.some((result) => !result.empty)) return "nonempty";
+  return correlated.some((result) => result.empty) ? "empty" : null;
+}
+
+function isCorrelatedEmptyWaitResult(event: PollActivityLike, history: readonly PollActivityLike[]): boolean {
+  return correlatedWaitResult(event, history) === "empty";
+}
+
+function isCorrelatedNonemptyWaitResult(event: PollActivityLike, history: readonly PollActivityLike[]): boolean {
+  return correlatedWaitResult(event, history) === "nonempty";
+}
+
+function isCorrelatedWaitProgress(event: PollActivityLike, history: readonly PollActivityLike[]): boolean {
+  if (event.method !== "item/mcpToolCall/progress" || !event.payload || typeof event.payload !== "object") return false;
+  const itemId = (event.payload as Record<string, unknown>).itemId;
+  if (typeof itemId !== "string" || !itemId.trim()) return false;
+  const waitIds = new Set(history.flatMap((candidate) => [...supervisedWaitToolUseIds(candidate)]));
+  return waitIds.has(itemId.trim());
+}
+
+/**
+ * Keep the whole empty room-poll handoff quiet, not only the wait tool-use.
+ * Claude emits wait tool-use -> user tool-result -> a thinking-only assistant
+ * beat -> the next wait. Correlating the exact tool_use_id avoids treating a
+ * real addressed result (or an unrelated tool) as idle, and the persisted
+ * activity window makes the decision survive a daemon restart mid-poll.
+ */
+export function isSupervisedQuietPollContinuation(
+  event: PollActivityLike,
+  history: readonly PollActivityLike[],
+): boolean {
+  const recent = history.slice(-8);
+  if (isCorrelatedWaitProgress(event, recent)) return true;
+  if (isCorrelatedEmptyWaitResult(event, recent)) return true;
+  if (!isThinkingOnlyAssistantEvent(event)) return false;
+  const prior = recent.at(-1);
+  return prior ? isCorrelatedEmptyWaitResult(prior, recent.slice(0, -1)) : false;
 }
 
 /**
@@ -1573,13 +1708,18 @@ export class SupervisorDaemon {
     const observedLifecycle = providerStreamLifecycle(event);
     const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
     if (!entry) return;
+    const addressedWaitResult = observedLifecycle === "idle"
+      && isCorrelatedNonemptyWaitResult(event, entry.activity ?? []);
     // A terminal native failure is sticky for the installed execution. Late
     // deltas and heartbeats from that same handle are evidence, not recovery.
-    const lifecycle = entry.observed_state === "failed" ? "failed" : observedLifecycle;
+    const lifecycle = entry.observed_state === "failed"
+      ? "failed"
+      : addressedWaitResult ? "working" : observedLifecycle;
     // Provider-local stream counters may restart when a replacement daemon
     // attaches. Persist a daemon-global monotonic sequence for the manifest.
     const sequence = Math.max((entry.activity?.at(-1)?.sequence ?? 0) + 1, event.sequence);
-    const quietlyPolling = isSupervisedWaitProviderEvent(event);
+    const quietlyPolling = isSupervisedWaitProviderEvent(event)
+      || isSupervisedQuietPollContinuation(event, entry.activity ?? []);
     const status: DaemonActivityEvent["status"] = lifecycle === "failed"
       ? "blocked"
       : lifecycle === "terminal" || quietlyPolling ? "idle" : lifecycle;

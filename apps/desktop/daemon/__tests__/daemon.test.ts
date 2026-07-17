@@ -13,7 +13,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { isSupervisedWaitProviderEvent, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
+import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -175,8 +175,8 @@ test("supervised native stream classifies structured Claude and Codex room waits
   assert.equal(isSupervisedWaitProviderEvent({
     ...base,
     provider: "codex",
-    method: "item/mcpToolCall/progress",
-    payload: { item: { tool: "wait_for_messages" } },
+    method: "item/started",
+    payload: { item: { type: "mcpToolCall", id: "wait_codex", server: "letagents", tool: "wait_for_messages", status: "inProgress" } },
   }), true);
   assert.equal(isSupervisedWaitProviderEvent({
     ...base,
@@ -186,9 +186,107 @@ test("supervised native stream classifies structured Claude and Codex room waits
   assert.equal(isSupervisedWaitProviderEvent({
     ...base,
     provider: "codex",
-    method: "item/mcpToolCall/progress",
-    payload: { item: { tool: "read_messages" } },
+    method: "item/started",
+    payload: { item: { type: "mcpToolCall", id: "read_codex", server: "letagents", tool: "read_messages", status: "inProgress" } },
   }), false, "other room tools remain visible as real work");
+});
+
+test("supervised native stream keeps correlated empty wait results and handoffs quiet", () => {
+  const claudeWait = {
+    method: "assistant",
+    payload: {
+      type: "assistant",
+      message: { content: [{
+        type: "tool_use",
+        id: "wait_claude",
+        name: "mcp__letagents__wait_for_messages",
+        input: { after_message_id: "msg_10", agent_session_id: "agent_session_exact" },
+      }] },
+    },
+  };
+  const claudeResult = (body: object, overrides: object = {}) => ({
+    method: "user",
+    payload: {
+      type: "user",
+      message: { content: [{
+        type: "tool_result",
+        tool_use_id: "wait_claude",
+        content: [{ type: "text", text: JSON.stringify(body) }],
+        ...overrides,
+      }] },
+    },
+  });
+  const emptyResult = claudeResult({ messages: [], room_id: "focus_37" });
+  assert.equal(isSupervisedQuietPollContinuation(emptyResult, [claudeWait]), true);
+  assert.equal(isSupervisedQuietPollContinuation(
+    claudeResult({ messages: [], last_observed_message_id: "msg_11", skipped_message_count: 1 }),
+    [claudeWait],
+  ), true, "silent/skipped cursor progress remains an idle poll result");
+  assert.equal(isSupervisedQuietPollContinuation(
+    claudeResult({ messages: [{ id: "msg_11", text: "please act" }] }),
+    [claudeWait],
+  ), false, "an addressed result wakes the worker visibly");
+  assert.equal(isSupervisedQuietPollContinuation(
+    claudeResult({ messages: [] }, { is_error: true }),
+    [claudeWait],
+  ), false, "poll errors are never hidden as idle");
+  assert.equal(isSupervisedQuietPollContinuation(
+    { method: "assistant", payload: { type: "assistant", message: { content: [{ type: "thinking", thinking: "bounded provider thought" }] } } },
+    [claudeWait, emptyResult],
+  ), true, "the thinking-only beat before the immediate re-wait does not flash working");
+  assert.equal(isSupervisedQuietPollContinuation(
+    { method: "assistant", payload: { type: "assistant", message: { content: [{ type: "text", text: "Starting the requested review" }] } } },
+    [claudeWait, emptyResult],
+  ), false, "user-facing assistant work remains visible without free-text heuristics");
+
+  const codexWait = {
+    method: "item/started",
+    payload: {
+      item: { type: "mcpToolCall", id: "wait_codex", server: "letagents", tool: "wait_for_messages", status: "inProgress" },
+      threadId: "thread_codex",
+      turnId: "turn_codex",
+    },
+  };
+  const codexProgress = {
+    method: "item/mcpToolCall/progress",
+    payload: { itemId: "wait_codex", message: "waiting", threadId: "thread_codex", turnId: "turn_codex" },
+  };
+  const codexResult = {
+    method: "item/completed",
+    payload: {
+      item: {
+        type: "mcpToolCall", id: "wait_codex", server: "letagents", tool: "wait_for_messages", status: "completed",
+        result: { content: [{ type: "text", text: JSON.stringify({ messages: [], last_observed_message_id: "msg_12" }) }], structuredContent: null, _meta: null },
+        error: null,
+      },
+      threadId: "thread_codex",
+      turnId: "turn_codex",
+    },
+  };
+  assert.equal(isSupervisedQuietPollContinuation(codexProgress, [codexWait]), true, "real Codex progress correlates by params.itemId");
+  assert.equal(isSupervisedQuietPollContinuation(codexResult, [codexWait, codexProgress]), true, "real Codex completion correlates by params.item.id");
+  assert.equal(isSupervisedQuietPollContinuation({
+    method: "item/completed",
+    payload: {
+      item: {
+        type: "mcpToolCall", id: "wait_codex", server: "letagents", tool: "wait_for_messages", status: "completed",
+        result: { content: [], structuredContent: { messages: [{ id: "msg_13", text: "please act" }] }, _meta: null },
+        error: null,
+      },
+    },
+  }, [codexWait]), false, "an addressed real Codex completion remains visible work");
+  assert.equal(isSupervisedQuietPollContinuation({
+    method: "item/completed",
+    payload: {
+      item: {
+        type: "mcpToolCall", id: "wait_codex", server: "letagents", tool: "wait_for_messages", status: "failed",
+        result: null, error: { message: "poll failed" },
+      },
+    },
+  }, [codexWait]), false, "a failed real Codex completion is never hidden");
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal(isSupervisedQuietPollContinuation(emptyResult, [claudeWait]), true, `staggered idle agent ${index + 1} stays quiet`);
+  }
 });
 
 async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
@@ -403,9 +501,14 @@ test("terminal native failure is sticky for one provider execution", async () =>
     await internals.handleProviderStream("terminal_stream", handle, {
       ...base,
       sequence: 1,
-      kind: "transcript_snapshot",
-      method: "thread/read",
-      payload: { threadStatus: { type: "systemError" }, latestTurn: { status: "failed" } },
+      kind: "item_lifecycle",
+      method: "item/completed",
+      payload: {
+        item: {
+          type: "mcpToolCall", id: "wait_codex_failed", server: "letagents", tool: "wait_for_messages",
+          status: "failed", result: null, error: { message: "poll failed" },
+        },
+      },
     });
     let current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
     assert.equal(current.observed_state, "failed");
@@ -423,6 +526,169 @@ test("terminal native failure is sticky for one provider execution", async () =>
     assert.equal(current.activity?.at(-1)?.status, "blocked");
   } finally {
     await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("daemon keeps empty wait results idle across the real stream handler and restart", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const handle = {
+    workAttemptId: "attempt_poll",
+    pid: 4200,
+    providerContinuationId: "claude_poll",
+    providerConnection: null,
+    observedState: "working" as const,
+  };
+  type StreamEvent = {
+    workAttemptId: string; providerContinuationId: string; observedAt: string; sequence: number;
+    provider: string; kind: string; method: string; payload: unknown; payloadTruncated: boolean;
+    payloadRedacted: boolean; durablePayloadRef: null;
+  };
+  type StreamInternals = {
+    liveHandles: Map<string, typeof handle>;
+    liveBindingIdentities: Map<string, { executionGenerationId: undefined }>;
+    handleProviderStream: (entryId: string, providerHandle: typeof handle, event: StreamEvent) => Promise<void>;
+    publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean>;
+  };
+  let sequence = 0;
+  const event = (method: string, payload: unknown): StreamEvent => ({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId,
+    observedAt: new Date(Date.now() + sequence).toISOString(),
+    sequence: ++sequence,
+    provider: "claude-code",
+    kind: "tool_lifecycle",
+    method,
+    payload,
+    payloadTruncated: false,
+    payloadRedacted: false,
+    durablePayloadRef: null,
+  });
+  const codexEvent = (method: string, payload: unknown): StreamEvent => ({
+    ...event(method, payload),
+    provider: "codex",
+  });
+  const wait = (id: string) => event("assistant", {
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name: "mcp__letagents__wait_for_messages", input: {} }] },
+  });
+  const result = (id: string, messages: unknown[]) => event("user", {
+    type: "user",
+    message: { content: [{
+      type: "tool_result",
+      tool_use_id: id,
+      content: [{ type: "text", text: JSON.stringify({ messages, room_id: "focus_37" }) }],
+    }] },
+  });
+  const install = (daemon: SupervisorDaemon, published: Array<"working" | "idle">): StreamInternals => {
+    const internals = daemon as unknown as StreamInternals;
+    internals.liveHandles.set("quiet_poll", handle);
+    internals.liveBindingIdentities.set("quiet_poll", { executionGenerationId: undefined });
+    internals.publishNativeActivity = async (_entryId, _method, status) => { published.push(status); return true; };
+    return internals;
+  };
+
+  const first = new SupervisorDaemon(paths, "darwin");
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...entry, id: "quiet_poll", room_id: "focus_37", provider: "claude-code", desired_state: "paused" },
+    });
+    const published: Array<"working" | "idle"> = [];
+    const firstInternals = install(first, published);
+    await firstInternals.handleProviderStream("quiet_poll", handle, wait("wait_1"));
+    await firstInternals.handleProviderStream("quiet_poll", handle, result("wait_1", []));
+    await firstInternals.handleProviderStream("quiet_poll", handle, event("assistant", {
+      type: "assistant", message: { content: [{ type: "thinking", thinking: "provider-internal handoff" }] },
+    }));
+    assert.deepEqual(published, ["idle", "idle", "idle"], "empty Claude wait lifecycle never flips room presence to working");
+    let projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(projection.observed_state, "idle");
+    assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
+
+    await firstInternals.handleProviderStream("quiet_poll", handle, wait("wait_2"));
+    await firstInternals.handleProviderStream("quiet_poll", handle, result("wait_2", [{ id: "msg_12", text: "please review" }]));
+    assert.equal(published.at(-1), "working", "a nonempty addressed wait result remains visible work");
+    projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(projection.observed_state, "working");
+
+    const codexStarted = codexEvent("item/started", {
+      item: {
+        type: "mcpToolCall", id: "wait_codex_real", server: "letagents", tool: "wait_for_messages",
+        status: "inProgress", arguments: {}, appContext: null, pluginId: null, result: null, error: null, durationMs: null,
+      },
+      threadId: "thread_codex",
+      turnId: "turn_codex",
+      startedAtMs: Date.now(),
+    });
+    const codexProgress = codexEvent("item/mcpToolCall/progress", {
+      itemId: "wait_codex_real", message: "waiting", threadId: "thread_codex", turnId: "turn_codex",
+    });
+    const codexCompleted = codexEvent("item/completed", {
+      item: {
+        type: "mcpToolCall", id: "wait_codex_real", server: "letagents", tool: "wait_for_messages",
+        status: "completed", arguments: {}, appContext: null, pluginId: null,
+        result: {
+          content: [{ type: "text", text: JSON.stringify({ messages: [], last_observed_message_id: "msg_13", skipped_message_count: 1 }) }],
+          structuredContent: null,
+          _meta: null,
+        },
+        error: null,
+        durationMs: 30_000,
+      },
+      threadId: "thread_codex",
+      turnId: "turn_codex",
+      completedAtMs: Date.now(),
+    });
+    await firstInternals.handleProviderStream("quiet_poll", handle, codexStarted);
+    await firstInternals.handleProviderStream("quiet_poll", handle, codexProgress);
+    await firstInternals.handleProviderStream("quiet_poll", handle, codexCompleted);
+    assert.deepEqual(published.slice(-3), ["idle", "idle", "idle"], "real Codex start, progress, and empty/silent completion stay idle");
+    projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
+
+    const addressedStarted = codexEvent("item/started", {
+      item: {
+        type: "mcpToolCall", id: "wait_codex_addressed", server: "letagents", tool: "wait_for_messages",
+        status: "inProgress", arguments: {}, appContext: null, pluginId: null, result: null, error: null, durationMs: null,
+      },
+    });
+    const addressedCompleted = codexEvent("item/completed", {
+      item: {
+        type: "mcpToolCall", id: "wait_codex_addressed", server: "letagents", tool: "wait_for_messages",
+        status: "completed", arguments: {}, appContext: null, pluginId: null,
+        result: { content: [], structuredContent: { messages: [{ id: "msg_14", text: "please act" }] }, _meta: null },
+        error: null,
+        durationMs: 1,
+      },
+    });
+    await firstInternals.handleProviderStream("quiet_poll", handle, addressedStarted);
+    await firstInternals.handleProviderStream("quiet_poll", handle, addressedCompleted);
+    assert.deepEqual(published.slice(-2), ["idle", "working"], "a real addressed Codex completion wakes the work indicator");
+    projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(projection.observed_state, "working");
+    assert.equal(projection.activity?.at(-1)?.status, "working");
+
+    await firstInternals.handleProviderStream("quiet_poll", handle, wait("wait_restart"));
+    await first.stop();
+    second = new SupervisorDaemon(paths, "darwin");
+    await second.start();
+    const afterRestart: Array<"working" | "idle"> = [];
+    const secondInternals = install(second, afterRestart);
+    await secondInternals.handleProviderStream("quiet_poll", handle, result("wait_restart", []));
+    assert.deepEqual(afterRestart, ["idle"], "persisted wait correlation survives a daemon restart mid-poll");
+    projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(projection.observed_state, "idle");
+  } finally {
+    await second?.stop();
+    await first.stop();
     await env.cleanup();
   }
 });
