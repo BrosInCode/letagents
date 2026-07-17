@@ -605,7 +605,6 @@ import {
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import {
-  isSupervisedRuntimeSettled,
   refreshSupervisedRuntimeEntry,
   stopSupervisedProviderLane,
 } from "../../../domain/supervised-recovery";
@@ -1682,7 +1681,12 @@ function startSupervisedRuntimeRefresh(entryId: string, intervalMs = 1_000): voi
     }
     supervisedConflict.value = refreshed.entry;
     supervisedConflictLookupError.value = null;
-    if (isSupervisedRuntimeSettled(refreshed.entry)) {
+    // Stop polling on the phased-launch terminal states (ready / actionable
+    // failure / stopped), not the legacy settled heuristic: a native-working
+    // but not-yet-bound entry is still launching (Connecting) and must keep
+    // polling until it binds and its workplace is reachable.
+    const launchProgress = supervisedLaunchProgress(refreshed.entry);
+    if (launchProgress.ready || launchProgress.failed || launchProgress.stopped) {
       stopSupervisedRuntimeRefreshTimer();
     }
   };

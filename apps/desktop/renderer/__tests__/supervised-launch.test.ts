@@ -80,13 +80,35 @@ test("provider child up but still starting is connecting to the room", () => {
   assert.equal(stateOf(progress, "connecting_room"), "active");
 });
 
-test("awaiting the exact bind (coordination_blocked) is registering identity, NOT a failure", () => {
+test("native-working but unbound with no workplace evidence stays at Connecting, NOT a failure", () => {
+  // P1: a provider that is "working" locally but has not reached the room (no
+  // session id, workplace not reachable) must NOT be advanced to Registering.
+  const progress = supervisedLaunchProgress(entry({
+    workspacePath: "/tmp/wt",
+    providerPid: 4242,
+    observedState: "working",
+    condition: "none",
+    agentSessionId: null,
+    agentSessionBindingState: "none",
+    workplaceLiveness: { state: "unknown", observedAt: null, detail: "Awaiting room registration." },
+  }));
+  assert.equal(progress.failed, false);
+  assert.equal(progress.ready, false);
+  assert.equal(progress.currentPhaseId, "connecting_room");
+  assert.equal(stateOf(progress, "starting_provider"), "done");
+  assert.equal(stateOf(progress, "connecting_room"), "active");
+  assert.equal(progress.joinHint, "The agent will join the room shortly.");
+});
+
+test("real workplace/session evidence advances Connecting -> Registering (coordination_blocked pre-bind, not a failure)", () => {
   const progress = supervisedLaunchProgress(entry({
     workspacePath: "/tmp/wt",
     providerPid: 4242,
     observedState: "recovering",
     condition: "coordination_blocked",
+    agentSessionId: "agent_session_422",
     agentSessionBindingState: "none",
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-17T00:00:02.000Z", detail: null },
   }));
   assert.equal(progress.failed, false, "coordination_blocked pre-bind must not read as failure");
   assert.equal(progress.currentPhaseId, "registering_identity");
@@ -95,16 +117,20 @@ test("awaiting the exact bind (coordination_blocked) is registering identity, NO
   assert.equal(progress.joinHint, "The agent will join the room shortly.");
 });
 
-test("a bound, working, unblocked entry is ready and resolves the real name", () => {
-  const progress = supervisedLaunchProgress(entry({
-    displayName: "QuartzMeadow",
-    workspacePath: "/tmp/wt",
-    providerPid: 4242,
-    observedState: "working",
-    condition: "none",
-    agentSessionId: "agent_session_422",
-    agentSessionBindingState: "active",
-  }));
+const readyEntry = (overrides = {}) => entry({
+  displayName: "QuartzMeadow",
+  workspacePath: "/tmp/wt",
+  providerPid: 4242,
+  observedState: "working",
+  condition: "none",
+  agentSessionId: "agent_session_422",
+  agentSessionBindingState: "active",
+  workplaceLiveness: { state: "reachable", observedAt: "2026-07-17T00:00:03.000Z", detail: null },
+  ...overrides,
+});
+
+test("a bound, working, reachable, unblocked entry is ready and resolves the real name", () => {
+  const progress = supervisedLaunchProgress(readyEntry());
   assert.equal(progress.ready, true);
   assert.equal(progress.failed, false);
   assert.equal(progress.currentPhaseId, "ready");
@@ -114,14 +140,39 @@ test("a bound, working, unblocked entry is ready and resolves the real name", ()
   assert.match(progress.headline, /QuartzMeadow/);
 });
 
-test("an idle bound entry is also ready", () => {
-  const progress = supervisedLaunchProgress(entry({
+test("an idle bound reachable entry is also ready", () => {
+  assert.equal(supervisedLaunchProgress(readyEntry({ observedState: "idle" })).ready, true);
+});
+
+test("a bound entry whose workplace is not yet reachable is NOT ready (still Registering)", () => {
+  const progress = supervisedLaunchProgress(readyEntry({
+    workplaceLiveness: { state: "unknown", observedAt: null, detail: "Awaiting room registration." },
+  }));
+  assert.equal(progress.ready, false);
+  assert.equal(progress.currentPhaseId, "ready"); // reached registering-done(3); Ready phase active, not done
+  assert.equal(stateOf(progress, "registering_identity"), "done");
+  assert.equal(stateOf(progress, "ready"), "active");
+});
+
+test("P1: a working+unbound entry advances to ready in the SAME derivation once it binds and its workplace is reachable", () => {
+  const unbound = entry({
     workspacePath: "/tmp/wt",
     providerPid: 4242,
-    observedState: "idle",
+    observedState: "working",
+    agentSessionId: null,
+    agentSessionBindingState: "none",
+    workplaceLiveness: { state: "unknown", observedAt: null, detail: null },
+  });
+  assert.equal(supervisedLaunchProgress(unbound).currentPhaseId, "connecting_room");
+  assert.equal(supervisedLaunchProgress(unbound).ready, false);
+
+  const bound = entry({
+    ...unbound,
+    agentSessionId: "agent_session_500",
     agentSessionBindingState: "active",
-  }));
-  assert.equal(progress.ready, true);
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-17T00:00:04.000Z", detail: null },
+  });
+  assert.equal(supervisedLaunchProgress(bound).ready, true);
 });
 
 test("a blocking auth condition fails the current phase with actionable detail", () => {
