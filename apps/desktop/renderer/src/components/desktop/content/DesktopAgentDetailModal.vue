@@ -340,10 +340,48 @@
                   </li>
                 </ol>
               </section>
-              <div class="desktop-agent-detail-permission-actions" aria-label="Desired state controls">
-                <button type="button" :disabled="entry.desiredState === 'running' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'running')">Run</button>
-                <button type="button" :disabled="entry.desiredState === 'paused' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'paused')">Pause</button>
-                <button type="button" :disabled="entry.desiredState === 'stopped' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'stopped')">Stop</button>
+              <p class="desktop-agent-detail-supervisor-status" aria-live="polite">
+                {{ supervisedLifecycleStatusLabel(entry) }}
+              </p>
+              <div class="desktop-agent-detail-permission-actions" aria-label="Lifecycle controls">
+                <button type="button" :disabled="entry.desiredState === 'running' || Boolean(updatingSupervisorEntryId) || Boolean(stoppingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'running')">Run</button>
+                <button type="button" :disabled="entry.desiredState === 'paused' || Boolean(updatingSupervisorEntryId) || Boolean(stoppingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'paused')">Pause</button>
+              </div>
+              <div
+                class="desktop-agent-detail-danger-zone"
+                data-testid="desktop-agent-detail-stop-agent-zone"
+                aria-label="Stop agent"
+              >
+                <div class="desktop-agent-detail-danger-copy">
+                  <strong>Stop agent</strong>
+                  <small>Retires this supervised runtime for good. This is not the same as stopping the current turn.</small>
+                </div>
+                <div class="desktop-agent-detail-danger-actions">
+                  <template v-if="stopAgentConfirmEntryId === entry.id && entry.desiredState !== 'stopped'">
+                    <button
+                      type="button"
+                      class="desktop-agent-detail-danger-button"
+                      data-testid="desktop-agent-detail-stop-agent-confirm"
+                      :disabled="Boolean(stoppingSupervisorEntryId)"
+                      @click="confirmStopSupervisedAgent(entry.id)"
+                    >{{ supervisedStopAgentButtonLabel(entry, { confirming: true, pendingStop: stoppingSupervisorEntryId === entry.id }) }}</button>
+                    <button
+                      type="button"
+                      class="desktop-agent-detail-danger-cancel"
+                      data-testid="desktop-agent-detail-stop-agent-cancel"
+                      :disabled="Boolean(stoppingSupervisorEntryId)"
+                      @click="stopAgentConfirmEntryId = null"
+                    >Cancel</button>
+                  </template>
+                  <button
+                    v-else
+                    type="button"
+                    class="desktop-agent-detail-danger-button"
+                    data-testid="desktop-agent-detail-stop-agent"
+                    :disabled="supervisedStopAgentDisabled(entry) || Boolean(stoppingSupervisorEntryId)"
+                    @click="stopAgentConfirmEntryId = entry.id"
+                  >{{ supervisedStopAgentButtonLabel(entry, { confirming: false, pendingStop: stoppingSupervisorEntryId === entry.id }) }}</button>
+                </div>
               </div>
               <div class="desktop-agent-detail-session-inspection">
                 <span>Activity — bounded/redacted native events, not thoughts</span>
@@ -448,6 +486,11 @@ import {
   restoreFocus,
   trapFocusInDialog,
 } from "./modal-focus";
+import {
+  supervisedLifecycleStatusLabel,
+  supervisedStopAgentButtonLabel,
+  supervisedStopAgentDisabled,
+} from "../../../domain/supervised-stop";
 
 const props = defineProps<{
   open: boolean;
@@ -478,6 +521,8 @@ const turnControlActions = new Map<string, {
   workAttemptId: string;
   executionGenerationId: string;
 }>();
+const stopAgentConfirmEntryId = ref<string | null>(null);
+const stoppingSupervisorEntryId = ref<string | null>(null);
 const expandedSupervisorActivity = ref<Record<string, boolean>>({});
 const knownSupervisorEntryIds = ref<string[]>([]);
 const loadingManagedSessions = ref(false);
@@ -687,6 +732,8 @@ function clearTransientState(): void {
   turnControlDrafts.value = {};
   turnControlStages.value = {};
   turnControlActions.clear();
+  stopAgentConfirmEntryId.value = null;
+  stoppingSupervisorEntryId.value = null;
   expandedSupervisorActivity.value = {};
   knownSupervisorEntryIds.value = [];
 }
@@ -873,6 +920,24 @@ async function resolveTurnControl(
     supervisorError.value = error instanceof Error ? error.message : "Could not resolve the uncertain turn control.";
   } finally {
     resolvingTurnControlEntryId.value = null;
+  }
+}
+
+// Destructive Stop agent: retires exactly this supervised entry
+// (desired_state=stopped). Fenced to the exact entry id from the row so a
+// same-label peer is never affected; idempotent while a stop is in flight.
+async function confirmStopSupervisedAgent(id: string): Promise<void> {
+  if (stoppingSupervisorEntryId.value) return;
+  stoppingSupervisorEntryId.value = id;
+  stopAgentConfirmEntryId.value = null;
+  supervisorError.value = null;
+  try {
+    const updated = await desktopIpc.supervisor.setDesiredState(id, "stopped");
+    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((entry) => entry.id !== id)];
+  } catch (error) {
+    supervisorError.value = error instanceof Error ? error.message : "Could not stop this agent.";
+  } finally {
+    stoppingSupervisorEntryId.value = null;
   }
 }
 

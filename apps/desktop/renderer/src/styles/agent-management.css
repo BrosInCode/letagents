@@ -1324,6 +1324,60 @@
   opacity: 0.5;
 }
 
+.desktop-agent-detail-supervisor-status {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.desktop-agent-detail-danger-zone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.desktop-agent-detail-danger-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.desktop-agent-detail-danger-copy strong {
+  font-size: 0.82rem;
+  color: #fecaca;
+}
+
+.desktop-agent-detail-danger-copy small {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
+
+.desktop-agent-detail-danger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.desktop-agent-detail-danger-button {
+  border: 1px solid rgba(239, 68, 68, 0.4) !important;
+  background: rgba(239, 68, 68, 0.14) !important;
+  color: #fecaca !important;
+  font-weight: 850;
+}
+
+.desktop-agent-detail-danger-button:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.22) !important;
+}
+
 .desktop-agent-detail-body {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
