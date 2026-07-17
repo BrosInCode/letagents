@@ -113,7 +113,7 @@ test("provider router selects the native adapter by manifest provider and fences
       return {
         ...adapter,
         async spawn(input) {
-          if (!input.displayName?.trim()) throw new Error("Cursor requires the durable agent display name.");
+          if (!input.agentDisplayName?.trim()) throw new Error("Cursor requires the durable agent display name.");
           return adapter.spawn(input);
         },
       };
@@ -173,6 +173,13 @@ test("provider router selects the native adapter by manifest provider and fences
     router.spawn({ ...claudeSpawn, provider: "cursor" }),
     /requires the durable agent display name/,
   );
+  const cursor = await router.spawn({
+    ...claudeSpawn,
+    provider: "cursor",
+    workAttemptId: "cursor-attempt",
+    agentDisplayName: "Durable Cursor Agent",
+  });
+  assert.equal(cursor.providerContinuationId, "continuation:cursor-attempt");
 });
 
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {
