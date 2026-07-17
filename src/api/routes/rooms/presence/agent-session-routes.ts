@@ -44,6 +44,23 @@ export function desktopManagedPausePresence(input: {
   };
 }
 
+/**
+ * The base identity label with any accumulated numeric collision suffix
+ * stripped. Collision disambiguation only ever appends space-separated
+ * pure-digit groups (see pickSessionDisplayName), so peeling those trailing
+ * groups recovers the canonical base even when the stored `agent.display_name`
+ * has itself drifted to a decorated form across earlier re-registrations.
+ * Non-numeric words (e.g. "SilverHarbor East", "Agent 47A") are preserved.
+ */
+export function canonicalBaseDisplayName(displayName: string): string {
+  const trimmed = displayName.trim();
+  if (!trimmed) return trimmed;
+  const parts = trimmed.split(/\s+/);
+  let end = parts.length;
+  while (end > 1 && /^\d+$/.test(parts[end - 1]!)) end -= 1;
+  return parts.slice(0, end).join(" ");
+}
+
 export function normalizeReplayedAgentDisplayName(
   requestedDisplayName: string,
   canonicalDisplayName: string
@@ -132,7 +149,11 @@ export function registerAgentSessionRoutes(
       const requestedTokens = requestedDisplayName.toLowerCase().split(/[\s_-]+/).filter((token) => token.length > 0);
       const isGenericName = !requestedDisplayName || requestedTokens.every((token) => genericKeywords.has(token));
 
-      const canonicalDisplayName = agent.display_name.trim();
+      // Derive the canonical BASE, not the stored label: `agent.display_name`
+      // can itself have drifted to a decorated form ("MistyMorrow 2 1 1 1")
+      // across earlier re-registrations, which would make the replay
+      // normalization below a no-op and let the suffix compound.
+      const canonicalDisplayName = canonicalBaseDisplayName(agent.display_name);
       const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
         requestedDisplayName,
         canonicalDisplayName
