@@ -102,8 +102,8 @@
         <p v-else class="sidebar-search-empty">Search by room, branch, or task.</p>
     </section>
 
-    <div v-else-if="sidebarMode === 'expanded'" class="sidebar-navigation">
-        <div class="sidebar-actions" @contextmenu.prevent="openBackgroundContextMenu">
+    <div v-else-if="sidebarMode === 'expanded'" class="sidebar-navigation" @contextmenu.prevent="openBackgroundContextMenu">
+      <div class="sidebar-actions">
       <button
         class="sidebar-cta"
         type="button"
@@ -115,7 +115,9 @@
         </span>
         <span>New room</span>
       </button>
+      </div>
 
+      <div class="sidebar-room-sections">
       <section v-if="pinnedProjectEntries.length" class="sidebar-pinned-section" data-testid="sidebar-section-pinned">
         <button
           class="sidebar-section-header pinned-section-header"
@@ -228,12 +230,11 @@
           </div>
         </Transition>
       </section>
-        </div>
 
         <section
           class="sidebar-section"
+          :data-empty="!roomProjectEntries.length"
           data-testid="sidebar-section-rooms"
-          @contextmenu.prevent="openBackgroundContextMenu"
         >
       <button
         class="sidebar-section-header"
@@ -350,6 +351,7 @@
         </div>
       </Transition>
         </section>
+      </div>
     </div>
 
     <div v-if="sidebarMode === 'expanded'" class="sidebar-footer">
