@@ -20,6 +20,7 @@ import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { ManifestStore } from "../manifest-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -325,6 +326,8 @@ test("daemon convergence drives Claude through the router across stop and same-a
   const calls: string[] = [];
   let nextPid = 5000;
   let continuation = "claude-continuation";
+  let rejectControlAfterDispatch = false;
+  let sawAcceptedControlBeforeProvider = false;
   const adapter: NativeProviderAdapter = {
     capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
     async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
@@ -333,6 +336,10 @@ test("daemon convergence drives Claude through the router across stop and same-a
     async poke() { throw new Error("Claude poke is intentionally unavailable"); },
     async controlTurn(handle, correction) {
       calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      const current = (await new ManifestStore(paths.manifestPath).load()).entries.find((candidate) => candidate.id === entry.id);
+      sawAcceptedControlBeforeProvider = current?.turn_control?.status === "accepted"
+        && current.turn_control.stages.length === 0;
+      if (rejectControlAfterDispatch) throw new Error("injected ambiguous provider outcome");
       return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
     },
     async stop(handle) {
@@ -416,6 +423,26 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.equal(stale.ok, false);
     assert.match(stale.error ?? "", /stale or incomplete/);
     assert.equal(calls.filter((call) => call.startsWith("control:")).length, 1, "duplicate and stale requests never reach the provider");
+    assert.equal(sawAcceptedControlBeforeProvider, true, "the action is durable before provider dispatch and carries no optimistic ack stages");
+    rejectControlAfterDispatch = true;
+    const uncertainParams = { ...controlParams, action_id: "human-control-uncertain", correction: "Do not replay this correction" };
+    const uncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
+    assert.equal(uncertain.ok, false);
+    assert.match(uncertain.error ?? "", /injected ambiguous provider outcome/);
+    rejectControlAfterDispatch = false;
+    const retryUncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
+    assert.equal(retryUncertain.ok, false);
+    assert.match(retryUncertain.error ?? "", /durably accepted.*uncertain.*not replayed/i);
+    const competing = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      ...uncertainParams,
+      action_id: "human-control-competing",
+    });
+    assert.equal(competing.ok, false);
+    assert.match(competing.error ?? "", /unresolved.*refusing a second action/i);
+    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 2, "an ambiguous accepted effect is never dispatched twice");
+    const journaled = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
+    assert.equal(journaled?.status, "uncertain");
+    assert.deepEqual(journaled?.stages, []);
     await new WorkerBindingStore(paths.workerBindingsPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
@@ -433,6 +460,66 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(calls.some((call) => call.startsWith("spawn:")));
     assert.ok(calls.some((call) => call.startsWith("stop:")));
     assert.ok(calls.some((call) => call.startsWith("resume:")));
+  } finally {
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon restart never replays a durably accepted turn-control effect", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-control-restart-"));
+  const calls: string[] = [];
+  const adapter = fakeAdapter("claude-code", calls);
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+    workerBindingsPath: join(root, "worker-bindings.json"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", router, false);
+  const recordedAt = new Date().toISOString();
+  const entry: DaemonManifestEntry = {
+    id: "restart_control", room_id: "room", display_name: "Claude", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "working", condition: "none",
+    permission_profile_id: "full_access", created_by: "test", created_at: recordedAt,
+    work_attempt_id: "attempt_exact",
+    provider_ref: {
+      work_attempt_id: "attempt_exact",
+      provider_continuation_id: "session_exact",
+      execution_generation_id: "generation_exact",
+      provider_connection: { kind: "claude_cli", pid: 4242, processIdentity: "claude:4242" },
+    },
+    turn_control: {
+      action_id: "action_accepted_before_crash",
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      has_correction: true,
+      status: "accepted",
+      capability: "native_interrupt",
+      interrupted: null,
+      resumed: null,
+      state: null,
+      stages: [],
+      error: null,
+      recorded_at: recordedAt,
+      updated_at: recordedAt,
+    },
+  };
+  try {
+    await new ManifestStore(paths.manifestPath).write(0, [entry]);
+    await daemon.start();
+    const recovered = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
+    assert.equal(recovered?.status, "uncertain");
+    assert.match(recovered?.error ?? "", /restarted.*not replayed/i);
+    const replay = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: entry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_accepted_before_crash",
+      correction: "one correction",
+    });
+    assert.equal(replay.ok, false);
+    assert.match(replay.error ?? "", /durably accepted.*not replayed/i);
+    assert.equal(calls.some((call) => call.includes(":control:")), false);
   } finally {
     await daemon.stop();
     await rm(root, { recursive: true, force: true });

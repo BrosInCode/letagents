@@ -243,6 +243,20 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
         execution_generation_id: "generation_alpha",
         updated_at: "2026-07-15T18:00:00.000Z",
       },
+      turn_control: {
+        action_id: "action_persisted",
+        work_attempt_id: "attempt_alpha",
+        execution_generation_id: "generation_alpha",
+        status: "completed",
+        capability: "native_interrupt",
+        interrupted: true,
+        resumed: true,
+        state: "working",
+        stages: ["delivered", "interrupting", "applied", "resumed"],
+        error: null,
+        recorded_at: "2026-07-15T18:00:01.000Z",
+        updated_at: "2026-07-15T18:00:02.000Z",
+      },
     });
     const rebound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
     assert.equal(rebound.agentSessionId, "agent_session_rebound");
@@ -250,6 +264,8 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     assert.equal(rebound.executionGenerationId, "generation_alpha");
     assert.equal(rebound.providerContinuationId, "continuation_alpha");
     assert.equal(rebound.providerPid, 4242);
+    assert.equal(rebound.turnControl?.actionId, "action_persisted");
+    assert.deepEqual(rebound.turnControl?.stages, ["delivered", "interrupting", "applied", "resumed"]);
     Object.assign(wire.entries[0], {
       worker_binding: null,
       last_worker_binding: {

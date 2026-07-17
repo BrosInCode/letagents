@@ -70,6 +70,20 @@ type WireEntry = {
   native_liveness?: { state: string; observed_at: string | null; detail: string | null };
   activity?: WireActivityEvent[];
   reconciliation?: { exit_timestamps_ms?: number[]; last_terminal?: Record<string, unknown> };
+  turn_control?: {
+    action_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    status: "accepted" | "completed" | "uncertain";
+    capability: "native_interrupt" | "restart_resume" | "unsupported";
+    interrupted: boolean | null;
+    resumed: boolean | null;
+    state: "idle" | "working" | null;
+    stages: DesktopSupervisorTurnControlResult["stages"];
+    error: string | null;
+    recorded_at: string;
+    updated_at: string;
+  } | null;
 };
 type WireActivityEvent = {
   observed_at: string;
@@ -449,6 +463,20 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
     lastTerminal: entry.reconciliation?.last_terminal ?? null,
     activity: (entry.activity ?? []).map(mapActivity),
+    turnControl: entry.turn_control ? {
+      actionId: entry.turn_control.action_id,
+      workAttemptId: entry.turn_control.work_attempt_id,
+      executionGenerationId: entry.turn_control.execution_generation_id,
+      status: entry.turn_control.status,
+      capability: entry.turn_control.capability,
+      interrupted: entry.turn_control.interrupted,
+      resumed: entry.turn_control.resumed,
+      state: entry.turn_control.state,
+      stages: entry.turn_control.stages,
+      error: entry.turn_control.error,
+      recordedAt: entry.turn_control.recorded_at,
+      updatedAt: entry.turn_control.updated_at,
+    } : null,
   };
 }
 
