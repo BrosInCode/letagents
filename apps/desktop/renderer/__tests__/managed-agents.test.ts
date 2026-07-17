@@ -41,6 +41,7 @@ import {
   managedAgentPermissionProfileSummary,
   managedAgentPermissionRequestTargetLabel,
   managedAgentProviderIdentityForTarget,
+  managedAgentSessionMatchesSupervisorTarget,
   managedAgentSessionMatchesRoom,
   managedAgentSessionMatchesReasoning,
   managedAgentSessionMatchesTarget,
@@ -416,6 +417,125 @@ test("a rebound room session resolves one exact supervisor entry without a local
     ], [], "agent_session_403", ["supervised_second"]).map((entry) => entry.id),
     ["supervised_second"],
     "a previously exact entry remains controllable when restart temporarily clears its worker binding",
+  );
+});
+
+test("exact supervisor worker bindings join Activity workers to their managed Claude and Codex controls", () => {
+  const codexEntry = supervisorEntry({
+    id: "supervised_codex",
+    displayName: "Shared agent",
+    provider: "codex",
+    agentSessionId: "agent_session_codex",
+    agentSessionBindingState: "active",
+  });
+  const claudeEntry = supervisorEntry({
+    id: "supervised_claude",
+    displayName: "Shared agent",
+    provider: "claude-code",
+    agentSessionId: "agent_session_claude",
+    agentSessionBindingState: "active",
+  });
+  const codexSession = session({
+    id: "managed_codex",
+    providerId: "codex",
+    agentSessionId: "local_agent_session_codex",
+    displayName: "Shared agent",
+    supervisorEntryId: "supervised_codex",
+  });
+  const claudeSession = session({
+    id: "managed_claude",
+    providerId: "claude-code",
+    agentSessionId: "local_agent_session_claude",
+    displayName: "Shared agent",
+    supervisorEntryId: "supervised_claude",
+  });
+
+  assert.equal(
+    managedAgentSessionMatchesSupervisorTarget(
+      claudeSession,
+      [codexEntry, claudeEntry],
+      "agent_session_claude",
+    ),
+    true,
+    "a freshly registered Claude worker reaches the managed session that owns its exact supervisor entry",
+  );
+  assert.equal(
+    managedAgentSessionMatchesSupervisorTarget(
+      codexSession,
+      [codexEntry, claudeEntry],
+      "agent_session_codex",
+    ),
+    true,
+    "Codex uses the same provider-neutral durable binding path",
+  );
+  assert.equal(
+    managedAgentSessionMatchesSupervisorTarget(
+      codexSession,
+      [codexEntry, claudeEntry],
+      "agent_session_claude",
+    ),
+    false,
+    "same-label peers never inherit another worker's controls",
+  );
+  assert.equal(
+    managedAgentSessionMatchesSupervisorTarget(
+      claudeSession,
+      [codexEntry, claudeEntry],
+      "external_session",
+    ),
+    false,
+    "unbound external workers keep the external-agent Inspector",
+  );
+});
+
+test("supervisor target joins survive room re-registration and temporary restart unbinding", () => {
+  const managed = session({
+    providerId: "claude-code",
+    agentSessionId: "local_agent_session_claude",
+    supervisorEntryId: "supervised_claude",
+  });
+  const rebound = supervisorEntry({
+    id: "supervised_claude",
+    provider: "claude-code",
+    agentSessionId: "agent_session_re_registered",
+    agentSessionBindingState: "active",
+  });
+  assert.equal(
+    managedAgentSessionMatchesSupervisorTarget(
+      managed,
+      [rebound],
+      "agent_session_re_registered",
+    ),
+    true,
+  );
+
+  const restarting = {
+    ...rebound,
+    agentSessionId: null,
+    agentSessionBindingState: "historical" as const,
+  };
+  assert.equal(
+    managedAgentSessionMatchesSupervisorTarget(
+      managed,
+      [restarting],
+      "agent_session_re_registered",
+      ["supervised_claude"],
+    ),
+    true,
+    "the previously exact entry stays joined while a restart briefly clears the daemon projection",
+  );
+});
+
+test("ambiguous duplicate worker bindings fail closed instead of widening controls", () => {
+  const first = supervisorEntry({ id: "supervised_first", agentSessionId: "agent_session_shared" });
+  const second = supervisorEntry({ id: "supervised_second", agentSessionId: "agent_session_shared" });
+  assert.equal(
+    managedAgentSessionMatchesSupervisorTarget(
+      session({ supervisorEntryId: "supervised_first" }),
+      [first, second],
+      "agent_session_shared",
+    ),
+    false,
   );
 });
 

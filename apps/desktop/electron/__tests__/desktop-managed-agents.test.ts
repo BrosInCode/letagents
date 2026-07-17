@@ -26,6 +26,8 @@ const {
   saveAgentSession,
   saveCodexLiveSession,
   saveStoredAgentIdentity,
+  toPublicClaudeCodeManagedAgentSession,
+  toPublicCursorManagedAgentSession,
   toPublicManagedAgentSession,
 } = await import("../main/agents/state.js");
 const {
@@ -546,6 +548,46 @@ test("public Codex managed session projects the selected permission profile", ()
     model: "gpt-5.2-codex-high",
     effort: "high",
   })).effort, "high");
+});
+
+test("public Claude managed session preserves its durable supervisor entry id", () => {
+  const publicSession = toPublicClaudeCodeManagedAgentSession({
+    session_id: "managed_claude",
+    room_id: "room_1",
+    room_identifier: "room_1",
+    cwd: "/tmp/repo",
+    stop_phrase: "/stop",
+    max_minutes: 0,
+    token: "token",
+    status: "running",
+    started_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:00:00.000Z",
+    joined_via: "join_room",
+    claude_bin: "claude",
+    supervisor_entry_id: "supervised_claude",
+  });
+
+  assert.equal(publicSession.supervisorEntryId, "supervised_claude");
+});
+
+test("public Cursor managed session preserves its durable supervisor entry id", () => {
+  const publicSession = toPublicCursorManagedAgentSession({
+    session_id: "managed_cursor",
+    room_id: "room_1",
+    room_identifier: "room_1",
+    cwd: "/tmp/repo",
+    stop_phrase: "/stop",
+    max_minutes: 0,
+    token: "token",
+    status: "running",
+    started_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:00:00.000Z",
+    joined_via: "join_room",
+    cursor_bin: "cursor-agent",
+    supervisor_entry_id: "supervised_cursor",
+  });
+
+  assert.equal(publicSession.supervisorEntryId, "supervised_cursor");
 });
 
 test("desktop Codex runtime reasoning hides raw app-server reasoning text", () => {

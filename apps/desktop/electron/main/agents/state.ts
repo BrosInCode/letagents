@@ -1054,6 +1054,7 @@ export function toPublicClaudeCodeManagedAgentSession(
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
     failure: session.failure ?? null,
+    supervisorEntryId: session.supervisor_entry_id ?? null,
   };
 }
 
@@ -1169,5 +1170,6 @@ export function toPublicCursorManagedAgentSession(
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
     failure: session.failure ?? null,
+    supervisorEntryId: session.supervisor_entry_id ?? null,
   };
 }
