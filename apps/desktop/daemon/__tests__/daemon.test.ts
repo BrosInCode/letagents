@@ -1335,6 +1335,67 @@ test("desired stopped turns every terminal into a clean stopped observation and 
   } finally { await daemon?.stop().catch(() => undefined); await env.cleanup(); }
 });
 
+test("an intentional stop-turn terminal remains idle without restarting the running lane", async () => {
+  const env = await fixture();
+  const manifestPath = join(env.root, "manifest.json");
+  const executionGenerationId = "stop-turn-generation";
+  const stoppedTurnEntry: DaemonManifestEntry = {
+    ...entry,
+    desired_state: "running",
+    observed_state: "working",
+    work_attempt_id: "stop-turn-attempt",
+    provider_ref: {
+      work_attempt_id: "stop-turn-attempt",
+      provider_continuation_id: "stop-turn-continuation",
+      execution_generation_id: executionGenerationId,
+      provider_connection: null,
+    },
+    turn_control: {
+      action_id: "stop-turn-action",
+      work_attempt_id: "stop-turn-attempt",
+      execution_generation_id: executionGenerationId,
+      has_correction: false,
+      status: "completed",
+      capability: "native_interrupt",
+      interrupted: true,
+      resumed: false,
+      state: "idle",
+      stages: ["delivered", "interrupting", "applied"],
+      error: null,
+      recorded_at: "2026-07-17T06:59:17.996Z",
+      updated_at: "2026-07-17T06:59:18.205Z",
+    },
+  };
+  await new ManifestStore(manifestPath).write(0, [stoppedTurnEntry]);
+  const daemon = new SupervisorDaemon({
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath,
+    auditPath: join(env.root, "audit.jsonl"),
+  }, "darwin");
+  try {
+    await daemon.start();
+    await daemon.observeProviderExit(stoppedTurnEntry.id, {
+      endedAt: "2026-07-17T06:59:18.205Z",
+      exitCode: 0,
+      signal: null,
+      terminalCause: "stopped",
+      providerContinuationId: "stop-turn-continuation",
+    }, "daemon-provider", executionGenerationId);
+    const current = (await new ManifestStore(manifestPath).load()).entries[0]!;
+    assert.equal(current.desired_state, "running");
+    assert.equal(current.observed_state, "idle");
+    assert.equal(current.condition, "none");
+    assert.equal(current.last_error, null);
+    assert.equal(current.provider_ref?.execution_generation_id, executionGenerationId);
+    assert.equal(current.turn_control?.action_id, "stop-turn-action");
+    assert.equal(current.reconciliation?.last_terminal?.terminal_cause, "stopped");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("simulated flock reacquires the persistent lock inode after release", async () => {
   const env = await fixture();
   const lock = join(env.root, "daemon.lock");
