@@ -39,7 +39,7 @@ export type LaunchJourneyPhaseId =
   | "saving_agent"
   | SupervisedLaunchPhaseId; // preparing_workspace | starting_provider | connecting_room | registering_identity | ready
 
-export type LaunchJourneyPhaseState = "pending" | "active" | "done" | "failed";
+export type LaunchJourneyPhaseState = "pending" | "active" | "done" | "failed" | "cancelled";
 
 export type LaunchJourneyStatus =
   | "in_progress"
@@ -216,6 +216,10 @@ function buildPhases(
       state = "done";
     } else if (index === fold.activeIndex && fold.failedIndex === null && !fold.settled) {
       state = "active";
+    } else if (fold.settled && index === fold.activeIndex) {
+      // Terminal cancelled/stopped: the step that was in flight is Cancelled,
+      // never a misleading "Waiting". Steps never reached stay neutral.
+      state = "cancelled";
     } else {
       state = "pending";
     }

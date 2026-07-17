@@ -270,16 +270,35 @@ test("cancelling a not-yet-bound launch still reads as launch cancelled (finding
   assert.match(view.headline, /cancelled/i);
 });
 
-test("a terminal cancelled/stopped outcome leaves zero active steps (finding 4)", () => {
+test("a terminal cancelled/stopped outcome leaves zero active steps and marks the boundary Cancelled (finding 4)", () => {
   const cancelled = foldLaunchJourney({
     events: [evt("launch.requested", { sequence: 1 }), evt("launch.cancelled", { sequence: 2 })],
     provider: "codex",
   });
   assert.equal(cancelled.phases.filter((phase) => phase.state === "active").length, 0);
+  // The step that was in flight reads Cancelled, not the misleading "Waiting".
+  assert.equal(stateOf(cancelled, "connecting_supervisor"), "cancelled");
+  assert.equal(cancelled.phases.some((phase) => phase.state === "cancelled"), true);
+
   const stopped = foldLaunchJourney({
     entry: entry({ desiredState: "stopped", observedState: "absent", agentSessionBindingState: "none" }),
   });
   assert.equal(stopped.phases.filter((phase) => phase.state === "active").length, 0);
+  assert.equal(stopped.phases.some((phase) => phase.state === "cancelled"), true);
+});
+
+test("a connected-then-cancelled launch keeps the connected step done (finding 4)", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("launch.cancelled", { sequence: 3 }),
+    ],
+    provider: "codex",
+  });
+  assert.equal(stateOf(view, "connecting_supervisor"), "done");
+  assert.equal(stateOf(view, "saving_agent"), "cancelled");
+  assert.equal(view.phases.filter((phase) => phase.state === "active").length, 0);
 });
 
 test("at most one step is in progress while launching", () => {
