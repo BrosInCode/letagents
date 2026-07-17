@@ -109,6 +109,11 @@ export interface StoredAgentSessionState {
   agent_key: string;
   agent_instance_id?: string | null;
   display_name: string;
+  /** The stable base label this client declared at registration (the intent
+   * behind `display_name` before any server collision suffix). Re-registration
+   * echoes it as `requested_base_display_name` so a replayed decorated label
+   * converges server-side instead of compounding. */
+  requested_base_display_name?: string | null;
   owner_label: string;
   ide_label: string;
   repo_branch?: string | null;

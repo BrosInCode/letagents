@@ -98,6 +98,10 @@ export interface RoomAgentSession {
   agent_key: string;
   agent_instance_id: string | null;
   display_name: string;
+  /** Server-resolved base label (before any collision suffix) recorded at
+   * creation; clients echo it back as `requested_base_display_name` on
+   * re-registration so replays converge. Null on legacy rows. */
+  assigned_base_display_name?: string | null;
   owner_account_id: string;
   supervisor_grant_id: string | null;
   owner_label: string;
@@ -240,6 +244,7 @@ export interface RoomAgentSessionRow {
   agent_key: string;
   agent_instance_id: string | null;
   display_name: string;
+  assigned_base_display_name?: string | null;
   owner_account_id: string;
   supervisor_grant_id: string | null;
   owner_label: string;
