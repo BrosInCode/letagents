@@ -468,6 +468,7 @@ export interface ManagedAgentTargetKeys {
   displayName?: string | null;
   ideLabel?: string | null;
   ownerAttribution?: string | null;
+  sender?: string | null;
 }
 
 export interface ManagedAgentWorkIndicator {
@@ -653,6 +654,84 @@ export function managedAgentSessionMatchesReasoning(
   if (!reasoning) return false;
   if (session.reasoningSessionId && session.reasoningSessionId === reasoning.id) return true;
   return Boolean(session.agentSessionId && reasoning.agentSessionId && session.agentSessionId === reasoning.agentSessionId);
+}
+
+export interface ManagedAgentDetailSelection {
+  managedSessions: DesktopManagedAgentSession[];
+  supervisorEntries: DesktopSupervisorManifestEntry[];
+  providerIdentity: ManagedAgentProviderIdentity | null;
+  showExternalFallback: boolean;
+}
+
+/**
+ * Behavioral projection used by the Agent Inspector. Keeping the complete
+ * selection in one domain function makes exact binding, provider identity,
+ * local-session state, and the external fallback impossible to drift apart.
+ */
+export function managedAgentDetailSelection(
+  sessions: readonly DesktopManagedAgentSession[],
+  entries: readonly DesktopSupervisorManifestEntry[],
+  target: ManagedAgentTargetKeys | null | undefined,
+  reasoning: Pick<DesktopReasoningSession, "id" | "agentSessionId"> | null | undefined,
+  knownSupervisorEntryIds: readonly string[] = [],
+): ManagedAgentDetailSelection {
+  if (!target) {
+    return {
+      managedSessions: [],
+      supervisorEntries: [],
+      providerIdentity: null,
+      showExternalFallback: true,
+    };
+  }
+
+  const eligibleSessions = sessions.filter((session) =>
+    isVisibleManagedAgentSession(session) || Boolean(session.supervisorEntryId)
+  );
+  const managedSessions = eligibleSessions.filter((session) =>
+    managedAgentSessionMatchesTarget(session, target) ||
+    managedAgentSessionMatchesReasoning(session, reasoning) ||
+    managedAgentSessionMatchesSupervisorTarget(
+      session,
+      entries,
+      target.agentSessionId,
+      knownSupervisorEntryIds,
+    )
+  );
+
+  const exactEntries = exactSupervisorEntriesForTarget(
+    entries,
+    managedSessions,
+    target.agentSessionId,
+    knownSupervisorEntryIds,
+  );
+  const supervisorEntries = exactEntries
+    ? exactEntries.length === 1 ? exactEntries : []
+    : (() => {
+    const labels = new Set([
+      target.displayName,
+      target.sender,
+      target.actorLabel,
+      target.ideLabel,
+    ].filter(Boolean).map((value) => String(value).toLowerCase()));
+    return entries.filter((entry) => {
+      const displayName = entry.displayName.toLowerCase();
+      return labels.has(displayName) ||
+        [...labels].some((label) => label.startsWith(`${displayName} |`));
+    });
+    })();
+  const providerIdentity = managedAgentProviderIdentityForTarget(
+    entries,
+    managedSessions,
+    target.agentSessionId,
+    knownSupervisorEntryIds,
+  );
+
+  return {
+    managedSessions,
+    supervisorEntries,
+    providerIdentity,
+    showExternalFallback: managedSessions.length === 0 && supervisorEntries.length === 0,
+  };
 }
 
 export function isExternalMcpProviderReady(

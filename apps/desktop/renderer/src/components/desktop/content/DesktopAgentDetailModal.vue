@@ -471,13 +471,9 @@ import {
   reasoningTitle,
 } from "../../../domain/reasoning";
 import {
-  isVisibleManagedAgentSession,
   canStopManagedAgentTurn,
   exactSupervisorEntriesForTarget,
-  managedAgentProviderIdentityForTarget,
-  managedAgentSessionMatchesSupervisorTarget,
-  managedAgentSessionMatchesTarget,
-  managedAgentSessionMatchesReasoning,
+  managedAgentDetailSelection,
   managedAgentSessionDisplayName,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSummary,
@@ -573,24 +569,14 @@ const reasoningRows = computed(() =>
   latestReasoning.value ? reasoningFieldRows(latestReasoning.value) : []
 );
 
-const matchingManagedSessions = computed(() => {
-  const activeSessions = managedSessions.value.filter((session) =>
-    isVisibleManagedAgentSession(session) || Boolean(session.supervisorEntryId)
-  );
-  if (!props.target) return [];
-
-  const reasoningSession = latestReasoning.value;
-  return activeSessions.filter((session) =>
-    managedAgentSessionMatchesTarget(session, props.target!) ||
-    managedAgentSessionMatchesReasoning(session, reasoningSession) ||
-    managedAgentSessionMatchesSupervisorTarget(
-      session,
-      supervisorEntries.value,
-      props.target!.agentSessionId,
-      knownSupervisorEntryIds.value,
-    )
-  );
-});
+const detailSelection = computed(() => managedAgentDetailSelection(
+  managedSessions.value,
+  supervisorEntries.value,
+  props.target,
+  latestReasoning.value,
+  knownSupervisorEntryIds.value,
+));
+const matchingManagedSessions = computed(() => detailSelection.value.managedSessions);
 const directMatchingSupervisorEntries = computed(() =>
   exactSupervisorEntriesForTarget(
     supervisorEntries.value,
@@ -614,38 +600,8 @@ watch(supervisorEntries, (entries) => {
     }
   }
 });
-const matchingSupervisorEntries = computed(() => {
-  const exactEntries = exactSupervisorEntriesForTarget(
-    supervisorEntries.value,
-    matchingManagedSessions.value,
-    props.target?.agentSessionId,
-    knownSupervisorEntryIds.value,
-  );
-  if (exactEntries) {
-    // Same-provider peers may intentionally share a display label. Once MCP
-    // registration gives us durable supervisor ids, never widen the Inspector
-    // match back out through labels and accidentally combine their activity.
-    return exactEntries;
-  }
-  const target = props.target;
-  const labels = new Set([
-    target?.displayName,
-    target?.sender,
-    target?.actorLabel,
-    target?.ideLabel,
-  ].filter(Boolean).map((value) => String(value).toLowerCase()));
-  return supervisorEntries.value.filter((entry) => {
-    const displayName = entry.displayName.toLowerCase();
-    return labels.has(displayName)
-      || [...labels].some((label) => label.startsWith(`${displayName} |`));
-  });
-});
-const providerIdentity = computed(() => managedAgentProviderIdentityForTarget(
-  supervisorEntries.value,
-  matchingManagedSessions.value,
-  props.target?.agentSessionId,
-  knownSupervisorEntryIds.value,
-));
+const matchingSupervisorEntries = computed(() => detailSelection.value.supervisorEntries);
+const providerIdentity = computed(() => detailSelection.value.providerIdentity);
 const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
 );
