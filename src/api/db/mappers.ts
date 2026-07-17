@@ -502,6 +502,7 @@ export function toRoomAgentSession(row: RoomAgentSessionRow): RoomAgentSession {
     agent_key: row.agent_key,
     agent_instance_id: row.agent_instance_id,
     display_name: row.display_name,
+    assigned_base_display_name: row.assigned_base_display_name ?? null,
     owner_account_id: row.owner_account_id,
     supervisor_grant_id: row.supervisor_grant_id,
     owner_label: row.owner_label,
