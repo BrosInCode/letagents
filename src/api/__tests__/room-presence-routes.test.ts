@@ -12,6 +12,7 @@ const {
   canonicalBaseDisplayName,
   desktopManagedPausePresence,
   normalizeReplayedAgentDisplayName,
+  resolveReplayCanonicalBase,
 } = await import("../routes/rooms/presence/agent-session-routes.js");
 
 test("desktop closed-room pauses stay distinct from agent failures", () => {
@@ -47,12 +48,26 @@ test("canonicalBaseDisplayName strips accumulated numeric collision suffixes onl
   assert.equal(canonicalBaseDisplayName("7 7 7"), "7");
 });
 
-test("canonical base makes replay normalization idempotent from a decorated stored label", () => {
-  // Regression for the compounding bug: passing the already-decorated stored
-  // label as canonical made normalize a no-op. Deriving the base first fixes it.
+test("resolveReplayCanonicalBase strips a suffix only with identity provenance", () => {
+  // Held base "MistyMorrow" -> a decorated replay reduces to it (fixes the
+  // compounding bug where the stored canonical is the codename, not the label).
+  const held = new Set(["MistyMorrow", "MistyMorrow 1"]);
+  assert.equal(resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", "OwlSolar", held), "MistyMorrow");
+  // No provenance for "Agent": a legitimate numeric-ending name is NOT demoted;
+  // falls back to the stored canonical so normalize leaves it untouched.
+  const noHistory = new Set<string>();
+  const canonical = resolveReplayCanonicalBase("Agent 47", "OwlSolar", noHistory);
+  assert.equal(canonical, "OwlSolar");
+  assert.equal(normalizeReplayedAgentDisplayName("Agent 47", canonical), "Agent 47");
+  // A base that the identity never held is left alone even if it looks decorated.
+  assert.equal(resolveReplayCanonicalBase("Falcon 3", "OwlSolar", new Set(["Otter"])), "OwlSolar");
+});
+
+test("canonical base makes replay normalization idempotent for a held decorated label", () => {
+  const held = new Set(["MistyMorrow"]);
   const drifted = "MistyMorrow 2 1 1 1";
   assert.equal(
-    normalizeReplayedAgentDisplayName(drifted, canonicalBaseDisplayName(drifted)),
+    normalizeReplayedAgentDisplayName(drifted, resolveReplayCanonicalBase(drifted, "OwlSolar", held)),
     "MistyMorrow",
   );
 });
