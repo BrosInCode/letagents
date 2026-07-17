@@ -17,7 +17,7 @@ test("the supervised modal exposes a dedicated destructive Stop agent zone", () 
 test("Stop agent is confirm-gated (two-step) and cancellable", () => {
   assert.match(modalSource, /data-testid="desktop-agent-detail-stop-agent-confirm"/);
   assert.match(modalSource, /data-testid="desktop-agent-detail-stop-agent-cancel"/);
-  assert.match(modalSource, /stopAgentConfirmEntryId = entry\.id/);
+  assert.match(modalSource, /stopAgentConfirmEntryId\.value = entry\.id/);
   assert.match(modalSource, /stopAgentConfirmEntryId\.value = null/);
 });
 
@@ -38,4 +38,13 @@ test("Stop agent is distinct from Stop turn, not an adjacent plain lifecycle but
 test("Stop agent is idempotent-guarded and works while a stop is in flight", () => {
   assert.match(modalSource, /supervisedStopAgentDisabled\(entry\)/);
   assert.match(modalSource, /stoppingSupervisorEntryId/);
+});
+
+test("a failed stop surfaces an honest error and a direct retry (no confirm loop)", () => {
+  assert.match(modalSource, /supervisedStopAgentFailed/);
+  assert.match(modalSource, /data-testid="desktop-agent-detail-stop-agent-error"/);
+  assert.match(modalSource, /function onStopAgentPrimary/);
+  // Retry re-issues the stop directly; a fresh stop still asks for confirm.
+  assert.match(modalSource, /if \(supervisedStopAgentFailed\(entry\)\) \{\s*void confirmStopSupervisedAgent\(entry\.id\)/);
+  assert.match(modalSource, /@click="onStopAgentPrimary\(entry\)"/);
 });

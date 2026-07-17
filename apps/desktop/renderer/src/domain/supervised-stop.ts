@@ -16,11 +16,16 @@ type StopFields = Pick<DesktopSupervisorManifestEntry, "desiredState" | "observe
  * A truthful lifecycle label for a supervised entry, so a stopped/stopping
  * agent never lingers in the UI as "working"/"idle".
  */
+/** A stop request that converged to a failure instead of stopping. */
+export function supervisedStopAgentFailed(entry: StopFields): boolean {
+  return entry.desiredState === "stopped" && entry.observedState === "failed";
+}
+
 export function supervisedLifecycleStatusLabel(entry: StopFields): string {
   if (entry.desiredState === "stopped") {
-    return entry.observedState === "stopped" || entry.observedState === "absent"
-      ? "Stopped"
-      : "Stopping…";
+    if (entry.observedState === "stopped" || entry.observedState === "absent") return "Stopped";
+    if (entry.observedState === "failed") return "Stop failed";
+    return "Stopping…";
   }
   if (entry.desiredState === "paused") {
     return entry.observedState === "paused" ? "Paused" : "Pausing…";
@@ -36,16 +41,21 @@ export function supervisedLifecycleStatusLabel(entry: StopFields): string {
   }
 }
 
-/** The entry is already retired, so Stop agent is a no-op (idempotent guard). */
-export function supervisedStopAgentDisabled(entry: Pick<DesktopSupervisorManifestEntry, "desiredState">): boolean {
-  return entry.desiredState === "stopped";
+/**
+ * The entry is already retired, so Stop agent is a no-op (idempotent guard).
+ * A FAILED stop is NOT disabled — it stays actionable so the owner can retry.
+ */
+export function supervisedStopAgentDisabled(entry: StopFields): boolean {
+  return entry.desiredState === "stopped" && entry.observedState !== "failed";
 }
 
-/** Whether a stop is still converging (desired stopped but not yet observed). */
+/** Whether a stop is still converging (desired stopped, not yet stopped and
+ * not failed). A failed stop is terminal-not-converging, so it is excluded. */
 export function supervisedStopAgentInFlight(entry: StopFields): boolean {
   return entry.desiredState === "stopped"
     && entry.observedState !== "stopped"
-    && entry.observedState !== "absent";
+    && entry.observedState !== "absent"
+    && entry.observedState !== "failed";
 }
 
 /**
@@ -58,6 +68,7 @@ export function supervisedStopAgentButtonLabel(
   state: { confirming: boolean; pendingStop: boolean },
 ): string {
   if (state.pendingStop || supervisedStopAgentInFlight(entry)) return "Stopping…";
+  if (supervisedStopAgentFailed(entry)) return "Retry stop";
   if (entry.desiredState === "stopped") return "Stopped";
   if (state.confirming) return "Confirm stop";
   return "Stop agent";
