@@ -227,6 +227,61 @@ test("the room name appears in the joining step", () => {
   assert.match(view.phases.find((phase) => phase.id === "connecting_room")!.label, /Room Agents Rewrite/);
 });
 
+test("a retry after failure clears the prior terminal and progresses (finding 1)", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("launch.failed", { sequence: 3, detail: "boom", recovery: "retry" }),
+      // Retry reuses the same launch id and opens a fresh attempt:
+      evt("launch.requested", { sequence: 4 }),
+      evt("supervisor.connected", { sequence: 5 }),
+    ],
+    provider: "codex",
+  });
+  assert.equal(view.status, "in_progress");
+  assert.equal(view.failed, false);
+  assert.equal(stateOf(view, "saving_agent"), "active");
+  assert.equal(view.phases.filter((phase) => phase.state === "failed").length, 0);
+});
+
+test("stopping a ready (bound) agent reads as stopped, not launch cancelled (finding 3)", () => {
+  const view = foldLaunchJourney({
+    entry: entry({
+      displayName: "SilverCanyon",
+      desiredState: "stopped",
+      observedState: "absent",
+      agentSessionId: "agent_session_9",
+      agentSessionBindingState: "historical",
+      workspacePath: "/tmp/wt",
+      providerPid: null,
+    }),
+  });
+  assert.equal(view.stopped, true);
+  assert.doesNotMatch(view.headline, /cancelled/i);
+  assert.match(view.headline, /stopped/i);
+});
+
+test("cancelling a not-yet-bound launch still reads as launch cancelled (finding 3)", () => {
+  const view = foldLaunchJourney({
+    entry: entry({ desiredState: "stopped", observedState: "absent", agentSessionBindingState: "none" }),
+  });
+  assert.equal(view.stopped, true);
+  assert.match(view.headline, /cancelled/i);
+});
+
+test("a terminal cancelled/stopped outcome leaves zero active steps (finding 4)", () => {
+  const cancelled = foldLaunchJourney({
+    events: [evt("launch.requested", { sequence: 1 }), evt("launch.cancelled", { sequence: 2 })],
+    provider: "codex",
+  });
+  assert.equal(cancelled.phases.filter((phase) => phase.state === "active").length, 0);
+  const stopped = foldLaunchJourney({
+    entry: entry({ desiredState: "stopped", observedState: "absent", agentSessionBindingState: "none" }),
+  });
+  assert.equal(stopped.phases.filter((phase) => phase.state === "active").length, 0);
+});
+
 test("at most one step is in progress while launching", () => {
   const entries = [
     foldLaunchJourney({ requested: true, provider: "codex" }),
