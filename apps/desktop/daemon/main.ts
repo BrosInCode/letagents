@@ -2069,10 +2069,26 @@ export class SupervisorDaemon {
         await this.transitionOnce(entryId, entry.observed_state, "quarantined", `late provider terminal: ${terminal.terminalCause}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs()), last_terminal: payload }, "quarantine_death", payload);
         return;
       }
-      const intentional = entry.desired_state === "stopped" || entry.desired_state === "paused";
-      const observedState = entry.desired_state === "paused" ? "paused" : intentional ? "stopped" : "failed";
+      const turnControl = entry.turn_control;
+      const completedStopTurn = entry.desired_state === "running"
+        && terminal.terminalCause === "stopped"
+        && turnControl?.execution_generation_id === entry.provider_ref?.execution_generation_id
+        && turnControl?.status === "completed"
+        && turnControl?.has_correction === false
+        && turnControl?.interrupted === true
+        && turnControl?.resumed === false
+        && turnControl?.state === "idle";
+      const intentional = entry.desired_state === "stopped" || entry.desired_state === "paused" || completedStopTurn;
+      const observedState = completedStopTurn ? "idle" : entry.desired_state === "paused" ? "paused" : intentional ? "stopped" : "failed";
       const reconciliation = { ...advanceReconciliationState(entry.reconciliation, observedState, this.nowMs()), last_terminal: payload };
-      await this.transitionOnce(entryId, observedState, "none", `provider terminal: ${terminal.terminalCause}`, actor, reconciliation);
+      await this.transitionOnce(
+        entryId,
+        observedState,
+        "none",
+        completedStopTurn ? "provider terminal completed intentional stop-turn" : `provider terminal: ${terminal.terminalCause}`,
+        actor,
+        reconciliation,
+      );
     });
   }
 
