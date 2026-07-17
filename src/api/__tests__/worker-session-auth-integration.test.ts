@@ -742,9 +742,10 @@ test(
     assert.notEqual(secondSession.session_id, firstSession.session_id);
 
     // A daemon restart may use a new runtime instance id and may replay the
-    // server-assigned, already-decorated label from an older collision. The
-    // canonical identity is unchanged, so neither difference may compound
-    // the suffix across sequential registrations.
+    // server-assigned, already-decorated label from an older collision. An
+    // updated client sends its stable base as `requested_base_display_name`;
+    // the server reduces the compounded label to that trusted base only —
+    // never by guessing from numeric shape — so the suffix cannot compound.
     await endRoomAgentSession!({ session_id: secondSession.session_id! });
     const restarted = await invoke(
       registerHandler,
@@ -753,6 +754,7 @@ test(
           ...registrationBody,
           agent_instance_id: "burst-instance-after-restart",
           display_name: "MistyMorrow 2 1 1 1",
+          requested_base_display_name: "MistyMorrow",
         },
         { params: { 0: room.id } }
       )
@@ -762,7 +764,7 @@ test(
     assert.equal(
       restartedSession.display_name,
       "MistyMorrow",
-      "restart normalizes accumulated collision suffixes back to the canonical label"
+      "restart with a trusted base signal converges the compounded label to the base"
     );
 
     // A DIFFERENT instance while the name is actively held still gets a
@@ -790,6 +792,7 @@ test(
           ...registrationBody,
           agent_instance_id: "burst-instance-overlap-restart",
           display_name: "MistyMorrow 2 1 1",
+          requested_base_display_name: "MistyMorrow",
         },
         { params: { 0: room.id } }
       )
@@ -830,6 +833,48 @@ test(
       (explicitSame.body as { display_name?: string }).display_name,
       "MorningGlory",
       "an explicit same-name request resumes without numbering"
+    );
+
+    // A first-ever DELIBERATE numeric-ending rename, declared as its own base,
+    // is preserved even though the identity currently holds bare "MorningGlory"
+    // — the server never treats a client-declared base as a collision suffix.
+    const deliberateRename = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        {
+          ...registrationBody,
+          agent_instance_id: "burst-instance-deliberate-47",
+          display_name: "MorningGlory 47",
+          requested_base_display_name: "MorningGlory 47",
+        },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(deliberateRename.statusCode, 201, JSON.stringify(deliberateRename.body));
+    assert.equal(
+      (deliberateRename.body as { display_name?: string }).display_name,
+      "MorningGlory 47",
+      "a deliberate numeric-ending rename declared as its own base is not demoted to the bare base"
+    );
+
+    // A decorated replay WITHOUT a trusted base signal fails closed: the label
+    // is preserved verbatim, never guessed back to a base from numeric shape.
+    const noSignalReplay = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        {
+          ...registrationBody,
+          agent_instance_id: "burst-instance-no-signal",
+          display_name: "MorningGlory 9 9",
+        },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(noSignalReplay.statusCode, 201, JSON.stringify(noSignalReplay.body));
+    assert.equal(
+      (noSignalReplay.body as { display_name?: string }).display_name,
+      "MorningGlory 9 9",
+      "no trusted signal -> preserve the requested label (fail closed, no shape inference)"
     );
   }
 );

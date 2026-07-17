@@ -9,8 +9,8 @@ const {
   registerRoomPresenceRoutes,
 } = await import("../routes/rooms/presence/index.js");
 const {
-  canonicalBaseDisplayName,
   desktopManagedPausePresence,
+  isNumericSuffixExtension,
   normalizeReplayedAgentDisplayName,
   resolveReplayCanonicalBase,
 } = await import("../routes/rooms/presence/agent-session-routes.js");
@@ -34,41 +34,39 @@ test("replayed collision suffixes normalize to the canonical agent display name"
   assert.equal(normalizeReplayedAgentDisplayName("Agent 47A", "Agent"), "Agent 47A");
 });
 
-test("canonicalBaseDisplayName strips accumulated numeric collision suffixes only", () => {
-  // The stored agent.display_name may itself have drifted to a decorated form;
-  // the base must be recovered so replay normalization is not a no-op.
-  assert.equal(canonicalBaseDisplayName("MistyMorrow 2 1 1 1"), "MistyMorrow");
-  assert.equal(canonicalBaseDisplayName("SilverHarbor 2"), "SilverHarbor");
-  assert.equal(canonicalBaseDisplayName("MistyMorrow"), "MistyMorrow");
-  // Non-numeric words are preserved (custom names, alphanumeric tails).
-  assert.equal(canonicalBaseDisplayName("SilverHarbor East"), "SilverHarbor East");
-  assert.equal(canonicalBaseDisplayName("Agent 47A"), "Agent 47A");
-  assert.equal(canonicalBaseDisplayName("  MistyMorrow 3  "), "MistyMorrow");
-  // Never strips to empty even for a pathological all-numeric label.
-  assert.equal(canonicalBaseDisplayName("7 7 7"), "7");
+test("isNumericSuffixExtension recognizes only base + trailing numeric groups", () => {
+  assert.equal(isNumericSuffixExtension("MistyMorrow 2 1 1 1", "MistyMorrow"), true);
+  assert.equal(isNumericSuffixExtension("MistyMorrow 1", "MistyMorrow"), true);
+  assert.equal(isNumericSuffixExtension("MistyMorrow", "MistyMorrow"), false); // no suffix
+  assert.equal(isNumericSuffixExtension("Agent 47A", "Agent"), false);         // 47A not pure-digit
+  assert.equal(isNumericSuffixExtension("MistyMorrow East", "MistyMorrow"), false);
+  assert.equal(isNumericSuffixExtension("Otter 3", "MistyMorrow"), false);     // different base
 });
 
-test("resolveReplayCanonicalBase strips a suffix only with identity provenance", () => {
-  // Held base "MistyMorrow" -> a decorated replay reduces to it (fixes the
-  // compounding bug where the stored canonical is the codename, not the label).
-  const held = new Set(["MistyMorrow", "MistyMorrow 1"]);
-  assert.equal(resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", "OwlSolar", held), "MistyMorrow");
-  // No provenance for "Agent": a legitimate numeric-ending name is NOT demoted;
-  // falls back to the stored canonical so normalize leaves it untouched.
-  const noHistory = new Set<string>();
-  const canonical = resolveReplayCanonicalBase("Agent 47", "OwlSolar", noHistory);
-  assert.equal(canonical, "OwlSolar");
-  assert.equal(normalizeReplayedAgentDisplayName("Agent 47", canonical), "Agent 47");
-  // A base that the identity never held is left alone even if it looks decorated.
-  assert.equal(resolveReplayCanonicalBase("Falcon 3", "OwlSolar", new Set(["Otter"])), "OwlSolar");
+test("resolveReplayCanonicalBase reduces ONLY via a valid trusted base signal", () => {
+  // Trusted client base "MistyMorrow" reduces a compounded replay to it.
+  assert.equal(resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", "MistyMorrow"), "MistyMorrow");
+  assert.equal(resolveReplayCanonicalBase("MistyMorrow", "MistyMorrow"), "MistyMorrow");
+  // A deliberate numeric-ending name declared as its own base is preserved.
+  assert.equal(resolveReplayCanonicalBase("Agent 47", "Agent 47"), "Agent 47");
+  // A trusted base that does NOT match the requested label is ignored (the
+  // label is preserved, not force-reduced) — no cross-name capture.
+  assert.equal(resolveReplayCanonicalBase("Agent 47", "MistyMorrow"), "Agent 47");
+  // No signal -> fail closed, preserve verbatim (never guess from shape).
+  assert.equal(resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", null), "MistyMorrow 2 1 1 1");
+  assert.equal(resolveReplayCanonicalBase("Agent 47", ""), "Agent 47");
 });
 
-test("canonical base makes replay normalization idempotent for a held decorated label", () => {
-  const held = new Set(["MistyMorrow"]);
-  const drifted = "MistyMorrow 2 1 1 1";
+test("trusted base + normalize converges a compounded label while preserving a deliberate one", () => {
   assert.equal(
-    normalizeReplayedAgentDisplayName(drifted, resolveReplayCanonicalBase(drifted, "OwlSolar", held)),
+    normalizeReplayedAgentDisplayName("MistyMorrow 2 1 1 1", resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", "MistyMorrow")),
     "MistyMorrow",
+  );
+  // First-ever deliberate "Agent 47" (declared base "Agent 47") stays put even
+  // though the identity previously held "Agent".
+  assert.equal(
+    normalizeReplayedAgentDisplayName("Agent 47", resolveReplayCanonicalBase("Agent 47", "Agent 47")),
+    "Agent 47",
   );
 });
 

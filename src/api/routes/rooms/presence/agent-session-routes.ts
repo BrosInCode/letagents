@@ -7,7 +7,6 @@ import {
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getLastEndedWorkerSessionDisplayName,
-  getWorkerSessionDisplayNamesForIdentity,
   getRoomAgentSessionByCredentials,
   getRoomParticipants,
   recordNativeHarnessActivity,
@@ -46,43 +45,41 @@ export function desktopManagedPausePresence(input: {
 }
 
 /**
- * The base identity label with any accumulated numeric collision suffix
- * stripped. Collision disambiguation only ever appends space-separated
- * pure-digit groups (see pickSessionDisplayName), so peeling those trailing
- * groups recovers the canonical base even when the stored `agent.display_name`
- * has itself drifted to a decorated form across earlier re-registrations.
- * Non-numeric words (e.g. "SilverHarbor East", "Agent 47A") are preserved.
+ * True when `label` is exactly `base` plus one or more trailing space-separated
+ * pure-digit groups — i.e. the shape the collision allocator produces
+ * (`${base} ${offset}`), possibly compounded by the historical bug. Used to
+ * validate that a trusted base signal actually corresponds to the requested
+ * label before reducing to it.
  */
-export function canonicalBaseDisplayName(displayName: string): string {
-  const trimmed = displayName.trim();
-  if (!trimmed) return trimmed;
-  const parts = trimmed.split(/\s+/);
-  let end = parts.length;
-  while (end > 1 && /^\d+$/.test(parts[end - 1]!)) end -= 1;
-  return parts.slice(0, end).join(" ");
+export function isNumericSuffixExtension(label: string, base: string): boolean {
+  const trimmedLabel = label.trim();
+  const trimmedBase = base.trim();
+  if (!trimmedBase || !trimmedLabel.startsWith(`${trimmedBase} `)) return false;
+  const suffix = trimmedLabel.slice(trimmedBase.length).trim();
+  return suffix.length > 0 && suffix.split(/\s+/).every((part) => /^\d+$/.test(part));
 }
 
 /**
  * Resolve the canonical base to normalize a replayed display name against,
- * using PROVENANCE rather than blind string stripping. A trailing numeric
- * group is only treated as a server-appended collision suffix when the
- * stripped base is a label this identity has actually held before
- * (`identityHeldDisplayNames`). This recovers the true base for a decorated
- * codename ("MistyMorrow 2 1 1 1" → "MistyMorrow" when the identity held
- * "MistyMorrow") without ever demoting a legitimate numeric-ending name
- * ("Agent 47" stays "Agent 47" when the identity never held "Agent"). Falls
- * back to the stored canonical label when provenance is absent.
+ * using an EXPLICIT trusted client signal — never numeric-shape/history
+ * inference. `trustedBaseSignal` is the stable base the client declares for its
+ * canonical identity (`requested_base_display_name`). It is honored only when
+ * the requested label IS that base or that base plus a numeric collision
+ * suffix, so a compounded "MistyMorrow 2 1 1 1" reduces to a client-declared
+ * "MistyMorrow" while a deliberately-requested "Agent 47" (declared base
+ * "Agent 47", or no signal) is preserved. With no trusted proof the label is
+ * preserved verbatim (fail closed) — the server never guesses intent.
  */
 export function resolveReplayCanonicalBase(
   requestedDisplayName: string,
-  storedCanonicalDisplayName: string,
-  identityHeldDisplayNames: ReadonlySet<string>,
+  trustedBaseSignal: string | null | undefined,
 ): string {
   const requested = requestedDisplayName.trim();
-  const base = canonicalBaseDisplayName(requested);
-  return base !== requested && identityHeldDisplayNames.has(base)
-    ? base
-    : storedCanonicalDisplayName.trim();
+  const trusted = (trustedBaseSignal ?? "").trim();
+  if (trusted && (requested === trusted || isNumericSuffixExtension(requested, trusted))) {
+    return trusted;
+  }
+  return requested;
 }
 
 export function normalizeReplayedAgentDisplayName(
@@ -128,6 +125,7 @@ export function registerAgentSessionRoutes(
       actor_key,
       actor_label,
       display_name,
+      requested_base_display_name,
       ide_label,
       agent_instance_id,
       session_kind,
@@ -138,6 +136,7 @@ export function registerAgentSessionRoutes(
       actor_key?: string;
       actor_label?: string;
       display_name?: string;
+      requested_base_display_name?: string | null;
       ide_label?: string;
       agent_instance_id?: string | null;
       session_kind?: string;
@@ -174,7 +173,7 @@ export function registerAgentSessionRoutes(
       const isGenericName = !requestedDisplayName || requestedTokens.every((token) => genericKeywords.has(token));
 
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
-      const [activeParticipants, activeSessionsForIdentity, priorWorkerDisplayNames] = await Promise.all([
+      const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
         requestedSessionKind === "worker"
           ? getActiveRoomAgentSessionsForWorkerIdentity({
@@ -182,29 +181,18 @@ export function registerAgentSessionRoutes(
               agent_key: agent.canonical_key,
             })
           : Promise.resolve([]),
-        requestedSessionKind === "worker"
-          ? getWorkerSessionDisplayNamesForIdentity({
-              room_id: project.id,
-              agent_key: agent.canonical_key,
-            })
-          : Promise.resolve([] as string[]),
       ]);
 
-      // Provenance for replay normalization: the labels THIS identity has
-      // actually held here (every worker session name it has used, active or
-      // ended). The stored `agent.display_name` is the canonical codename, not
-      // the per-session label, so the base is recovered from session history —
-      // never by blindly stripping trailing digits (which would demote a
-      // legitimate numeric-ending name like "Agent 47").
-      const identityHeldDisplayNames = new Set<string>([
-        ...activeSessionsForIdentity.map((session) => session.display_name),
-        ...priorWorkerDisplayNames,
-      ]);
-      const canonicalDisplayName = resolveReplayCanonicalBase(
-        requestedDisplayName,
-        agent.display_name,
-        identityHeldDisplayNames,
-      );
+      // Reduce a replayed, already-decorated label to its base ONLY from the
+      // client's explicit trusted base signal (`requested_base_display_name`),
+      // never from numeric shape or name history. Absent a valid signal the
+      // label is preserved verbatim (fail closed), so a deliberate
+      // numeric-ending name is never demoted and legacy accumulation is not
+      // "guessed" away.
+      const trustedRequestedBase = typeof requested_base_display_name === "string"
+        ? requested_base_display_name.trim()
+        : "";
+      const canonicalDisplayName = resolveReplayCanonicalBase(requestedDisplayName, trustedRequestedBase);
       const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
         requestedDisplayName,
         canonicalDisplayName
@@ -298,6 +286,9 @@ export function registerAgentSessionRoutes(
             agent_key: agent.canonical_key,
             agent_instance_id: normalizedAgentInstanceId,
             display_name: sessionDisplayName,
+            // Persist the server-resolved base (before any collision suffix) as
+            // durable allocation provenance for this session.
+            assigned_base_display_name: baseDisplayName,
             owner_account_id: req.sessionAccount.account_id,
             owner_label: agent.owner_label,
             ide_label: resolvedIdeLabel,

@@ -1,517 +1,524 @@
 {
-  "version": "7",
-  "dialect": "postgresql",
-  "entries": [
-    {
-      "idx": 0,
-      "version": "7",
-      "when": 1774036580239,
-      "tag": "0000_gray_zzzax",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1774041401480,
-      "tag": "0001_married_wither",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1774085474872,
-      "tag": "0002_confused_squadron_sinister",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1774122417752,
-      "tag": "0003_blue_human_fly",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "7",
-      "when": 1774129039507,
-      "tag": "0004_smooth_vulcan",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "7",
-      "when": 1774131774550,
-      "tag": "0005_magenta_ricochet",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "7",
-      "when": 1774173228779,
-      "tag": "0006_tearful_power_man",
-      "breakpoints": true
-    },
-    {
-      "idx": 7,
-      "version": "7",
-      "when": 1774175736084,
-      "tag": "0007_auth_sessions_token_hash",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "7",
-      "when": 1774744369064,
-      "tag": "0008_wonderful_kang",
-      "breakpoints": true
-    },
-    {
-      "idx": 9,
-      "version": "7",
-      "when": 1774749858509,
-      "tag": "0009_overjoyed_karma",
-      "breakpoints": true
-    },
-    {
-      "idx": 10,
-      "version": "7",
-      "when": 1774756686397,
-      "tag": "0010_absurd_sir_ram",
-      "breakpoints": true
-    },
-    {
-      "idx": 11,
-      "version": "7",
-      "when": 1774758093609,
-      "tag": "0011_wild_swarm",
-      "breakpoints": true
-    },
-    {
-      "idx": 12,
-      "version": "7",
-      "when": 1775418904144,
-      "tag": "0012_red_cardiac",
-      "breakpoints": true
-    },
-    {
-      "idx": 13,
-      "version": "7",
-      "when": 1775510562247,
-      "tag": "0013_icy_baron_strucker",
-      "breakpoints": true
-    },
-    {
-      "idx": 14,
-      "version": "7",
-      "when": 1775521556820,
-      "tag": "0014_omniscient_enchantress",
-      "breakpoints": true
-    },
-    {
-      "idx": 15,
-      "version": "7",
-      "when": 1775527453450,
-      "tag": "0015_jazzy_cassandra_nova",
-      "breakpoints": true
-    },
-    {
-      "idx": 16,
-      "version": "7",
-      "when": 1775553672621,
-      "tag": "0016_high_dust",
-      "breakpoints": true
-    },
-    {
-      "idx": 17,
-      "version": "7",
-      "when": 1775595600000,
-      "tag": "0017_restless_signal",
-      "breakpoints": true
-    },
-    {
-      "idx": 18,
-      "version": "7",
-      "when": 1775602800000,
-      "tag": "0018_brisk_lockjaw",
-      "breakpoints": true
-    },
-    {
-      "idx": 19,
-      "version": "7",
-      "when": 1775661822391,
-      "tag": "0019_silver_roster",
-      "breakpoints": true
-    },
-    {
-      "idx": 20,
-      "version": "7",
-      "when": 1776606050000,
-      "tag": "0020_focus_rooms",
-      "breakpoints": true
-    },
-    {
-      "idx": 21,
-      "version": "7",
-      "when": 1776626870529,
-      "tag": "0021_room_manager_coordination",
-      "breakpoints": true
-    },
-    {
-      "idx": 22,
-      "version": "7",
-      "when": 1776633200000,
-      "tag": "0022_focus_room_visibility_settings",
-      "breakpoints": true
-    },
-    {
-      "idx": 23,
-      "version": "7",
-      "when": 1776633720000,
-      "tag": "0023_allow_ad_hoc_focus_rooms",
-      "breakpoints": true
-    },
-    {
-      "idx": 24,
-      "version": "7",
-      "when": 1776646921013,
-      "tag": "0024_repair_ad_hoc_focus_lineage",
-      "breakpoints": true
-    },
-    {
-      "idx": 25,
-      "version": "7",
-      "when": 1776681600000,
-      "tag": "0025_focus_room_hard_isolation",
-      "breakpoints": true
-    },
-    {
-      "idx": 26,
-      "version": "7",
-      "when": 1776726013074,
-      "tag": "0026_message_attachments",
-      "breakpoints": true
-    },
-    {
-      "idx": 27,
-      "version": "7",
-      "when": 1776769200000,
-      "tag": "0027_stale_task_prompt_mutes",
-      "breakpoints": true
-    },
-    {
-      "idx": 28,
-      "version": "7",
-      "when": 1776729300000,
-      "tag": "0028_room_activity_history_archive",
-      "breakpoints": true
-    },
-    {
-      "idx": 29,
-      "version": "7",
-      "when": 1776700000000,
-      "tag": "0029_reasoning_sessions",
-      "breakpoints": true
-    },
-    {
-      "idx": 30,
-      "version": "7",
-      "when": 1776878100000,
-      "tag": "0030_room_agent_delivery_sessions",
-      "breakpoints": true
-    },
-    {
-      "idx": 31,
-      "version": "7",
-      "when": 1776868800000,
-      "tag": "0031_room_live_agent_suppressions",
-      "breakpoints": true
-    },
-    {
-      "idx": 32,
-      "version": "7",
-      "when": 1777150800000,
-      "tag": "0032_agent_sessions",
-      "breakpoints": true
-    },
-    {
-      "idx": 33,
-      "version": "7",
-      "when": 1777225579313,
-      "tag": "0033_active_worker_identity_unique",
-      "breakpoints": true
-    },
-    {
-      "idx": 34,
-      "version": "7",
-      "when": 1777241609065,
-      "tag": "0034_independent_agent_sessions",
-      "breakpoints": true
-    },
-    {
-      "idx": 35,
-      "version": "7",
-      "when": 1777250369708,
-      "tag": "0035_focus_room_conclusion_details",
-      "breakpoints": true
-    },
-    {
-      "idx": 36,
-      "version": "7",
-      "when": 1777478400000,
-      "tag": "0036_task_lease_agent_sessions",
-      "breakpoints": true
-    },
-    {
-      "idx": 37,
-      "version": "7",
-      "when": 1777885200000,
-      "tag": "0037_agent_liveness_enrichment",
-      "breakpoints": true
-    },
-    {
-      "idx": 38,
-      "version": "7",
-      "when": 1778457600000,
-      "tag": "0038_account_room_recents",
-      "breakpoints": true
-    },
-    {
-      "idx": 39,
-      "version": "7",
-      "when": 1778544000000,
-      "tag": "0039_add_rental_participant_role",
-      "breakpoints": true
-    },
-    {
-      "idx": 40,
-      "version": "7",
-      "when": 1778544060000,
-      "tag": "0040_rental_schema_groundwork",
-      "breakpoints": true
-    },
-    {
-      "idx": 41,
-      "version": "7",
-      "when": 1778630400000,
-      "tag": "0041_rental_listings",
-      "breakpoints": true
-    },
-    {
-      "idx": 42,
-      "version": "7",
-      "when": 1778716800000,
-      "tag": "0042_rental_sessions",
-      "breakpoints": true
-    },
-    {
-      "idx": 43,
-      "version": "7",
-      "when": 1778803200000,
-      "tag": "0043_rental_activity_events",
-      "breakpoints": true
-    },
-    {
-      "idx": 44,
-      "version": "7",
-      "when": 1778889600000,
-      "tag": "0044_rental_usage_meters",
-      "breakpoints": true
-    },
-    {
-      "idx": 45,
-      "version": "7",
-      "when": 1778893200000,
-      "tag": "0045_rental_sessions_heartbeat",
-      "breakpoints": true
-    },
-    {
-      "idx": 46,
-      "version": "7",
-      "when": 1778979600000,
-      "tag": "0046_rental_scoped_workspaces",
-      "breakpoints": true
-    },
-    {
-      "idx": 47,
-      "version": "7",
-      "when": 1779066000000,
-      "tag": "0047_rental_workspace_exposures",
-      "breakpoints": true
-    },
-    {
-      "idx": 48,
-      "version": "7",
-      "when": 1779152400000,
-      "tag": "0048_rental_patch_proposals",
-      "breakpoints": true
-    },
-    {
-      "idx": 49,
-      "version": "7",
-      "when": 1780516800000,
-      "tag": "0049_messages_client_message_id",
-      "breakpoints": true
-    },
-    {
-      "idx": 50,
-      "version": "7",
-      "when": 1781208000000,
-      "tag": "0050_focus_room_archives",
-      "breakpoints": true
-    },
-    {
-      "idx": 51,
-      "version": "7",
-      "when": 1781481600000,
-      "tag": "0051_task_source_message_id_unique",
-      "breakpoints": true
-    },
-    {
-      "idx": 52,
-      "version": "7",
-      "when": 1781568000000,
-      "tag": "0052_message_thread_state",
-      "breakpoints": true
-    },
-    {
-      "idx": 53,
-      "version": "7",
-      "when": 1782604800000,
-      "tag": "0053_github_event_spine",
-      "breakpoints": true
-    },
-    {
-      "idx": 54,
-      "version": "7",
-      "when": 1782691200000,
-      "tag": "0054_git_room_bindings",
-      "breakpoints": true
-    },
-    {
-      "idx": 55,
-      "version": "7",
-      "when": 1782777600000,
-      "tag": "0055_room_shared_artifacts",
-      "breakpoints": true
-    },
-    {
-      "idx": 56,
-      "version": "7",
-      "when": 1782864000000,
-      "tag": "0056_git_room_lifecycle_order",
-      "breakpoints": true
-    },
-    {
-      "idx": 57,
-      "version": "7",
-      "when": 1782950400000,
-      "tag": "0057_agent_session_repo_branch",
-      "breakpoints": true
-    },
-    {
-      "idx": 58,
-      "version": "7",
-      "when": 1783036800000,
-      "tag": "0058_room_shared_artifact_number_bigint",
-      "breakpoints": true
-    },
-    {
-      "idx": 59,
-      "version": "7",
-      "when": 1783123200000,
-      "tag": "0059_board_manager_intents",
-      "breakpoints": true
-    },
-    {
-      "idx": 60,
-      "version": "7",
-      "when": 1783209600000,
-      "tag": "0060_room_shared_artifact_git_kinds",
-      "breakpoints": true
-    },
-    {
-      "idx": 61,
-      "version": "7",
-      "when": 1783296000000,
-      "tag": "0061_rental_context_requests",
-      "breakpoints": true
-    },
-    {
-      "idx": 62,
-      "version": "7",
-      "when": 1783382400000,
-      "tag": "0062_desktop_event_delivery",
-      "breakpoints": true
-    },
-    {
-      "idx": 63,
-      "version": "7",
-      "when": 1783468800000,
-      "tag": "0063_room_shared_artifact_detail",
-      "breakpoints": true
-    },
-    {
-      "idx": 64,
-      "version": "7",
-      "when": 1783900800000,
-      "tag": "0064_agent_offline_announcements",
-      "breakpoints": true
-    },
-    {
-      "idx": 65,
-      "version": "7",
-      "when": 1783987200000,
-      "tag": "0065_board_manager_failover",
-      "breakpoints": true
-    },
-    {
-      "idx": 66,
-      "version": "7",
-      "when": 1784073600000,
-      "tag": "0066_board_intent_escalation",
-      "breakpoints": true
-    },
-    {
-      "idx": 67,
-      "version": "7",
-      "when": 1784160000000,
-      "tag": "0067_room_stall_watchdog",
-      "breakpoints": true
-    },
-    {
-      "idx": 68,
-      "version": "7",
-      "when": 1784246400000,
-      "tag": "0068_agent_session_bearers",
-      "breakpoints": true
-    },
-    {
-      "idx": 69,
-      "version": "7",
-      "when": 1784332800000,
-      "tag": "0069_supervisor_host_grants",
-      "breakpoints": true
-    },
-    {
-      "idx": 70,
-      "version": "7",
-      "when": 1784419200000,
-      "tag": "0070_task_lease_epoch",
-      "breakpoints": true
-    },
-    {
-      "idx": 71,
-      "version": "7",
-      "when": 1784505600000,
-      "tag": "0071_task_lease_rebind_attestation",
-      "breakpoints": true
-    },
-    {
-      "idx": 72,
-      "version": "7",
-      "when": 1784592000000,
-      "tag": "0072_workflow_effect_outbox",
-      "breakpoints": true
-    }
-  ]
+	"version": "7",
+	"dialect": "postgresql",
+	"entries": [
+		{
+			"idx": 0,
+			"version": "7",
+			"when": 1774036580239,
+			"tag": "0000_gray_zzzax",
+			"breakpoints": true
+		},
+		{
+			"idx": 1,
+			"version": "7",
+			"when": 1774041401480,
+			"tag": "0001_married_wither",
+			"breakpoints": true
+		},
+		{
+			"idx": 2,
+			"version": "7",
+			"when": 1774085474872,
+			"tag": "0002_confused_squadron_sinister",
+			"breakpoints": true
+		},
+		{
+			"idx": 3,
+			"version": "7",
+			"when": 1774122417752,
+			"tag": "0003_blue_human_fly",
+			"breakpoints": true
+		},
+		{
+			"idx": 4,
+			"version": "7",
+			"when": 1774129039507,
+			"tag": "0004_smooth_vulcan",
+			"breakpoints": true
+		},
+		{
+			"idx": 5,
+			"version": "7",
+			"when": 1774131774550,
+			"tag": "0005_magenta_ricochet",
+			"breakpoints": true
+		},
+		{
+			"idx": 6,
+			"version": "7",
+			"when": 1774173228779,
+			"tag": "0006_tearful_power_man",
+			"breakpoints": true
+		},
+		{
+			"idx": 7,
+			"version": "7",
+			"when": 1774175736084,
+			"tag": "0007_auth_sessions_token_hash",
+			"breakpoints": true
+		},
+		{
+			"idx": 8,
+			"version": "7",
+			"when": 1774744369064,
+			"tag": "0008_wonderful_kang",
+			"breakpoints": true
+		},
+		{
+			"idx": 9,
+			"version": "7",
+			"when": 1774749858509,
+			"tag": "0009_overjoyed_karma",
+			"breakpoints": true
+		},
+		{
+			"idx": 10,
+			"version": "7",
+			"when": 1774756686397,
+			"tag": "0010_absurd_sir_ram",
+			"breakpoints": true
+		},
+		{
+			"idx": 11,
+			"version": "7",
+			"when": 1774758093609,
+			"tag": "0011_wild_swarm",
+			"breakpoints": true
+		},
+		{
+			"idx": 12,
+			"version": "7",
+			"when": 1775418904144,
+			"tag": "0012_red_cardiac",
+			"breakpoints": true
+		},
+		{
+			"idx": 13,
+			"version": "7",
+			"when": 1775510562247,
+			"tag": "0013_icy_baron_strucker",
+			"breakpoints": true
+		},
+		{
+			"idx": 14,
+			"version": "7",
+			"when": 1775521556820,
+			"tag": "0014_omniscient_enchantress",
+			"breakpoints": true
+		},
+		{
+			"idx": 15,
+			"version": "7",
+			"when": 1775527453450,
+			"tag": "0015_jazzy_cassandra_nova",
+			"breakpoints": true
+		},
+		{
+			"idx": 16,
+			"version": "7",
+			"when": 1775553672621,
+			"tag": "0016_high_dust",
+			"breakpoints": true
+		},
+		{
+			"idx": 17,
+			"version": "7",
+			"when": 1775595600000,
+			"tag": "0017_restless_signal",
+			"breakpoints": true
+		},
+		{
+			"idx": 18,
+			"version": "7",
+			"when": 1775602800000,
+			"tag": "0018_brisk_lockjaw",
+			"breakpoints": true
+		},
+		{
+			"idx": 19,
+			"version": "7",
+			"when": 1775661822391,
+			"tag": "0019_silver_roster",
+			"breakpoints": true
+		},
+		{
+			"idx": 20,
+			"version": "7",
+			"when": 1776606050000,
+			"tag": "0020_focus_rooms",
+			"breakpoints": true
+		},
+		{
+			"idx": 21,
+			"version": "7",
+			"when": 1776626870529,
+			"tag": "0021_room_manager_coordination",
+			"breakpoints": true
+		},
+		{
+			"idx": 22,
+			"version": "7",
+			"when": 1776633200000,
+			"tag": "0022_focus_room_visibility_settings",
+			"breakpoints": true
+		},
+		{
+			"idx": 23,
+			"version": "7",
+			"when": 1776633720000,
+			"tag": "0023_allow_ad_hoc_focus_rooms",
+			"breakpoints": true
+		},
+		{
+			"idx": 24,
+			"version": "7",
+			"when": 1776646921013,
+			"tag": "0024_repair_ad_hoc_focus_lineage",
+			"breakpoints": true
+		},
+		{
+			"idx": 25,
+			"version": "7",
+			"when": 1776681600000,
+			"tag": "0025_focus_room_hard_isolation",
+			"breakpoints": true
+		},
+		{
+			"idx": 26,
+			"version": "7",
+			"when": 1776726013074,
+			"tag": "0026_message_attachments",
+			"breakpoints": true
+		},
+		{
+			"idx": 27,
+			"version": "7",
+			"when": 1776769200000,
+			"tag": "0027_stale_task_prompt_mutes",
+			"breakpoints": true
+		},
+		{
+			"idx": 28,
+			"version": "7",
+			"when": 1776729300000,
+			"tag": "0028_room_activity_history_archive",
+			"breakpoints": true
+		},
+		{
+			"idx": 29,
+			"version": "7",
+			"when": 1776700000000,
+			"tag": "0029_reasoning_sessions",
+			"breakpoints": true
+		},
+		{
+			"idx": 30,
+			"version": "7",
+			"when": 1776878100000,
+			"tag": "0030_room_agent_delivery_sessions",
+			"breakpoints": true
+		},
+		{
+			"idx": 31,
+			"version": "7",
+			"when": 1776868800000,
+			"tag": "0031_room_live_agent_suppressions",
+			"breakpoints": true
+		},
+		{
+			"idx": 32,
+			"version": "7",
+			"when": 1777150800000,
+			"tag": "0032_agent_sessions",
+			"breakpoints": true
+		},
+		{
+			"idx": 33,
+			"version": "7",
+			"when": 1777225579313,
+			"tag": "0033_active_worker_identity_unique",
+			"breakpoints": true
+		},
+		{
+			"idx": 34,
+			"version": "7",
+			"when": 1777241609065,
+			"tag": "0034_independent_agent_sessions",
+			"breakpoints": true
+		},
+		{
+			"idx": 35,
+			"version": "7",
+			"when": 1777250369708,
+			"tag": "0035_focus_room_conclusion_details",
+			"breakpoints": true
+		},
+		{
+			"idx": 36,
+			"version": "7",
+			"when": 1777478400000,
+			"tag": "0036_task_lease_agent_sessions",
+			"breakpoints": true
+		},
+		{
+			"idx": 37,
+			"version": "7",
+			"when": 1777885200000,
+			"tag": "0037_agent_liveness_enrichment",
+			"breakpoints": true
+		},
+		{
+			"idx": 38,
+			"version": "7",
+			"when": 1778457600000,
+			"tag": "0038_account_room_recents",
+			"breakpoints": true
+		},
+		{
+			"idx": 39,
+			"version": "7",
+			"when": 1778544000000,
+			"tag": "0039_add_rental_participant_role",
+			"breakpoints": true
+		},
+		{
+			"idx": 40,
+			"version": "7",
+			"when": 1778544060000,
+			"tag": "0040_rental_schema_groundwork",
+			"breakpoints": true
+		},
+		{
+			"idx": 41,
+			"version": "7",
+			"when": 1778630400000,
+			"tag": "0041_rental_listings",
+			"breakpoints": true
+		},
+		{
+			"idx": 42,
+			"version": "7",
+			"when": 1778716800000,
+			"tag": "0042_rental_sessions",
+			"breakpoints": true
+		},
+		{
+			"idx": 43,
+			"version": "7",
+			"when": 1778803200000,
+			"tag": "0043_rental_activity_events",
+			"breakpoints": true
+		},
+		{
+			"idx": 44,
+			"version": "7",
+			"when": 1778889600000,
+			"tag": "0044_rental_usage_meters",
+			"breakpoints": true
+		},
+		{
+			"idx": 45,
+			"version": "7",
+			"when": 1778893200000,
+			"tag": "0045_rental_sessions_heartbeat",
+			"breakpoints": true
+		},
+		{
+			"idx": 46,
+			"version": "7",
+			"when": 1778979600000,
+			"tag": "0046_rental_scoped_workspaces",
+			"breakpoints": true
+		},
+		{
+			"idx": 47,
+			"version": "7",
+			"when": 1779066000000,
+			"tag": "0047_rental_workspace_exposures",
+			"breakpoints": true
+		},
+		{
+			"idx": 48,
+			"version": "7",
+			"when": 1779152400000,
+			"tag": "0048_rental_patch_proposals",
+			"breakpoints": true
+		},
+		{
+			"idx": 49,
+			"version": "7",
+			"when": 1780516800000,
+			"tag": "0049_messages_client_message_id",
+			"breakpoints": true
+		},
+		{
+			"idx": 50,
+			"version": "7",
+			"when": 1781208000000,
+			"tag": "0050_focus_room_archives",
+			"breakpoints": true
+		},
+		{
+			"idx": 51,
+			"version": "7",
+			"when": 1781481600000,
+			"tag": "0051_task_source_message_id_unique",
+			"breakpoints": true
+		},
+		{
+			"idx": 52,
+			"version": "7",
+			"when": 1781568000000,
+			"tag": "0052_message_thread_state",
+			"breakpoints": true
+		},
+		{
+			"idx": 53,
+			"version": "7",
+			"when": 1782604800000,
+			"tag": "0053_github_event_spine",
+			"breakpoints": true
+		},
+		{
+			"idx": 54,
+			"version": "7",
+			"when": 1782691200000,
+			"tag": "0054_git_room_bindings",
+			"breakpoints": true
+		},
+		{
+			"idx": 55,
+			"version": "7",
+			"when": 1782777600000,
+			"tag": "0055_room_shared_artifacts",
+			"breakpoints": true
+		},
+		{
+			"idx": 56,
+			"version": "7",
+			"when": 1782864000000,
+			"tag": "0056_git_room_lifecycle_order",
+			"breakpoints": true
+		},
+		{
+			"idx": 57,
+			"version": "7",
+			"when": 1782950400000,
+			"tag": "0057_agent_session_repo_branch",
+			"breakpoints": true
+		},
+		{
+			"idx": 58,
+			"version": "7",
+			"when": 1783036800000,
+			"tag": "0058_room_shared_artifact_number_bigint",
+			"breakpoints": true
+		},
+		{
+			"idx": 59,
+			"version": "7",
+			"when": 1783123200000,
+			"tag": "0059_board_manager_intents",
+			"breakpoints": true
+		},
+		{
+			"idx": 60,
+			"version": "7",
+			"when": 1783209600000,
+			"tag": "0060_room_shared_artifact_git_kinds",
+			"breakpoints": true
+		},
+		{
+			"idx": 61,
+			"version": "7",
+			"when": 1783296000000,
+			"tag": "0061_rental_context_requests",
+			"breakpoints": true
+		},
+		{
+			"idx": 62,
+			"version": "7",
+			"when": 1783382400000,
+			"tag": "0062_desktop_event_delivery",
+			"breakpoints": true
+		},
+		{
+			"idx": 63,
+			"version": "7",
+			"when": 1783468800000,
+			"tag": "0063_room_shared_artifact_detail",
+			"breakpoints": true
+		},
+		{
+			"idx": 64,
+			"version": "7",
+			"when": 1783900800000,
+			"tag": "0064_agent_offline_announcements",
+			"breakpoints": true
+		},
+		{
+			"idx": 65,
+			"version": "7",
+			"when": 1783987200000,
+			"tag": "0065_board_manager_failover",
+			"breakpoints": true
+		},
+		{
+			"idx": 66,
+			"version": "7",
+			"when": 1784073600000,
+			"tag": "0066_board_intent_escalation",
+			"breakpoints": true
+		},
+		{
+			"idx": 67,
+			"version": "7",
+			"when": 1784160000000,
+			"tag": "0067_room_stall_watchdog",
+			"breakpoints": true
+		},
+		{
+			"idx": 68,
+			"version": "7",
+			"when": 1784246400000,
+			"tag": "0068_agent_session_bearers",
+			"breakpoints": true
+		},
+		{
+			"idx": 69,
+			"version": "7",
+			"when": 1784332800000,
+			"tag": "0069_supervisor_host_grants",
+			"breakpoints": true
+		},
+		{
+			"idx": 70,
+			"version": "7",
+			"when": 1784419200000,
+			"tag": "0070_task_lease_epoch",
+			"breakpoints": true
+		},
+		{
+			"idx": 71,
+			"version": "7",
+			"when": 1784505600000,
+			"tag": "0071_task_lease_rebind_attestation",
+			"breakpoints": true
+		},
+		{
+			"idx": 72,
+			"version": "7",
+			"when": 1784592000000,
+			"tag": "0072_workflow_effect_outbox",
+			"breakpoints": true
+		},
+		{
+			"idx": 73,
+			"version": "7",
+			"when": 1784678400000,
+			"tag": "0073_agent_session_assigned_base",
+			"breakpoints": true
+		}
+	]
 }

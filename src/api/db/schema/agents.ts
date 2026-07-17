@@ -64,6 +64,12 @@ export const room_agent_sessions = pgTable(
     tool_bridge_id: text("tool_bridge_id"),
     repo_branch: text("repo_branch"),
     display_name: text("display_name").notNull(),
+    // The server-resolved BASE label for this session, before any collision
+    // suffix. Provenance for replay normalization: a decorated replay is only
+    // reduced to a base the identity actually held; a legitimate numeric-ending
+    // name is itself recorded as a base, so it is never demoted. Nullable for
+    // legacy rows (fail closed: absent provenance = no stripping).
+    assigned_base_display_name: text("assigned_base_display_name"),
     owner_account_id: text("owner_account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
