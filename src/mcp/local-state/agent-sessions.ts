@@ -35,22 +35,21 @@ export function getCurrentAgentSession(roomId?: string | null): StoredAgentSessi
 }
 
 /**
- * The most recently updated stored session (active or ended) this identity had
- * in the room. Re-registration consults it so a replayed prior label reuses
- * the base recorded when that label was first allocated.
+ * Every stored session (active or ended) this identity had in the room,
+ * most recently updated first. Re-registration consults the FULL lineage so a
+ * replayed prior label reuses the base recorded when that exact label was
+ * allocated — a latest-only lookup would lose an older concurrent sibling's
+ * base and misread its restart as a deliberate rename.
  */
-export function getLastStoredAgentSessionForRoomIdentity(
+export function getStoredAgentSessionsForRoomIdentity(
   roomId: string,
   agentKey: string | null | undefined
-): StoredAgentSessionState | null {
-  if (!roomId || !agentKey) return null;
+): StoredAgentSessionState[] {
+  if (!roomId || !agentKey) return [];
   const state = readLocalState();
-  let best: StoredAgentSessionState | null = null;
-  for (const session of Object.values(state.agent_sessions ?? {})) {
-    if (session.room_id !== roomId || session.agent_key !== agentKey) continue;
-    if (!best || session.updated_at > best.updated_at) best = session;
-  }
-  return best;
+  return Object.values(state.agent_sessions ?? {})
+    .filter((session) => session.room_id === roomId && session.agent_key === agentKey)
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
 export function saveAgentSession(

@@ -107,7 +107,7 @@ export {
   getPendingDeviceAuth,
   getStoredAgentIdentity,
   getStoredAgentSession,
-  getLastStoredAgentSessionForRoomIdentity,
+  getStoredAgentSessionsForRoomIdentity,
   getStoredAuth,
   getStoredCurrentRoom,
   getStoredRoomSession,

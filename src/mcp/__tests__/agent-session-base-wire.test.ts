@@ -62,9 +62,13 @@ test("register_agent_session emits, persists, and replays the stable base signal
           ? body.requested_base_display_name
           : null;
         const requestedName = typeof body?.display_name === "string" ? body.display_name : "WireFox";
-        // First allocation simulates a live collision: the server decorates
-        // the label but records the base it allocated from.
-        const displayName = sessionCounter === 1 ? `${requestedName} 2` : requestedName;
+        // Simulated collisions: the first "MistyMorrow" allocation decorates
+        // to "MistyMorrow 2"; a later bare "MistyMorrow" request while that
+        // label sibling exists decorates to "MistyMorrow 1". The server always
+        // records the base it allocated from.
+        const displayName = requestedName === "MistyMorrow"
+          ? (sessionCounter === 1 ? "MistyMorrow 2" : "MistyMorrow 1")
+          : requestedName;
         return new Response(JSON.stringify({
           session_id: `agent_session_wire_${sessionCounter}`,
           session_token: `token_${sessionCounter}`,
@@ -133,6 +137,28 @@ test("register_agent_session emits, persists, and replays the stable base signal
       registrationBodies[2]!.requested_base_display_name,
       "MistyMorrow 47",
       "a deliberate rename is its own base on the wire",
+    );
+
+    // 5. Concurrent-sibling restart: allocate a NEWER sibling ("MistyMorrow 1",
+    //    base "MistyMorrow"), then restart the OLDER sibling by replaying its
+    //    decorated label "MistyMorrow 2". A latest-only provenance lookup would
+    //    compare against the newer sibling, mismatch, and misdeclare
+    //    "MistyMorrow 2" as a deliberate base — the exact-label lineage match
+    //    must still declare the ORIGINAL base.
+    const sibling = JSON.parse((await register({ room_id: "room_wire", display_name: "MistyMorrow" })).content[0]!.text);
+    assert.equal(sibling.success, true);
+    const storedSibling = getStoredAgentSession(sibling.agent_session_id);
+    assert.equal(storedSibling!.display_name, "MistyMorrow 1", "newer sibling holds the decorated label");
+    assert.equal(storedSibling!.requested_base_display_name, "MistyMorrow");
+
+    const olderRestart = JSON.parse((await register({ room_id: "room_wire", display_name: "MistyMorrow 2" })).content[0]!.text);
+    assert.equal(olderRestart.success, true);
+    const lastBody = registrationBodies[registrationBodies.length - 1]!;
+    assert.equal(lastBody.display_name, "MistyMorrow 2");
+    assert.equal(
+      lastBody.requested_base_display_name,
+      "MistyMorrow",
+      "restarting the older sibling resolves its base from the exact-label lineage, not the latest session",
     );
   } finally {
     globalThis.fetch = originalFetch;

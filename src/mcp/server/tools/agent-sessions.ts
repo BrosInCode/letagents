@@ -21,7 +21,7 @@ import {
   getSessionLivenessRegistration,
   getAgentSessionRepoBranch,
   getStoredAgentSession,
-  getLastStoredAgentSessionForRoomIdentity,
+  getStoredAgentSessionsForRoomIdentity,
   getTargetRoomId,
   ensureLocalWorkerAgentSession,
   isLocalRoomStorageEnabled,
@@ -169,11 +169,11 @@ export function registerAgentSessionTools(server: McpServer): void {
       // Stable-base signal (task_66): declare the intent behind display_name
       // so the server can converge a replayed decorated label without ever
       // guessing from numeric shape.
-      const priorRoomSession = getLastStoredAgentSessionForRoomIdentity(apiRoomId, identity.canonical_key);
+      const priorRoomSessions = getStoredAgentSessionsForRoomIdentity(apiRoomId, identity.canonical_key);
       const requestedBaseDisplayName = resolveClientRequestedBase({
         explicitDisplayName: display_name,
         identityDisplayName: identity.display_name,
-        priorSession: priorRoomSession,
+        priorSessions: priorRoomSessions,
       });
       const created = await apiCall<Record<string, unknown>>(
         `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
