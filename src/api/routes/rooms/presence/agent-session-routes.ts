@@ -1,7 +1,7 @@
 import type { Express } from "express";
 
 import {
-  createRoomAgentSession,
+  createFencedRoomAgentSession,
   endRoomAgentSession,
   forceDisconnectRoomAgentDeliverySession,
   getActiveRoomAgentSessionsForWorkerIdentity,
@@ -9,6 +9,8 @@ import {
   getLastEndedWorkerSessionDisplayName,
   getRoomAgentSessionByCredentials,
   getRoomParticipants,
+  isActiveAgentInstanceConflictError,
+  isActiveRoomAgentSessionStaleForRegistration,
   recordNativeHarnessActivity,
   upsertDesktopRoomAgentDeliveryHeartbeat,
   upsertRoomAgentPresence,
@@ -132,6 +134,8 @@ export function registerAgentSessionRoutes(
       runtime,
       repo_branch,
       registration_liveness,
+      replace_agent_session_id,
+      replace_agent_session_token,
     } = req.body as {
       actor_key?: string;
       actor_label?: string;
@@ -143,6 +147,8 @@ export function registerAgentSessionRoutes(
       runtime?: string;
       repo_branch?: string | null;
       registration_liveness?: unknown;
+      replace_agent_session_id?: string | null;
+      replace_agent_session_token?: string | null;
     };
 
     const actorKey = typeof actor_key === "string" ? actor_key.trim() : "";
@@ -173,6 +179,25 @@ export function registerAgentSessionRoutes(
       const isGenericName = !requestedDisplayName || requestedTokens.every((token) => genericKeywords.has(token));
 
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
+      const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
+      const normalizedRegistrationLiveness = normalizeRegistrationLiveness(registration_liveness);
+      const replacementSessionId = typeof replace_agent_session_id === "string"
+        ? replace_agent_session_id.trim()
+        : "";
+      const replacementSessionToken = typeof replace_agent_session_token === "string"
+        ? replace_agent_session_token.trim()
+        : "";
+      if (
+        Boolean(replacementSessionId) !== Boolean(replacementSessionToken)
+        || replacementSessionId.length > 240
+        || replacementSessionToken.length > 512
+      ) {
+        res.status(400).json({
+          error: "replace_agent_session_id and replace_agent_session_token must be supplied together.",
+          code: "invalid_agent_session_replacement_proof",
+        });
+        return;
+      }
       const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
         requestedSessionKind === "worker"
@@ -182,6 +207,32 @@ export function registerAgentSessionRoutes(
             })
           : Promise.resolve([]),
       ]);
+      const replaceableSessionIds = new Set(
+        activeSessionsForIdentity
+          .filter((session) => normalizedAgentInstanceId
+            && session.agent_instance_id === normalizedAgentInstanceId
+            && (session.session_id === replacementSessionId
+              || isActiveRoomAgentSessionStaleForRegistration({
+              active_session: session,
+            })))
+          .map((session) => session.session_id),
+      );
+      const conflictingSameInstance = activeSessionsForIdentity.find((session) =>
+        normalizedAgentInstanceId
+          && session.agent_instance_id === normalizedAgentInstanceId
+          && !replaceableSessionIds.has(session.session_id)
+      );
+      if (conflictingSameInstance) {
+        res.status(409).json({
+          error: "This exact agent instance is already active on another live transport.",
+          code: "agent_instance_already_active",
+          active_session_id: conflictingSameInstance.session_id,
+        });
+        return;
+      }
+      const allocationSessions = activeSessionsForIdentity.filter(
+        (session) => !replaceableSessionIds.has(session.session_id),
+      );
 
       // Reduce a replayed, already-decorated label to its base ONLY from the
       // client's explicit trusted base signal (`requested_base_display_name`),
@@ -203,7 +254,7 @@ export function registerAgentSessionRoutes(
         : (normalizedRequestedDisplayName || canonicalDisplayName);
       const usedDisplayNames = new Set([
         ...activeParticipants.map((participant) => participant.display_name),
-        ...activeSessionsForIdentity.map((session) => session.display_name),
+        ...allocationSessions.map((session) => session.display_name),
       ]);
 
       // Participant rows are durable room history, not proof that a label is
@@ -212,7 +263,7 @@ export function registerAgentSessionRoutes(
       // it. Never reclaim a label that belongs to a human or another agent:
       // genuinely concurrent/same-name peers still need disambiguation.
       if (requestedSessionKind === "worker") {
-        const baseHeldByThisIdentity = activeSessionsForIdentity.some(
+        const baseHeldByThisIdentity = allocationSessions.some(
           (session) => session.display_name === baseDisplayName
         );
         const baseBelongsToAnotherParticipant = activeParticipants.some(
@@ -244,7 +295,7 @@ export function registerAgentSessionRoutes(
         if (
           resumableName
           && (isGenericName || resumableName === baseDisplayName)
-          && !activeSessionsForIdentity.some((session) => session.display_name === resumableName)
+          && !allocationSessions.some((session) => session.display_name === resumableName)
         ) {
           usedDisplayNames.delete(resumableName);
           baseDisplayName = resumableName;
@@ -259,8 +310,6 @@ export function registerAgentSessionRoutes(
       );
 
       let offset = 0;
-      const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
-      const normalizedRegistrationLiveness = normalizeRegistrationLiveness(registration_liveness);
       const normalizedRepoBranch = normalizeOptionalText(repo_branch);
       const maxRegistrationAttempts = 25;
       for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
@@ -276,7 +325,7 @@ export function registerAgentSessionRoutes(
         });
 
         try {
-          const session = await createRoomAgentSession({
+          const created = await createFencedRoomAgentSession({
             room_id: project.id,
             session_kind: requestedSessionKind,
             runtime: normalizeRuntime(runtime || resolvedIdeLabel),
@@ -292,11 +341,21 @@ export function registerAgentSessionRoutes(
             owner_account_id: req.sessionAccount.account_id,
             owner_label: agent.owner_label,
             ide_label: resolvedIdeLabel,
-          });
-
-          res.status(201).json(session);
+          }, replacementSessionId && replacementSessionToken ? {
+            session_id: replacementSessionId,
+            session_token: replacementSessionToken,
+          } : null);
+          res.status(201).json(created.session);
           return;
         } catch (error) {
+          if (isActiveAgentInstanceConflictError(error)) {
+            res.status(409).json({
+              error: error.message,
+              code: error.code,
+              active_session_id: error.active_session_id,
+            });
+            return;
+          }
           if (requestedSessionKind === "worker" && isActiveWorkerActorLabelConflict(error)) {
             usedDisplayNames.add(sessionDisplayName);
             offset++;

@@ -170,11 +170,20 @@ export function registerAgentSessionTools(server: McpServer): void {
       // so the server can converge a replayed decorated label without ever
       // guessing from numeric shape.
       const priorRoomSessions = getStoredAgentSessionsForRoomIdentity(apiRoomId, identity.canonical_key);
+      const requestedSessionKind = session_kind ?? "worker";
       const requestedBaseDisplayName = resolveClientRequestedBase({
         explicitDisplayName: display_name,
         identityDisplayName: identity.display_name,
         priorSessions: priorRoomSessions,
       });
+      const replacementSession = requestedSessionKind === "worker"
+        ? priorRoomSessions.find((session) =>
+            !session.ended_at
+            && session.session_kind === "worker"
+            && session.agent_instance_id === AGENT_INSTANCE_UUID
+            && Boolean(session.session_token)
+          ) ?? null
+        : null;
       const created = await apiCall<Record<string, unknown>>(
         `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
         {
@@ -190,6 +199,8 @@ export function registerAgentSessionTools(server: McpServer): void {
             runtime: requestedRuntime,
             repo_branch: repoBranch,
             registration_liveness: getSessionLivenessRegistration(requestedRuntime),
+            replace_agent_session_id: replacementSession?.session_id ?? null,
+            replace_agent_session_token: replacementSession?.session_token ?? null,
           }),
         }
       );
@@ -198,6 +209,13 @@ export function registerAgentSessionTools(server: McpServer): void {
       const sessionToken = typeof created.session_token === "string" ? created.session_token : "";
       if (!sessionId || !sessionToken) {
         throw new Error("Agent session registration response was missing session credentials.");
+      }
+
+      if (replacementSession) {
+        endStoredAgentSession(
+          replacementSession.session_id,
+          typeof created.created_at === "string" ? created.created_at : new Date().toISOString(),
+        );
       }
 
       let session = saveAgentSession({
