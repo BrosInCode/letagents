@@ -24,6 +24,8 @@ import {
   type ProviderSpawnRequest,
   type ProviderStopOptions,
   type ProviderTurnControlResult,
+  ProviderTurnControlError,
+  type ProviderTurnControlOptions,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -502,6 +504,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   async controlTurn(
     providerHandle: ProviderHandle,
     correction?: string | null,
+    options: ProviderTurnControlOptions = {},
   ): Promise<ProviderTurnControlResult> {
     const handle = this.requireHandle(providerHandle);
     if (handle.terminal) throw new Error("Claude continuation is terminal; no turn can be controlled.");
@@ -509,6 +512,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const active = handle.state === "working";
     if (active) {
       const resultBoundary = this.waitForNextTurnResult(handle);
+      await options.markDispatched?.();
+      if (handle.state !== "working") {
+        const result = await resultBoundary;
+        throw new ProviderTurnControlError(
+          `Claude returned ${streamMethod(result)} before the interrupt was dispatched.`,
+          "not_applied",
+        );
+      }
       handle.child.writeLine(JSON.stringify({
         type: "control_request",
         request_id: randomUUID(),
@@ -520,11 +531,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       const result = await resultBoundary;
       const subtype = typeof result.subtype === "string" ? result.subtype.toLowerCase() : "";
       if (subtype !== "interrupted" || sessionIdOf(result) !== handle.providerContinuationId) {
-        throw new Error(`Claude returned ${streamMethod(result)} instead of an exact-session interrupted boundary.`);
+        const exactSessionTerminal = sessionIdOf(result) === handle.providerContinuationId;
+        throw new ProviderTurnControlError(
+          `Claude returned ${streamMethod(result)} instead of an exact-session interrupted boundary.`,
+          exactSessionTerminal ? "not_applied" : "uncertain",
+        );
       }
       handle.state = "idle";
     }
     if (text) {
+      if (!active) await options.markDispatched?.();
       handle.child.writeLine(userStreamJsonLine(text));
       handle.state = "working";
     }

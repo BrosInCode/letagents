@@ -417,7 +417,7 @@ export interface DesktopSupervisorManifestEntry {
     actionId: string;
     workAttemptId: string;
     executionGenerationId: string;
-    status: "accepted" | "completed" | "uncertain";
+    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
     capability: "native_interrupt" | "restart_resume" | "unsupported";
     interrupted: boolean | null;
     resumed: boolean | null;
@@ -464,6 +464,14 @@ export interface DesktopSupervisorTurnControlResult {
   state: "idle" | "working";
   duplicate: boolean;
   stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
+}
+
+export interface DesktopSupervisorTurnControlResolutionInput {
+  entryId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  actionId: string;
+  resolution: "not_applied" | "applied";
 }
 
 export interface DesktopSupervisorAttemptDetail {

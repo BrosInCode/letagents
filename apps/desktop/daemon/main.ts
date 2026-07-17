@@ -225,6 +225,16 @@ export class SupervisorDaemon {
           correction: typeof params.correction === "string" ? params.correction : null,
         });
       }
+      if (request.method === "manifest.resolve_turn_control") {
+        const params = this.paramsRecord(request.params);
+        return this.resolveTurnControl({
+          entryId: String(params.id ?? ""),
+          workAttemptId: String(params.work_attempt_id ?? ""),
+          executionGenerationId: String(params.execution_generation_id ?? ""),
+          actionId: String(params.action_id ?? ""),
+          resolution: String(params.resolution ?? "") as "not_applied" | "applied",
+        });
+      }
       if (request.method === "lane.reserve_legacy") {
         const params = this.paramsRecord(request.params);
         return this.reserveLegacyLane({
@@ -296,7 +306,7 @@ export class SupervisorDaemon {
     await this.singleton.acquire();
     this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
     this.manifestGeneration = (await this.store.load()).generation;
-    await this.recoverAcceptedTurnControls();
+    await this.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
     await this.socket.start();
     if (this.providerPort && this.autoConverge) {
@@ -304,20 +314,23 @@ export class SupervisorDaemon {
     }
   }
 
-  private async recoverAcceptedTurnControls(): Promise<void> {
+  private async recoverTurnControls(): Promise<void> {
     await this.serializeManifestMutation(async () => {
       const manifest = await this.store.load();
       const recoveredAt = new Date().toISOString();
       let changed = false;
       const entries = manifest.entries.map((entry) => {
-        if (entry.turn_control?.status !== "accepted") return entry;
+        if (entry.turn_control?.status !== "prepared" && entry.turn_control?.status !== "dispatching") return entry;
         changed = true;
+        const wasPrepared = entry.turn_control.status === "prepared";
         return {
           ...entry,
           turn_control: {
             ...entry.turn_control,
-            status: "uncertain" as const,
-            error: "Supervisor restarted before the provider outcome was durably completed; the action was not replayed.",
+            status: wasPrepared ? "retryable" as const : "uncertain" as const,
+            error: wasPrepared
+              ? "Supervisor restarted before native dispatch; the correction is safe to retry."
+              : "Supervisor restarted after native dispatch began; verify the provider outcome before resolving the action.",
             updated_at: recoveredAt,
           },
         };
@@ -507,6 +520,83 @@ export class SupervisorDaemon {
     return operation;
   }
 
+  private async resolveTurnControl(input: {
+    entryId: string;
+    workAttemptId: string;
+    executionGenerationId: string;
+    actionId: string;
+    resolution: "not_applied" | "applied";
+  }): Promise<DaemonManifestEntryView> {
+    if (!input.entryId || !input.workAttemptId || !input.executionGenerationId || !input.actionId) {
+      throw new Error("Exact turn-control resolution identity is required.");
+    }
+    if (input.resolution !== "not_applied" && input.resolution !== "applied") {
+      throw new Error("Turn-control resolution must be 'not_applied' or 'applied'.");
+    }
+    const updated = await this.updateManifestEntry(input.entryId, (current) => {
+      const control = current.turn_control;
+      if (!control
+        || control.action_id !== input.actionId
+        || control.work_attempt_id !== input.workAttemptId
+        || control.execution_generation_id !== input.executionGenerationId
+        || current.work_attempt_id !== input.workAttemptId
+        || current.provider_ref?.execution_generation_id !== input.executionGenerationId) {
+        throw new Error("Turn-control resolution identity is stale or belongs to another execution.");
+      }
+      if (control.status !== "uncertain") {
+        throw new Error("Only an uncertain turn-control outcome requires operator resolution.");
+      }
+      const updatedAt = new Date().toISOString();
+      const activity = [...(current.activity ?? []), sanitizeDaemonActivityEvent({
+        observed_at: updatedAt,
+        sequence: ((current.activity ?? []).at(-1)?.sequence ?? 0) + 1,
+        provider: current.provider,
+        kind: "turn_lifecycle",
+        method: "supervisor/resolve-turn-control",
+        summary: input.resolution === "not_applied"
+          ? "Operator verified the ambiguous native effect was not applied; retry enabled"
+          : "Operator verified the ambiguous native effect was applied",
+        status: current.observed_state === "working" ? "working" : "idle",
+        payload: { action_id: control.action_id, resolution: input.resolution },
+        payload_truncated: false,
+        payload_redacted: false,
+        durable_payload_ref: null,
+      })].slice(-200);
+      if (input.resolution === "not_applied") {
+        return {
+          ...current,
+          activity,
+          turn_control: {
+            ...control,
+            status: "retryable",
+            stages: [],
+            error: "Operator verified that the prior native effect was not applied; retry is enabled.",
+            updated_at: updatedAt,
+          },
+        };
+      }
+      return {
+        ...current,
+        activity,
+        reconciliation: rememberCompletedControlAction(
+          advanceReconciliationState(current.reconciliation, current.observed_state, this.nowMs()),
+          control.action_id,
+        ),
+        turn_control: {
+          ...control,
+          status: "completed",
+          interrupted: true,
+          resumed: control.has_correction,
+          state: current.observed_state === "working" ? "working" : "idle",
+          stages: ["already_applied"],
+          error: "Operator verified that the prior native effect was applied.",
+          updated_at: updatedAt,
+        },
+      };
+    });
+    return this.entryWithDerivedLiveness(updated);
+  }
+
   private async controlTurnOnce(input: {
     entryId: string;
     workAttemptId: string;
@@ -534,6 +624,8 @@ export class SupervisorDaemon {
     const capability = capabilities?.turnControl ?? "unsupported";
     const correction = input.correction?.trim() || null;
     const existingControl = entry.turn_control;
+    const retryingControl = existingControl?.action_id === input.actionId
+      && existingControl.status === "retryable";
     if (existingControl?.action_id === input.actionId) {
       if (existingControl.work_attempt_id !== input.workAttemptId
         || existingControl.execution_generation_id !== input.executionGenerationId
@@ -554,12 +646,15 @@ export class SupervisorDaemon {
           stages: ["already_applied"],
         };
       }
-      throw new Error("Turn control was durably accepted but its provider outcome is uncertain; it was not replayed.");
+      if (!retryingControl) {
+        throw new Error("Turn control was durably dispatched but its provider outcome is unresolved; it was not replayed.");
+      }
     }
     if (existingControl
       && existingControl.work_attempt_id === input.workAttemptId
       && existingControl.execution_generation_id === input.executionGenerationId
-      && existingControl.status !== "completed") {
+      && existingControl.status !== "completed"
+      && existingControl.status !== "retryable") {
       throw new Error(`Turn control action '${existingControl.action_id}' is unresolved; refusing a second action on the same execution generation.`);
     }
     if (reconciliation.completed_action_ids.includes(input.actionId)) {
@@ -603,11 +698,12 @@ export class SupervisorDaemon {
         || current.provider_ref?.execution_generation_id !== input.executionGenerationId) {
         throw new Error("Turn control was superseded before durable acceptance.");
       }
-      if (current.turn_control?.action_id === input.actionId) return current;
+      if (current.turn_control?.action_id === input.actionId && current.turn_control.status !== "retryable") return current;
       if (current.turn_control
         && current.turn_control.work_attempt_id === input.workAttemptId
         && current.turn_control.execution_generation_id === input.executionGenerationId
-        && current.turn_control.status !== "completed") {
+        && current.turn_control.status !== "completed"
+        && current.turn_control.status !== "retryable") {
         throw new Error(`Turn control action '${current.turn_control.action_id}' became unresolved before dispatch.`);
       }
       return {
@@ -617,7 +713,7 @@ export class SupervisorDaemon {
           work_attempt_id: input.workAttemptId,
           execution_generation_id: input.executionGenerationId,
           has_correction: Boolean(correction),
-          status: "accepted",
+          status: "prepared",
           capability,
           interrupted: null,
           resumed: null,
@@ -630,16 +726,44 @@ export class SupervisorDaemon {
       };
     });
     let providerResult: ProviderTurnControlResult;
+    let dispatchMarked = false;
     try {
-      providerResult = await this.providerPort.controlTurn(handle, correction, { actionId: input.actionId });
+      providerResult = await this.providerPort.controlTurn(handle, correction, {
+        actionId: input.actionId,
+        markDispatched: async () => {
+          if (dispatchMarked) return;
+          await this.updateManifestEntry(entry.id, (current) => {
+            if (current.turn_control?.action_id !== input.actionId
+              || current.work_attempt_id !== input.workAttemptId
+              || current.provider_ref?.execution_generation_id !== input.executionGenerationId) {
+              throw new Error("Turn control lost its durable prepared journal before native dispatch.");
+            }
+            return {
+              ...current,
+              turn_control: {
+                ...current.turn_control,
+                status: "dispatching",
+                updated_at: new Date().toISOString(),
+              },
+            };
+          });
+          dispatchMarked = true;
+        },
+      });
+      if ((providerResult.interrupted || providerResult.resumed) && !dispatchMarked) {
+        throw new Error("Provider reported a turn-control effect without marking native dispatch.");
+      }
     } catch (error) {
       const message = redactCredentialText(error instanceof Error ? error.message : String(error)).value;
+      const outcome = error && typeof error === "object" && "turnControlOutcome" in error
+        ? (error as { turnControlOutcome?: unknown }).turnControlOutcome
+        : null;
       await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
         ? {
           ...current,
           turn_control: {
             ...current.turn_control,
-            status: "uncertain",
+            status: outcome === "not_applied" ? "retryable" : dispatchMarked ? "uncertain" : "retryable",
             error: message,
             updated_at: new Date().toISOString(),
           },

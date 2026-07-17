@@ -19,6 +19,8 @@ import {
   type ProviderSpawnRequest,
   type ProviderStopOptions,
   type ProviderTurnControlResult,
+  type ProviderTurnControlOptions,
+  ProviderTurnControlError,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -411,6 +413,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   async controlTurn(
     providerHandle: ProviderHandle,
     correction?: string | null,
+    options: ProviderTurnControlOptions = {},
   ): Promise<ProviderTurnControlResult> {
     const handle = this.requireHandle(providerHandle);
     if (handle.terminal) throw new Error("Cursor continuation is terminal; no turn can be controlled.");
@@ -421,8 +424,18 @@ export class CursorProviderAdapter implements ProviderAdapter {
       if (typeof identity !== "string" || !sameProcessBirthIdentity(identity, turn.processIdentity)) {
         throw new Error("Cursor turn identity is stale; refusing to interrupt a different process.");
       }
-      turn.interruptRequested = true;
       try {
+        await options.markDispatched?.();
+        const dispatchIdentity = this.deps.getProcessIdentity(turn.pid);
+        if (handle.liveTurn !== turn
+          || typeof dispatchIdentity !== "string"
+          || !sameProcessBirthIdentity(dispatchIdentity, turn.processIdentity)) {
+          throw new ProviderTurnControlError(
+            "Cursor turn ended before the child interrupt was dispatched.",
+            "not_applied",
+          );
+        }
+        turn.interruptRequested = true;
         this.deps.signalProcess(turn.pid, "SIGTERM");
       } catch (error) {
         turn.interruptRequested = false;
@@ -437,7 +450,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
       await turn.completion;
       if (handle.terminal) throw new Error("Cursor turn interruption unexpectedly ended the supervised attempt.");
     }
-    if (text) await this.beginTurn(handle, text, handle.providerContinuationId);
+    if (text) {
+      if (!turn) await options.markDispatched?.();
+      await this.beginTurn(handle, text, handle.providerContinuationId);
+    }
     return {
       capability: "restart_resume",
       interrupted: Boolean(turn),

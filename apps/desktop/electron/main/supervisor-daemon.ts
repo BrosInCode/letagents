@@ -14,6 +14,7 @@ import type {
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import { desktopRoot } from "./paths.js";
@@ -74,7 +75,7 @@ type WireEntry = {
     action_id: string;
     work_attempt_id: string;
     execution_generation_id: string;
-    status: "accepted" | "completed" | "uncertain";
+    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
     capability: "native_interrupt" | "restart_resume" | "unsupported";
     interrupted: boolean | null;
     resumed: boolean | null;
@@ -272,6 +273,17 @@ export class SupervisorDaemonClient {
       action_id: input.actionId,
       correction: input.correction ?? null,
     }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+  }
+
+  async resolveTurnControl(input: DesktopSupervisorTurnControlResolutionInput): Promise<DesktopSupervisorManifestEntry> {
+    await this.ensureRunning();
+    return mapEntry(await this.request<WireEntry>("manifest.resolve_turn_control", {
+      id: input.entryId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      action_id: input.actionId,
+      resolution: input.resolution,
+    }));
   }
 
   async readAttempt(id: string): Promise<DesktopSupervisorAttemptDetail> {

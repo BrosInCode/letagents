@@ -1537,6 +1537,16 @@
   font-size: 11px;
 }
 
+.desktop-agent-turn-control-resolution {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.desktop-agent-turn-control-resolution button {
+  flex: 1 1 180px;
+}
+
 .desktop-agent-detail-permission-actions button {
   display: inline-flex;
   align-items: center;
