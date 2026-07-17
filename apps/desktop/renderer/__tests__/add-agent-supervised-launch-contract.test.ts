@@ -36,12 +36,16 @@ test("Add Agent modal folds launch events idempotently by sequence", () => {
   assert.match(modalSource, /existing\.sequence === event\.sequence/);
 });
 
-test("the sign-in recovery performs a real provider-auth action, not a silent retry", () => {
-  // sign_in must copy the provider sign-in command (a real action), not fall
-  // straight through to startManagedAgent.
+test("the sign-in recovery performs a real provider-auth action and does not start the agent", () => {
+  // sign_in (with a command) must copy the provider sign-in command and RETURN,
+  // never falling through to startManagedAgent.
   assert.match(modalSource, /action === "sign_in" && authCommand\.value/);
   const signInBranch = modalSource.slice(modalSource.indexOf('action === "sign_in"'));
-  assert.match(signInBranch, /copyAgentAuthCommand\(\)/);
+  assert.match(signInBranch, /copyAgentAuthCommand\(\)[\s\S]*?return;/);
+  // The retry/reconnect fallthrough (and command-absent sign_in) is the only
+  // path that starts the agent.
+  const recoverBody = modalSource.slice(modalSource.indexOf("function handleLaunchRecover"));
+  assert.match(recoverBody, /supervisedCreationRequestId = activeLaunchId\.value;[\s\S]*?startManagedAgent\(\)/);
 });
 
 test("Add Agent modal keeps raw supervised lookup errors out of the product card", () => {

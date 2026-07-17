@@ -62,6 +62,27 @@ test("resolveReadyReachedAt stamps ready once, monotonically, and only when runn
   );
 });
 
+test("ready_reached_at survives a manifest round-trip, defaults absent, and a stop never clears it (task_84)", async () => {
+  const env = await fixture();
+  try {
+    const store = new ManifestStore(join(env.root, "manifest.json"));
+    // An old manifest without the field loads as absent (defaults null downstream).
+    await store.write(0, [{ ...entry }]);
+    assert.equal((await store.load()).entries[0]?.ready_reached_at, undefined);
+    // A set-once stamp survives save → load (i.e. a daemon restart round-trip).
+    await store.write(1, [{ ...entry, ready_reached_at: "2026-07-17T00:00:00.000Z" }]);
+    assert.equal((await store.load()).entries[0]?.ready_reached_at, "2026-07-17T00:00:00.000Z");
+    // A later stop (spread-preserving mutation) must not clear the stamp.
+    const loaded = (await store.load()).entries[0]!;
+    await store.write(2, [{ ...loaded, desired_state: "stopped", observed_state: "absent" }]);
+    const after = (await store.load()).entries[0];
+    assert.equal(after?.ready_reached_at, "2026-07-17T00:00:00.000Z");
+    assert.equal(after?.desired_state, "stopped");
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test("legacy lane owner liveness compares the stable process birth prefix, not the whole ps line", () => {
   // Repro of the supervised Start reserve->activate failure: Electron records the
   // owner identity as start-time only (defaultGetProcessIdentity = `ps -o lstart=`),
