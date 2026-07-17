@@ -37,6 +37,9 @@ import type {
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResolutionInput,
+  DesktopSupervisorTurnControlResult,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
 } from "./agents.js";
@@ -298,6 +301,8 @@ export interface DesktopApi {
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
+    controlTurn: (input: DesktopSupervisorTurnControlInput) => Promise<DesktopSupervisorTurnControlResult>;
+    resolveTurnControl: (input: DesktopSupervisorTurnControlResolutionInput) => Promise<DesktopSupervisorManifestEntry>;
     readAttempt: (id: string) => Promise<DesktopSupervisorAttemptDetail>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
   };

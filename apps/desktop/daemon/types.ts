@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.13";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.14";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -93,6 +93,25 @@ export type DaemonManifestEntry = {
   workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
   activity?: DaemonActivityEvent[];
+  /**
+   * Durable human turn-control effect journal. `accepted` is written before
+   * provider dispatch; after a daemon restart it is never blindly replayed.
+   */
+  turn_control?: {
+    action_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    has_correction: boolean;
+    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
+    capability: "native_interrupt" | "restart_resume" | "unsupported";
+    interrupted: boolean | null;
+    resumed: boolean | null;
+    state: "idle" | "working" | null;
+    stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
+    error: string | null;
+    recorded_at: string;
+    updated_at: string;
+  } | null;
   /** Last verified exact room identity; retained when live credentials unbind. */
   last_worker_binding?: DaemonWorkerBindingProjection | null;
   reconciliation?: ReconciliationState;

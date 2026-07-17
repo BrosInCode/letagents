@@ -49,6 +49,28 @@ export interface ProviderAdapterCapabilities {
    * surface this bound.
    */
   survivesRestart: boolean;
+  /** How this provider can stop one turn without ending the supervised attempt. */
+  turnControl?: "native_interrupt" | "restart_resume" | "unsupported";
+}
+
+export interface ProviderTurnControlResult {
+  capability: NonNullable<ProviderAdapterCapabilities["turnControl"]>;
+  interrupted: boolean;
+  resumed: boolean;
+  state: "idle" | "working";
+}
+
+export interface ProviderTurnControlOptions {
+  /** Persist the dispatching journal state before the first native side effect. */
+  markDispatched?: () => Promise<void>;
+}
+
+export class ProviderTurnControlError extends Error {
+  readonly turnControlOutcome: "not_applied" | "uncertain";
+  constructor(message: string, outcome: "not_applied" | "uncertain") {
+    super(message);
+    this.turnControlOutcome = outcome;
+  }
 }
 
 export type ProviderTerminalCause =
@@ -245,6 +267,12 @@ export interface ProviderAdapter {
 
   /** Inject a message at the next tool boundary. Requires capabilities().midTurnInjection. */
   poke(handle: ProviderHandle, message: string): Promise<void>;
+
+  /**
+   * Stop only the current native turn and optionally apply a correction on the
+   * same provider continuation. This must never make the work attempt terminal.
+   */
+  controlTurn?(handle: ProviderHandle, correction?: string | null, options?: ProviderTurnControlOptions): Promise<ProviderTurnControlResult>;
 
   /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
   stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;

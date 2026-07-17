@@ -23,6 +23,9 @@ import {
   type ProviderObservedState,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
+  type ProviderTurnControlResult,
+  ProviderTurnControlError,
+  type ProviderTurnControlOptions,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -117,6 +120,7 @@ const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
   // orphan and resume the continuation, but in-context state since the last
   // message is not a survivable live session. Bounded recovery, not survival.
   survivesRestart: false,
+  turnControl: "native_interrupt",
 };
 
 // Reserved flags the adapter owns. Everything else in the launch policy is the
@@ -406,6 +410,7 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
   streamSequence = 0;
+  readonly turnResultWaiters = new Set<(message: ClaudeStreamMessage) => void>();
 
   constructor(
     readonly workAttemptId: string,
@@ -494,6 +499,57 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     throw new Error(
       "Claude mid-turn injection is not enabled: stream-json input is the candidate but no spike cell has proven it.",
     );
+  }
+
+  async controlTurn(
+    providerHandle: ProviderHandle,
+    correction?: string | null,
+    options: ProviderTurnControlOptions = {},
+  ): Promise<ProviderTurnControlResult> {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.terminal) throw new Error("Claude continuation is terminal; no turn can be controlled.");
+    const text = correction?.trim() || null;
+    const active = handle.state === "working";
+    if (active) {
+      const resultBoundary = this.waitForNextTurnResult(handle);
+      await options.markDispatched?.();
+      if (handle.state !== "working") {
+        const result = await resultBoundary;
+        throw new ProviderTurnControlError(
+          `Claude returned ${streamMethod(result)} before the interrupt was dispatched.`,
+          "not_applied",
+        );
+      }
+      handle.child.writeLine(JSON.stringify({
+        type: "control_request",
+        request_id: randomUUID(),
+        request: { subtype: "interrupt" },
+      }));
+      // A control_response acknowledgement is intentionally insufficient. The
+      // subsequent result event is the only proof that the queued/live turn
+      // actually reached an interrupted boundary.
+      const result = await resultBoundary;
+      const subtype = typeof result.subtype === "string" ? result.subtype.toLowerCase() : "";
+      if (subtype !== "interrupted" || sessionIdOf(result) !== handle.providerContinuationId) {
+        const exactSessionTerminal = sessionIdOf(result) === handle.providerContinuationId;
+        throw new ProviderTurnControlError(
+          `Claude returned ${streamMethod(result)} instead of an exact-session interrupted boundary.`,
+          exactSessionTerminal ? "not_applied" : "uncertain",
+        );
+      }
+      handle.state = "idle";
+    }
+    if (text) {
+      if (!active) await options.markDispatched?.();
+      handle.child.writeLine(userStreamJsonLine(text));
+      handle.state = "working";
+    }
+    return {
+      capability: "native_interrupt",
+      interrupted: active,
+      resumed: Boolean(text),
+      state: text ? "working" : "idle",
+    };
   }
 
   async stop(
@@ -809,6 +865,26 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
+      const exactInterrupted = typeof message.subtype === "string"
+        && message.subtype.toLowerCase() === "interrupted"
+        && sessionIdOf(message) === handle.providerContinuationId;
+      if (handle.turnResultWaiters.size) {
+        const waiters = [...handle.turnResultWaiters];
+        handle.turnResultWaiters.clear();
+        for (const resolve of waiters) resolve(message);
+      }
+      if (exactInterrupted) {
+        handle.state = "idle";
+        this.publishActivity(handle, {
+          source: "native_harness",
+          method: streamMethod(message),
+          summary: "Turn interrupted",
+          status: "idle",
+          checking: "",
+          next_action: "awaiting redirected work",
+        });
+        return;
+      }
       if (isClaudeFailedResult(message)) {
         handle.state = "failed";
         this.publishActivity(handle, {
@@ -844,6 +920,20 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         next_action: "",
       });
     }
+  }
+
+  private waitForNextTurnResult(handle: ClaudeProviderHandle): Promise<ClaudeStreamMessage> {
+    return new Promise<ClaudeStreamMessage>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        handle.turnResultWaiters.delete(done);
+        reject(new Error("Claude did not prove the active turn reached an interrupted boundary."));
+      }, 10_000);
+      const done = (message: ClaudeStreamMessage) => {
+        clearTimeout(timer);
+        resolve(message);
+      };
+      handle.turnResultWaiters.add(done);
+    });
   }
 
   private publishStream(
