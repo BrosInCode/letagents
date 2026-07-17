@@ -36,6 +36,20 @@ test("Add Agent modal folds launch events idempotently by sequence", () => {
   assert.match(modalSource, /existing\.sequence === event\.sequence/);
 });
 
+test("the sign-in recovery performs a real provider-auth action, not a silent retry", () => {
+  // sign_in must copy the provider sign-in command (a real action), not fall
+  // straight through to startManagedAgent.
+  assert.match(modalSource, /action === "sign_in" && authCommand\.value/);
+  const signInBranch = modalSource.slice(modalSource.indexOf('action === "sign_in"'));
+  assert.match(signInBranch, /copyAgentAuthCommand\(\)/);
+});
+
+test("Add Agent modal keeps raw supervised lookup errors out of the product card", () => {
+  // The raw daemon lookup error must not be interpolated into the card.
+  assert.doesNotMatch(modalSource, /\{\{\s*supervisedConflictLookupError\s*\}\}/);
+  assert.match(modalSource, /We lost track of this launch/);
+});
+
 test("Add Agent modal restores an in-flight launch on reopen from the daemon manifest", () => {
   assert.match(modalSource, /restoreSupervisedLaunchInProgress/);
   assert.match(modalSource, /supervisor\.listAgents\(props\.roomIdentifier\)/);

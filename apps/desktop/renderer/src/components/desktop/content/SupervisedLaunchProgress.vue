@@ -25,6 +25,7 @@
         <span class="supervised-launch-phase-marker" aria-hidden="true">
           <Check v-if="phase.state === 'done'" :size="12" />
           <X v-else-if="phase.state === 'failed'" :size="12" />
+          <Minus v-else-if="phase.state === 'cancelled'" :size="12" />
           <span v-else-if="phase.state === 'active'" class="supervised-launch-phase-spinner" />
           <span v-else class="supervised-launch-phase-dot" />
         </span>
@@ -69,7 +70,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { Check, X } from "@lucide/vue";
+import { Check, Minus, X } from "@lucide/vue";
 import type { DesktopLaunchRecoveryAction } from "../../../../../electron/ipc-types";
 import type { LaunchJourneyPhaseState, LaunchJourneyView } from "../../../domain/launch-journey";
 
@@ -83,6 +84,7 @@ function phaseStatusText(state: LaunchJourneyPhaseState): string {
     case "done": return "Complete";
     case "active": return "In progress";
     case "failed": return "Needs attention";
+    case "cancelled": return "Cancelled";
     default: return "Waiting";
   }
 }
@@ -91,9 +93,7 @@ function recoveryLabel(action: DesktopLaunchRecoveryAction): string {
   switch (action) {
     case "retry": return "Try again";
     case "reconnect": return "Reconnect";
-    // Honest copy: the action retries the launch. Provider sign-in happens in
-    // the provider itself; a dedicated open-provider action is a follow-up.
-    case "sign_in": return "Try again after signing in";
+    case "sign_in": return "Copy sign-in command";
     case "choose_project": return "Choose project";
   }
 }
