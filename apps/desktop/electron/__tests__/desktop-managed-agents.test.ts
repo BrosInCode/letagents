@@ -1348,6 +1348,7 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.match(pollingPrompt, /readable progress for the desktop UI/);
   assert.match(pollingPrompt, /Suggested codename: MapleRidge/);
   assert.match(pollingPrompt, /runtime="codex:LOCAL_CODEX_ROOM_test"/);
+  assert.match(pollingPrompt, /cwd="\/tmp\/repo"/, "fresh supervised registration carries the exact worktree into the MCP bind path");
   assert.match(pollingPrompt, /MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor/);
   assert.match(pollingPrompt, /Treat this as your room identity/);
   assert.match(pollingPrompt, /Call set_agent_name with that chosen codename before posting status or registering/);
