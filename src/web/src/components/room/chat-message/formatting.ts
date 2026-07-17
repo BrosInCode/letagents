@@ -25,8 +25,45 @@ export function stripStatusPrefix(text: string): string {
 
 const MAX_BLOCKQUOTE_DEPTH = 8
 
-export function renderMessageContent(text: string): string {
-  return renderMessageBlocks(text)
+export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>): string {
+  return linkTaskReferences(renderMessageBlocks(text), taskReferenceIds)
+}
+
+function linkTaskReferences(html: string, taskReferenceIds?: ReadonlySet<string>): string {
+  if (!taskReferenceIds?.size) return html
+  const chunks = html.split(/(<[^>]+>)/g)
+  const skipStack: string[] = []
+  return chunks.map((chunk) => {
+    if (!chunk) return ''
+    if (chunk.startsWith('<') && chunk.endsWith('>')) {
+      updateReferenceSkipStack(skipStack, chunk)
+      return chunk
+    }
+    if (skipStack.length) return chunk
+    return chunk.replace(/\btask_\d+\b/g, (taskId) => {
+      if (!taskReferenceIds.has(taskId)) return taskId
+      return [
+        '<button class="task-reference-link" type="button"',
+        ` data-task-reference-id="${taskId}"`,
+        ` title="Open ${taskId} on the Board">`,
+        taskId,
+        '</button>',
+      ].join('')
+    })
+  }).join('')
+}
+
+function updateReferenceSkipStack(skipStack: string[], tag: string): void {
+  const tagMatch = /^<\/?\s*([A-Za-z0-9-]+)/.exec(tag)
+  if (!tagMatch) return
+  const tagName = tagMatch[1]!.toLowerCase()
+  if (!['a', 'button', 'code'].includes(tagName)) return
+  if (/^<\//.test(tag)) {
+    const index = skipStack.lastIndexOf(tagName)
+    if (index >= 0) skipStack.splice(index, 1)
+    return
+  }
+  if (!/\/\s*>$/.test(tag)) skipStack.push(tagName)
 }
 
 function renderMessageBlocks(value: string, quoteDepth = 0): string {

@@ -50,6 +50,7 @@
         :active-thread-root="false"
         :highlight-query="searchQuery"
         :message-reference-ids="threadMessageReferenceIds"
+        :task-reference-ids="taskReferenceIds"
         :search-active="parent.id === activeSearchMessageId"
         :thread-message-id="parent.id"
         :test-id="`room-thread-message-${parent.id}`"
@@ -60,6 +61,7 @@
         @open-image="$emit('open-image', $event)"
         @open-agent="$emit('open-agent', $event)"
         @open-github-event="$emit('open-github-event', $event)"
+        @open-task="$emit('open-task', $event)"
       />
 
       <div class="room-thread-divider">
@@ -81,6 +83,7 @@
           :active-thread-root="false"
           :highlight-query="searchQuery"
           :message-reference-ids="threadMessageReferenceIds"
+          :task-reference-ids="taskReferenceIds"
           :search-active="reply.id === activeSearchMessageId"
           :thread-message-id="reply.id"
           :test-id="`room-thread-reply-${reply.id}`"
@@ -91,6 +94,7 @@
           @open-image="$emit('open-image', $event)"
           @open-agent="$emit('open-agent', $event)"
           @open-github-event="$emit('open-github-event', $event)"
+          @open-task="$emit('open-task', $event)"
         />
       </template>
 
@@ -227,6 +231,7 @@ const props = defineProps<{
   loadingOlderReplies: boolean;
   searchQuery: string;
   activeSearchMessageId: string | null;
+  taskReferenceIds: ReadonlySet<string>;
 }>();
 
 const emit = defineEmits<{
@@ -235,6 +240,7 @@ const emit = defineEmits<{
   "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>];
   "open-github-event": [url: string];
   "open-agent": [target: AgentModalTarget];
+  "open-task": [taskId: string];
   "jump-message": [messageId: string];
   "load-older-replies": [];
   "pick-attachments": [];

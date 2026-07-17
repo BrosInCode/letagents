@@ -6,7 +6,7 @@
       :class="{ collapsed: isLong && !expanded }"
       :data-testid="`desktop-long-message-content-${safeMessageId}`"
     >
-      <div class="desktop-long-message-html" v-html="html" @click="handleMessageReferenceClick" />
+      <div class="desktop-long-message-html" v-html="html" @click="handleInlineReferenceClick" />
       <span v-if="isLong && !expanded" class="desktop-long-message-fade" aria-hidden="true" />
     </div>
 
@@ -54,7 +54,7 @@
           <div
             class="desktop-reader-content desktop-long-message-html"
             v-html="html"
-            @click="handleMessageReferenceClick"
+            @click="handleInlineReferenceClick"
           />
 
           <footer class="desktop-reader-footer">
@@ -85,6 +85,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   "message-reference-click": [messageId: string];
+  "task-reference-click": [taskId: string];
 }>();
 
 const expanded = ref(false);
@@ -117,16 +118,24 @@ function closeReader(): void {
   readerOpen.value = false;
 }
 
-function handleMessageReferenceClick(event: MouseEvent): void {
-  const target = event.target instanceof Element
+function handleInlineReferenceClick(event: MouseEvent): void {
+  const messageTarget = event.target instanceof Element
     ? event.target.closest<HTMLElement>("[data-message-reference-id]")
     : null;
-  const messageId = target?.dataset.messageReferenceId || "";
-  if (!messageId) return;
+  const taskTarget = event.target instanceof Element
+    ? event.target.closest<HTMLElement>("[data-task-reference-id]")
+    : null;
+  const messageId = messageTarget?.dataset.messageReferenceId || "";
+  const taskId = taskTarget?.dataset.taskReferenceId || "";
+  if (!messageId && !taskId) return;
   event.preventDefault();
   event.stopPropagation();
   readerOpen.value = false;
-  emit("message-reference-click", messageId);
+  if (messageId) {
+    emit("message-reference-click", messageId);
+    return;
+  }
+  emit("task-reference-click", taskId);
 }
 
 async function copyText(): Promise<void> {

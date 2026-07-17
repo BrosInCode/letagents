@@ -97,7 +97,9 @@
         <DesktopGitHubEventCard
           v-if="githubEvent"
           :event="githubEvent"
+          :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @open-event="$emit('open-github-event', $event)"
+          @open-task="$emit('open-task', $event)"
         />
 
         <DesktopLongMessageContent
@@ -106,6 +108,7 @@
           :html="renderedText"
           :message-id="message.id"
           @message-reference-click="$emit('scroll-to-message', $event)"
+          @task-reference-click="$emit('open-task', $event)"
         />
 
         <DesktopMessageAttachments
@@ -236,6 +239,7 @@ const props = withDefaults(defineProps<{
   activeThreadRoot: boolean;
   highlightQuery: string;
   messageReferenceIds?: ReadonlySet<string>;
+  taskReferenceIds?: ReadonlySet<string>;
   searchActive: boolean;
   animateArrival?: boolean;
   context?: "timeline" | "thread-root" | "thread-reply";
@@ -252,6 +256,7 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-agent": [target: AgentModalTarget];
   "open-github-event": [url: string];
+  "open-task": [taskId: string];
   "quote-selection": [messageId: string, text: string];
   "jump-to-thread-root": [messageId: string];
 }>();
@@ -304,6 +309,7 @@ const renderedText = computed(() => {
     isAmbientSystem.value ? stripStatusPrefix(text) : text,
     props.highlightQuery,
     props.messageReferenceIds,
+    props.taskReferenceIds,
   );
 });
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");

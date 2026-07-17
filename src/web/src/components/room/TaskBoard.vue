@@ -1,5 +1,5 @@
 <template>
-  <div class="board-panel">
+  <div ref="boardPanel" class="board-panel">
     <TaskBoardAddForm @addTask="emit('addTask', $event)" />
     <TaskBoardEmptyState v-if="groupedTasks.length === 0" />
 
@@ -14,6 +14,7 @@
       :updatingTask="updatingTask"
       :updatingLeaseTask="updatingLeaseTask"
       :updatingReviewLeaseTask="updatingReviewLeaseTask"
+      :selectedTaskId="selectedTaskId"
       @toggle="toggleGroup"
       @updateStatus="handleUpdateStatus"
       @leaseAction="handleLeaseAction"
@@ -24,7 +25,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, toRef } from 'vue'
+import { nextTick, ref, toRef, watch } from 'vue'
 
 import { type RoomAgentPresence, type RoomTask, type TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import TaskBoardAddForm from './task-board/TaskBoardAddForm.vue'
@@ -41,6 +42,7 @@ const props = defineProps<{
   presence: readonly RoomAgentPresence[]
   canManageLeases: boolean
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
+  selectedTaskId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -55,7 +57,23 @@ const updatingTask = ref<string | null>(null)
 const updatingLeaseTask = ref<string | null>(null)
 const updatingReviewLeaseTask = ref<string | null>(null)
 const collapsedGroups = ref(new Set<string>())
+const boardPanel = ref<HTMLElement | null>(null)
 const groupedTasks = useTaskGroups(toRef(props, 'tasks'))
+
+watch(() => props.selectedTaskId || null, async (taskId) => {
+  if (!taskId) return
+  const task = props.tasks.find(candidate => candidate.id === taskId)
+  if (!task) return
+  const nextCollapsed = new Set(collapsedGroups.value)
+  nextCollapsed.delete(task.status)
+  collapsedGroups.value = nextCollapsed
+  await nextTick()
+  const card = Array.from(
+    boardPanel.value?.querySelectorAll<HTMLElement>('[data-board-task-id]') || [],
+  ).find(candidate => candidate.dataset.boardTaskId === taskId)
+  card?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  card?.focus({ preventScroll: true })
+}, { immediate: true })
 
 function toggleGroup(status: string) {
   const next = new Set(collapsedGroups.value)

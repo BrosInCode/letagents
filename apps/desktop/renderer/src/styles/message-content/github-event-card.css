@@ -84,6 +84,18 @@
   color: #f59e0b;
 }
 
+.desktop-github-chip.is-task.is-interactive {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.desktop-github-chip.is-task.is-interactive:hover,
+.desktop-github-chip.is-task.is-interactive:focus-visible {
+  border-color: color-mix(in srgb, #f59e0b 54%, transparent);
+  background: color-mix(in srgb, #f59e0b 15%, transparent);
+  outline: none;
+}
+
 .desktop-github-event strong {
   color: #fff;
   font-size: 0.92rem;

@@ -756,6 +756,57 @@ describe("room chat helpers", () => {
     );
   });
 
+  it("links loaded task references to the Board", () => {
+    assert.equal(
+      renderMessageText(
+        "Continue task_42, then task_99.",
+        "",
+        undefined,
+        new Set(["task_42"]),
+      ),
+      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Open task_42 on the Board">task_42</button>, then task_99.</p>',
+    );
+  });
+
+  it("keeps task references linked when search highlights only part of the id", () => {
+    assert.equal(
+      renderMessageText(
+        "Continue task_42.",
+        "42",
+        undefined,
+        new Set(["task_42"]),
+      ),
+      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Open task_42 on the Board">task_<mark class="message-search-hit">42</mark></button>.</p>',
+    );
+  });
+
+  it("highlights escaped HTML characters without breaking encoded message text", () => {
+    assert.equal(
+      renderMessageText('Say "quote" & <tag>.', '"quote"'),
+      '<p>Say <mark class="message-search-hit">&quot;quote&quot;</mark> &amp; &lt;tag&gt;.</p>',
+    );
+    assert.equal(
+      renderMessageText('Say "quote" & <tag>.', "&"),
+      '<p>Say &quot;quote&quot; <mark class="message-search-hit">&amp;</mark> &lt;tag&gt;.</p>',
+    );
+    assert.equal(
+      renderMessageText('Say "quote" & <tag>.', "<tag>"),
+      '<p>Say &quot;quote&quot; &amp; <mark class="message-search-hit">&lt;tag&gt;</mark>.</p>',
+    );
+  });
+
+  it("does not link task references inside code or existing links", () => {
+    assert.equal(
+      renderMessageText(
+        "Use `task_42` or https://example.com/task_42 before task_7",
+        "",
+        undefined,
+        new Set(["task_42", "task_7"]),
+      ),
+      '<p>Use <code>task_42</code> or <a href="https://example.com/task_42" target="_blank" rel="noopener noreferrer">https://example.com/task_42</a> before <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_7" title="Open task_7 on the Board">task_7</button></p>',
+    );
+  });
+
   it("formats selected-text quotes as the message target with optional source context", () => {
     assert.equal(
       selectedTextQuoteBlock("first line\n\nsecond line", "msg_42"),

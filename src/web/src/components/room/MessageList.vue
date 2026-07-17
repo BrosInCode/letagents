@@ -21,10 +21,12 @@
           :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
           :class="messageClasses(msg)"
           :searchQuery="searchQuery"
+          :taskReferenceIds="taskReferenceIds"
           @reply="emit('reply', $event)"
           @openImageViewer="emit('openImageViewer', $event)"
           @scrollToReply="scrollToMessage"
           @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
+          @openTask="emit('openTask', $event)"
         />
       </TransitionGroup>
     </div>
@@ -60,12 +62,14 @@ const props = defineProps<{
   isLoadingOlderMessages?: boolean
   searchQuery?: string
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
+  taskReferenceIds?: ReadonlySet<string>
 }>()
 const emit = defineEmits<{
   loadOlder: []
   reply: [message: RoomMessage]
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
+  openTask: [taskId: string]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)

@@ -42,7 +42,12 @@
           :summary="reasoningSummary"
           @open="reasoningOpen = true"
         />
-        <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
+        <GitHubEventCard
+          v-if="githubEvent"
+          :event="githubEvent"
+          :taskLinkEnabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
+          @openTask="emit('openTask', $event)"
+        />
         <AgentThinkingCard
           v-else-if="thinkingCard"
           :card="thinkingCard"
@@ -54,6 +59,7 @@
           :text="message.text || ''"
           :html="renderedContent"
           :messageId="message.id"
+          @taskReferenceClick="emit('openTask', $event)"
         />
         <MessageAttachments
           v-if="attachments.length"
@@ -126,12 +132,14 @@ const props = defineProps<{
   thread?: MessageThreadSummary | null
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   reasoningSession?: RoomReasoningSession | null
+  taskReferenceIds?: ReadonlySet<string>
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
   scrollToReply: [messageId: string]
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
+  openTask: [taskId: string]
 }>()
 
 const reasoningOpen = ref(false)
@@ -229,7 +237,8 @@ const formattedTime = computed(() => formatMessageTime(props.message.timestamp))
 const renderedContent = computed(() => renderMessageContent(
   isAmbientSystem.value
     ? stripStatusPrefix(props.message.text || '')
-    : props.message.text || ''
+    : props.message.text || '',
+  props.taskReferenceIds,
 ))
 </script>
 

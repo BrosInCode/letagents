@@ -13,10 +13,12 @@
         :isLoadingOlderMessages="isLoadingOlderMessages"
         :searchQuery="searchQuery"
         :stalePromptTaskStates="stalePromptTaskStates"
+        :taskReferenceIds="taskReferenceIds"
         @loadOlder="emit('loadOlder')"
         @reply="emit('reply', $event)"
         @openImageViewer="emit('openImageViewer', $event)"
         @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
+        @openTask="emit('openTask', $event)"
       />
 
       <GitHubEventFeed
@@ -39,6 +41,7 @@
         :presence="boardHandoffPresence"
         :canManageLeases="room?.role === 'admin'"
         :taskGithubStatus="taskGithubStatus"
+        :selectedTaskId="selectedBoardTaskId"
         @addTask="emit('addTask', $event)"
         @updateTask="emitUpdateTask"
         @leaseAction="emit('leaseAction', $event)"
@@ -134,7 +137,7 @@ import type {
   TaskReviewLeaseActionPayload,
 } from './types'
 
-defineProps<{
+const props = defineProps<{
   activeTab: RoomTab
   tabTransitionName: string
   messages: readonly RoomMessage[]
@@ -171,6 +174,7 @@ defineProps<{
   creatingAdHocFocusRoom: boolean
   sharingFocusResult: boolean
   updatingFocusSettings: boolean
+  selectedBoardTaskId: string | null
   loadActivityHistory?: (options?: {
     query?: string
     page?: number
@@ -197,10 +201,14 @@ const emit = defineEmits<{
   openParentRoom: []
   shareResults: [summary: string, details: FocusRoomConclusionDetails | null]
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
+  openTask: [taskId: string]
 }>()
 
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
+const taskReferenceIds = computed<ReadonlySet<string>>(() =>
+  new Set(props.tasks.map(task => task.id))
+)
 
 function emitUpdateTask(taskId: string, updates: { status: string }) {
   emit('updateTask', taskId, updates)

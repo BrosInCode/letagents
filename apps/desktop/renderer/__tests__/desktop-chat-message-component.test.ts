@@ -35,7 +35,7 @@ test("thread-context messages expose their DOM contract through the shared compo
       message: {
         id: "msg_thread_reply",
         sender: "Oak",
-        text: "Thread reply",
+        text: "Review task_42",
         attachments: [],
         agentPromptKind: null,
         source: "agent",
@@ -71,6 +71,7 @@ test("thread-context messages expose their DOM contract through the shared compo
       searchActive: false,
       threadMessageId: "msg_thread_reply",
       testId: "room-thread-reply-msg_thread_reply",
+      taskReferenceIds: new Set(["task_42"]),
     }),
   });
 
@@ -79,6 +80,7 @@ test("thread-context messages expose their DOM contract through the shared compo
   assert.match(html, /data-testid="room-thread-reply-msg_thread_reply"/);
   assert.match(html, /aria-label="Copy message"/);
   assert.match(html, /aria-label="Jump to root"/);
+  assert.match(html, /data-task-reference-id="task_42"/);
   assert.match(html, /EmmyMay&#39;s agent/);
   assert.match(html, /room-provider-badge--codex/);
   assert.match(html, /aria-label="Codex provider"/);
@@ -103,4 +105,44 @@ test("context-menu dismissal restores focus only for keyboard and copy actions",
     focus: (options) => calls.push(options),
   });
   assert.deepEqual(calls, [{ preventScroll: true }]);
+});
+
+test("GitHub event task chips expose the shared Board navigation contract", async () => {
+  const app = createSSRApp({
+    render: () => h(DesktopChatMessage as object, {
+      message: {
+        id: "msg_github",
+        sender: "github",
+        text: "PR #800 opened in BrosInCode/letagents linked to task_42: Link task mentions https://github.com/BrosInCode/letagents/pull/800",
+        attachments: [],
+        agentPromptKind: null,
+        source: "github",
+        timestamp: "2026-07-17T04:34:00.000Z",
+        actorLabel: null,
+        agentIdentity: null,
+        threadRootId: null,
+        threadReplyToId: null,
+        thread: null,
+        replyTo: null,
+      },
+      threadSummary: {
+        count: 0,
+        unreadCount: 0,
+        latest: null,
+        latestPreview: null,
+        latestTimestamp: null,
+        participants: [],
+        hasPartialHistory: false,
+        loadingEarlier: false,
+      },
+      activeThreadRoot: false,
+      highlightQuery: "",
+      searchActive: false,
+      taskReferenceIds: new Set(["task_42"]),
+    }),
+  });
+
+  const html = await renderToString(app);
+  assert.match(html, /<button[^>]*data-task-reference-id="task_42"/);
+  assert.match(html, /title="Open task_42 on the Board"/);
 });
