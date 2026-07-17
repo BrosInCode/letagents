@@ -50,7 +50,7 @@
         data-testid="room-local-agent-work-list"
       >
         <article
-          v-for="work in localAgentWork"
+          v-for="work in collapsedAgentWork.visible"
           :key="work.id"
           class="room-local-agent-work"
           data-testid="room-local-agent-work"
@@ -58,7 +58,7 @@
           <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
           <div>
             <strong>{{ work.displayName }}</strong>
-            <span>{{ work.summary }}</span>
+            <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
           </div>
           <span class="room-local-agent-work-dots" aria-hidden="true">
             <i></i>
@@ -66,6 +66,14 @@
             <i></i>
           </span>
         </article>
+        <p
+          v-if="collapsedAgentWork.hiddenCount > 0"
+          class="room-local-agent-work-overflow"
+          data-testid="room-local-agent-work-overflow"
+          aria-live="polite"
+        >
+          +{{ collapsedAgentWork.hiddenCount }} more {{ collapsedAgentWork.hiddenCount === 1 ? "agent" : "agents" }} working
+        </p>
       </div>
 
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
@@ -125,7 +133,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
-import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
+import { collapseWorkIndicators, type ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
@@ -293,6 +301,8 @@ watch(
   },
   { immediate: true },
 );
+
+const collapsedAgentWork = computed(() => collapseWorkIndicators(props.localAgentWork));
 
 watch(
   () => props.localAgentWork.map((work) => `${work.id}:${work.summary}`).join("|"),

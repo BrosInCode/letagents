@@ -523,7 +523,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
       { ...working, id: "supervised_stale", agentSessionId: "agent_session_404", nativeLiveness: { state: "stale", observedAt: working.nativeLiveness.observedAt, detail: null } },
     ], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
     [{
-      id: "supervised_working:7",
+      id: "supervised_working",
       displayName: "DawnHarbor",
       summary: "Inspecting the workspace",
       startedAt: "2026-07-15T18:00:01.000Z",

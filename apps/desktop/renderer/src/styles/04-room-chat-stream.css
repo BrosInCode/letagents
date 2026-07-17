@@ -206,6 +206,14 @@
   animation-delay: 240ms;
 }
 
+.room-local-agent-work-overflow {
+  margin: 2px 0 0;
+  padding-left: 4px;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 640;
+}
+
 @keyframes local-agent-work-pulse {
   0%,
   100% {
