@@ -379,9 +379,15 @@
                     class="desktop-agent-detail-danger-button"
                     data-testid="desktop-agent-detail-stop-agent"
                     :disabled="supervisedStopAgentDisabled(entry) || Boolean(stoppingSupervisorEntryId)"
-                    @click="stopAgentConfirmEntryId = entry.id"
+                    @click="onStopAgentPrimary(entry)"
                   >{{ supervisedStopAgentButtonLabel(entry, { confirming: false, pendingStop: stoppingSupervisorEntryId === entry.id }) }}</button>
                 </div>
+                <p
+                  v-if="supervisedStopAgentFailed(entry)"
+                  class="desktop-agent-detail-error"
+                  data-testid="desktop-agent-detail-stop-agent-error"
+                  role="alert"
+                >{{ entry.lastError || "The stop did not complete. Retry to converge the runtime to stopped." }}</p>
               </div>
               <div class="desktop-agent-detail-session-inspection">
                 <span>Activity — bounded/redacted native events, not thoughts</span>
@@ -490,6 +496,7 @@ import {
   supervisedLifecycleStatusLabel,
   supervisedStopAgentButtonLabel,
   supervisedStopAgentDisabled,
+  supervisedStopAgentFailed,
 } from "../../../domain/supervised-stop";
 
 const props = defineProps<{
@@ -939,6 +946,16 @@ async function confirmStopSupervisedAgent(id: string): Promise<void> {
   } finally {
     stoppingSupervisorEntryId.value = null;
   }
+}
+
+// A fresh stop asks for destructive confirmation; a previously-FAILED stop is
+// already-confirmed intent, so its "Retry stop" re-issues directly.
+function onStopAgentPrimary(entry: DesktopSupervisorManifestEntry): void {
+  if (supervisedStopAgentFailed(entry)) {
+    void confirmStopSupervisedAgent(entry.id);
+    return;
+  }
+  stopAgentConfirmEntryId.value = entry.id;
 }
 
 function livenessLabel(axis: DesktopSupervisorLivenessAxis): string {

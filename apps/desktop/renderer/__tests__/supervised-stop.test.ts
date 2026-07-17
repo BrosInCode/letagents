@@ -5,6 +5,7 @@ import {
   supervisedLifecycleStatusLabel,
   supervisedStopAgentButtonLabel,
   supervisedStopAgentDisabled,
+  supervisedStopAgentFailed,
   supervisedStopAgentInFlight,
 } from "../src/domain/supervised-stop";
 import type { DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
@@ -72,6 +73,23 @@ test("button label walks Stop agent -> Confirm stop -> Stopping… -> Stopped", 
 test("an unresolved/unbound launch is still stoppable (label reflects running, not blocked)", () => {
   // A launch gone wrong: never bound, still desired running.
   const unresolved = fields({ desiredState: "running", observedState: "recovering" });
-  assert.equal(supervisedStopAgentDisabled({ desiredState: "running" }), false);
+  assert.equal(supervisedStopAgentDisabled(fields({ desiredState: "running" })), false);
   assert.equal(supervisedStopAgentButtonLabel(unresolved, { confirming: false, pendingStop: false }), "Stop agent");
+});
+
+test("a failed stop is honest and retryable, not endless Stopping…", () => {
+  const failedStop = fields({ desiredState: "stopped", observedState: "failed" });
+  assert.equal(supervisedStopAgentFailed(failedStop), true);
+  // Honest label, not a perpetual Stopping….
+  assert.equal(supervisedLifecycleStatusLabel(failedStop), "Stop failed");
+  // Not counted as in-flight (it is terminal-not-converging).
+  assert.equal(supervisedStopAgentInFlight(failedStop), false);
+  // Stays actionable so the owner can retry.
+  assert.equal(supervisedStopAgentDisabled(failedStop), false);
+  assert.equal(supervisedStopAgentButtonLabel(failedStop, { confirming: false, pendingStop: false }), "Retry stop");
+  // A still-converging stop remains disabled + Stopping….
+  const stopping = fields({ desiredState: "stopped", observedState: "stopping" });
+  assert.equal(supervisedStopAgentFailed(stopping), false);
+  assert.equal(supervisedStopAgentDisabled(stopping), true);
+  assert.equal(supervisedStopAgentButtonLabel(stopping, { confirming: false, pendingStop: false }), "Stopping…");
 });
