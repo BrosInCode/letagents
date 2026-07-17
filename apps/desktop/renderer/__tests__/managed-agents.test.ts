@@ -40,6 +40,7 @@ import {
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
   managedAgentPermissionRequestTargetLabel,
+  managedAgentDetailSelection,
   managedAgentProviderIdentityForTarget,
   managedAgentSessionMatchesSupervisorTarget,
   managedAgentSessionMatchesRoom,
@@ -537,6 +538,65 @@ test("ambiguous duplicate worker bindings fail closed instead of widening contro
     ),
     false,
   );
+});
+
+test("Agent Inspector selection exposes exact bound controls and keeps unsafe targets external", () => {
+  const boundEntry = supervisorEntry({
+    id: "supervised_claude",
+    displayName: "Claude Code supervised agent",
+    provider: "claude-code",
+    agentSessionId: "agent_session_441",
+    agentSessionBindingState: "historical",
+  });
+  const boundSession = session({
+    id: "managed_claude",
+    providerId: "claude-code",
+    agentSessionId: null,
+    canStop: false,
+    supervisorEntryId: "supervised_claude",
+  });
+  const target = {
+    agentSessionId: "agent_session_441",
+    agentKey: "EmmyMay/summitcrisp",
+    actorLabel: "SummitCrisp | EmmyMay's agent | Agent",
+    displayName: "SummitCrisp",
+    ideLabel: "Agent",
+    ownerAttribution: "EmmyMay's agent",
+    sender: "SummitCrisp | EmmyMay's agent | Agent",
+  };
+
+  const bound = managedAgentDetailSelection(
+    [boundSession],
+    [boundEntry],
+    target,
+    null,
+  );
+  assert.deepEqual(bound.managedSessions.map((candidate) => candidate.id), ["managed_claude"]);
+  assert.deepEqual(bound.supervisorEntries.map((entry) => entry.id), ["supervised_claude"]);
+  assert.equal(bound.providerIdentity?.label, "Claude Code");
+  assert.equal(bound.showExternalFallback, false);
+
+  const external = managedAgentDetailSelection(
+    [boundSession],
+    [boundEntry],
+    { ...target, agentSessionId: "external_session" },
+    null,
+  );
+  assert.deepEqual(external.managedSessions, []);
+  assert.deepEqual(external.supervisorEntries, []);
+  assert.equal(external.providerIdentity, null);
+  assert.equal(external.showExternalFallback, true);
+
+  const ambiguous = managedAgentDetailSelection(
+    [boundSession],
+    [boundEntry, { ...boundEntry, id: "supervised_peer" }],
+    target,
+    null,
+  );
+  assert.deepEqual(ambiguous.managedSessions, []);
+  assert.deepEqual(ambiguous.supervisorEntries, []);
+  assert.equal(ambiguous.providerIdentity, null);
+  assert.equal(ambiguous.showExternalFallback, true, "ambiguous durable entries fail closed without controls");
 });
 
 test("provider identity presentation follows exact active and historical supervisor bindings", () => {
