@@ -168,8 +168,10 @@
   overflow: hidden;
 }
 
-.sidebar-room-sections:has(> .sidebar-section > .sidebar-section-header[data-collapsed="true"])
-  > .sidebar-pinned-section {
+.sidebar-room-sections:has(
+    > .sidebar-section > .sidebar-section-header[data-collapsed="true"],
+    > .sidebar-section[data-empty="true"]
+  ) > .sidebar-pinned-section {
   max-height: 100%;
 }
 
@@ -324,7 +326,10 @@
 }
 
 .project-list .room-row:focus-visible,
-.project-list .project-row:focus-visible {
+.project-list .project-row:focus-visible,
+.pinned-list .pinned-room:focus-visible,
+.pinned-list .room-row:focus-visible,
+.pinned-list .project-toggle:focus-visible {
   outline-offset: -2px;
 }
 
