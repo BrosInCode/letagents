@@ -34,6 +34,7 @@ const addMessage = dbModule?.addMessage;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const createTask = dbModule?.createTask;
+const createTaskLease = dbModule?.createTaskLease;
 const endRoomAgentSession = dbModule?.endRoomAgentSession;
 const getRoomAgentDeliverySessions = dbModule?.getRoomAgentDeliverySessions;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
@@ -907,7 +908,7 @@ test(
     const { room } = await seedHarness();
     const handlers = registerRoutesForRoom(room);
     const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
-    if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions || !pool || !createTask || !updateTask || !addMessage) {
+    if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions || !pool || !createTask || !createTaskLease || !updateTask || !addMessage) {
       throw new Error("DB-backed worker session tests require TEST_DB_URL");
     }
 
@@ -967,6 +968,15 @@ test(
       }, { params: { 0: room.id, 1: continuityTask.id }, query: {} }),
     );
     assert.equal(assignedContinuityTask.statusCode, 200, JSON.stringify(assignedContinuityTask.body));
+    await createTaskLease({
+      room_id: room.id,
+      task_id: continuityTask.id,
+      kind: "work",
+      agent_key: firstSession.agent_key,
+      agent_session_id: firstSession.session_id,
+      actor_label: firstSession.actor_label,
+      created_by: "task_85_test",
+    });
     const assignmentNow = new Date().toISOString();
     await pool.query(
       `INSERT INTO board_manager_assignments
