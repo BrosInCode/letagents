@@ -1,12 +1,16 @@
 import crypto from "crypto";
-import { and, asc, desc, eq, gt, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_session_bearers, room_agent_sessions, supervisor_host_grants } from "./schema.js";
+import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_delivery_sessions, room_agent_presence, room_agent_session_bearers, room_agent_sessions, supervisor_host_grants } from "./schema.js";
 import { AUTH_STATE_TTL_MS, hashToken, nextPrefixedId } from "./utils.js";
 import { toRoomAgentSession } from "./mappers.js";
 import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionBearer, RoomAgentSessionRow, Session, SessionAccount, SupervisorHostGrant } from "./types.js";
-import type { RoomAgentSessionKind } from "../../shared/agent-presence.js";
+import {
+  ACTIVE_AGENT_DELIVERY_WINDOW_MS,
+  ROOM_AGENT_RECONNECT_GRACE_MS,
+  type RoomAgentSessionKind,
+} from "../../shared/agent-presence.js";
 import { DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES, getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, type AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
@@ -371,7 +375,7 @@ function newBearerExpiry(now: Date): string {
   return new Date(now.getTime() + getAgentSessionBearerTtlMs()).toISOString();
 }
 
-export async function createRoomAgentSession(input: {
+export interface CreateRoomAgentSessionInput {
   room_id: string;
   session_kind: RoomAgentSessionKind;
   runtime: string;
@@ -388,7 +392,55 @@ export async function createRoomAgentSession(input: {
   supervisor_grant_id?: string | null;
   worker_bearer_expires_at?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
-}): Promise<CreatedRoomAgentSession> {
+}
+
+export const SAME_INSTANCE_RECLAIM_STALE_AFTER_MS =
+  ACTIVE_AGENT_DELIVERY_WINDOW_MS + ROOM_AGENT_RECONNECT_GRACE_MS;
+
+export class ActiveAgentInstanceConflictError extends Error {
+  readonly code = "agent_instance_already_active";
+
+  constructor(readonly active_session_id: string) {
+    super("This exact agent instance is already active on another live transport.");
+    this.name = "ActiveAgentInstanceConflictError";
+  }
+}
+
+export function isActiveAgentInstanceConflictError(
+  error: unknown,
+): error is ActiveAgentInstanceConflictError {
+  return error instanceof ActiveAgentInstanceConflictError;
+}
+
+export function isActiveRoomAgentSessionStaleForRegistration(input: {
+  active_session: Pick<RoomAgentSession, "last_seen_at">;
+  now_ms?: number;
+}): boolean {
+  const lastSeenMs = Date.parse(input.active_session.last_seen_at);
+  const nowMs = input.now_ms ?? Date.now();
+  return Number.isFinite(lastSeenMs)
+    && nowMs - lastSeenMs >= SAME_INSTANCE_RECLAIM_STALE_AFTER_MS;
+}
+
+export interface RoomAgentSessionReplacementProof {
+  session_id: string;
+  session_token: string;
+}
+
+function replacementProofMatches(
+  activeSession: Pick<RoomAgentSessionRow, "session_id" | "token_hash">,
+  proof: RoomAgentSessionReplacementProof | null | undefined,
+): boolean {
+  if (!proof || proof.session_id !== activeSession.session_id) return false;
+  const expected = Buffer.from(activeSession.token_hash, "hex");
+  const actual = Buffer.from(hashToken(proof.session_token), "hex");
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+async function insertRoomAgentSessionTx(
+  tx: any,
+  input: CreateRoomAgentSessionInput,
+): Promise<CreatedRoomAgentSession> {
   const nowDate = new Date();
   const now = nowDate.toISOString();
   const sessionToken = makeAgentSessionToken();
@@ -396,7 +448,7 @@ export async function createRoomAgentSession(input: {
     ? makeAgentSessionBearerToken()
     : null;
   const session = {
-    session_id: await nextPrefixedId("room_agent_sessions", "agent_session"),
+    session_id: await nextPrefixedId("room_agent_sessions", "agent_session", tx),
     room_id: input.room_id,
     token_hash: hashToken(sessionToken),
     session_kind: input.session_kind,
@@ -422,12 +474,8 @@ export async function createRoomAgentSession(input: {
     ended_at: null,
   };
 
-  return db.transaction(async (tx) => {
-    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
-      throw new Error("Supervisor grant fence is stale.");
-    }
-    const [created] = await tx.insert(room_agent_sessions).values(session).returning();
-    if (workerBearer) await tx.insert(room_agent_session_bearers).values({
+  const [created] = await tx.insert(room_agent_sessions).values(session).returning();
+  if (workerBearer) await tx.insert(room_agent_session_bearers).values({
       bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
       session_id: session.session_id,
       room_id: session.room_id,
@@ -441,7 +489,110 @@ export async function createRoomAgentSession(input: {
       rotated_from_bearer_id: null,
       created_at: now,
     });
-    return { ...toRoomAgentSession(created as RoomAgentSessionRow), session_token: sessionToken, worker_bearer: workerBearer };
+  return { ...toRoomAgentSession(created as RoomAgentSessionRow), session_token: sessionToken, worker_bearer: workerBearer };
+}
+
+export async function createRoomAgentSession(
+  input: CreateRoomAgentSessionInput,
+): Promise<CreatedRoomAgentSession> {
+  return db.transaction(async (tx) => {
+    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+      throw new Error("Supervisor grant fence is stale.");
+    }
+    return insertRoomAgentSessionTx(tx, input);
+  });
+}
+
+/**
+ * Register one worker session behind an exact room/key/instance fence.
+ *
+ * A reconnect proves ownership by presenting the exact prior session
+ * credential. A caller without that secret may reclaim only after the prior
+ * session heartbeat expires; while it is fresh we fail closed so a genuinely
+ * concurrent process cannot steal the instance identity. The advisory lock
+ * linearizes simultaneous registrations and keeps at most one active session
+ * for the tuple even on databases that predate a uniqueness constraint.
+ */
+export async function createFencedRoomAgentSession(
+  input: CreateRoomAgentSessionInput,
+  replacementProof?: RoomAgentSessionReplacementProof | null,
+): Promise<{
+  session: CreatedRoomAgentSession;
+  replaced_session_ids: string[];
+}> {
+  if (input.session_kind !== "worker" || !input.agent_instance_id?.trim()) {
+    return {
+      session: await createRoomAgentSession(input),
+      replaced_session_ids: [],
+    };
+  }
+
+  return db.transaction(async (tx) => {
+    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+      throw new Error("Supervisor grant fence is stale.");
+    }
+
+    const instanceId = input.agent_instance_id!.trim();
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_instance:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
+    const predecessors = await tx
+      .select()
+      .from(room_agent_sessions)
+      .where(and(
+        eq(room_agent_sessions.room_id, input.room_id),
+        eq(room_agent_sessions.agent_key, input.agent_key),
+        eq(room_agent_sessions.agent_instance_id, instanceId),
+        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+        isNull(room_agent_sessions.ended_at),
+      ))
+      .orderBy(desc(room_agent_sessions.last_seen_at));
+
+    const nowMs = Date.now();
+    for (const row of predecessors) {
+      const activeSession = toRoomAgentSession(row as RoomAgentSessionRow);
+      if (!replacementProofMatches(row as RoomAgentSessionRow, replacementProof)
+        && !isActiveRoomAgentSessionStaleForRegistration({
+        active_session: activeSession,
+        now_ms: nowMs,
+      })) {
+        throw new ActiveAgentInstanceConflictError(activeSession.session_id);
+      }
+    }
+
+    const replacedSessionIds = predecessors.map((row: RoomAgentSessionRow) => row.session_id);
+    if (replacedSessionIds.length > 0) {
+      const now = new Date(nowMs).toISOString();
+      await tx.update(room_agent_sessions)
+        .set({ ended_at: now, updated_at: now, last_seen_at: now })
+        .where(and(
+          inArray(room_agent_sessions.session_id, replacedSessionIds),
+          isNull(room_agent_sessions.ended_at),
+        ));
+      await tx.update(room_agent_session_bearers)
+        .set({ revoked_at: now })
+        .where(and(
+          inArray(room_agent_session_bearers.session_id, replacedSessionIds),
+          isNull(room_agent_session_bearers.revoked_at),
+        ));
+      await tx.update(room_agent_delivery_sessions)
+        .set({
+          active_connection_count: 0,
+          last_disconnected_at: now,
+          reconnect_grace_expires_at: now,
+          updated_at: now,
+        })
+        .where(inArray(room_agent_delivery_sessions.agent_session_id, replacedSessionIds));
+      // Presence is actor-label keyed and rejects writes from a different
+      // session owner. Remove only the replaced session's current projection
+      // so the successor can publish immediately; durable session/liveness
+      // history remains intact.
+      await tx.delete(room_agent_presence)
+        .where(inArray(room_agent_presence.agent_session_id, replacedSessionIds));
+    }
+
+    return {
+      session: await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId }),
+      replaced_session_ids: replacedSessionIds,
+    };
   });
 }
 
