@@ -83,6 +83,7 @@ type LaunchFields = Pick<
   | "providerPid"
   | "agentSessionId"
   | "agentSessionBindingState"
+  | "workplaceLiveness"
 >;
 
 /** A block/failure that genuinely needs the owner, distinct from the normal
@@ -113,15 +114,18 @@ function reachedIndex(entry: LaunchFields): number {
   const live = entry.observedState === "idle"
     || entry.observedState === "working"
     || entry.observedState === "checkpointing";
-  if (bound && live && entry.condition === "none") return 4; // ready
+  const workplaceReachable = entry.workplaceLiveness?.state === "reachable";
+  // Ready only on real end-to-end evidence: the exact worker is bound, its
+  // workplace is reachable, the provider is live, and nothing is blocked. A
+  // native-working-but-unbound provider is NOT ready.
+  if (bound && live && workplaceReachable && entry.condition === "none") return 4; // ready
   if (bound) return 3;                                        // registering done
-  // Provider child is up and the daemon is past "starting" (awaiting the room
-  // bind). observedState "starting"/"absent" means it has not connected yet.
-  const connecting = entry.providerPid != null
-    && entry.observedState !== "starting"
-    && entry.observedState !== "absent";
-  if (connecting) return 2;                                   // connecting done
-  if (entry.providerPid != null) return 1;                    // provider started
+  // Connecting completes only on actual workplace/session evidence — a room
+  // session id or a reachable workplace. A provider that is merely "working"
+  // locally but has not reached the room stays at "provider started"
+  // (Connecting in progress), not advanced to Registering.
+  if (entry.providerPid != null && (workplaceReachable || entry.agentSessionId != null)) return 2; // connecting done
+  if (entry.providerPid != null) return 1;                    // provider started, connecting
   if (entry.workspacePath != null) return 0;                  // workspace ready
   return -1;                                                  // preparing
 }
