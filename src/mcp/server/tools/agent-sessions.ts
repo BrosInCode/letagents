@@ -21,11 +21,13 @@ import {
   getSessionLivenessRegistration,
   getAgentSessionRepoBranch,
   getStoredAgentSession,
+  getLastStoredAgentSessionForRoomIdentity,
   getTargetRoomId,
   ensureLocalWorkerAgentSession,
   isLocalRoomStorageEnabled,
   joinRoomIdentifier,
   resolveLocalRoomStorageIdentifiers,
+  resolveClientRequestedBase,
   saveAgentSession,
   toPublicAgentSession,
   toPublicRoomState,
@@ -164,6 +166,15 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
+      // Stable-base signal (task_66): declare the intent behind display_name
+      // so the server can converge a replayed decorated label without ever
+      // guessing from numeric shape.
+      const priorRoomSession = getLastStoredAgentSessionForRoomIdentity(apiRoomId, identity.canonical_key);
+      const requestedBaseDisplayName = resolveClientRequestedBase({
+        explicitDisplayName: display_name,
+        identityDisplayName: identity.display_name,
+        priorSession: priorRoomSession,
+      });
       const created = await apiCall<Record<string, unknown>>(
         `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
         {
@@ -174,6 +185,7 @@ export function registerAgentSessionTools(server: McpServer): void {
             ide_label: identity.ide_label ?? detectAgentIdeLabel(),
             agent_instance_id: AGENT_INSTANCE_UUID,
             display_name: display_name?.trim() || identity.display_name,
+            requested_base_display_name: requestedBaseDisplayName,
             session_kind: session_kind ?? "worker",
             runtime: requestedRuntime,
             repo_branch: repoBranch,
@@ -203,6 +215,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         agent_key: typeof created.agent_key === "string" ? created.agent_key : identity.canonical_key,
         agent_instance_id: typeof created.agent_instance_id === "string" ? created.agent_instance_id : AGENT_INSTANCE_UUID,
         display_name: typeof created.display_name === "string" ? created.display_name : identity.display_name,
+        // Prefer the server-recorded allocation base; fall back to the base we
+        // declared so a later resume still replays a stable signal.
+        requested_base_display_name:
+          (typeof created.assigned_base_display_name === "string" && created.assigned_base_display_name.trim())
+            || requestedBaseDisplayName
+            || null,
         owner_label: typeof created.owner_label === "string" ? created.owner_label : identity.owner_label,
         ide_label: typeof created.ide_label === "string" ? created.ide_label : identity.ide_label ?? detectAgentIdeLabel(),
         repo_branch: typeof created.repo_branch === "string" ? created.repo_branch : repoBranch,

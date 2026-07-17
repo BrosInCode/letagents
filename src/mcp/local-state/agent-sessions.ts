@@ -34,6 +34,25 @@ export function getCurrentAgentSession(roomId?: string | null): StoredAgentSessi
   return best;
 }
 
+/**
+ * The most recently updated stored session (active or ended) this identity had
+ * in the room. Re-registration consults it so a replayed prior label reuses
+ * the base recorded when that label was first allocated.
+ */
+export function getLastStoredAgentSessionForRoomIdentity(
+  roomId: string,
+  agentKey: string | null | undefined
+): StoredAgentSessionState | null {
+  if (!roomId || !agentKey) return null;
+  const state = readLocalState();
+  let best: StoredAgentSessionState | null = null;
+  for (const session of Object.values(state.agent_sessions ?? {})) {
+    if (session.room_id !== roomId || session.agent_key !== agentKey) continue;
+    if (!best || session.updated_at > best.updated_at) best = session;
+  }
+  return best;
+}
+
 export function saveAgentSession(
   session: StoredAgentSessionState,
   makeCurrent = true

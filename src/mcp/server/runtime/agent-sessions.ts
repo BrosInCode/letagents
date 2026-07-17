@@ -88,6 +88,32 @@ export function resolveAgentSession(
   return session;
 }
 
+/**
+ * The stable base this client declares as `requested_base_display_name` when
+ * registering. Rules (task_66):
+ * - An explicit display_name that replays a PRIOR stored session label for
+ *   this room+identity is a resume, not a rename: reuse the base recorded
+ *   when that label was allocated, so a server-decorated label converges.
+ * - Any other explicit display_name is deliberate intent and IS the base —
+ *   a numeric-ending custom name ("Agent 47") is therefore never demoted.
+ * - With no explicit name, fall back to the prior session's recorded base,
+ *   then to the durable identity's display name.
+ */
+export function resolveClientRequestedBase(input: {
+  explicitDisplayName?: string | null;
+  identityDisplayName: string;
+  priorSession?: Pick<StoredAgentSessionState, "display_name" | "requested_base_display_name"> | null;
+}): string {
+  const explicit = input.explicitDisplayName?.trim() || "";
+  const priorLabel = input.priorSession?.display_name?.trim() || "";
+  const priorBase = input.priorSession?.requested_base_display_name?.trim() || "";
+  if (explicit) {
+    if (priorLabel && explicit === priorLabel && priorBase) return priorBase;
+    return explicit;
+  }
+  return priorBase || input.identityDisplayName.trim();
+}
+
 export function identityFromAgentSession(session: StoredAgentSessionState): StoredAgentIdentityState {
   return {
     name: normalizeAgentBaseName(session.display_name),
