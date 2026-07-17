@@ -592,6 +592,28 @@ export async function getLastEndedWorkerSessionDisplayName(input: {
   return row?.display_name ?? null;
 }
 
+/**
+ * Every distinct worker-session display name this identity has ever used in the
+ * room (active or ended). Used as provenance when normalizing a replayed
+ * decorated label: a trailing numeric group is only a server-appended collision
+ * suffix if the stripped base is a label the identity actually held here.
+ */
+export async function getWorkerSessionDisplayNamesForIdentity(input: {
+  room_id: string;
+  agent_key: string;
+}): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ display_name: room_agent_sessions.display_name })
+    .from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.room_id, input.room_id),
+      eq(room_agent_sessions.agent_key, input.agent_key),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+    ));
+
+  return rows.map((row) => row.display_name).filter((name): name is string => typeof name === "string");
+}
+
 export async function getRoomAgentSessionByCredentials(input: {
   session_id: string;
   session_token: string;
