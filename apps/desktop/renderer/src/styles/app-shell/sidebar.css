@@ -356,6 +356,10 @@
   flex: 0 0 auto;
 }
 
+.sidebar-section[data-empty="true"] {
+  flex: 0 0 auto;
+}
+
 .sidebar-section-header {
   display: flex;
   align-items: center;
@@ -645,7 +649,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .project-list {
+  .project-list,
+  .pinned-list {
     transition: none;
   }
 

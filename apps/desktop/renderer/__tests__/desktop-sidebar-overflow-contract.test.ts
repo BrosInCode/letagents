@@ -24,6 +24,10 @@ describe("desktop sidebar overflow contract", () => {
     );
     assert.match(sidebarStyles, /\.sidebar-navigation\s*\{[\s\S]*?grid-template-rows: auto minmax\(0, 1fr\);/);
     assert.match(sidebarStyles, /\.sidebar-room-sections\s*\{[\s\S]*?min-height: 0;[\s\S]*?overflow: hidden;/);
+    assert.match(
+      sidebarSource,
+      /class="sidebar-navigation"\s+@contextmenu\.prevent="openBackgroundContextMenu"/,
+    );
   });
 
   it("gives large pinned groups their own bounded scroll area", () => {
@@ -31,7 +35,19 @@ describe("desktop sidebar overflow contract", () => {
     assert.match(sidebarRoomStyles, /\.sidebar-pinned-section\s*\{[\s\S]*?max-height: 50%;[\s\S]*?overflow: hidden;/);
     assert.match(
       sidebarRoomStyles,
-      /\.sidebar-room-sections:has\(> \.sidebar-section > \.sidebar-section-header\[data-collapsed="true"\]\)\s*> \.sidebar-pinned-section\s*\{\s*max-height: 100%;/,
+      /\.sidebar-room-sections:has\([\s\S]*?> \.sidebar-section\[data-empty="true"\][\s\S]*?\) > \.sidebar-pinned-section\s*\{\s*max-height: 100%;/,
+    );
+    assert.match(sidebarSource, /class="sidebar-section"\s+:data-empty="!roomProjectEntries\.length"/);
+  });
+
+  it("preserves focus and reduced-motion behavior in the pinned scroller", () => {
+    assert.match(
+      sidebarRoomStyles,
+      /\.pinned-list \.pinned-room:focus-visible,[\s\S]*?\.pinned-list \.project-toggle:focus-visible\s*\{\s*outline-offset: -2px;/,
+    );
+    assert.match(
+      sidebarStyles,
+      /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.project-list,\s*\.pinned-list\s*\{\s*transition: none;/,
     );
   });
 });
