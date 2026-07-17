@@ -244,6 +244,63 @@ export function exactSupervisorEntriesForTarget(
   return sessionId ? [] : null;
 }
 
+export interface ManagedAgentProviderIdentity {
+  supervisorEntryId: string;
+  providerId: string;
+  label: string;
+  model: string | null;
+  accessibleLabel: string;
+  bindingState: DesktopSupervisorManifestEntry["agentSessionBindingState"];
+}
+
+/**
+ * Resolve provider presentation only after an exact daemon/session binding is
+ * available. The Inspector must not infer a provider from a display name: two
+ * supervised peers can intentionally share that name while using different
+ * providers or generations.
+ */
+export function managedAgentProviderIdentityForTarget(
+  entries: readonly DesktopSupervisorManifestEntry[],
+  sessions: readonly Pick<DesktopManagedAgentSession, "supervisorEntryId">[],
+  targetAgentSessionId: string | null | undefined,
+  knownSupervisorEntryIds: readonly string[] = [],
+): ManagedAgentProviderIdentity | null {
+  const exactEntries = exactSupervisorEntriesForTarget(
+    entries,
+    sessions,
+    targetAgentSessionId,
+    knownSupervisorEntryIds,
+  );
+  if (!exactEntries || exactEntries.length !== 1) return null;
+
+  const entry = exactEntries[0]!;
+  const providerId = entry.provider.trim();
+  if (!providerId) return null;
+  const label = managedAgentProviderLabel(providerId);
+  const model = entry.model?.trim() || null;
+  return {
+    supervisorEntryId: entry.id,
+    providerId,
+    label,
+    model,
+    accessibleLabel: model ? `${label} · ${model}` : label,
+    bindingState: entry.agentSessionBindingState,
+  };
+}
+
+export function managedAgentProviderLabel(providerId: string): string {
+  switch (providerId.trim().toLowerCase()) {
+    case "codex": return "Codex";
+    case "claude":
+    case "claude-code": return "Claude Code";
+    case "antigravity": return "Antigravity";
+    case "cursor": return "Cursor";
+    case "open-model":
+    case "open_model": return "Open Model";
+    default: return providerId.trim();
+  }
+}
+
 /**
  * Project bounded native activity into the existing chat work indicator. This
  * is observable lifecycle evidence, never hidden reasoning text.
