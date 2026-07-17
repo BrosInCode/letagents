@@ -151,6 +151,7 @@ import {
   classifyLaunchFailure,
   emitLaunchEvent,
   getLaunchEvents,
+  launchReachedReady,
   LaunchBlockedError,
   onLaunchEvent,
 } from "./launch-events.js";
@@ -931,18 +932,23 @@ export function registerDesktopIpcHandlers(
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
       if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
-      // Retiring a launch (Cancel launch / Stop agent) is the one intentional
-      // terminal fact; the launch id is the entry id without its prefix.
+      // Cancelling belongs to launch history only when the attempt had not yet
+      // reached ready. setDesiredState records the new desired state but returns
+      // before convergence, so `updated` still reflects the pre-stop binding /
+      // liveness — enough to tell a mid-launch cancel from a post-ready
+      // lifecycle stop (which is an agent event, not a launch fact).
       if (desiredState === "stopped" && id.startsWith("supervised_")) {
-        emitLaunchEvent({
-          launchId: id.slice("supervised_".length),
-          entryId: id,
-          roomIdentifier: updated.roomId,
-          provider: updated.provider,
-          type: "launch.cancelled",
-          detail: "You stopped this launch.",
-          durable: true,
-        });
+        if (!launchReachedReady(updated)) {
+          emitLaunchEvent({
+            launchId: id.slice("supervised_".length),
+            entryId: id,
+            roomIdentifier: updated.roomId,
+            provider: updated.provider,
+            type: "launch.cancelled",
+            detail: "You stopped this launch.",
+            durable: true,
+          });
+        }
       }
       return updated;
     },

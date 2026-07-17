@@ -20,16 +20,18 @@ import {
  *  - the daemon manifest snapshot the modal already polls, which explains
  *    everything after the durable claim exists.
  *
- * Three grammars are kept deliberately separate (msg_5190):
+ * Three grammars are kept deliberately separate:
  *  - MACHINE grammar = the event types (past-tense completed facts), consumed
  *    but never shown.
  *  - PRODUCT grammar = the per-step state (Waiting / In progress / Complete /
- *    Needs attention / Failed / Cancelled / Ready); exactly one step is active.
+ *    Needs attention / Failed / Cancelled / Ready); exactly one step is active
+ *    while launching, and a terminal outcome leaves zero active steps.
  *  - HUMAN grammar = the copy below (present-participle headings + plain
  *    sub-copy). Technical nouns stay out of the journey.
  *
- * Delivery is at-least-once, so events are folded idempotently by `sequence`: a
- * duplicate or reordered event never advances or regresses the journey.
+ * Delivery is at-least-once, so events are folded idempotently by `sequence`.
+ * Each `launch.requested` starts a fresh attempt: a retry under the same launch
+ * id folds only the latest attempt, so it is never stuck on a prior terminal.
  */
 
 export type LaunchJourneyPhaseId =
@@ -63,7 +65,7 @@ export interface LaunchJourneyView {
   ready: boolean;
   /** Needs the owner's attention (blocked) or the attempt ended (failed). */
   failed: boolean;
-  /** Intentionally retired before/after readiness. */
+  /** Intentionally retired (cancelled mid-launch, or stopped after ready). */
   stopped: boolean;
   agentName: string | null;
   providerLabel: string;
@@ -86,6 +88,11 @@ const JOURNEY_PHASE_ORDER: readonly LaunchJourneyPhaseId[] = [
   "registering_identity",
   "ready",
 ];
+
+// Pre-durable phase indices.
+const CONNECTING = 0;
+const SAVING = 1;
+const PREPARING = 2;
 
 const JOIN_HINT = "You can close this window. We'll keep setting up the agent.";
 
@@ -127,7 +134,7 @@ function phaseCopy(
   }
 }
 
-/** Fold at-least-once events into a stable set of observed milestones. */
+/** Fold the LATEST attempt's at-least-once events into observed milestones. */
 function foldEvents(events: readonly DesktopLaunchEvent[]): {
   connected: boolean;
   saved: boolean;
@@ -135,11 +142,20 @@ function foldEvents(events: readonly DesktopLaunchEvent[]): {
   terminal: DesktopLaunchEvent | null;
 } {
   const sorted = [...events].sort((left, right) => left.sequence - right.sequence);
+  // A retry reuses the launch id and appends a fresh `launch.requested`; fold
+  // only from the last one so an earlier terminal never leaks into the retry.
+  let attemptStart = 0;
+  for (let index = sorted.length - 1; index >= 0; index -= 1) {
+    if (sorted[index]!.type === "launch.requested") {
+      attemptStart = index;
+      break;
+    }
+  }
   let connected = false;
   let saved = false;
   let activated = false;
   let terminal: DesktopLaunchEvent | null = null;
-  for (const event of sorted) {
+  for (const event of sorted.slice(attemptStart)) {
     switch (event.type) {
       case "supervisor.connected":
         connected = true;
@@ -174,22 +190,31 @@ function manifestRecovery(entry: DesktopSupervisorManifestEntry): DesktopLaunchR
   }
 }
 
+interface PhaseFold {
+  /** The current/boundary step. */
+  activeIndex: number;
+  /** The step that failed, or null. */
+  failedIndex: number | null;
+  /** Terminal success: every step complete. */
+  ready: boolean;
+  /** Terminal-without-failure (cancelled/stopped): no step is active. */
+  settled: boolean;
+}
+
 function buildPhases(
-  activeIndex: number,
-  failedIndex: number | null,
+  fold: PhaseFold,
   ctx: { providerLabel: string; roomLabel: string; agentName: string | null },
-  allDone: boolean,
 ): LaunchJourneyPhase[] {
   return JOURNEY_PHASE_ORDER.map((id, index) => {
     const copy = phaseCopy(id, ctx);
     let state: LaunchJourneyPhaseState;
-    if (allDone) {
+    if (fold.ready) {
       state = "done";
-    } else if (failedIndex !== null && index === failedIndex) {
+    } else if (fold.failedIndex !== null && index === fold.failedIndex) {
       state = "failed";
-    } else if (index < activeIndex) {
+    } else if (index < fold.activeIndex) {
       state = "done";
-    } else if (index === activeIndex && failedIndex === null) {
+    } else if (index === fold.activeIndex && fold.failedIndex === null && !fold.settled) {
       state = "active";
     } else {
       state = "pending";
@@ -205,11 +230,6 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
   const roomLabel = input.roomLabel?.trim() || "the room";
   const { connected, saved, terminal } = foldEvents(events);
 
-  // Pre-durable phase indices.
-  const CONNECTING = 0;
-  const SAVING = 1;
-  const PREPARING = 2;
-
   if (entry) {
     // The durable entry proves the connect + save window completed; the last
     // five steps are derived from the manifest exactly as before, just relabelled.
@@ -217,13 +237,18 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     const agentName = manifest.agentName;
     const ctx = { providerLabel, roomLabel, agentName };
     const manifestActiveOffset = manifest.phases.findIndex((phase) => phase.state === "active" || phase.state === "failed");
-    // Journey index of the manifest's current phase (+2 for the two pre-durable steps).
     const activeIndex = manifest.ready
       ? JOURNEY_PHASE_ORDER.length - 1
       : PREPARING + Math.max(manifestActiveOffset, 0);
     const failedIndex = manifest.failed ? activeIndex : null;
+    // A stop of an agent that already bound a room identity is a lifecycle stop,
+    // not a cancelled launch — the launch succeeded and was later retired.
+    const everBound = entry.agentSessionBindingState !== "none";
 
-    const phases = buildPhases(activeIndex, failedIndex, ctx, manifest.ready);
+    const phases = buildPhases(
+      { activeIndex, failedIndex, ready: manifest.ready, settled: manifest.stopped },
+      ctx,
+    );
     const status: LaunchJourneyStatus = manifest.ready
       ? "ready"
       : manifest.stopped
@@ -240,7 +265,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       stopped: manifest.stopped,
       agentName,
       providerLabel,
-      headline: headlineFor(status, ctx),
+      headline: headlineFor(status, ctx, { stoppedAfterReady: everBound }),
       failureDetail: manifest.failed ? manifest.failureDetail : null,
       recovery: manifest.failed ? manifestRecovery(entry) : null,
       joinHint: status === "in_progress" ? JOIN_HINT : null,
@@ -253,17 +278,21 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
   if (terminal) {
     // A failure/cancel before the durable claim. Attribute it to the step that
     // was in flight: connecting if we never connected, otherwise saving.
-    const failedIndex = connected ? SAVING : CONNECTING;
+    const boundaryIndex = connected ? SAVING : CONNECTING;
+    const cancelled = terminal.type === "launch.cancelled";
     const status: LaunchJourneyStatus =
-      terminal.type === "launch.cancelled" ? "cancelled" : terminal.type === "launch.blocked" ? "blocked" : "failed";
-    const phases = buildPhases(failedIndex, status === "cancelled" ? null : failedIndex, ctx, false);
+      cancelled ? "cancelled" : terminal.type === "launch.blocked" ? "blocked" : "failed";
+    const phases = buildPhases(
+      { activeIndex: boundaryIndex, failedIndex: cancelled ? null : boundaryIndex, ready: false, settled: cancelled },
+      ctx,
+    );
     return {
       phases,
-      currentPhaseId: JOURNEY_PHASE_ORDER[failedIndex]!,
+      currentPhaseId: JOURNEY_PHASE_ORDER[boundaryIndex]!,
       status,
       ready: false,
       failed: status === "blocked" || status === "failed",
-      stopped: status === "cancelled",
+      stopped: cancelled,
       agentName: null,
       providerLabel,
       headline: headlineFor(status, ctx),
@@ -275,7 +304,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
 
   // Still progressing through the pre-durable window.
   const activeIndex = saved ? PREPARING : connected ? SAVING : CONNECTING;
-  const phases = buildPhases(activeIndex, null, ctx, false);
+  const phases = buildPhases({ activeIndex, failedIndex: null, ready: false, settled: false }, ctx);
   return {
     phases,
     currentPhaseId: JOURNEY_PHASE_ORDER[Math.min(activeIndex, phases.length - 1)]!,
@@ -295,12 +324,17 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
 function headlineFor(
   status: LaunchJourneyStatus,
   ctx: { providerLabel: string; roomLabel: string; agentName: string | null },
+  opts: { stoppedAfterReady?: boolean } = {},
 ): string {
   switch (status) {
     case "ready":
       return ctx.agentName ? `${ctx.agentName} joined the room` : "Your agent is ready";
     case "cancelled":
-      return "Launch cancelled";
+      // A successful launch that was later stopped is a lifecycle stop, not a
+      // cancelled launch.
+      return opts.stoppedAfterReady
+        ? (ctx.agentName ? `${ctx.agentName} stopped` : `${ctx.providerLabel} agent stopped`)
+        : "Launch cancelled";
     case "blocked":
     case "failed":
       return `Couldn't add the ${ctx.providerLabel} agent`;
