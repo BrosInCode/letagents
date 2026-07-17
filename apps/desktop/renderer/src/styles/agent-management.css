@@ -1194,14 +1194,24 @@
   z-index: 82;
   display: grid;
   place-items: center;
-  padding: 22px;
+  padding:
+    max(12px, env(safe-area-inset-top))
+    max(12px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-left));
   background: rgba(0, 0, 0, 0.62);
   backdrop-filter: blur(18px);
 }
 
 .desktop-agent-detail-modal {
-  width: min(1040px, calc(100vw - 44px));
-  max-height: min(820px, calc(100vh - 44px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1040px, 100%);
+  max-width: 100%;
+  height: min(820px, 100%);
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: var(--radius-lg);
@@ -1246,11 +1256,9 @@
 
 .desktop-agent-detail-header h3 {
   min-width: 0;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   font-size: 1.2rem;
   line-height: 1.18;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .desktop-agent-detail-header p {
@@ -1258,6 +1266,7 @@
   color: var(--text-secondary);
   font-size: 0.82rem;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .desktop-agent-detail-header-actions {
@@ -1272,6 +1281,7 @@
 
 .desktop-agent-detail-title-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -1298,9 +1308,7 @@
 
 .desktop-agent-detail-provider-identity > span:last-child,
 .desktop-agent-detail-session-provider > small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .desktop-agent-detail-session-provider {
@@ -1486,12 +1494,24 @@
   background: rgba(239, 68, 68, 0.22) !important;
 }
 
+.desktop-agent-detail-header button:focus-visible,
+.desktop-agent-detail-panel button:focus-visible,
+.desktop-agent-detail-session button:focus-visible,
+.desktop-agent-detail-empty button:focus-visible,
+.desktop-agent-turn-control textarea:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 48%, transparent);
+  outline-offset: 2px;
+}
+
 .desktop-agent-detail-body {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
   padding: 20px;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
-  max-height: calc(min(820px, calc(100vh - 44px)) - 106px);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .desktop-agent-detail-panel {
@@ -1504,6 +1524,7 @@
 
 .desktop-agent-detail-panel header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -1549,11 +1570,9 @@
 
 .desktop-agent-detail-session p {
   grid-column: 1 / -1;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--text-tertiary);
   font-size: 0.73rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .desktop-agent-detail-session-inspection {
@@ -1571,11 +1590,9 @@
 
 .desktop-agent-detail-session-inspection span {
   min-width: 0;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--text-secondary);
   font-size: 0.78rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .desktop-agent-detail-session-inspection button {
@@ -1757,10 +1774,8 @@
   grid-column: 1 / -1;
   display: grid;
   gap: 7px;
-  max-height: 172px;
   margin: 0;
   padding: 0;
-  overflow: auto;
   list-style: none;
 }
 
@@ -1833,6 +1848,7 @@
   color: var(--text-secondary);
   font-size: 0.8rem;
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .desktop-agent-detail-empty {
@@ -1916,25 +1932,109 @@
 
   .desktop-agent-detail-backdrop {
     align-items: end;
-    padding: 12px;
   }
 
   .desktop-agent-detail-modal {
     width: 100%;
-    max-height: calc(100vh - 24px);
+    height: 100%;
   }
 
-  .desktop-agent-detail-header,
   .desktop-agent-detail-body {
     grid-template-columns: 1fr;
   }
 
+  .desktop-agent-detail-header {
+    gap: 12px;
+    align-items: start;
+    padding: 18px 20px;
+  }
+
+  .desktop-agent-detail-header h3,
+  .desktop-agent-detail-header p,
+  .desktop-agent-detail-provider-identity > span:last-child {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
   .desktop-agent-detail-header-actions {
-    justify-content: flex-start;
+    align-self: start;
+  }
+
+  .desktop-agent-detail-header .desktop-agent-detail-icon-button,
+  .desktop-agent-detail-header .desktop-modal-close,
+  .desktop-agent-detail-panel header button,
+  .desktop-agent-detail-session button,
+  .desktop-agent-detail-empty button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .desktop-agent-detail-header .desktop-agent-detail-icon-button {
+    width: 44px;
+    height: 44px;
+    border-radius: 9px;
+  }
+
+  .desktop-agent-detail-agent-actions {
+    flex-basis: 100%;
+    gap: 4px;
+  }
+
+  .desktop-agent-detail-body {
+    gap: 12px;
+    padding: 12px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .desktop-agent-detail-panel {
+    padding: 14px;
+  }
+
+  .desktop-agent-detail-session,
+  .desktop-agent-detail-session-inspection {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .desktop-agent-detail-session-inspection {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .desktop-agent-detail-session-inspection button,
+  .desktop-agent-turn-control-heading button {
+    width: 100%;
+  }
+
+  .desktop-agent-turn-control-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .desktop-agent-detail-permission-actions > button {
+    flex: 1 1 140px;
+  }
+
+  .desktop-agent-detail-danger-zone {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .desktop-agent-detail-danger-actions {
+    width: 100%;
+  }
+
+  .desktop-agent-detail-danger-actions > button {
+    flex: 1 1 140px;
   }
 }
 
 @media (max-width: 520px) {
+  .desktop-agent-detail-local-pill {
+    display: none;
+  }
+
   .desktop-add-agent-header {
     padding: 22px 20px 20px;
   }
@@ -1959,5 +2059,18 @@
     margin-bottom: -24px;
     margin-left: -20px;
     padding: 14px 20px 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-agent-detail-status-pulse[data-state="running"]::after {
+    animation: none;
+  }
+
+  .desktop-agent-detail-header button,
+  .desktop-agent-detail-panel header button,
+  .desktop-agent-detail-session button,
+  .desktop-agent-detail-empty button {
+    transition-property: border-color, background, color, opacity;
   }
 }
