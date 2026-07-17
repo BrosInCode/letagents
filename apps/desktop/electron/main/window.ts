@@ -207,6 +207,18 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         result.addAgentModal = true;
         result.addAgentRoomLabel = (document.querySelector('[data-testid="desktop-add-agent-room-label"]')?.textContent || "")
           .includes("Smoke Room");
+
+        // Run-mode-first: the modal now opens on the run-mode chooser. Choose the
+        // supervised mode to reveal the provider rail + config surface before
+        // touching either.
+        const runModeSupervised = await waitFor(
+          "run-mode supervised option",
+          () => document.querySelector('[data-testid="desktop-add-agent-runmode-supervised"]')
+        );
+        runModeSupervised.click();
+
+        await waitFor("codex provider", () => document.querySelector('[data-testid="desktop-add-agent-provider-codex"]'));
+        result.codexProvider = true;
         result.addAgentModalLayout = (() => {
           const modal = document.querySelector('[data-testid="desktop-add-agent-modal"]');
           const providers = modal?.querySelector(".desktop-add-agent-providers");
@@ -219,8 +231,6 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
             rectsDoNotOverlap(providers, status);
         })();
 
-        await waitFor("codex provider", () => document.querySelector('[data-testid="desktop-add-agent-provider-codex"]'));
-        result.codexProvider = true;
         const modalText = () => document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "";
         await waitFor("codex missing runtime", () =>
           modalText().includes("Codex is not installed.") &&
@@ -233,15 +243,29 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         );
         result.managedSessionCodename = true;
         result.addAgentStopAgentOnly = modalText().includes("Stop agent") && !modalText().includes("Stop turn");
-        result.deliveryControls = modalText().includes("From the agent app") && modalText().includes("From this desktop app");
-        const supervisedLifecycleButton = document.querySelector('[data-testid="desktop-add-agent-lifecycle-supervised"]');
-        supervisedLifecycleButton?.click();
+
+        // Lifecycle, charter and delivery now live behind the Customize
+        // disclosure — open it before asserting them.
+        const customizeToggle = await waitFor(
+          "customize toggle",
+          () => document.querySelector('[data-testid="desktop-add-agent-customize-toggle"]')
+        );
+        customizeToggle.click();
+        const supervisedLifecycleButton = await waitFor(
+          "supervised lifecycle control",
+          () => document.querySelector('[data-testid="desktop-add-agent-lifecycle-supervised"]')
+        );
+        supervisedLifecycleButton.click();
         await waitFor("supervised lifecycle controls", () =>
           modalText().includes("A detached daemon owns desired state and recovery") &&
           Boolean(document.querySelector('[data-testid="desktop-add-agent-supervised-charter"]'))
         );
         result.supervisedLifecycleControls = true;
         document.querySelector('[data-testid="desktop-add-agent-lifecycle-legacy"]')?.click();
+        await waitFor("delivery controls under customize", () =>
+          modalText().includes("From the agent app") && modalText().includes("From this desktop app")
+        );
+        result.deliveryControls = true;
         result.addAgentModalScroll = (() => {
           const dialog = document.querySelector(".desktop-add-agent-modal");
           const status = dialog?.querySelector(".desktop-add-agent-status");
@@ -319,6 +343,12 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         await waitFor("add-agent modal closed", () => !document.querySelector('[data-testid="desktop-add-agent-modal"]'));
         addAgentButton.click();
         await waitFor("add-agent modal reopened", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+        // The reopened modal resets to the run-mode chooser; re-enter supervised
+        // to reach the provider config surface again.
+        (await waitFor(
+          "reopened run-mode supervised option",
+          () => document.querySelector('[data-testid="desktop-add-agent-runmode-supervised"]')
+        )).click();
         await waitFor("codex install confirmation cleared on close", () =>
           (document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Install Codex") &&
           !(document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Confirm install Codex")

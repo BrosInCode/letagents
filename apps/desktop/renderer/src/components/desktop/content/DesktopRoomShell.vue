@@ -272,6 +272,8 @@
       @choose-worktree="openAgentWorktree"
       @managed-sessions-updated="replaceManagedAgentSessions"
       @managed-session-started="upsertManagedAgentSession"
+      @open-agent-detail="openAgentDetail"
+      @start-first-message="startFirstMessage"
     />
   </section>
 </template>
@@ -1598,6 +1600,17 @@ function stopManagedAgentSessionsRefreshTimer(): void {
 
 function openAgentDetail(target: AgentModalTarget): void {
   selectedAgentDetailTarget.value = target;
+}
+
+function startFirstMessage(): void {
+  // Leave the Add Agent modal and land the person in the chat composer so they
+  // can send the freshly launched agent its first message.
+  addAgentModalOpen.value = false;
+  activeTab.value = "chat";
+  void nextTick(() => {
+    const composer = document.querySelector<HTMLTextAreaElement>('[data-testid="desktop-composer-input"]');
+    composer?.focus();
+  });
 }
 
 function openAddAgentModalFromDetail(): void {

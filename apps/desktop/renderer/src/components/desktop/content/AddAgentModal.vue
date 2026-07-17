@@ -20,10 +20,10 @@
           <header class="desktop-add-agent-header">
             <div>
               <span>Add agent</span>
-              <h3 id="desktop-add-agent-title">Bring an agent into this room</h3>
+              <h3 id="desktop-add-agent-title">Add an agent to this room</h3>
               <p>
-                Choose a provider, confirm its setup, then start it in
-                <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
+                Choose how this agent should run in
+                <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>, then pick a provider.
               </p>
             </div>
             <button
@@ -36,528 +36,661 @@
             </button>
           </header>
 
-          <div class="desktop-add-agent-body">
-            <section class="desktop-add-agent-providers" aria-label="Agent providers">
-              <span class="desktop-add-agent-providers-label">Provider</span>
-              <button
-                v-for="provider in providers"
-                :key="provider.id"
-                class="desktop-add-agent-provider"
-                type="button"
-                :data-selected="provider.id === selectedProviderId"
-                :aria-pressed="provider.id === selectedProviderId"
-                :data-testid="`desktop-add-agent-provider-${provider.id}`"
-                @click="selectProvider(provider.id)"
-              >
-                <span class="desktop-add-agent-provider-icon" aria-hidden="true">
-                  <McpHarnessIcon :target-id="provider.mcpTargetId" />
-                </span>
-                <span>
-                  <strong>{{ provider.name }}</strong>
-                  <small>{{ provider.description }}</small>
-                </span>
-              </button>
-            </section>
-
-            <section class="desktop-add-agent-status" :data-state="preflight?.status || 'loading'">
-              <div class="desktop-add-agent-status-header">
-                <div>
-                  <span>{{ selectedProvider?.name || "Provider" }}</span>
-                  <h4>{{ statusTitle }}</h4>
-                </div>
-                <div class="desktop-add-agent-status-actions">
-                  <span
-                    class="desktop-add-agent-status-pill"
-                    :data-state="preflight?.status || 'loading'"
-                    aria-live="polite"
-                  >
-                    {{ preflightStatusLabel }}
+          <div class="desktop-add-agent-body" :data-phase="runMode ? 'configure' : 'choose'">
+            <section
+              v-if="!runMode"
+              class="desktop-add-agent-runmode"
+              role="radiogroup"
+              aria-label="How should this agent run?"
+              data-testid="desktop-add-agent-runmode"
+            >
+              <label class="desktop-add-agent-runmode-card">
+                <input
+                  type="radio"
+                  name="desktop-add-agent-runmode"
+                  value="supervised"
+                  data-testid="desktop-add-agent-runmode-supervised"
+                  :checked="runMode === 'supervised'"
+                  @change="chooseRunMode('supervised')"
+                />
+                <span class="desktop-add-agent-runmode-card-body">
+                  <span class="desktop-add-agent-runmode-card-title">
+                    <strong>Keep running for me</strong>
+                    <em>Recommended</em>
                   </span>
-                  <button
-                    type="button"
-                    :disabled="loadingPreflight || !selectedProviderId"
-                    @click="refreshSelectedProvider({ forceModels: true })"
-                  >
-                    {{ loadingPreflight ? "Checking..." : "Check again" }}
-                  </button>
-                </div>
-              </div>
-
-              <p v-if="preflight?.detail">{{ preflight.detail }}</p>
-              <p v-else-if="loadError">{{ loadError }}</p>
-              <p v-else>Checking provider readiness...</p>
-
-              <dl class="desktop-add-agent-checks">
-                <div>
-                  <dt>Agent app</dt>
-                  <dd>{{ runtimeLabel }}</dd>
-                </div>
-                <div>
-                  <dt>LetAgents connection</dt>
-                  <dd>{{ bridgeLabel }}</dd>
-                </div>
-                <div>
-                  <dt>Project folder</dt>
-                  <dd>{{ repoLabel }}</dd>
-                </div>
-              </dl>
-
-              <section
-                v-if="showWorktreePicker"
-                class="desktop-add-agent-worktrees"
-                data-testid="desktop-add-agent-worktree-picker"
-                aria-label="Matching worktrees"
-              >
-              <div class="desktop-add-agent-worktrees-header">
-                <span>Existing worktrees</span>
-                <p>{{ worktreePickerDescription }}</p>
-              </div>
-              <button
-                v-for="worktree in matchingWorktrees"
-                :key="worktree.path"
-                type="button"
-                class="desktop-add-agent-worktree"
-                :data-current="worktree.isCurrent"
-                :data-testid="`desktop-add-agent-worktree-${worktree.path}`"
-                @click="chooseWorktree(worktree.path)"
-              >
-                <GitBranch :size="14" aria-hidden="true" />
-                <span>
-                  <strong>{{ worktree.branch }}</strong>
-                  <small>{{ worktree.path }}</small>
+                  <small>
+                    LetAgents starts the agent and a detached supervisor keeps it running, recovering,
+                    and reachable in this room — even after you close this app.
+                  </small>
                 </span>
-                <code>{{ worktree.head.slice(0, 7) }}</code>
-              </button>
-              <p v-if="!matchingWorktrees.length" class="desktop-add-agent-worktrees-empty">
-                No existing worktree is on {{ preflight?.branchMismatch?.expectedBranch }}.
-              </p>
+              </label>
+              <label class="desktop-add-agent-runmode-card">
+                <input
+                  type="radio"
+                  name="desktop-add-agent-runmode"
+                  value="connect"
+                  data-testid="desktop-add-agent-runmode-connect"
+                  :checked="runMode === 'connect'"
+                  @change="chooseRunMode('connect')"
+                />
+                <span class="desktop-add-agent-runmode-card-body">
+                  <span class="desktop-add-agent-runmode-card-title">
+                    <strong>Connect an existing agent</strong>
+                  </span>
+                  <small>
+                    Point an agent you already run — Claude Code, Cursor, and more — at this room through
+                    the installed LetAgents connection.
+                  </small>
+                </span>
+              </label>
             </section>
 
-            <section
-              v-if="preflight?.nextAction === 'authenticate' && authCommand"
-              class="desktop-add-agent-auth-command"
-              aria-label="Agent sign-in command"
-            >
-              <span>Sign-in command</span>
-              <code>{{ authCommand }}</code>
-            </section>
+            <template v-else>
+              <section class="desktop-add-agent-providers" aria-label="Agent providers">
+                <button
+                  type="button"
+                  class="desktop-add-agent-back"
+                  data-testid="desktop-add-agent-back"
+                  @click="goBackToRunModeChoice"
+                >
+                  <ArrowLeft :size="14" aria-hidden="true" />
+                  <span>How it runs</span>
+                </button>
+                <span class="desktop-add-agent-providers-label">Provider</span>
+                <button
+                  v-for="provider in runModeProviders"
+                  :key="provider.id"
+                  class="desktop-add-agent-provider"
+                  type="button"
+                  :data-selected="provider.id === selectedProviderId"
+                  :aria-pressed="provider.id === selectedProviderId"
+                  :data-testid="`desktop-add-agent-provider-${provider.id}`"
+                  @click="selectProvider(provider.id)"
+                >
+                  <span class="desktop-add-agent-provider-icon" aria-hidden="true">
+                    <McpHarnessIcon :target-id="provider.mcpTargetId" />
+                  </span>
+                  <span>
+                    <strong>{{ provider.name }}</strong>
+                    <small>{{ provider.description }}</small>
+                  </span>
+                </button>
+              </section>
 
-            <section
-              v-if="showOpenModelConfig"
-              class="desktop-add-agent-open-model-config"
-              data-testid="desktop-add-agent-open-model-config"
-              aria-label="Open model configuration"
-            >
-              <span>Model endpoint</span>
-              <label>
-                <small>Endpoint URL (OpenAI Responses-compatible)</small>
-                <input
-                  v-model="openModelBaseUrl"
-                  type="url"
-                  placeholder="https://openrouter.ai/api/v1"
-                  data-testid="desktop-add-agent-open-model-base-url"
-                />
-              </label>
-              <label>
-                <small>Saved default model</small>
-                <input
-                  v-model="openModelModel"
-                  type="text"
-                  placeholder="qwen/qwen3-coder"
-                  data-testid="desktop-add-agent-open-model-model"
-                />
-              </label>
-              <label>
-                <small>API key {{ openModelStatus?.hasApiKey ? "(saved - paste to replace)" : "(optional for local endpoints)" }}</small>
-                <input
-                  v-model="openModelApiKey"
-                  type="password"
-                  autocomplete="off"
-                  :placeholder="openModelStatus?.hasApiKey ? '••••••••' : 'sk-or-...'"
-                  data-testid="desktop-add-agent-open-model-api-key"
-                />
-              </label>
-              <div class="desktop-add-agent-open-model-config-actions">
-                <button
-                  type="button"
-                  :disabled="savingOpenModelSettings"
-                  data-testid="desktop-add-agent-open-model-save"
-                  @click="saveOpenModelSettings"
-                >
-                  {{ savingOpenModelSettings ? "Saving..." : "Save model settings" }}
-                </button>
-                <button
-                  v-if="openModelStatus?.hasApiKey"
-                  type="button"
-                  :disabled="savingOpenModelSettings"
-                  @click="clearOpenModelApiKey"
-                >
-                  Clear saved key
-                </button>
-              </div>
-              <p v-if="openModelStatus?.error">{{ openModelStatus.error }}</p>
-            </section>
+              <section class="desktop-add-agent-status" :data-state="preflight?.status || 'loading'">
+                <div class="desktop-add-agent-status-header">
+                  <div>
+                    <span>{{ selectedProvider?.name || "Provider" }}</span>
+                    <h4>{{ statusTitle }}</h4>
+                  </div>
+                  <div class="desktop-add-agent-status-actions">
+                    <span
+                      class="desktop-add-agent-status-pill"
+                      :data-state="preflight?.status || 'loading'"
+                      aria-live="polite"
+                    >
+                      {{ preflightStatusLabel }}
+                    </span>
+                    <button
+                      type="button"
+                      :disabled="loadingPreflight || !selectedProviderId"
+                      @click="refreshSelectedProvider({ forceModels: true })"
+                    >
+                      {{ loadingPreflight ? "Checking..." : "Check again" }}
+                    </button>
+                  </div>
+                </div>
 
-            <section
-              v-if="showModelSelector"
-              class="desktop-add-agent-delivery desktop-add-agent-model"
-              aria-label="Agent model"
-            >
-              <div class="desktop-add-agent-section-heading">
-                <span>Model &amp; reasoning</span>
-                <button
-                  type="button"
-                  :disabled="loadingProviderModels"
-                  data-testid="desktop-add-agent-model-refresh"
-                  @click="refreshProviderModels"
+                <p v-if="preflight?.detail">{{ preflight.detail }}</p>
+                <p v-else-if="loadError">{{ loadError }}</p>
+                <p v-else>Checking provider readiness...</p>
+
+                <template v-if="runMode === 'supervised'">
+                  <section class="desktop-add-agent-supervised-intro" aria-label="How supervision works">
+                    <p>
+                      LetAgents launches {{ selectedProvider?.name || "the agent" }} and hands it to a detached
+                      supervisor that keeps it working, recovering, and reachable in
+                      <strong>{{ roomLabel }}</strong> — even after you close this app.
+                    </p>
+                  </section>
+
+                  <dl class="desktop-add-agent-config-summary" data-testid="desktop-add-agent-config-summary">
+                    <div>
+                      <dt>Agent</dt>
+                      <dd>{{ selectedProvider?.name || "Provider" }}</dd>
+                    </div>
+                    <div>
+                      <dt>Model</dt>
+                      <dd>{{ configuredModelSummary }}</dd>
+                    </div>
+                  </dl>
+
+                  <section class="desktop-add-agent-customize" aria-label="Customize agent">
+                    <button
+                      type="button"
+                      class="desktop-add-agent-customize-toggle"
+                      :aria-expanded="customizeOpen"
+                      aria-controls="desktop-add-agent-customize-panel"
+                      data-testid="desktop-add-agent-customize-toggle"
+                      @click="customizeOpen = !customizeOpen"
+                    >
+                      <ChevronDown
+                        class="desktop-add-agent-customize-chevron"
+                        :data-open="customizeOpen"
+                        :size="16"
+                        aria-hidden="true"
+                      />
+                      <span>Customize</span>
+                    </button>
+                    <div
+                      v-show="customizeOpen"
+                      id="desktop-add-agent-customize-panel"
+                      class="desktop-add-agent-customize-panel"
+                    >
+                      <dl class="desktop-add-agent-checks">
+                        <div>
+                          <dt>Agent app</dt>
+                          <dd>{{ runtimeLabel }}</dd>
+                        </div>
+                        <div>
+                          <dt>LetAgents connection</dt>
+                          <dd>{{ bridgeLabel }}</dd>
+                        </div>
+                        <div>
+                          <dt>Project folder</dt>
+                          <dd>{{ repoLabel }}</dd>
+                        </div>
+                      </dl>
+
+                      <section
+                        v-if="showModelSelector"
+                        class="desktop-add-agent-delivery desktop-add-agent-model"
+                        aria-label="Agent model"
+                      >
+                        <div class="desktop-add-agent-section-heading">
+                          <span>Model &amp; reasoning</span>
+                          <button
+                            type="button"
+                            :disabled="loadingProviderModels"
+                            data-testid="desktop-add-agent-model-refresh"
+                            @click="refreshProviderModels"
+                          >
+                            {{ loadingProviderModels ? "Loading..." : "Refresh models" }}
+                          </button>
+                        </div>
+                        <div class="desktop-add-agent-model-grid" :data-single="!showEffortSelector">
+                          <div class="desktop-add-agent-setting">
+                            <DesktopModelPicker
+                              :model-value="selectedModelChoice"
+                              :options="modelSelectOptions"
+                              label="Model"
+                              id="desktop-add-agent-model-select"
+                              described-by="desktop-add-agent-model-description"
+                              test-id="desktop-add-agent-model-select"
+                              @update:model-value="handleModelChoiceValue"
+                            />
+                            <label v-if="selectedModelMode === 'custom'" class="desktop-add-agent-model-custom-input">
+                              <small>Model id</small>
+                              <input
+                                v-model="customModelId"
+                                type="text"
+                                placeholder="provider/model-or-alias"
+                                data-testid="desktop-add-agent-model-custom-input"
+                              />
+                            </label>
+                            <p id="desktop-add-agent-model-description">{{ modelSelectorDescription }}</p>
+                          </div>
+                          <div v-if="showEffortSelector" class="desktop-add-agent-setting">
+                            <DesktopSelectField
+                              :model-value="selectedEffort"
+                              :options="effortSelectOptions"
+                              label="Effort"
+                              id="desktop-add-agent-effort-select"
+                              described-by="desktop-add-agent-effort-description"
+                              test-id="desktop-add-agent-effort-select"
+                              @update:model-value="handleEffortValue"
+                            />
+                            <p id="desktop-add-agent-effort-description">
+                              {{ effortSelectorDescription }}
+                            </p>
+                          </div>
+                        </div>
+                        <p class="desktop-add-agent-model-catalog" aria-live="polite">
+                          {{ providerModelCatalogLabel }}
+                        </p>
+                      </section>
+
+                      <section
+                        v-if="hasSupervisedRuntime(selectedProvider)"
+                        class="desktop-add-agent-delivery"
+                        aria-label="Agent lifecycle"
+                        data-testid="desktop-add-agent-lifecycle"
+                      >
+                        <span>Lifecycle</span>
+                        <div class="desktop-add-agent-segmented">
+                          <button
+                            type="button"
+                            :data-selected="launchMode === 'legacy'"
+                            data-testid="desktop-add-agent-lifecycle-legacy"
+                            @click="launchMode = 'legacy'"
+                          >
+                            This app
+                          </button>
+                          <button
+                            type="button"
+                            :data-selected="launchMode === 'supervised'"
+                            data-testid="desktop-add-agent-lifecycle-supervised"
+                            @click="launchMode = 'supervised'"
+                          >
+                            Supervised
+                          </button>
+                        </div>
+                        <p>{{ lifecycleDescription }}</p>
+                        <label v-if="launchMode === 'supervised'" class="desktop-add-agent-model-custom-input">
+                          <small>What should this agent help with?</small>
+                          <textarea
+                            v-model="supervisedCharter"
+                            rows="3"
+                            data-testid="desktop-add-agent-supervised-charter"
+                          />
+                        </label>
+                      </section>
+
+                      <section
+                        v-if="showDeliverySelector && launchMode === 'legacy'"
+                        class="desktop-add-agent-delivery"
+                        aria-label="Agent delivery mode"
+                      >
+                        <span>Delivery</span>
+                        <div class="desktop-add-agent-segmented">
+                          <button
+                            type="button"
+                            :data-selected="deliveryMode === 'mcp_polling'"
+                            @click="deliveryMode = 'mcp_polling'"
+                          >
+                            From the agent app
+                          </button>
+                          <button
+                            type="button"
+                            :data-selected="deliveryMode === 'desktop_events'"
+                            @click="deliveryMode = 'desktop_events'"
+                          >
+                            From this desktop app
+                          </button>
+                        </div>
+                        <p>{{ deliveryModeDescription }}</p>
+                      </section>
+
+                      <section
+                        v-if="selectedProvider?.capabilities.includes('desktop_managed_runtime') && selectedPermissionProfiles.length"
+                        class="desktop-add-agent-permissions"
+                        aria-label="Agent permissions"
+                      >
+                        <span>Permissions</span>
+                        <div class="desktop-add-agent-permission-options">
+                          <button
+                            v-for="profile in selectedPermissionProfiles"
+                            :key="profile.id"
+                            type="button"
+                            :data-selected="profile.id === selectedPermissionProfile?.id"
+                            :data-state="profile.status"
+                            :disabled="profile.status !== 'available'"
+                            @click="selectPermissionProfile(profile)"
+                          >
+                            <span class="desktop-add-agent-permission-option-title">
+                              <strong>{{ profile.label }}</strong>
+                              <em :data-risk="profile.risk">{{ profile.risk }}</em>
+                            </span>
+                            <small>{{ permissionProfileOptionSummary(profile) }}</small>
+                          </button>
+                        </div>
+                        <p v-if="selectedPermissionProfile">{{ permissionProfileSummary(selectedPermissionProfile) }}</p>
+                      </section>
+
+                      <section
+                        v-if="showCursorMcpPolicySelector"
+                        class="desktop-add-agent-delivery"
+                        aria-label="Cursor MCP tools"
+                      >
+                        <span>MCP tools</span>
+                        <div class="desktop-add-agent-segmented">
+                          <button
+                            v-for="option in cursorMcpPolicyOptions"
+                            :key="option.id"
+                            type="button"
+                            :data-selected="selectedCursorMcpPolicy === option.id"
+                            :data-testid="`desktop-add-agent-cursor-mcp-${option.id}`"
+                            @click="selectedCursorMcpPolicy = option.id"
+                          >
+                            {{ option.label }}
+                          </button>
+                        </div>
+                        <p>{{ selectedCursorMcpPolicyDescription }}</p>
+                      </section>
+                    </div>
+                  </section>
+                </template>
+
+                <section
+                  v-if="showWorktreePicker"
+                  class="desktop-add-agent-worktrees"
+                  data-testid="desktop-add-agent-worktree-picker"
+                  aria-label="Matching worktrees"
                 >
-                  {{ loadingProviderModels ? "Loading..." : "Refresh models" }}
-                </button>
-              </div>
-              <div class="desktop-add-agent-model-grid" :data-single="!showEffortSelector">
-                <div class="desktop-add-agent-setting">
-                  <DesktopModelPicker
-                    :model-value="selectedModelChoice"
-                    :options="modelSelectOptions"
-                    label="Model"
-                    id="desktop-add-agent-model-select"
-                    described-by="desktop-add-agent-model-description"
-                    test-id="desktop-add-agent-model-select"
-                    @update:model-value="handleModelChoiceValue"
-                  />
-                  <label v-if="selectedModelMode === 'custom'" class="desktop-add-agent-model-custom-input">
-                    <small>Model id</small>
+                  <div class="desktop-add-agent-worktrees-header">
+                    <span>Existing worktrees</span>
+                    <p>{{ worktreePickerDescription }}</p>
+                  </div>
+                  <button
+                    v-for="worktree in matchingWorktrees"
+                    :key="worktree.path"
+                    type="button"
+                    class="desktop-add-agent-worktree"
+                    :data-current="worktree.isCurrent"
+                    :data-testid="`desktop-add-agent-worktree-${worktree.path}`"
+                    @click="chooseWorktree(worktree.path)"
+                  >
+                    <GitBranch :size="14" aria-hidden="true" />
+                    <span>
+                      <strong>{{ worktree.branch }}</strong>
+                      <small>{{ worktree.path }}</small>
+                    </span>
+                    <code>{{ worktree.head.slice(0, 7) }}</code>
+                  </button>
+                  <p v-if="!matchingWorktrees.length" class="desktop-add-agent-worktrees-empty">
+                    No existing worktree is on {{ preflight?.branchMismatch?.expectedBranch }}.
+                  </p>
+                </section>
+
+                <section
+                  v-if="preflight?.nextAction === 'authenticate' && authCommand"
+                  class="desktop-add-agent-auth-command"
+                  aria-label="Agent sign-in command"
+                >
+                  <span>Sign-in command</span>
+                  <code>{{ authCommand }}</code>
+                </section>
+
+                <section
+                  v-if="showOpenModelConfig"
+                  class="desktop-add-agent-open-model-config"
+                  data-testid="desktop-add-agent-open-model-config"
+                  aria-label="Open model configuration"
+                >
+                  <span>Model endpoint</span>
+                  <label>
+                    <small>Endpoint URL (OpenAI Responses-compatible)</small>
                     <input
-                      v-model="customModelId"
-                      type="text"
-                      placeholder="provider/model-or-alias"
-                      data-testid="desktop-add-agent-model-custom-input"
+                      v-model="openModelBaseUrl"
+                      type="url"
+                      placeholder="https://openrouter.ai/api/v1"
+                      data-testid="desktop-add-agent-open-model-base-url"
                     />
                   </label>
-                  <p id="desktop-add-agent-model-description">{{ modelSelectorDescription }}</p>
-                </div>
-                <div v-if="showEffortSelector" class="desktop-add-agent-setting">
-                  <DesktopSelectField
-                    :model-value="selectedEffort"
-                    :options="effortSelectOptions"
-                    label="Effort"
-                    id="desktop-add-agent-effort-select"
-                    described-by="desktop-add-agent-effort-description"
-                    test-id="desktop-add-agent-effort-select"
-                    @update:model-value="handleEffortValue"
-                  />
-                  <p id="desktop-add-agent-effort-description">
-                    {{ effortSelectorDescription }}
-                  </p>
-                </div>
-              </div>
-              <p class="desktop-add-agent-model-catalog" aria-live="polite">
-                {{ providerModelCatalogLabel }}
-              </p>
-            </section>
+                  <label>
+                    <small>Saved default model</small>
+                    <input
+                      v-model="openModelModel"
+                      type="text"
+                      placeholder="qwen/qwen3-coder"
+                      data-testid="desktop-add-agent-open-model-model"
+                    />
+                  </label>
+                  <label>
+                    <small>API key {{ openModelStatus?.hasApiKey ? "(saved - paste to replace)" : "(optional for local endpoints)" }}</small>
+                    <input
+                      v-model="openModelApiKey"
+                      type="password"
+                      autocomplete="off"
+                      :placeholder="openModelStatus?.hasApiKey ? '••••••••' : 'sk-or-...'"
+                      data-testid="desktop-add-agent-open-model-api-key"
+                    />
+                  </label>
+                  <div class="desktop-add-agent-open-model-config-actions">
+                    <button
+                      type="button"
+                      :disabled="savingOpenModelSettings"
+                      data-testid="desktop-add-agent-open-model-save"
+                      @click="saveOpenModelSettings"
+                    >
+                      {{ savingOpenModelSettings ? "Saving..." : "Save model settings" }}
+                    </button>
+                    <button
+                      v-if="openModelStatus?.hasApiKey"
+                      type="button"
+                      :disabled="savingOpenModelSettings"
+                      @click="clearOpenModelApiKey"
+                    >
+                      Clear saved key
+                    </button>
+                  </div>
+                  <p v-if="openModelStatus?.error">{{ openModelStatus.error }}</p>
+                </section>
 
-            <section
-              v-if="hasSupervisedRuntime(selectedProvider)"
-              class="desktop-add-agent-delivery"
-              aria-label="Agent lifecycle"
-              data-testid="desktop-add-agent-lifecycle"
-            >
-              <span>Lifecycle</span>
-              <div class="desktop-add-agent-segmented">
-                <button
-                  type="button"
-                  :data-selected="launchMode === 'legacy'"
-                  data-testid="desktop-add-agent-lifecycle-legacy"
-                  @click="launchMode = 'legacy'"
+                <section
+                  v-if="connectJoinPrompt"
+                  class="desktop-add-agent-external-prompt"
+                  data-testid="desktop-add-agent-external-prompt"
+                  aria-label="External agent join prompt"
                 >
-                  This app
-                </button>
-                <button
-                  type="button"
-                  :data-selected="launchMode === 'supervised'"
-                  data-testid="desktop-add-agent-lifecycle-supervised"
-                  @click="launchMode = 'supervised'"
-                >
-                  Supervised
-                </button>
-              </div>
-              <p>{{ lifecycleDescription }}</p>
-              <label v-if="launchMode === 'supervised'" class="desktop-add-agent-model-custom-input">
-                <small>Charter</small>
-                <textarea
-                  v-model="supervisedCharter"
-                  rows="3"
-                  data-testid="desktop-add-agent-supervised-charter"
-                />
-              </label>
-            </section>
+                  <div class="desktop-add-agent-external-prompt-intro">
+                    <div>
+                      <span>External agent setup</span>
+                      <p>
+                        Copy these instructions into {{ selectedProvider?.name || "the provider" }} so it can join the
+                        correct room, use a readable agent name, and keep listening for work.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      :disabled="copyingExternalPrompt"
+                      @click="copyExternalJoinPrompt"
+                    >
+                      {{ copyingExternalPrompt ? "Copying..." : "Copy agent instructions" }}
+                    </button>
+                  </div>
+                  <details class="desktop-add-agent-external-prompt-details">
+                    <summary>Show full instructions</summary>
+                    <pre><code>{{ connectJoinPrompt }}</code></pre>
+                  </details>
+                </section>
 
-            <section
-              v-if="showDeliverySelector && launchMode === 'legacy'"
-              class="desktop-add-agent-delivery"
-              aria-label="Agent delivery mode"
-            >
-              <span>Delivery</span>
-              <div class="desktop-add-agent-segmented">
-                <button
-                  type="button"
-                  :data-selected="deliveryMode === 'mcp_polling'"
-                  @click="deliveryMode = 'mcp_polling'"
+                <section
+                  v-if="activeManagedSessions.length && runMode === 'supervised'"
+                  class="desktop-add-agent-managed-sessions"
                 >
-                  From the agent app
-                </button>
-                <button
-                  type="button"
-                  :data-selected="deliveryMode === 'desktop_events'"
-                  @click="deliveryMode = 'desktop_events'"
-                >
-                  From this desktop app
-                </button>
-              </div>
-              <p>{{ deliveryModeDescription }}</p>
-            </section>
+                  <article
+                    v-for="session in activeManagedSessions"
+                    :key="session.id"
+                    class="desktop-add-agent-managed-session"
+                  >
+                    <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
+                    <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
+                    <small>
+                      {{ managedAgentSessionDetail(session) }}
+                    </small>
+                    <div class="desktop-add-agent-managed-session-actions">
+                      <button
+                        type="button"
+                        class="desktop-add-agent-managed-session-danger"
+                        :disabled="!session.canStop || Boolean(stoppingSessionId)"
+                        @click="stopManagedAgent(session.id)"
+                      >
+                        {{ stoppingSessionId === session.id ? "Stopping..." : "Stop agent" }}
+                      </button>
+                    </div>
+                  </article>
+                </section>
 
-            <section
-              v-if="selectedProvider?.capabilities.includes('desktop_managed_runtime') && selectedPermissionProfiles.length"
-              class="desktop-add-agent-permissions"
-              aria-label="Agent permissions"
-            >
-              <span>Permissions</span>
-              <div class="desktop-add-agent-permission-options">
-                <button
-                  v-for="profile in selectedPermissionProfiles"
-                  :key="profile.id"
-                  type="button"
-                  :data-selected="profile.id === selectedPermissionProfile?.id"
-                  :data-state="profile.status"
-                  :disabled="profile.status !== 'available'"
-                  @click="selectPermissionProfile(profile)"
+                <section
+                  v-if="supervisedLaunchView && runMode === 'supervised'"
+                  class="desktop-add-agent-managed-sessions"
+                  data-testid="desktop-add-agent-supervised-runtime"
+                  aria-label="Supervised agent launch"
                 >
-                  <span class="desktop-add-agent-permission-option-title">
-                    <strong>{{ profile.label }}</strong>
-                    <em :data-risk="profile.risk">{{ profile.risk }}</em>
+                  <article
+                    class="desktop-add-agent-managed-session"
+                    :data-state="supervisedLaunchView.ready
+                      ? (supervisedConflict?.observedState ?? 'idle')
+                      : supervisedLaunchView.failed ? 'blocked'
+                      : supervisedLaunchView.stopped ? 'stopped'
+                      : 'starting'"
+                  >
+                    <SupervisedLaunchProgress :progress="supervisedLaunchView" @recover="handleLaunchRecover" />
+                    <div
+                      v-if="supervisedLaunchView?.ready"
+                      class="desktop-add-agent-ready-actions"
+                    >
+                      <button
+                        type="button"
+                        class="desktop-add-agent-ready-primary"
+                        data-testid="desktop-add-agent-view-agent"
+                        @click="viewLaunchedAgent"
+                      >
+                        View agent
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="desktop-add-agent-send-first-message"
+                        @click="sendFirstMessage"
+                      >
+                        Send first message
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="desktop-add-agent-add-another"
+                        @click="addAnother"
+                      >
+                        Add another
+                      </button>
+                    </div>
+                    <div class="desktop-add-agent-managed-session-actions">
+                      <button
+                        v-if="supervisedConflict"
+                        type="button"
+                        class="desktop-add-agent-managed-session-danger"
+                        data-testid="desktop-add-agent-stop-supervised-runtime"
+                        :disabled="Boolean(stoppingSupervisorEntryId)"
+                        @click="stopSupervisedConflict"
+                      >
+                        {{ stoppingSupervisorEntryId === supervisedConflict.id
+                          ? "Stopping..."
+                          : supervisedLaunchView.ready ? "Stop this supervised agent" : "Cancel launch" }}
+                      </button>
+                      <button
+                        v-else-if="supervisedLaunchView.failed || supervisedLaunchView.stopped"
+                        type="button"
+                        class="desktop-add-agent-managed-session-secondary"
+                        data-testid="desktop-add-agent-dismiss-launch"
+                        @click="dismissLaunch"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </article>
+                </section>
+
+                <p
+                  v-if="supervisedConflictLookupError"
+                  class="desktop-add-agent-feedback"
+                  data-testid="desktop-add-agent-supervised-lookup-error"
+                >
+                  We lost track of this launch. Please try adding the agent again.
+                </p>
+
+                <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
+
+                <div class="desktop-add-agent-actions">
+                  <button
+                    v-if="preflight?.nextAction === 'install_runtime'"
+                    type="button"
+                    class="desktop-add-agent-primary"
+                    :disabled="setupBusy"
+                    @click="runSetupAction('install_runtime')"
+                  >
+                    {{ setupActionButtonText("install_runtime") }}
+                  </button>
+
+                  <button
+                    v-else-if="preflight?.nextAction === 'install_mcp_bridge'"
+                    type="button"
+                    class="desktop-add-agent-primary"
+                    :disabled="setupBusy"
+                    @click="runSetupAction('install_mcp_bridge')"
+                  >
+                    {{ setupActionButtonText("install_mcp_bridge") }}
+                  </button>
+
+                  <button
+                    v-else-if="preflight?.nextAction === 'authenticate'"
+                    type="button"
+                    class="desktop-add-agent-primary"
+                    :disabled="copyingAuthCommand"
+                    @click="copyAgentAuthCommand"
+                  >
+                    {{ copyingAuthCommand ? "Copying..." : "Copy sign-in command" }}
+                  </button>
+
+                  <button
+                    v-else-if="preflight?.nextAction === 'choose_repo'"
+                    type="button"
+                    class="desktop-add-agent-primary"
+                    @click="emit('choose-repo')"
+                  >
+                    Choose project folder
+                  </button>
+
+                  <button
+                    v-else-if="preflight?.nextAction === 'choose_worktree' && canCreateWorktree && !matchingWorktrees.length"
+                    type="button"
+                    class="desktop-add-agent-primary"
+                    data-testid="desktop-add-agent-create-worktree"
+                    :disabled="creatingWorktree"
+                    @click="createWorktree"
+                  >
+                    {{ createWorktreeButtonLabel }}
+                  </button>
+
+                  <button
+                    v-else-if="preflight?.nextAction === 'choose_worktree'"
+                    type="button"
+                    class="desktop-add-agent-primary"
+                    disabled
+                  >
+                    {{ matchingWorktrees.length ? "Choose a worktree above" : "No matching worktree found" }}
+                  </button>
+
+                  <button
+                    v-else-if="hasDesktopManagedRuntime(selectedProvider) && runMode === 'supervised'"
+                    type="button"
+                    class="desktop-add-agent-primary"
+                    :disabled="!canStartManagedAgent || startingAgent"
+                    @click="startManagedAgent"
+                  >
+                    {{ managedAgentStartButtonLabel }}
+                  </button>
+
+                  <span v-if="activeSetupConfirmation" class="desktop-add-agent-confirmation">
+                    Review this action, then confirm to continue.
                   </span>
-                  <small>{{ permissionProfileOptionSummary(profile) }}</small>
-                </button>
-              </div>
-              <p v-if="selectedPermissionProfile">{{ permissionProfileSummary(selectedPermissionProfile) }}</p>
-            </section>
-
-            <section
-              v-if="showCursorMcpPolicySelector"
-              class="desktop-add-agent-delivery"
-              aria-label="Cursor MCP tools"
-            >
-              <span>MCP tools</span>
-              <div class="desktop-add-agent-segmented">
-                <button
-                  v-for="option in cursorMcpPolicyOptions"
-                  :key="option.id"
-                  type="button"
-                  :data-selected="selectedCursorMcpPolicy === option.id"
-                  :data-testid="`desktop-add-agent-cursor-mcp-${option.id}`"
-                  @click="selectedCursorMcpPolicy = option.id"
-                >
-                  {{ option.label }}
-                </button>
-              </div>
-              <p>{{ selectedCursorMcpPolicyDescription }}</p>
-            </section>
-
-            <section
-              v-if="externalJoinPrompt"
-              class="desktop-add-agent-external-prompt"
-              data-testid="desktop-add-agent-external-prompt"
-              aria-label="External agent join prompt"
-            >
-              <div class="desktop-add-agent-external-prompt-intro">
-                <div>
-                  <span>External agent setup</span>
-                  <p>
-                    Copy these instructions into {{ selectedProvider?.name || "the provider" }} so it can join the
-                    correct room, use a readable agent name, and keep listening for work.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  :disabled="copyingExternalPrompt"
-                  @click="copyExternalJoinPrompt"
-                >
-                  {{ copyingExternalPrompt ? "Copying..." : "Copy agent instructions" }}
-                </button>
-              </div>
-              <details class="desktop-add-agent-external-prompt-details">
-                <summary>Show full instructions</summary>
-                <pre><code>{{ externalJoinPrompt }}</code></pre>
-              </details>
-            </section>
-
-            <section v-if="activeManagedSessions.length" class="desktop-add-agent-managed-sessions">
-              <article
-                v-for="session in activeManagedSessions"
-                :key="session.id"
-                class="desktop-add-agent-managed-session"
-              >
-                <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
-                <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
-                <small>
-                  {{ managedAgentSessionDetail(session) }}
-                </small>
-                <div class="desktop-add-agent-managed-session-actions">
-                  <button
-                    type="button"
-                    class="desktop-add-agent-managed-session-danger"
-                    :disabled="!session.canStop || Boolean(stoppingSessionId)"
-                    @click="stopManagedAgent(session.id)"
+                  <span v-else-if="isExternalMcpProviderReady(selectedProvider, preflight)" class="desktop-add-agent-confirmation">
+                    {{ externalMcpProviderInstruction(selectedProvider) }}
+                  </span>
+                  <span v-else-if="runMode === 'supervised' && selectedPermissionProfileWarning" class="desktop-add-agent-confirmation">
+                    {{ selectedPermissionProfileWarning }}
+                  </span>
+                  <span v-else-if="runMode === 'supervised' && activeManagedSessions.length" class="desktop-add-agent-confirmation">
+                    Each start creates a separate local agent session.
+                  </span>
+                  <span
+                    v-else-if="runMode === 'supervised' && preflight?.status === 'ready' && hasDesktopManagedRuntime(selectedProvider)"
+                    class="desktop-add-agent-confirmation"
                   >
-                    {{ stoppingSessionId === session.id ? "Stopping..." : "Stop agent" }}
-                  </button>
+                    Starts a {{ selectedProvider?.name || "local" }} agent for this room.
+                  </span>
                 </div>
-              </article>
-            </section>
-
-            <section
-              v-if="supervisedLaunchView"
-              class="desktop-add-agent-managed-sessions"
-              data-testid="desktop-add-agent-supervised-runtime"
-              aria-label="Supervised agent launch"
-            >
-              <article
-                class="desktop-add-agent-managed-session"
-                :data-state="supervisedLaunchView.ready
-                  ? (supervisedConflict?.observedState ?? 'idle')
-                  : supervisedLaunchView.failed ? 'blocked'
-                  : supervisedLaunchView.stopped ? 'stopped'
-                  : 'starting'"
-              >
-                <SupervisedLaunchProgress :progress="supervisedLaunchView" @recover="handleLaunchRecover" />
-                <div class="desktop-add-agent-managed-session-actions">
-                  <button
-                    v-if="supervisedConflict"
-                    type="button"
-                    class="desktop-add-agent-managed-session-danger"
-                    data-testid="desktop-add-agent-stop-supervised-runtime"
-                    :disabled="Boolean(stoppingSupervisorEntryId)"
-                    @click="stopSupervisedConflict"
-                  >
-                    {{ stoppingSupervisorEntryId === supervisedConflict.id
-                      ? "Stopping..."
-                      : supervisedLaunchView.ready ? "Stop this supervised agent" : "Cancel launch" }}
-                  </button>
-                  <button
-                    v-else-if="supervisedLaunchView.failed || supervisedLaunchView.stopped"
-                    type="button"
-                    class="desktop-add-agent-managed-session-secondary"
-                    data-testid="desktop-add-agent-dismiss-launch"
-                    @click="dismissLaunch"
-                  >
-                    Dismiss
-                  </button>
-                </div>
-              </article>
-            </section>
-
-            <p
-              v-if="supervisedConflictLookupError"
-              class="desktop-add-agent-feedback"
-              data-testid="desktop-add-agent-supervised-lookup-error"
-            >
-              We lost track of this launch. Please try adding the agent again.
-            </p>
-
-            <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
-
-            <div class="desktop-add-agent-actions">
-              <button
-                v-if="preflight?.nextAction === 'install_runtime'"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="setupBusy"
-                @click="runSetupAction('install_runtime')"
-              >
-                {{ setupActionButtonText("install_runtime") }}
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'install_mcp_bridge'"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="setupBusy"
-                @click="runSetupAction('install_mcp_bridge')"
-              >
-                {{ setupActionButtonText("install_mcp_bridge") }}
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'authenticate'"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="copyingAuthCommand"
-                @click="copyAgentAuthCommand"
-              >
-                {{ copyingAuthCommand ? "Copying..." : "Copy sign-in command" }}
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'choose_repo'"
-                type="button"
-                class="desktop-add-agent-primary"
-                @click="emit('choose-repo')"
-              >
-                Choose project folder
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'choose_worktree' && canCreateWorktree && !matchingWorktrees.length"
-                type="button"
-                class="desktop-add-agent-primary"
-                data-testid="desktop-add-agent-create-worktree"
-                :disabled="creatingWorktree"
-                @click="createWorktree"
-              >
-                {{ createWorktreeButtonLabel }}
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'choose_worktree'"
-                type="button"
-                class="desktop-add-agent-primary"
-                disabled
-              >
-                {{ matchingWorktrees.length ? "Choose a worktree above" : "No matching worktree found" }}
-              </button>
-
-              <button
-                v-else-if="hasDesktopManagedRuntime(selectedProvider)"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="!canStartManagedAgent || startingAgent"
-                @click="startManagedAgent"
-              >
-                {{ managedAgentStartButtonLabel }}
-              </button>
-
-              <span v-if="activeSetupConfirmation" class="desktop-add-agent-confirmation">
-                Review this action, then confirm to continue.
-              </span>
-              <span v-else-if="isExternalMcpProviderReady(selectedProvider, preflight)" class="desktop-add-agent-confirmation">
-                {{ externalMcpProviderInstruction(selectedProvider) }}
-              </span>
-              <span v-else-if="selectedPermissionProfileWarning" class="desktop-add-agent-confirmation">
-                {{ selectedPermissionProfileWarning }}
-              </span>
-              <span v-else-if="activeManagedSessions.length" class="desktop-add-agent-confirmation">
-                Each start creates a separate local agent session.
-              </span>
-              <span
-                v-else-if="preflight?.status === 'ready' && hasDesktopManagedRuntime(selectedProvider)"
-                class="desktop-add-agent-confirmation"
-              >
-                Starts a {{ selectedProvider?.name || "local" }} agent for this room.
-              </span>
-            </div>
-
-            </section>
+              </section>
+            </template>
           </div>
         </section>
       </div>
@@ -567,7 +700,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { GitBranch, X } from "@lucide/vue";
+import { ArrowLeft, ChevronDown, GitBranch, X } from "@lucide/vue";
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
@@ -633,6 +766,7 @@ import { foldLaunchJourney } from "../../../domain/launch-journey";
 import SupervisedLaunchProgress from "./SupervisedLaunchProgress.vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
+import type { AgentModalTarget } from "./desktop-chat-message/types";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
 import {
   currentFocusableElement,
@@ -660,6 +794,8 @@ const emit = defineEmits<{
   "choose-worktree": [rootPath: string];
   "managed-sessions-updated": [sessions: DesktopManagedAgentSession[]];
   "managed-session-started": [session: DesktopManagedAgentSession];
+  "open-agent-detail": [target: AgentModalTarget];
+  "start-first-message": [];
 }>();
 
 const providers = ref<DesktopAgentProvider[]>([]);
@@ -686,6 +822,11 @@ const loadError = ref<string | null>(null);
 const setupMessage = ref<string | null>(null);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
 const launchMode = ref<"legacy" | "supervised">("legacy");
+// runMode is the run-mode-first gate: the form first asks how the agent should
+// run, then reveals a mode-scoped provider rail + config. runMode DRIVES
+// launchMode (supervised → launchMode "supervised"); it does not replace it.
+const runMode = ref<null | "supervised" | "connect">(null);
+const customizeOpen = ref(false);
 const supervisedCharter = ref("Work from the room board, coordinate in the room, and keep polling until stopped.");
 const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
 const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
@@ -767,6 +908,51 @@ const externalJoinPrompt = computed(() =>
     ? externalMcpProviderJoinPrompt(selectedProvider.value, props.roomIdentifier, props.repoRootPath)
     : null
 );
+
+// The supervised rail leads with providers that passed the durable supervision
+// evidence gate, then appends legacy-only app-managed providers (cursor,
+// open-model) so they stay reachable; selecting one forces launchMode "legacy"
+// through the existing selectProvider behavior.
+const supervisedProviders = computed(() => {
+  const supervised = providers.value.filter((provider) => hasSupervisedRuntime(provider));
+  const legacyManaged = providers.value.filter(
+    (provider) =>
+      hasDesktopManagedRuntime(provider)
+      && !supervised.some((entry) => entry.id === provider.id),
+  );
+  return [...supervised, ...legacyManaged];
+});
+
+const connectProviders = computed(() =>
+  providers.value.filter((provider) => provider.capabilities.includes("external_mcp")),
+);
+
+const runModeProviders = computed(() => {
+  if (runMode.value === "supervised") return supervisedProviders.value;
+  if (runMode.value === "connect") return connectProviders.value;
+  return [];
+});
+
+// Connect surfaces the join prompt for any external_mcp provider the instant its
+// MCP bridge is installed, independent of desktop_managed_runtime.
+const connectJoinPrompt = computed(() =>
+  selectedProvider.value
+    && selectedProvider.value.capabilities.includes("external_mcp")
+    && preflight.value?.mcpStatus === "installed"
+    ? externalMcpProviderJoinPrompt(selectedProvider.value, props.roomIdentifier, props.repoRootPath)
+    : null
+);
+
+const configuredModelSummary = computed(() => {
+  if (selectedModelMode.value === "custom") {
+    return customModelId.value.trim() || "Custom model id";
+  }
+  if (selectedModelMode.value === "option") {
+    return selectedProviderModel.value?.label || selectedProviderModelId.value || "Provider model";
+  }
+  const defaultModel = providerModels.value?.defaultModel;
+  return defaultModel ? `Provider default (${defaultModel})` : "Provider default";
+});
 
 const activeSetupConfirmation = computed(() => {
   const nextAction = preflight.value?.nextAction;
@@ -1056,7 +1242,8 @@ watch(
     props.roomGitRoom?.ref.name,
   ] as const,
   () => {
-    if (props.open && selectedProviderId.value) {
+    // Defer preflight/model IPC until a run mode is chosen.
+    if (props.open && selectedProviderId.value && runMode.value) {
       void refreshSelectedProvider();
     }
   },
@@ -1141,15 +1328,20 @@ async function loadProviders(): Promise<void> {
     );
     if (!isCurrentModalState(requestVersion)) return;
     providers.value = nextProviders;
-    const previousProviderId = selectedProviderId.value;
-    selectedProviderId.value = selectedProviderId.value
-      && providers.value.some((provider) => provider.id === selectedProviderId.value)
-      ? selectedProviderId.value
-      : providers.value.find((provider) => provider.id === "codex")?.id || providers.value[0]?.id || null;
-    syncPermissionProfileSelection();
-    syncDeliveryModeSelection();
-    if (selectedProviderId.value && selectedProviderId.value === previousProviderId) {
-      await refreshSelectedProvider();
+    // Auto-select + preflight refresh is deferred until a run mode is chosen:
+    // the rail is mode-scoped, so there is no provider to select (and nothing to
+    // preflight) until chooseRunMode picks one.
+    if (runMode.value) {
+      const previousProviderId = selectedProviderId.value;
+      selectedProviderId.value = selectedProviderId.value
+        && providers.value.some((provider) => provider.id === selectedProviderId.value)
+        ? selectedProviderId.value
+        : providers.value.find((provider) => provider.id === "codex")?.id || providers.value[0]?.id || null;
+      syncPermissionProfileSelection();
+      syncDeliveryModeSelection();
+      if (selectedProviderId.value && selectedProviderId.value === previousProviderId) {
+        await refreshSelectedProvider();
+      }
     }
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
@@ -1470,6 +1662,35 @@ function clearOpenModelApiKey(): Promise<void> {
   return applyOpenModelSettings({ apiKey: null });
 }
 
+function chooseRunMode(mode: "supervised" | "connect"): void {
+  runMode.value = mode;
+  customizeOpen.value = false;
+  const rail = mode === "supervised" ? supervisedProviders.value : connectProviders.value;
+  const preferredId = rail.find((provider) => provider.id === "codex")?.id ?? rail[0]?.id ?? null;
+  if (preferredId) {
+    selectProvider(preferredId);
+  }
+  if (mode === "supervised") {
+    // runMode drives launchMode: supervised providers keep the durable path.
+    launchMode.value = "supervised";
+  }
+  // Refresh directly rather than leaning on the selectedProviderId watcher:
+  // re-entering a mode with the same provider already selected would not retrip
+  // the watcher, leaving the deferred preflight (cleared on Back) unresolved.
+  if (selectedProviderId.value) {
+    void refreshSelectedProvider();
+  }
+}
+
+function goBackToRunModeChoice(): void {
+  // Never abandon a launch that is already in flight or bound to a durable
+  // supervised entry; the launch card owns that lifecycle.
+  if (launchStarted.value || supervisedConflict.value) return;
+  runMode.value = null;
+  customizeOpen.value = false;
+  invalidateCurrentPreflight();
+}
+
 function selectProvider(providerId: DesktopAgentProviderId): void {
   modalStateVersion += 1;
   clearScheduledModelPreflight();
@@ -1648,6 +1869,8 @@ function resetTransientState(): void {
   modalStateVersion += 1;
   preflightRequestId += 1;
   clearScheduledModelPreflight();
+  runMode.value = null;
+  customizeOpen.value = false;
   loadingProviders.value = false;
   loadingPreflight.value = false;
   setupBusy.value = false;
@@ -1710,6 +1933,9 @@ async function restoreSupervisedLaunchInProgress(): Promise<void> {
     .filter((entry) => entry.desiredState === "running" && !supervisedLaunchProgress(entry).ready)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   if (!launching) return;
+  // Reveal the supervised launch card immediately: a restored in-flight launch
+  // belongs to the supervised run mode.
+  runMode.value = "supervised";
   supervisedConflict.value = launching;
   supervisedConflictLookupError.value = null;
   // Reattach the same launch id so a launch still in its pre-durable window (or
@@ -1816,6 +2042,30 @@ function dismissLaunch(): void {
   launchEvents.value = [];
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
+}
+
+function viewLaunchedAgent(): void {
+  const entry = supervisedConflict.value;
+  if (!entry) return;
+  emit("open-agent-detail", {
+    actorLabel: null,
+    displayName: entry.displayName,
+    ownerAttribution: null,
+    ideLabel: selectedProvider.value?.name ?? null,
+    sender: entry.displayName,
+    agentKey: null,
+    agentSessionId: entry.agentSessionId,
+  });
+}
+
+function sendFirstMessage(): void {
+  emit("start-first-message");
+}
+
+function addAnother(): void {
+  // Keep runMode "supervised" so the form is immediately ready to launch
+  // another; only the finished launch card is cleared.
+  dismissLaunch();
 }
 
 function handleLaunchRecover(action: DesktopLaunchRecoveryAction): void {
@@ -1987,7 +2237,7 @@ async function copyAgentAuthCommand(): Promise<void> {
 }
 
 async function copyExternalJoinPrompt(): Promise<void> {
-  const prompt = externalJoinPrompt.value;
+  const prompt = connectJoinPrompt.value;
   if (!prompt || copyingExternalPrompt.value) return;
 
   const requestVersion = modalStateVersion;
