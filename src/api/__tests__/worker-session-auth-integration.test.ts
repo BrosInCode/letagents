@@ -888,7 +888,7 @@ test(
     const { room } = await seedHarness();
     const handlers = registerRoutesForRoom(room);
     const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
-    if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions || !pool || !createTask || !updateTask) {
+    if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions || !pool || !createTask || !updateTask || !addMessage) {
       throw new Error("DB-backed worker session tests require TEST_DB_URL");
     }
 
@@ -965,6 +965,20 @@ test(
         assignmentNow,
       ],
     );
+    const baselineMessage = await addMessage(room.id, "Human", "task_85 pending-poll baseline");
+    let predecessorPollSettled = false;
+    const predecessorPoll = invoke(
+      handlers.get.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/"),
+      requestWithDeliveryHeaders(firstSession, {
+        params: { 0: room.id },
+        query: { after: baselineMessage.id, timeout: "5000" },
+      }),
+    ).then((result) => {
+      predecessorPollSettled = true;
+      return result;
+    });
+    await sleep(50);
+    assert.equal(predecessorPollSettled, false, "predecessor poll is live before rotation");
 
     // The exact prior credential is the reconnect proof. It rotates behind
     // the instance fence and keeps the base display name.
@@ -985,6 +999,17 @@ test(
       "credential rotation preserves every session-bound authority reference",
     );
     assert.notEqual(resumedSession.session_token, firstSession.session_token);
+    const disconnectedPredecessorPoll = await Promise.race([
+      predecessorPoll,
+      sleep(1_000).then(() => null),
+    ]);
+    assert.ok(disconnectedPredecessorPoll, "rotation wakes the already-authenticated predecessor poll");
+    assert.equal(disconnectedPredecessorPoll.statusCode, 200);
+    assert.deepEqual(
+      (disconnectedPredecessorPoll.body as { messages?: unknown[] }).messages,
+      [],
+      "the predecessor transport closes without consuming a successor message",
+    );
 
     const afterResume = await pool.query<{
       session_id: string;
