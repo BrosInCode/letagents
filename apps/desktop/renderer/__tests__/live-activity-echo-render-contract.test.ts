@@ -25,3 +25,10 @@ test("the echo update is rate-limited with a trailing flush and cleaned up on un
   assert.match(viewportSource, /echoFlushTimer = window\.setTimeout\(applyEchoCoalescing/);
   assert.match(viewportSource, /window\.clearTimeout\(echoFlushTimer\)/);
 });
+
+test("scroll effects share the coalesced cadence, not the raw prop", () => {
+  // The scroll watcher must key off the rate-limited displayed set so it does
+  // not scroll on every raw native summary change.
+  assert.match(viewportSource, /\(\) => displayedAgentWork\.value\.map\(\(work\) => `\$\{work\.id\}:\$\{work\.summary\}`\)/);
+  assert.doesNotMatch(viewportSource, /\(\) => props\.localAgentWork\.map\(\(work\) => `\$\{work\.id\}:\$\{work\.summary\}`\)/);
+});
