@@ -244,6 +244,31 @@ export function exactSupervisorEntriesForTarget(
   return sessionId ? [] : null;
 }
 
+/**
+ * Join an Activity worker back to the local managed session that launched its
+ * supervisor entry. The managed runtime's own agentSessionId can differ from
+ * the room worker id after MCP registration, so supervisorEntryId is the
+ * durable bridge between those two projections.
+ */
+export function managedAgentSessionMatchesSupervisorTarget(
+  session: Pick<DesktopManagedAgentSession, "supervisorEntryId">,
+  entries: readonly DesktopSupervisorManifestEntry[],
+  targetAgentSessionId: string | null | undefined,
+  knownSupervisorEntryIds: readonly string[] = [],
+): boolean {
+  const exactEntries = exactSupervisorEntriesForTarget(
+    entries,
+    [],
+    targetAgentSessionId,
+    knownSupervisorEntryIds,
+  );
+  if (!exactEntries || exactEntries.length !== 1) return false;
+  return Boolean(
+    session.supervisorEntryId &&
+    session.supervisorEntryId === exactEntries[0]!.id
+  );
+}
+
 export interface ManagedAgentProviderIdentity {
   supervisorEntryId: string;
   providerId: string;
