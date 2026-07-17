@@ -119,6 +119,29 @@ test("once the durable entry exists the pre-durable steps are complete and the m
   assert.equal(activeCount(view), 1);
 });
 
+test("a daemon-journal replay alone rebuilds the completed journey after an app restart", () => {
+  const types: DesktopLaunchEventType[] = [
+    "launch.requested",
+    "supervisor.connected",
+    "agent.saved",
+    "launch.activated",
+    "workspace.prepared",
+    "provider.started",
+    "room.connected",
+    "identity.registered",
+    "agent.ready",
+  ];
+  const view = foldLaunchJourney({
+    events: types.map((type, index) => evt(type, { sequence: index + 1, durable: index >= 2 })),
+    provider: "codex",
+  });
+  assert.equal(view.ready, true);
+  assert.equal(view.status, "ready");
+  assert.equal(view.currentPhaseId, "ready");
+  assert.equal(activeCount(view), 0);
+  assert.deepEqual(view.phases.map((phase) => phase.state), ["done", "done", "done", "done", "done", "done", "done"]);
+});
+
 test("a bound, reachable, unblocked entry resolves to ready with the real name", () => {
   const view = foldLaunchJourney({
     entry: entry({

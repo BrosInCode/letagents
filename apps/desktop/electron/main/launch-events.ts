@@ -16,11 +16,11 @@ import type {
  * has its own monotonically increasing `sequence`; `getLaunchEvents` lets a
  * reopened modal replay everything after a cursor (at-least-once + idempotent).
  *
- * This buffer is intentionally in-memory and transient: the durable record of a
- * launch is the daemon manifest entry itself. On app restart mid-launch the
- * buffer is empty, and the renderer recovers post-claim progress from the
- * manifest snapshot it already polls. The fully-durable daemon journal is a
- * tracked follow-up.
+ * This buffer remains the live source for pre-claim observations. Once the
+ * daemon is reachable those observations are imported into its audit-backed
+ * launch journal; post-claim facts are daemon-owned. A reopened renderer merges
+ * this buffer with the durable replay, preferring the daemon for matching
+ * sequences.
  */
 
 const MAX_EVENTS_PER_LAUNCH = 64;
@@ -82,6 +82,28 @@ export function getLaunchEvents(launchId: string, afterSequence?: number | null)
   if (!record) return [];
   const cursor = typeof afterSequence === "number" && Number.isFinite(afterSequence) ? afterSequence : 0;
   return record.events.filter((event) => event.sequence > cursor);
+}
+
+/**
+ * Replace the transient buffer with the daemon-authoritative replay. This also
+ * advances the local sequence allocator, which is essential when a retry under
+ * the same launch id follows daemon-owned milestones created after Electron's
+ * last local event.
+ */
+export function reconcileLaunchEvents(events: readonly DesktopLaunchEvent[]): void {
+  if (events.length === 0) return;
+  const launchId = events[0]!.launchId;
+  if (events.some((event) => event.launchId !== launchId)) throw new Error("Launch replay contains mixed launch ids.");
+  const bySequence = new Map(events.map((event) => [event.sequence, event]));
+  const ordered = [...bySequence.values()].sort((left, right) => left.sequence - right.sequence).slice(-MAX_EVENTS_PER_LAUNCH);
+  launches.set(launchId, {
+    events: ordered,
+    sequence: ordered.reduce((maximum, event) => Math.max(maximum, event.sequence), 0),
+    updatedAt: Date.now(),
+  });
+  // Live consumers fold at-least-once and prefer the durable fact for an
+  // occupied sequence, so replaying the reconciled tail is safe.
+  for (const event of ordered) emitter.emit("launch-event", event);
 }
 
 export function onLaunchEvent(listener: (event: DesktopLaunchEvent) => void): () => void {

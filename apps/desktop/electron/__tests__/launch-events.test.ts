@@ -7,6 +7,7 @@ import {
   getLaunchEvents,
   LaunchBlockedError,
   onLaunchEvent,
+  reconcileLaunchEvents,
   resetLaunchEventsForTest,
   supervisedLaunchEverReady,
 } from "../main/launch-events.js";
@@ -50,6 +51,22 @@ test("onLaunchEvent receives live facts and can unsubscribe", () => {
   off();
   emitLaunchEvent({ launchId: "a", roomIdentifier: "r", provider: "codex", type: "supervisor.connected" });
   assert.deepEqual(received, ["launch.requested"]);
+});
+
+test("durable replay reconciles the local allocator before a same-id retry", () => {
+  emitLaunchEvent({ launchId: "a", roomIdentifier: "r", provider: "codex", type: "launch.requested" });
+  reconcileLaunchEvents([
+    {
+      launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+      sequence: 1, type: "launch.requested", at: "2026-07-17T00:00:00.000Z", detail: null, recovery: null, durable: false,
+    },
+    {
+      launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+      sequence: 9, type: "agent.ready", at: "2026-07-17T00:00:09.000Z", detail: null, recovery: null, durable: true,
+    },
+  ]);
+  const retry = emitLaunchEvent({ launchId: "a", roomIdentifier: "r", provider: "codex", type: "launch.requested" });
+  assert.equal(retry.sequence, 10);
 });
 
 test("carries entryId, recovery, and durable flags through", () => {

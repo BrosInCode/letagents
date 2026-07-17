@@ -16,7 +16,7 @@ import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonLaunchEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
@@ -1815,7 +1815,158 @@ test("audit transitions append and rotate instead of truncating", async () => {
     assert.match(await readFile(path, "utf8"), /"generation":2/);
     assert.doesNotMatch(await readFile(path, "utf8"), new RegExp(canary));
     assert.match(await readFile(path, "utf8"), /REDACTED/);
+    await log.appendLaunchEvents([{
+      launch_id: "launch_audit_123",
+      entry_id: "supervised_launch_audit_123",
+      room_id: "focus_37",
+      provider: "codex",
+      sequence: 1,
+      type: "launch.requested",
+      at: "2026-01-01T00:00:02.000Z",
+      detail: `Authorization: Bearer ${canary}`,
+      recovery: null,
+      durable: false,
+    }]);
+    await log.appendLaunchEvents([{
+      launch_id: "launch_audit_123",
+      entry_id: "supervised_launch_audit_123",
+      room_id: "focus_37",
+      provider: "codex",
+      sequence: 2,
+      type: "agent.saved",
+      at: "2026-01-01T00:00:03.000Z",
+      detail: "saved",
+      recovery: null,
+      durable: true,
+    }]);
+    const launchReplay = await log.readLaunchEvents("launch_audit_123");
+    assert.deepEqual(launchReplay.map((event) => event.sequence), [1, 2], "launch replay crosses audit rotation");
+    assert.doesNotMatch(JSON.stringify(launchReplay), new RegExp(canary));
+    assert.match(launchReplay[0]?.detail ?? "", /REDACTED/);
   } finally { await env.cleanup(); }
+});
+
+test("durable launch journal replays exact ordered facts across daemon restart and rejects sequence conflicts", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+    workerBindingsPath: join(env.root, "worker-bindings.json"),
+  };
+  const launchId = "launch_journal_123";
+  const entryId = `supervised_${launchId}`;
+  const imported = [
+    { launchId, entryId, roomIdentifier: "focus_37", provider: "codex", sequence: 1, type: "launch.requested", at: "2026-07-17T00:00:00.000Z", detail: null, recovery: null, durable: false },
+    { launchId, entryId, roomIdentifier: "focus_37", provider: "codex", sequence: 2, type: "supervisor.connected", at: "2026-07-17T00:00:01.000Z", detail: null, recovery: null, durable: false },
+  ];
+  let daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "launch.import_events", { launch_id: launchId, events: imported })).ok, true);
+    const conflictingPreClaimIdentity = await daemonRequest(paths.socketPath, "launch.import_events", {
+      launch_id: launchId,
+      events: [{ ...imported[0], roomIdentifier: "unrelated_room" }],
+    });
+    assert.equal(conflictingPreClaimIdentity.ok, false);
+    assert.match(conflictingPreClaimIdentity.error ?? "", /identity conflicts with durable history/i);
+    const readyEntry: DaemonManifestEntry = {
+      ...entry,
+      id: entryId,
+      room_id: "focus_37",
+      provider: "codex",
+      desired_state: "running",
+      observed_state: "working",
+      source_repo_path: env.root,
+      workspace_path: join(env.root, "worktree"),
+      work_attempt_id: "attempt_launch_journal",
+      provider_ref: {
+        work_attempt_id: "attempt_launch_journal",
+        provider_continuation_id: "continuation_launch_journal",
+        provider_connection: { kind: "codex_app_server", url: "http://127.0.0.1:4000", pid: 123 },
+        execution_generation_id: "generation_launch_journal",
+      },
+      workplace_liveness: { state: "reachable", observed_at: "2026-07-17T00:00:05.000Z", detail: "registered" },
+      ready_reached_at: "2026-07-17T00:00:07.000Z",
+      last_worker_binding: {
+        agent_session_id: "agent_session_launch_journal",
+        work_attempt_id: "attempt_launch_journal",
+        execution_generation_id: "generation_launch_journal",
+        updated_at: "2026-07-17T00:00:06.000Z",
+      },
+    };
+    const putReady = await daemonRequest(paths.socketPath, "manifest.put", { entry: readyEntry });
+    assert.equal(putReady.ok, true, putReady.error ?? "manifest.put failed");
+    const firstReplay = await daemonRequest(paths.socketPath, "launch.list_events", { launch_id: launchId, after_sequence: 0 });
+    assert.equal(firstReplay.ok, true);
+    assert.deepEqual(
+      (firstReplay.result as DaemonLaunchEvent[]).map((event) => [event.sequence, event.type, event.durable]),
+      [
+        [1, "launch.requested", false],
+        [2, "supervisor.connected", false],
+        [3, "agent.saved", true],
+        [4, "launch.activated", true],
+        [5, "workspace.prepared", true],
+        [6, "provider.started", true],
+        [7, "room.connected", true],
+        [8, "identity.registered", true],
+        [9, "agent.ready", true],
+      ],
+    );
+    // At-least-once imports are idempotent; a different fact at an occupied
+    // sequence fails closed instead of silently rewriting history.
+    assert.equal((await daemonRequest(paths.socketPath, "launch.import_events", { launch_id: launchId, events: imported })).ok, true);
+    const conflict = await daemonRequest(paths.socketPath, "launch.import_events", {
+      launch_id: launchId,
+      events: [{ ...imported[0], type: "launch.failed" }],
+    });
+    assert.equal(conflict.ok, false);
+    assert.match(conflict.error ?? "", /conflicts with durable history/i);
+    const crossRoom = await daemonRequest(paths.socketPath, "launch.import_events", {
+      launch_id: launchId,
+      events: [{ ...imported[0], sequence: 10, roomIdentifier: "unrelated_room" }],
+    });
+    assert.equal(crossRoom.ok, false);
+    assert.match(crossRoom.error ?? "", /does not match the supervised manifest identity/i);
+    const retryReplay = await daemonRequest(paths.socketPath, "launch.import_events", {
+      launch_id: launchId,
+      events: [
+        ...imported,
+        { ...imported[0], sequence: 5, at: "2026-07-17T00:01:00.000Z" },
+        { ...imported[1], sequence: 6, at: "2026-07-17T00:01:01.000Z" },
+      ],
+    });
+    assert.equal(retryReplay.ok, true);
+    const retryEvents = retryReplay.result as DaemonLaunchEvent[];
+    assert.deepEqual(
+      retryEvents.slice(9).map((event) => [event.sequence, event.type]),
+      [
+        [10, "launch.requested"],
+        [11, "supervisor.connected"],
+        [12, "agent.saved"],
+        [13, "launch.activated"],
+        [14, "workspace.prepared"],
+        [15, "provider.started"],
+        [16, "room.connected"],
+        [17, "identity.registered"],
+        [18, "agent.ready"],
+      ],
+      "a retry is rebased after daemon-only milestones and gets a fresh durable attempt suffix",
+    );
+
+    await daemon.stop();
+    daemon = new SupervisorDaemon(paths, "darwin");
+    await daemon.start();
+    const replayAfterRestart = await daemonRequest(paths.socketPath, "launch.list_events", { launch_id: launchId, after_sequence: 13 });
+    assert.deepEqual(
+      (replayAfterRestart.result as DaemonLaunchEvent[]).map((event) => event.sequence),
+      [14, 15, 16, 17, 18],
+    );
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
 });
 
 test("control socket rejects protocol mismatch explicitly", async () => {

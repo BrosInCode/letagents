@@ -40,6 +40,7 @@ async function startWireDaemon(
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
+  const launchEvents: Array<Record<string, any>> = [];
   const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -112,6 +113,26 @@ async function startWireDaemon(
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         entry.activity.push(request.params!.event);
         result = entry;
+      } else if (request.method === "launch.import_events") {
+        for (const event of request.params!.events ?? []) {
+          if (!launchEvents.some((candidate) => candidate.launch_id === request.params!.launch_id && candidate.sequence === event.sequence)) {
+            launchEvents.push({
+              launch_id: event.launchId,
+              entry_id: event.entryId,
+              room_id: event.roomIdentifier,
+              provider: event.provider,
+              sequence: event.sequence,
+              type: event.type,
+              at: event.at,
+              detail: event.detail,
+              recovery: event.recovery,
+              durable: event.durable,
+            });
+          }
+        }
+        result = launchEvents.filter((event) => event.launch_id === request.params!.launch_id);
+      } else if (request.method === "launch.list_events") {
+        result = launchEvents.filter((event) => event.launch_id === request.params!.launch_id && event.sequence > (request.params!.after_sequence ?? 0));
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -291,6 +312,20 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const listed = await client.list(created.roomId);
     assert.equal(listed.find((entry) => entry.id === second.id)?.desiredState, "running", "stopping one same-provider agent does not affect its peer");
     assert.equal((await client.readAttempt(created.id)).workspacePath, null);
+    const launchHistory = await client.importLaunchEvents("request_alpha", [{
+      launchId: "request_alpha",
+      entryId: created.id,
+      roomIdentifier: created.roomId,
+      provider: "codex",
+      sequence: 1,
+      type: "launch.requested",
+      at: "2026-07-17T00:00:00.000Z",
+      detail: "requested",
+      recovery: null,
+      durable: false,
+    }]);
+    assert.deepEqual(launchHistory.map((event) => [event.launchId, event.type, event.durable]), [["request_alpha", "launch.requested", false]]);
+    assert.equal((await client.listLaunchEvents("request_alpha", 0))[0]?.roomIdentifier, created.roomId);
     await client.create({
       roomIdentifier: "git-room:github.com:owner/claude-repo",
       displayName: "Durable Claude",

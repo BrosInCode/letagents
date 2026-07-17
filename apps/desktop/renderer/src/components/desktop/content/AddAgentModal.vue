@@ -1745,6 +1745,10 @@ function startSupervisedRuntimeRefresh(entryId: string, intervalMs = 1_000): voi
     }
     supervisedConflict.value = refreshed.entry;
     supervisedConflictLookupError.value = null;
+    // Reconcile the durable daemon journal on every manifest refresh. This is
+    // the live subscription path for post-claim facts and also repairs a modal
+    // reopened after either Electron or daemon restarted mid-launch.
+    void replayLaunchEvents(launchIdForEntry(entryId));
     // Stop polling on the phased-launch terminal states (ready / actionable
     // failure / stopped), not the legacy settled heuristic: a native-working
     // but not-yet-bound entry is still launching (Connecting) and must keep
@@ -1797,7 +1801,15 @@ async function replayLaunchEvents(launchId: string): Promise<void> {
 
 function appendLaunchEvent(event: DesktopLaunchEvent): void {
   // At-least-once delivery: fold idempotently by sequence.
-  if (launchEvents.value.some((existing) => existing.sequence === event.sequence)) return;
+  const index = launchEvents.value.findIndex((existing) => existing.sequence === event.sequence);
+  if (index >= 0) {
+    const existing = launchEvents.value[index]!;
+    if (!event.durable || existing.durable && existing.type === event.type) return;
+    const reconciled = [...launchEvents.value];
+    reconciled[index] = event;
+    launchEvents.value = reconciled;
+    return;
+  }
   launchEvents.value = [...launchEvents.value, event];
 }
 

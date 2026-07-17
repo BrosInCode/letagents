@@ -7,6 +7,7 @@ import { access, mkdir } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 
 import type {
+  DesktopLaunchEvent,
   DesktopSupervisorActivityEvent,
   DesktopSupervisorAttemptDetail,
   DesktopSupervisorCreateInput,
@@ -24,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.17";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.18";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -110,6 +111,18 @@ type WireLegacyLaneOwner = {
   session_id: string | null;
   created_at: string;
   updated_at: string;
+};
+type WireLaunchEvent = {
+  launch_id: string;
+  entry_id: string | null;
+  room_id: string;
+  provider: string;
+  sequence: number;
+  type: DesktopLaunchEvent["type"];
+  at: string;
+  detail: string | null;
+  recovery: DesktopLaunchEvent["recovery"];
+  durable: boolean;
 };
 
 export class SupervisorDaemonProtocolMismatchError extends Error {
@@ -319,6 +332,24 @@ export class SupervisorDaemonClient {
     return mapEntry(await this.request<WireEntry>("manifest.append_activity", { id, event: wireActivity(event) }));
   }
 
+  async importLaunchEvents(launchId: string, events: readonly DesktopLaunchEvent[]): Promise<DesktopLaunchEvent[]> {
+    await this.ensureRunning();
+    const wire = await this.request<WireLaunchEvent[]>("launch.import_events", {
+      launch_id: launchId,
+      events,
+    });
+    return wire.map(mapLaunchEvent);
+  }
+
+  async listLaunchEvents(launchId: string, afterSequence?: number | null): Promise<DesktopLaunchEvent[]> {
+    await this.ensureRunning();
+    const wire = await this.request<WireLaunchEvent[]>("launch.list_events", {
+      launch_id: launchId,
+      after_sequence: afterSequence ?? 0,
+    });
+    return wire.map(mapLaunchEvent);
+  }
+
   async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.update_workplace_liveness", {
@@ -449,6 +480,21 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
+  };
+}
+
+function mapLaunchEvent(event: WireLaunchEvent): DesktopLaunchEvent {
+  return {
+    launchId: event.launch_id,
+    entryId: event.entry_id,
+    roomIdentifier: event.room_id,
+    provider: event.provider,
+    sequence: event.sequence,
+    type: event.type,
+    at: event.at,
+    detail: event.detail,
+    recovery: event.recovery,
+    durable: event.durable,
   };
 }
 
