@@ -1,0 +1,310 @@
+import type {
+  DesktopLaunchEvent,
+  DesktopLaunchRecoveryAction,
+  DesktopSupervisorManifestEntry,
+} from "../../../electron/ipc-types";
+import {
+  supervisedLaunchProgress,
+  supervisedLaunchProviderLabel,
+  type SupervisedLaunchPhaseId,
+} from "./supervised-launch";
+
+/**
+ * One continuous, evidence-backed launch journey for the Add Agent modal
+ * (task_84).
+ *
+ * It folds two honest sources into a single ordered story:
+ *  - the Electron-owned pre-durable launch-event stream (connect → save →
+ *    activate), which explains the window that used to be an opaque "Starting…"
+ *    button; and
+ *  - the daemon manifest snapshot the modal already polls, which explains
+ *    everything after the durable claim exists.
+ *
+ * Three grammars are kept deliberately separate (msg_5190):
+ *  - MACHINE grammar = the event types (past-tense completed facts), consumed
+ *    but never shown.
+ *  - PRODUCT grammar = the per-step state (Waiting / In progress / Complete /
+ *    Needs attention / Failed / Cancelled / Ready); exactly one step is active.
+ *  - HUMAN grammar = the copy below (present-participle headings + plain
+ *    sub-copy). Technical nouns stay out of the journey.
+ *
+ * Delivery is at-least-once, so events are folded idempotently by `sequence`: a
+ * duplicate or reordered event never advances or regresses the journey.
+ */
+
+export type LaunchJourneyPhaseId =
+  | "connecting_supervisor"
+  | "saving_agent"
+  | SupervisedLaunchPhaseId; // preparing_workspace | starting_provider | connecting_room | registering_identity | ready
+
+export type LaunchJourneyPhaseState = "pending" | "active" | "done" | "failed";
+
+export type LaunchJourneyStatus =
+  | "in_progress"
+  | "ready"
+  | "blocked"
+  | "failed"
+  | "cancelled";
+
+export interface LaunchJourneyPhase {
+  id: LaunchJourneyPhaseId;
+  /** Human-grammar heading (present participle while active). */
+  label: string;
+  /** Human-grammar sub-copy explaining the step in plain language. */
+  detail: string;
+  state: LaunchJourneyPhaseState;
+}
+
+export interface LaunchJourneyView {
+  phases: LaunchJourneyPhase[];
+  currentPhaseId: LaunchJourneyPhaseId;
+  status: LaunchJourneyStatus;
+  /** Terminal success. */
+  ready: boolean;
+  /** Needs the owner's attention (blocked) or the attempt ended (failed). */
+  failed: boolean;
+  /** Intentionally retired before/after readiness. */
+  stopped: boolean;
+  agentName: string | null;
+  providerLabel: string;
+  /** Short card title. */
+  headline: string;
+  /** Plain-language problem for the failed/blocked step; null otherwise. */
+  failureDetail: string | null;
+  /** Single primary recovery action for the failed/blocked step; null otherwise. */
+  recovery: DesktopLaunchRecoveryAction | null;
+  /** Reassuring "you can close this window" copy while still progressing. */
+  joinHint: string | null;
+}
+
+const JOURNEY_PHASE_ORDER: readonly LaunchJourneyPhaseId[] = [
+  "connecting_supervisor",
+  "saving_agent",
+  "preparing_workspace",
+  "starting_provider",
+  "connecting_room",
+  "registering_identity",
+  "ready",
+];
+
+const JOIN_HINT = "You can close this window. We'll keep setting up the agent.";
+
+export interface LaunchJourneyInput {
+  /** Ordered (or unordered/duplicated) launch facts from Electron. */
+  events?: readonly DesktopLaunchEvent[];
+  /** The durable manifest entry once the claim exists; null in the pre-durable window. */
+  entry?: DesktopSupervisorManifestEntry | null;
+  /** Provider id used only when no entry/event is available yet. */
+  provider?: string;
+  /** Room name for the "Joining <room>" step. */
+  roomLabel?: string;
+  /** True once Start was clicked and the request is in flight (optimistic card). */
+  requested?: boolean;
+}
+
+function phaseCopy(
+  id: LaunchJourneyPhaseId,
+  ctx: { providerLabel: string; roomLabel: string; agentName: string | null },
+): { label: string; detail: string } {
+  switch (id) {
+    case "connecting_supervisor":
+      return { label: "Connecting to LetAgents", detail: "Making sure background agent management is available." };
+    case "saving_agent":
+      return { label: "Saving your agent", detail: "Recording this agent so setup can continue if you close the app." };
+    case "preparing_workspace":
+      return { label: "Preparing your project", detail: "Creating a private project area for this agent." };
+    case "starting_provider":
+      return { label: `Starting ${ctx.providerLabel}`, detail: `Opening ${ctx.providerLabel} with your selected model and permissions.` };
+    case "connecting_room":
+      return { label: `Joining ${ctx.roomLabel}`, detail: "Connecting your new agent to this room." };
+    case "registering_identity":
+      return { label: "Setting up the agent", detail: "Creating its room identity and linking it to this launch." };
+    case "ready":
+      return {
+        label: ctx.agentName ? `${ctx.agentName} is ready` : "Your agent is ready",
+        detail: "Your agent joined the room and can now receive messages.",
+      };
+  }
+}
+
+/** Fold at-least-once events into a stable set of observed milestones. */
+function foldEvents(events: readonly DesktopLaunchEvent[]): {
+  connected: boolean;
+  saved: boolean;
+  activated: boolean;
+  terminal: DesktopLaunchEvent | null;
+} {
+  const sorted = [...events].sort((left, right) => left.sequence - right.sequence);
+  let connected = false;
+  let saved = false;
+  let activated = false;
+  let terminal: DesktopLaunchEvent | null = null;
+  for (const event of sorted) {
+    switch (event.type) {
+      case "supervisor.connected":
+        connected = true;
+        break;
+      case "agent.saved":
+        connected = true;
+        saved = true;
+        break;
+      case "launch.activated":
+        connected = true;
+        saved = true;
+        activated = true;
+        break;
+      case "launch.blocked":
+      case "launch.failed":
+      case "launch.cancelled":
+        terminal = event;
+        break;
+      default:
+        break;
+    }
+  }
+  return { connected, saved, activated, terminal };
+}
+
+function manifestRecovery(entry: DesktopSupervisorManifestEntry): DesktopLaunchRecoveryAction {
+  switch (entry.condition) {
+    case "auth_blocked":
+      return "sign_in";
+    default:
+      return "retry";
+  }
+}
+
+function buildPhases(
+  activeIndex: number,
+  failedIndex: number | null,
+  ctx: { providerLabel: string; roomLabel: string; agentName: string | null },
+  allDone: boolean,
+): LaunchJourneyPhase[] {
+  return JOURNEY_PHASE_ORDER.map((id, index) => {
+    const copy = phaseCopy(id, ctx);
+    let state: LaunchJourneyPhaseState;
+    if (allDone) {
+      state = "done";
+    } else if (failedIndex !== null && index === failedIndex) {
+      state = "failed";
+    } else if (index < activeIndex) {
+      state = "done";
+    } else if (index === activeIndex && failedIndex === null) {
+      state = "active";
+    } else {
+      state = "pending";
+    }
+    return { id, label: copy.label, detail: copy.detail, state };
+  });
+}
+
+export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView {
+  const events = input.events ?? [];
+  const entry = input.entry ?? null;
+  const providerLabel = supervisedLaunchProviderLabel(entry?.provider ?? input.provider ?? "agent");
+  const roomLabel = input.roomLabel?.trim() || "the room";
+  const { connected, saved, terminal } = foldEvents(events);
+
+  // Pre-durable phase indices.
+  const CONNECTING = 0;
+  const SAVING = 1;
+  const PREPARING = 2;
+
+  if (entry) {
+    // The durable entry proves the connect + save window completed; the last
+    // five steps are derived from the manifest exactly as before, just relabelled.
+    const manifest = supervisedLaunchProgress(entry);
+    const agentName = manifest.agentName;
+    const ctx = { providerLabel, roomLabel, agentName };
+    const manifestActiveOffset = manifest.phases.findIndex((phase) => phase.state === "active" || phase.state === "failed");
+    // Journey index of the manifest's current phase (+2 for the two pre-durable steps).
+    const activeIndex = manifest.ready
+      ? JOURNEY_PHASE_ORDER.length - 1
+      : PREPARING + Math.max(manifestActiveOffset, 0);
+    const failedIndex = manifest.failed ? activeIndex : null;
+
+    const phases = buildPhases(activeIndex, failedIndex, ctx, manifest.ready);
+    const status: LaunchJourneyStatus = manifest.ready
+      ? "ready"
+      : manifest.stopped
+        ? "cancelled"
+        : manifest.failed
+          ? "failed"
+          : "in_progress";
+    return {
+      phases,
+      currentPhaseId: phases[Math.min(activeIndex, phases.length - 1)]!.id,
+      status,
+      ready: manifest.ready,
+      failed: manifest.failed,
+      stopped: manifest.stopped,
+      agentName,
+      providerLabel,
+      headline: headlineFor(status, ctx),
+      failureDetail: manifest.failed ? manifest.failureDetail : null,
+      recovery: manifest.failed ? manifestRecovery(entry) : null,
+      joinHint: status === "in_progress" ? JOIN_HINT : null,
+    };
+  }
+
+  // Pre-durable window: no durable entry yet. Drive from the event stream.
+  const ctx = { providerLabel, roomLabel, agentName: null as string | null };
+
+  if (terminal) {
+    // A failure/cancel before the durable claim. Attribute it to the step that
+    // was in flight: connecting if we never connected, otherwise saving.
+    const failedIndex = connected ? SAVING : CONNECTING;
+    const status: LaunchJourneyStatus =
+      terminal.type === "launch.cancelled" ? "cancelled" : terminal.type === "launch.blocked" ? "blocked" : "failed";
+    const phases = buildPhases(failedIndex, status === "cancelled" ? null : failedIndex, ctx, false);
+    return {
+      phases,
+      currentPhaseId: JOURNEY_PHASE_ORDER[failedIndex]!,
+      status,
+      ready: false,
+      failed: status === "blocked" || status === "failed",
+      stopped: status === "cancelled",
+      agentName: null,
+      providerLabel,
+      headline: headlineFor(status, ctx),
+      failureDetail: terminal.detail,
+      recovery: terminal.recovery,
+      joinHint: null,
+    };
+  }
+
+  // Still progressing through the pre-durable window.
+  const activeIndex = saved ? PREPARING : connected ? SAVING : CONNECTING;
+  const phases = buildPhases(activeIndex, null, ctx, false);
+  return {
+    phases,
+    currentPhaseId: JOURNEY_PHASE_ORDER[Math.min(activeIndex, phases.length - 1)]!,
+    status: "in_progress",
+    ready: false,
+    failed: false,
+    stopped: false,
+    agentName: null,
+    providerLabel,
+    headline: headlineFor("in_progress", ctx),
+    failureDetail: null,
+    recovery: null,
+    joinHint: JOIN_HINT,
+  };
+}
+
+function headlineFor(
+  status: LaunchJourneyStatus,
+  ctx: { providerLabel: string; roomLabel: string; agentName: string | null },
+): string {
+  switch (status) {
+    case "ready":
+      return ctx.agentName ? `${ctx.agentName} joined the room` : "Your agent is ready";
+    case "cancelled":
+      return "Launch cancelled";
+    case "blocked":
+    case "failed":
+      return `Couldn't add the ${ctx.providerLabel} agent`;
+    default:
+      return `Adding ${ctx.providerLabel} to ${ctx.roomLabel}`;
+  }
+}

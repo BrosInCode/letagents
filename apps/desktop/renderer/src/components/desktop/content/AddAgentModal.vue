@@ -417,18 +417,23 @@
             </section>
 
             <section
-              v-if="supervisedConflict && supervisedLaunchView"
+              v-if="supervisedLaunchView"
               class="desktop-add-agent-managed-sessions"
               data-testid="desktop-add-agent-supervised-runtime"
-              aria-label="Supervised agent runtime"
+              aria-label="Supervised agent launch"
             >
               <article
                 class="desktop-add-agent-managed-session"
-                :data-state="supervisedLaunchView.ready ? supervisedConflict.observedState : supervisedLaunchView.failed ? 'blocked' : 'starting'"
+                :data-state="supervisedLaunchView.ready
+                  ? (supervisedConflict?.observedState ?? 'idle')
+                  : supervisedLaunchView.failed ? 'blocked'
+                  : supervisedLaunchView.stopped ? 'stopped'
+                  : 'starting'"
               >
-                <SupervisedLaunchProgress :progress="supervisedLaunchView" />
+                <SupervisedLaunchProgress :progress="supervisedLaunchView" @recover="handleLaunchRecover" />
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
+                    v-if="supervisedConflict"
                     type="button"
                     class="desktop-add-agent-managed-session-danger"
                     data-testid="desktop-add-agent-stop-supervised-runtime"
@@ -438,6 +443,15 @@
                     {{ stoppingSupervisorEntryId === supervisedConflict.id
                       ? "Stopping..."
                       : supervisedLaunchView.ready ? "Stop this supervised agent" : "Cancel launch" }}
+                  </button>
+                  <button
+                    v-else-if="supervisedLaunchView.failed || supervisedLaunchView.stopped"
+                    type="button"
+                    class="desktop-add-agent-managed-session-secondary"
+                    data-testid="desktop-add-agent-dismiss-launch"
+                    @click="dismissLaunch"
+                  >
+                    Dismiss
                   </button>
                 </div>
               </article>
@@ -565,6 +579,8 @@ import type {
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
+  DesktopLaunchEvent,
+  DesktopLaunchRecoveryAction,
   DesktopOpenModelSettingsStatus,
   DesktopSupervisorManifestEntry,
   RepoStatus,
@@ -609,6 +625,7 @@ import {
   stopSupervisedProviderLane,
 } from "../../../domain/supervised-recovery";
 import { supervisedLaunchProgress } from "../../../domain/supervised-launch";
+import { foldLaunchJourney } from "../../../domain/launch-journey";
 import SupervisedLaunchProgress from "./SupervisedLaunchProgress.vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
@@ -653,6 +670,11 @@ const stoppingSessionId = ref<string | null>(null);
 const stoppingSupervisorEntryId = ref<string | null>(null);
 const supervisedConflict = ref<DesktopSupervisorManifestEntry | null>(null);
 const supervisedConflictLookupError = ref<string | null>(null);
+// task_84: the launch card appears the instant Start is clicked and is driven
+// by the ordered launch-event stream until the durable manifest entry exists.
+const launchStarted = ref(false);
+const activeLaunchId = ref<string | null>(null);
+const launchEvents = ref<DesktopLaunchEvent[]>([]);
 const copyingAuthCommand = ref(false);
 const copyingExternalPrompt = ref(false);
 const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
@@ -687,13 +709,22 @@ let modalStateVersion = 0;
 let managedSessionRefreshTimer: number | null = null;
 let supervisedRuntimeRefreshTimer: number | null = null;
 let supervisedCreationRequestId: string | null = null;
+let unsubscribeLaunchEvents: (() => void) | null = null;
 let modelPreflightTimer: number | null = null;
 
 const selectedProvider = computed(() =>
   providers.value.find((provider) => provider.id === selectedProviderId.value) || null
 );
 const supervisedLaunchView = computed(() =>
-  supervisedConflict.value ? supervisedLaunchProgress(supervisedConflict.value) : null
+  launchStarted.value || supervisedConflict.value
+    ? foldLaunchJourney({
+        events: launchEvents.value,
+        entry: supervisedConflict.value,
+        provider: selectedProviderId.value ?? undefined,
+        roomLabel: roomLabel.value,
+        requested: launchStarted.value,
+      })
+    : null
 );
 
 const activeManagedSessions = computed(() =>
@@ -1067,6 +1098,7 @@ onBeforeUnmount(() => {
   clearScheduledModelPreflight();
   stopManagedSessionRefreshTimer();
   stopSupervisedRuntimeRefreshTimer();
+  unsubscribeLaunchEventsFn();
 });
 
 async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {
@@ -1140,6 +1172,15 @@ async function startManagedAgent(): Promise<void> {
         throw new Error("This provider has not passed the durable supervision evidence gate.");
       }
       supervisedCreationRequestId ||= window.crypto.randomUUID();
+      // The launch card must appear the instant Start is clicked — before the
+      // create request returns — and advance from the ordered launch-event
+      // stream Electron emits for this exact launch id (connect → save →
+      // activate). Subscribe first so no early fact is missed.
+      launchStarted.value = true;
+      supervisedConflict.value = null;
+      supervisedConflictLookupError.value = null;
+      setupMessage.value = null;
+      subscribeLaunchEvents(supervisedCreationRequestId);
       const entry = await desktopIpc.supervisor.createAgent({
         creationRequestId: supervisedCreationRequestId,
         providerId: selectedProviderId.value,
@@ -1155,16 +1196,11 @@ async function startManagedAgent(): Promise<void> {
         model: selectedModel.value,
       });
       if (!isCurrentModalState(requestVersion)) return;
-      // A durable `running` claim returns before the native provider has
-      // published room presence. Render this manifest entry immediately so
-      // the first Start click has a visible result and cannot be mistaken for
-      // a no-op that needs a second click.
+      // The durable claim now exists: from here the journey is derived from the
+      // manifest the daemon owns. Keep the same card; feed it the entry.
       supervisedConflict.value = entry;
-      supervisedCreationRequestId = null;
       supervisedConflictLookupError.value = null;
-      // The phased launch row now communicates progress; avoid a duplicate,
-      // opaque observed-state line here.
-      setupMessage.value = null;
+      supervisedCreationRequestId = null;
       startSupervisedRuntimeRefresh(entry.id);
       void loadManagedSessions({ quiet: true });
       return;
@@ -1195,7 +1231,10 @@ async function startManagedAgent(): Promise<void> {
       if (entryId) {
         const recovery = await refreshSupervisedRuntimeEntry(desktopIpc.supervisor, props.roomIdentifier, entryId);
         if (!isCurrentModalState(requestVersion)) return;
-        supervisedConflict.value = recovery.entry?.desiredState === "stopped" ? null : recovery.entry;
+        // Only a genuinely live (running) entry should take over the card. A
+        // paused/stopped/rolled-back entry must not mask the terminal launch
+        // fact already carried by the event stream.
+        supervisedConflict.value = recovery.entry?.desiredState === "running" ? recovery.entry : null;
         supervisedConflictLookupError.value = recovery.entry ? null : recovery.error;
       }
     }
@@ -1437,6 +1476,10 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
   stopSupervisedRuntimeRefreshTimer();
+  unsubscribeLaunchEventsFn();
+  launchStarted.value = false;
+  activeLaunchId.value = null;
+  launchEvents.value = [];
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
   supervisedCreationRequestId = null;
@@ -1600,6 +1643,10 @@ function resetTransientState(): void {
   stoppingSessionId.value = null;
   stoppingSupervisorEntryId.value = null;
   stopSupervisedRuntimeRefreshTimer();
+  unsubscribeLaunchEventsFn();
+  launchStarted.value = false;
+  activeLaunchId.value = null;
+  launchEvents.value = [];
   supervisedConflict.value = null;
   supervisedConflictLookupError.value = null;
   supervisedCreationRequestId = null;
@@ -1653,6 +1700,11 @@ async function restoreSupervisedLaunchInProgress(): Promise<void> {
   if (!launching) return;
   supervisedConflict.value = launching;
   supervisedConflictLookupError.value = null;
+  // Reattach the same launch id so a launch still in its pre-durable window (or
+  // reopened after the app relaunched) rebuilds its story from any buffered
+  // facts; the manifest snapshot already covers the post-durable phases.
+  launchStarted.value = true;
+  subscribeLaunchEvents(launchIdForEntry(launching.id));
   startSupervisedRuntimeRefresh(launching.id);
 }
 
@@ -1699,6 +1751,70 @@ function stopSupervisedRuntimeRefreshTimer(): void {
     window.clearInterval(supervisedRuntimeRefreshTimer);
     supervisedRuntimeRefreshTimer = null;
   }
+}
+
+function launchIdForEntry(entryId: string): string {
+  return entryId.startsWith("supervised_") ? entryId.slice("supervised_".length) : entryId;
+}
+
+function subscribeLaunchEvents(launchId: string): void {
+  unsubscribeLaunchEventsFn();
+  activeLaunchId.value = launchId;
+  launchEvents.value = [];
+  const off = desktopIpc.supervisor.onLaunchEvent?.((event) => {
+    if (event.launchId !== activeLaunchId.value) return;
+    appendLaunchEvent(event);
+  });
+  unsubscribeLaunchEvents = off ?? null;
+  // Replay anything already buffered (reopen, or facts that landed before the
+  // subscription attached).
+  void replayLaunchEvents(launchId);
+}
+
+async function replayLaunchEvents(launchId: string): Promise<void> {
+  const getEvents = desktopIpc.supervisor.getLaunchEvents;
+  if (typeof getEvents !== "function") return;
+  try {
+    const events = await getEvents(launchId);
+    if (activeLaunchId.value !== launchId) return;
+    for (const event of events) appendLaunchEvent(event);
+  } catch {
+    // Best-effort replay; the manifest snapshot remains the durable fallback.
+  }
+}
+
+function appendLaunchEvent(event: DesktopLaunchEvent): void {
+  // At-least-once delivery: fold idempotently by sequence.
+  if (launchEvents.value.some((existing) => existing.sequence === event.sequence)) return;
+  launchEvents.value = [...launchEvents.value, event];
+}
+
+function unsubscribeLaunchEventsFn(): void {
+  if (unsubscribeLaunchEvents) {
+    unsubscribeLaunchEvents();
+    unsubscribeLaunchEvents = null;
+  }
+}
+
+function dismissLaunch(): void {
+  unsubscribeLaunchEventsFn();
+  stopSupervisedRuntimeRefreshTimer();
+  launchStarted.value = false;
+  activeLaunchId.value = null;
+  launchEvents.value = [];
+  supervisedConflict.value = null;
+  supervisedConflictLookupError.value = null;
+}
+
+function handleLaunchRecover(action: DesktopLaunchRecoveryAction): void {
+  if (action === "choose_project") {
+    emit("choose-repo");
+    return;
+  }
+  // retry / reconnect / sign_in: re-attempt under the same launch id so the
+  // retry stays idempotent once the user has addressed the cause.
+  if (activeLaunchId.value) supervisedCreationRequestId = activeLaunchId.value;
+  void startManagedAgent();
 }
 
 function isCurrentModalState(version: number): boolean {
