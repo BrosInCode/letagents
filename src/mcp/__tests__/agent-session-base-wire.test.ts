@@ -104,6 +104,10 @@ test("register_agent_session emits, persists, and replays the stable base signal
       "MistyMorrow",
       "wire body must carry the declared stable base",
     );
+    assert.equal(registrationBodies[0]!.replace_agent_session_id, null);
+    assert.equal(registrationBodies[0]!.replace_agent_session_token, null);
+    assert.doesNotMatch(JSON.stringify(first), /token_1/,
+      "replacement credentials remain private and never enter the tool response");
 
     // 2. The server-confirmed base is persisted into local session state even
     //    though the assigned label was decorated ("MistyMorrow 2").
@@ -127,6 +131,18 @@ test("register_agent_session emits, persists, and replays the stable base signal
       "MistyMorrow",
       "replaying the decorated prior label declares the ORIGINAL base",
     );
+    assert.equal(
+      registrationBodies[1]!.replace_agent_session_id,
+      first.agent_session_id,
+      "fresh re-registration identifies the exact predecessor",
+    );
+    assert.equal(
+      registrationBodies[1]!.replace_agent_session_token,
+      "token_1",
+      "fresh re-registration proves ownership with the protected prior credential",
+    );
+    assert.ok(getStoredAgentSession(first.agent_session_id)?.ended_at,
+      "a successfully rotated predecessor is marked ended in protected local state");
 
     // 4. A deliberate different name (numeric-ending rename) declares itself
     //    as its own base — never reduced to the prior base.

@@ -410,6 +410,15 @@ test(
       ide_label: "Codex",
       transport: "long_poll",
     });
+    const firstPresence = await invoke(
+      handlers.post.get("/^\\/rooms\\/(.+)\\/presence$/"),
+      ownerTokenRequest({
+        status: "working",
+        status_text: "first SwiftCrest transport",
+        ...sessionCredentials(firstSession),
+      }, { params: { 0: room.id } }),
+    );
+    assert.equal(firstPresence.statusCode, 200, JSON.stringify(firstPresence.body));
 
     const registrationBody = {
       actor_key: worker.agent_key,
@@ -876,5 +885,197 @@ test(
       "MorningGlory 9 9",
       "no trusted signal -> preserve the requested label (fail closed, no shape inference)"
     );
+  }
+);
+
+test(
+  "same-instance registration rotates with exact prior credentials or stale expiry",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+    if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions || !pool) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+
+    const registrationBody = {
+      actor_key: agentIdentity.canonical_key,
+      display_name: "SwiftCrest",
+      requested_base_display_name: "SwiftCrest",
+      ide_label: "Agent",
+      agent_instance_id: "same-instance-reconnect",
+      session_kind: "worker",
+      runtime: "codex",
+      registration_liveness: {
+        host_id: "host_swiftcrest",
+        liveness_capability: "codex_app_server_runtime_stream",
+        tool_bridge_id: "bridge_swiftcrest",
+      },
+    };
+
+    const first = await invoke(
+      registerHandler,
+      ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+    );
+    assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+    const firstSession = first.body as CreatedSession;
+    assert.equal(firstSession.display_name, "SwiftCrest");
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: firstSession.actor_label,
+      agent_key: firstSession.agent_key,
+      agent_instance_id: firstSession.agent_instance_id,
+      agent_session_id: firstSession.session_id,
+      session_kind: "worker",
+      runtime: "codex",
+      display_name: firstSession.display_name,
+      owner_label: agentIdentity.owner_label,
+      ide_label: "Agent",
+      transport: "long_poll",
+    });
+
+    // The exact prior credential is the reconnect proof. It rotates behind
+    // the instance fence and keeps the base display name.
+    const resumed = await invoke(
+      registerHandler,
+      ownerTokenRequest({
+        ...registrationBody,
+        replace_agent_session_id: firstSession.session_id,
+        replace_agent_session_token: firstSession.session_token,
+      }, { params: { 0: room.id } })
+    );
+    assert.equal(resumed.statusCode, 201, JSON.stringify(resumed.body));
+    const resumedSession = resumed.body as CreatedSession;
+    assert.equal(resumedSession.display_name, "SwiftCrest");
+    assert.notEqual(resumedSession.session_id, firstSession.session_id);
+
+    const afterResume = await pool.query<{
+      session_id: string;
+      ended_at: string | null;
+    }>(
+      `SELECT session_id, ended_at
+         FROM room_agent_sessions
+        WHERE room_id = $1 AND agent_key = $2 AND agent_instance_id = $3
+        ORDER BY created_at`,
+      [room.id, agentIdentity.canonical_key, registrationBody.agent_instance_id],
+    );
+    assert.equal(afterResume.rows.length, 2);
+    assert.ok(afterResume.rows.find((row) => row.session_id === firstSession.session_id)?.ended_at);
+    assert.equal(afterResume.rows.find((row) => row.session_id === resumedSession.session_id)?.ended_at, null);
+    assert.equal(afterResume.rows.filter((row) => row.ended_at === null).length, 1);
+    const deliveries = await getRoomAgentDeliverySessions(room.id);
+    assert.equal(
+      deliveries.find((delivery) => delivery.agent_session_id === firstSession.session_id)?.active_connection_count,
+      0,
+      "the replaced session cannot keep a duplicate delivery channel",
+    );
+    const resumedPresence = await invoke(
+      handlers.post.get("/^\\/rooms\\/(.+)\\/presence$/"),
+      ownerTokenRequest({
+        status: "working",
+        status_text: "resumed SwiftCrest transport",
+        ...sessionCredentials(resumedSession),
+      }, { params: { 0: room.id } }),
+    );
+    assert.equal(resumedPresence.statusCode, 200, JSON.stringify(resumedPresence.body));
+    assert.equal(
+      (resumedPresence.body as { agent_session_id?: string }).agent_session_id,
+      resumedSession.session_id,
+      "the replacement owns the single current presence projection",
+    );
+
+    // A separate live transport cannot steal the instance with a public
+    // session id and a forged credential, even if it copies the bridge label.
+    const foreignFresh = await invoke(
+      registerHandler,
+      ownerTokenRequest({
+        ...registrationBody,
+        replace_agent_session_id: resumedSession.session_id,
+        replace_agent_session_token: "forged-session-secret",
+      }, { params: { 0: room.id } })
+    );
+    assert.equal(foreignFresh.statusCode, 409, JSON.stringify(foreignFresh.body));
+    assert.equal(
+      (foreignFresh.body as { code?: string }).code,
+      "agent_instance_already_active",
+    );
+    const currentAfterConflict = await pool.query<{ ended_at: string | null }>(
+      "SELECT ended_at FROM room_agent_sessions WHERE session_id = $1",
+      [resumedSession.session_id],
+    );
+    assert.equal(currentAfterConflict.rows[0]?.ended_at, null);
+
+    const partialProof = await invoke(
+      registerHandler,
+      ownerTokenRequest({
+        ...registrationBody,
+        replace_agent_session_id: resumedSession.session_id,
+      }, { params: { 0: room.id } })
+    );
+    assert.equal(partialProof.statusCode, 400, JSON.stringify(partialProof.body));
+    assert.equal(
+      (partialProof.body as { code?: string }).code,
+      "invalid_agent_session_replacement_proof",
+    );
+
+    // Once heartbeat freshness expires, a successor without the old secret
+    // may reclaim the crashed instance. This covers missed disconnect/restart
+    // recovery without weakening the fresh-session fence.
+    await pool.query(
+      "UPDATE room_agent_sessions SET last_seen_at = NOW() - INTERVAL '3 minutes' WHERE session_id = $1",
+      [resumedSession.session_id],
+    );
+    const staleReplacement = await invoke(
+      registerHandler,
+      ownerTokenRequest({
+        ...registrationBody,
+        registration_liveness: {
+          ...registrationBody.registration_liveness,
+          tool_bridge_id: "bridge_successor_after_crash",
+        },
+      }, { params: { 0: room.id } })
+    );
+    assert.equal(staleReplacement.statusCode, 201, JSON.stringify(staleReplacement.body));
+    assert.equal((staleReplacement.body as CreatedSession).display_name, "SwiftCrest");
+
+    // Simultaneous first registration from two distinct transports is
+    // serialized by the instance fence: exactly one wins and one fails.
+    const concurrentBase = {
+      ...registrationBody,
+      display_name: "CedarRun",
+      requested_base_display_name: "CedarRun",
+      agent_instance_id: "concurrent-same-instance",
+    };
+    const concurrentResults = await Promise.all([
+      invoke(registerHandler, ownerTokenRequest({
+        ...concurrentBase,
+        registration_liveness: {
+          ...registrationBody.registration_liveness,
+          tool_bridge_id: "bridge_concurrent_a",
+        },
+      }, { params: { 0: room.id } })),
+      invoke(registerHandler, ownerTokenRequest({
+        ...concurrentBase,
+        registration_liveness: {
+          ...registrationBody.registration_liveness,
+          tool_bridge_id: "bridge_concurrent_b",
+        },
+      }, { params: { 0: room.id } })),
+    ]);
+    assert.deepEqual(
+      concurrentResults.map((result) => result.statusCode).sort(),
+      [201, 409],
+    );
+    const concurrentActive = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+         FROM room_agent_sessions
+        WHERE room_id = $1 AND agent_key = $2 AND agent_instance_id = $3 AND ended_at IS NULL`,
+      [room.id, agentIdentity.canonical_key, concurrentBase.agent_instance_id],
+    );
+    assert.equal(concurrentActive.rows[0]?.count, "1");
   }
 );

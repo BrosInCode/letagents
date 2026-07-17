@@ -14,6 +14,10 @@ const {
   normalizeReplayedAgentDisplayName,
   resolveReplayCanonicalBase,
 } = await import("../routes/rooms/presence/agent-session-routes.js");
+const {
+  isActiveRoomAgentSessionStaleForRegistration,
+  SAME_INSTANCE_RECLAIM_STALE_AFTER_MS,
+} = await import("../db/auth.js");
 
 test("desktop closed-room pauses stay distinct from agent failures", () => {
   assert.deepEqual(desktopManagedPausePresence({ availability: "room_closed" }), {
@@ -68,6 +72,28 @@ test("trusted base + normalize converges a compounded label while preserving a d
     normalizeReplayedAgentDisplayName("Agent 47", resolveReplayCanonicalBase("Agent 47", "Agent 47")),
     "Agent 47",
   );
+});
+
+test("same-instance stale reclaim requires an expired heartbeat", () => {
+  const now = Date.parse("2026-07-17T19:00:00.000Z");
+  const active = {
+    last_seen_at: new Date(now - 1_000).toISOString(),
+  };
+  assert.equal(isActiveRoomAgentSessionStaleForRegistration({
+    active_session: active,
+    now_ms: now,
+  }), false, "a fresh session cannot be reclaimed without its exact credential");
+  assert.equal(isActiveRoomAgentSessionStaleForRegistration({
+    active_session: {
+      ...active,
+      last_seen_at: new Date(now - SAME_INSTANCE_RECLAIM_STALE_AFTER_MS).toISOString(),
+    },
+    now_ms: now,
+  }), true, "a stale/crashed predecessor can be reclaimed after heartbeat expiry");
+  assert.equal(isActiveRoomAgentSessionStaleForRegistration({
+    active_session: { ...active, last_seen_at: "not-a-time" },
+    now_ms: now,
+  }), false, "missing or malformed liveness proof fails closed");
 });
 
 function createDeps() {
