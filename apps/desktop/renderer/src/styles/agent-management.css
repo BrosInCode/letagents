@@ -921,6 +921,114 @@
   opacity: 0.5;
 }
 
+.supervised-launch-progress {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.supervised-launch-progress-header {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.supervised-launch-progress-provider {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.supervised-launch-progress-header strong {
+  font-size: 0.9rem;
+}
+
+.supervised-launch-progress-header small {
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.supervised-launch-phases {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.supervised-launch-phase {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-tertiary);
+}
+
+.supervised-launch-phase[data-state="done"] { color: var(--text-secondary); }
+.supervised-launch-phase[data-state="active"] { color: var(--text); }
+.supervised-launch-phase[data-state="failed"] { color: #fca5a5; }
+
+.supervised-launch-phase-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.supervised-launch-phase[data-state="done"] .supervised-launch-phase-marker { color: #4ade80; }
+.supervised-launch-phase[data-state="failed"] .supervised-launch-phase-marker { color: #f87171; }
+
+.supervised-launch-phase-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.supervised-launch-phase-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  border: 1.6px solid rgba(255, 255, 255, 0.2);
+  border-top-color: currentColor;
+  animation: supervised-launch-spin 0.7s linear infinite;
+}
+
+@keyframes supervised-launch-spin {
+  to { transform: rotate(360deg); }
+}
+
+.supervised-launch-phase-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supervised-launch-phase-status {
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+}
+
+.supervised-launch-progress-hint {
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.supervised-launch-progress-failure {
+  color: #fca5a5;
+  font-size: 0.76rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .supervised-launch-phase-spinner { animation: none; }
+}
+
 .desktop-add-agent-actions {
   position: sticky;
   bottom: -36px;

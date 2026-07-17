@@ -417,21 +417,16 @@
             </section>
 
             <section
-              v-if="supervisedConflict"
+              v-if="supervisedConflict && supervisedLaunchView"
               class="desktop-add-agent-managed-sessions"
               data-testid="desktop-add-agent-supervised-runtime"
               aria-label="Supervised agent runtime"
             >
               <article
                 class="desktop-add-agent-managed-session"
-                :data-state="supervisedConflict.condition === 'none' ? supervisedConflict.observedState : 'blocked'"
+                :data-state="supervisedLaunchView.ready ? supervisedConflict.observedState : supervisedLaunchView.failed ? 'blocked' : 'starting'"
               >
-                <span>{{ supervisedConflictLabel }}</span>
-                <strong>{{ supervisedConflict.displayName }}</strong>
-                <small>
-                  {{ supervisedConflict.observedState }} · {{ supervisedConflict.condition }}
-                </small>
-                <p v-if="supervisedConflictDetail">{{ supervisedConflictDetail }}</p>
+                <SupervisedLaunchProgress :progress="supervisedLaunchView" />
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
                     type="button"
@@ -440,7 +435,9 @@
                     :disabled="Boolean(stoppingSupervisorEntryId)"
                     @click="stopSupervisedConflict"
                   >
-                    {{ stoppingSupervisorEntryId === supervisedConflict.id ? "Stopping..." : "Stop this supervised agent" }}
+                    {{ stoppingSupervisorEntryId === supervisedConflict.id
+                      ? "Stopping..."
+                      : supervisedLaunchView.ready ? "Stop this supervised agent" : "Cancel launch" }}
                   </button>
                 </div>
               </article>
@@ -611,9 +608,9 @@ import {
   isSupervisedRuntimeSettled,
   refreshSupervisedRuntimeEntry,
   stopSupervisedProviderLane,
-  supervisedRecoveryDetail,
-  supervisedRuntimeCardLabel,
 } from "../../../domain/supervised-recovery";
+import { supervisedLaunchProgress } from "../../../domain/supervised-launch";
+import SupervisedLaunchProgress from "./SupervisedLaunchProgress.vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { createManagedAgentWorktree } from "../../../domain/managed-agent-worktrees";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
@@ -696,11 +693,8 @@ let modelPreflightTimer: number | null = null;
 const selectedProvider = computed(() =>
   providers.value.find((provider) => provider.id === selectedProviderId.value) || null
 );
-const supervisedConflictDetail = computed(() =>
-  supervisedConflict.value ? supervisedRecoveryDetail(supervisedConflict.value) : null
-);
-const supervisedConflictLabel = computed(() =>
-  supervisedConflict.value ? supervisedRuntimeCardLabel(supervisedConflict.value) : "Supervised runtime"
+const supervisedLaunchView = computed(() =>
+  supervisedConflict.value ? supervisedLaunchProgress(supervisedConflict.value) : null
 );
 
 const activeManagedSessions = computed(() =>
@@ -1000,6 +994,7 @@ watch(
     if (open) {
       previousFocusElement = currentFocusableElement();
       void loadProviders();
+      void restoreSupervisedLaunchInProgress();
       startManagedSessionRefreshTimer();
       void nextTick(() => dialogElement.value?.focus());
     } else {
@@ -1168,7 +1163,9 @@ async function startManagedAgent(): Promise<void> {
       supervisedConflict.value = entry;
       supervisedCreationRequestId = null;
       supervisedConflictLookupError.value = null;
-      setupMessage.value = `${entry.displayName} is ${entry.observedState}; the supervisor daemon owns its lifecycle.`;
+      // The phased launch row now communicates progress; avoid a duplicate,
+      // opaque observed-state line here.
+      setupMessage.value = null;
       startSupervisedRuntimeRefresh(entry.id);
       void loadManagedSessions({ quiet: true });
       return;
@@ -1636,6 +1633,28 @@ function stopManagedSessionRefreshTimer(): void {
     window.clearInterval(managedSessionRefreshTimer);
     managedSessionRefreshTimer = null;
   }
+}
+
+async function restoreSupervisedLaunchInProgress(): Promise<void> {
+  // The daemon manifest is the source of truth, so a launch started before the
+  // modal was closed (or before the app was restarted) is recovered here and
+  // its phased row reappears with the current phase.
+  if (!props.open || supervisedConflict.value) return;
+  const requestVersion = modalStateVersion;
+  let entries: DesktopSupervisorManifestEntry[];
+  try {
+    entries = await desktopIpc.supervisor.listAgents(props.roomIdentifier);
+  } catch {
+    return;
+  }
+  if (!isCurrentModalState(requestVersion) || supervisedConflict.value) return;
+  const launching = entries
+    .filter((entry) => entry.desiredState === "running" && !supervisedLaunchProgress(entry).ready)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  if (!launching) return;
+  supervisedConflict.value = launching;
+  supervisedConflictLookupError.value = null;
+  startSupervisedRuntimeRefresh(launching.id);
 }
 
 function startSupervisedRuntimeRefresh(entryId: string, intervalMs = 1_000): void {
