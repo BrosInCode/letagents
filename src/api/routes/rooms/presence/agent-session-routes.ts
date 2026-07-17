@@ -61,6 +61,29 @@ export function canonicalBaseDisplayName(displayName: string): string {
   return parts.slice(0, end).join(" ");
 }
 
+/**
+ * Resolve the canonical base to normalize a replayed display name against,
+ * using PROVENANCE rather than blind string stripping. A trailing numeric
+ * group is only treated as a server-appended collision suffix when the
+ * stripped base is a label this identity has actually held before
+ * (`identityHeldDisplayNames`). This recovers the true base for a decorated
+ * codename ("MistyMorrow 2 1 1 1" → "MistyMorrow" when the identity held
+ * "MistyMorrow") without ever demoting a legitimate numeric-ending name
+ * ("Agent 47" stays "Agent 47" when the identity never held "Agent"). Falls
+ * back to the stored canonical label when provenance is absent.
+ */
+export function resolveReplayCanonicalBase(
+  requestedDisplayName: string,
+  storedCanonicalDisplayName: string,
+  identityHeldDisplayNames: ReadonlySet<string>,
+): string {
+  const requested = requestedDisplayName.trim();
+  const base = canonicalBaseDisplayName(requested);
+  return base !== requested && identityHeldDisplayNames.has(base)
+    ? base
+    : storedCanonicalDisplayName.trim();
+}
+
 export function normalizeReplayedAgentDisplayName(
   requestedDisplayName: string,
   canonicalDisplayName: string
@@ -149,19 +172,6 @@ export function registerAgentSessionRoutes(
       const requestedTokens = requestedDisplayName.toLowerCase().split(/[\s_-]+/).filter((token) => token.length > 0);
       const isGenericName = !requestedDisplayName || requestedTokens.every((token) => genericKeywords.has(token));
 
-      // Derive the canonical BASE, not the stored label: `agent.display_name`
-      // can itself have drifted to a decorated form ("MistyMorrow 2 1 1 1")
-      // across earlier re-registrations, which would make the replay
-      // normalization below a no-op and let the suffix compound.
-      const canonicalDisplayName = canonicalBaseDisplayName(agent.display_name);
-      const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
-        requestedDisplayName,
-        canonicalDisplayName
-      );
-
-      let baseDisplayName = isGenericName
-        ? pickLocalCodename(agent.canonical_key).display_name
-        : (normalizedRequestedDisplayName || canonicalDisplayName);
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
       const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
@@ -172,6 +182,31 @@ export function registerAgentSessionRoutes(
             })
           : Promise.resolve([]),
       ]);
+
+      // Provenance for replay normalization: the labels THIS identity has
+      // actually held (durable participant history + live sessions). The
+      // stored `agent.display_name` is the canonical codename, not the
+      // per-session label, so the base is recovered from history — never by
+      // blindly stripping trailing digits (which would demote "Agent 47").
+      const identityHeldDisplayNames = new Set<string>([
+        ...activeSessionsForIdentity.map((session) => session.display_name),
+        ...activeParticipants
+          .filter((participant) => participant.kind === "agent" && participant.agent_key === agent.canonical_key)
+          .map((participant) => participant.display_name),
+      ]);
+      const canonicalDisplayName = resolveReplayCanonicalBase(
+        requestedDisplayName,
+        agent.display_name,
+        identityHeldDisplayNames,
+      );
+      const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
+        requestedDisplayName,
+        canonicalDisplayName
+      );
+
+      let baseDisplayName = isGenericName
+        ? pickLocalCodename(agent.canonical_key).display_name
+        : (normalizedRequestedDisplayName || canonicalDisplayName);
       const usedDisplayNames = new Set([
         ...activeParticipants.map((participant) => participant.display_name),
         ...activeSessionsForIdentity.map((session) => session.display_name),
