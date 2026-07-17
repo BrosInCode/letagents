@@ -143,6 +143,8 @@ function foldEvents(events: readonly DesktopLaunchEvent[]): {
   connected: boolean;
   saved: boolean;
   activated: boolean;
+  activeIndex: number;
+  ready: boolean;
   terminal: DesktopLaunchEvent | null;
 } {
   const sorted = [...events].sort((left, right) => left.sequence - right.sequence);
@@ -158,20 +160,42 @@ function foldEvents(events: readonly DesktopLaunchEvent[]): {
   let connected = false;
   let saved = false;
   let activated = false;
+  let activeIndex = CONNECTING;
+  let ready = false;
   let terminal: DesktopLaunchEvent | null = null;
   for (const event of sorted.slice(attemptStart)) {
     switch (event.type) {
       case "supervisor.connected":
         connected = true;
+        activeIndex = Math.max(activeIndex, SAVING);
         break;
       case "agent.saved":
         connected = true;
         saved = true;
+        activeIndex = Math.max(activeIndex, PREPARING);
         break;
       case "launch.activated":
         connected = true;
         saved = true;
         activated = true;
+        activeIndex = Math.max(activeIndex, PREPARING);
+        break;
+      case "workspace.prepared":
+        activeIndex = Math.max(activeIndex, PREPARING + 1);
+        break;
+      case "provider.started":
+        activeIndex = Math.max(activeIndex, PREPARING + 2);
+        break;
+      case "room.connected":
+        activeIndex = Math.max(activeIndex, PREPARING + 3);
+        break;
+      case "identity.registered":
+        activeIndex = Math.max(activeIndex, PREPARING + 4);
+        break;
+      case "agent.ready":
+        activeIndex = JOURNEY_PHASE_ORDER.length - 1;
+        ready = true;
+        terminal = null;
         break;
       case "launch.blocked":
       case "launch.failed":
@@ -182,7 +206,7 @@ function foldEvents(events: readonly DesktopLaunchEvent[]): {
         break;
     }
   }
-  return { connected, saved, activated, terminal };
+  return { connected, saved, activated, activeIndex, ready, terminal };
 }
 
 function manifestRecovery(
@@ -241,7 +265,8 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
   const entry = input.entry ?? null;
   const providerLabel = supervisedLaunchProviderLabel(entry?.provider ?? input.provider ?? "agent");
   const roomLabel = input.roomLabel?.trim() || "the room";
-  const { connected, saved, terminal } = foldEvents(events);
+  const eventFold = foldEvents(events);
+  const { connected, saved, terminal } = eventFold;
 
   if (entry) {
     // The durable entry proves the connect + save window completed; the last
@@ -250,38 +275,45 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     const agentName = manifest.agentName;
     const ctx = { providerLabel, roomLabel, agentName };
     const manifestActiveOffset = manifest.phases.findIndex((phase) => phase.state === "active" || phase.state === "failed");
-    const activeIndex = manifest.ready
+    const manifestActiveIndex = manifest.ready
       ? JOURNEY_PHASE_ORDER.length - 1
       : PREPARING + Math.max(manifestActiveOffset, 0);
-    const failedIndex = manifest.failed ? activeIndex : null;
+    const activeIndex = Math.max(manifestActiveIndex, eventFold.activeIndex);
+    // The manifest is authoritative current state once an entry exists. The
+    // journal explains completed history and phase progress, but a historical
+    // ready/blocked fact must never override a later stop or recovery snapshot.
+    const ready = manifest.ready;
+    const stopped = manifest.stopped;
+    const failed = manifest.failed;
+    const failedIndex = failed ? activeIndex : null;
     // A stop of an agent that already reached ready is a lifecycle stop, not a
     // cancelled launch — the launch succeeded and was later retired. Uses the
     // durable ready stamp, consistent with the electron cancel gate.
     const everReady = entry.readyReachedAt != null;
 
     const phases = buildPhases(
-      { activeIndex, failedIndex, ready: manifest.ready, settled: manifest.stopped },
+      { activeIndex, failedIndex, ready, settled: stopped },
       ctx,
     );
-    const status: LaunchJourneyStatus = manifest.ready
-      ? "ready"
-      : manifest.stopped
+    const status: LaunchJourneyStatus = stopped
         ? "cancelled"
-        : manifest.failed
+      : ready
+        ? "ready"
+        : failed
           ? "failed"
           : "in_progress";
     return {
       phases,
       currentPhaseId: phases[Math.min(activeIndex, phases.length - 1)]!.id,
       status,
-      ready: manifest.ready,
-      failed: manifest.failed,
-      stopped: manifest.stopped,
+      ready,
+      failed,
+      stopped,
       agentName,
       providerLabel,
       headline: headlineFor(status, ctx, { stoppedAfterReady: everReady }),
-      failureDetail: manifest.failed ? manifest.failureDetail : null,
-      recovery: manifest.failed ? manifestRecovery(entry, input.hasSignInCommand ?? false) : null,
+      failureDetail: failed ? manifest.failureDetail : null,
+      recovery: failed ? manifestRecovery(entry, input.hasSignInCommand ?? false) : null,
       joinHint: status === "in_progress" ? JOIN_HINT : null,
     };
   }
@@ -292,7 +324,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
   if (terminal) {
     // A failure/cancel before the durable claim. Attribute it to the step that
     // was in flight: connecting if we never connected, otherwise saving.
-    const boundaryIndex = connected ? SAVING : CONNECTING;
+    const boundaryIndex = eventFold.activeIndex;
     const cancelled = terminal.type === "launch.cancelled";
     const status: LaunchJourneyStatus =
       cancelled ? "cancelled" : terminal.type === "launch.blocked" ? "blocked" : "failed";
@@ -316,8 +348,26 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     };
   }
 
+  if (eventFold.ready) {
+    const phases = buildPhases({ activeIndex: JOURNEY_PHASE_ORDER.length - 1, failedIndex: null, ready: true, settled: false }, ctx);
+    return {
+      phases,
+      currentPhaseId: "ready",
+      status: "ready",
+      ready: true,
+      failed: false,
+      stopped: false,
+      agentName: null,
+      providerLabel,
+      headline: headlineFor("ready", ctx),
+      failureDetail: null,
+      recovery: null,
+      joinHint: null,
+    };
+  }
+
   // Still progressing through the pre-durable window.
-  const activeIndex = saved ? PREPARING : connected ? SAVING : CONNECTING;
+  const activeIndex = eventFold.activeIndex;
   const phases = buildPhases({ activeIndex, failedIndex: null, ready: false, settled: false }, ctx);
   return {
     phases,

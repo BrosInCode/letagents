@@ -1797,7 +1797,15 @@ async function replayLaunchEvents(launchId: string): Promise<void> {
 
 function appendLaunchEvent(event: DesktopLaunchEvent): void {
   // At-least-once delivery: fold idempotently by sequence.
-  if (launchEvents.value.some((existing) => existing.sequence === event.sequence)) return;
+  const index = launchEvents.value.findIndex((existing) => existing.sequence === event.sequence);
+  if (index >= 0) {
+    const existing = launchEvents.value[index]!;
+    if (!event.durable || existing.durable && existing.type === event.type) return;
+    const reconciled = [...launchEvents.value];
+    reconciled[index] = event;
+    launchEvents.value = reconciled;
+    return;
+  }
   launchEvents.value = [...launchEvents.value, event];
 }
 

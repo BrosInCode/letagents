@@ -13,18 +13,14 @@
  * journey twice and never regresses it.
  *
  * SOURCE OF TRUTH: Electron owns the pre-durable connection facts, because an
- * unreachable background service cannot report its own unreachability. The
- * daemon owns durable lifecycle facts once the claim is persisted. In this
- * build the post-durable facts are still *derived by the renderer* from the
- * manifest snapshot it already polls (see supervised-launch.ts), so the
- * post-durable event types below are reserved for the follow-up durable journal
- * and are not emitted yet. `durable` records whether a fact is persisted by the
- * daemon (true) or a transient desktop observation (false) — the UI must never
- * pretend an event is durable before it is persisted.
+ * unreachable background service cannot report its own unreachability. Once
+ * connected, Electron imports those observations into the daemon's existing
+ * audit JSONL and the daemon appends every post-claim lifecycle fact. `durable`
+ * records whether the fact was daemon-persisted (true) or originated as a
+ * transient desktop observation (false).
  */
 
-/** Ordered launch lifecycle vocabulary. Pre-durable facts are emitted today;
- * post-durable facts are reserved for the durable daemon journal follow-up. */
+/** Ordered launch lifecycle vocabulary shared by live delivery and replay. */
 export type DesktopLaunchEventType =
   // Pre-durable, Electron-owned (emitted today):
   | "launch.requested"

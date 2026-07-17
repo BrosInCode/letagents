@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -14,7 +15,7 @@ import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
-import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonLaunchEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
@@ -43,6 +44,13 @@ type DaemonTurnControlResult = ProviderTurnControlResult & {
   duplicate: boolean;
   stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
 };
+
+const LAUNCH_EVENT_TYPES = new Set<DaemonLaunchEvent["type"]>([
+  "launch.requested", "supervisor.connected", "agent.saved", "launch.activated",
+  "workspace.prepared", "provider.started", "room.connected", "identity.registered",
+  "agent.ready", "launch.blocked", "launch.failed", "launch.cancelled",
+]);
+const LAUNCH_RECOVERY_ACTIONS = new Set(["retry", "reconnect", "sign_in", "choose_project"]);
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
@@ -335,6 +343,7 @@ export class SupervisorDaemon {
   private readonly gitCommand: GitCommand;
   private readonly workerBindings: WorkerBindingStore;
   private readonly socket: DaemonControlSocket;
+  private readonly launchJournalEmitter = new EventEmitter();
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
   private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
   private readonly scheduledConvergenceCancels = new Map<string, () => void>();
@@ -441,6 +450,22 @@ export class SupervisorDaemon {
         const params = this.paramsRecord(request.params);
         return this.appendActivity(String(params.id ?? ""), params.event as DaemonActivityEvent);
       }
+      if (request.method === "launch.import_events") {
+        const params = this.paramsRecord(request.params);
+        return this.importLaunchEvents(String(params.launch_id ?? ""), Array.isArray(params.events) ? params.events : []);
+      }
+      if (request.method === "launch.list_events") {
+        const params = this.paramsRecord(request.params);
+        return this.listLaunchEvents(String(params.launch_id ?? ""), Number(params.after_sequence ?? 0));
+      }
+      if (request.method === "launch.wait_events") {
+        const params = this.paramsRecord(request.params);
+        return this.waitLaunchEvents(
+          String(params.launch_id ?? ""),
+          Number(params.after_sequence ?? 0),
+          Number(params.timeout_ms ?? 25_000),
+        );
+      }
       if (request.method === "manifest.update_workplace_liveness") {
         const params = this.paramsRecord(request.params);
         return this.updateWorkplaceLiveness(
@@ -528,6 +553,7 @@ export class SupervisorDaemon {
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
     this.liveDisposers.clear();
     await Promise.all([...this.providerCallbacks]);
+    this.launchJournalEmitter.emit("changed", null);
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
   }
@@ -546,6 +572,7 @@ export class SupervisorDaemon {
     this.scheduledConvergence.clear();
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
     this.liveDisposers.clear();
+    this.launchJournalEmitter.emit("changed", null);
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
     // Existing convergence/provider callbacks are generation-fenced below.
@@ -626,6 +653,13 @@ export class SupervisorDaemon {
           candidate.room_id === entry.room_id && candidate.provider === entry.provider);
         if (legacyOwner && entry.desired_state === "running") {
           throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
+        }
+      }
+      if (entry.id.startsWith("supervised_")) {
+        const launchId = entry.id.slice("supervised_".length);
+        const imported = await this.audit.readLaunchEvents(launchId);
+        if (imported.some((event) => event.room_id !== entry.room_id || event.provider !== entry.provider)) {
+          throw new Error("Imported launch history does not match the supervised manifest identity.");
         }
       }
       const nextEntry: DaemonManifestEntry = {
@@ -2391,12 +2425,206 @@ export class SupervisorDaemon {
     } finally { release(); }
   }
 
-  private writeManifest(
+  private async writeManifest(
     expectedGeneration: number,
     entries: DaemonManifestEntry[],
     legacyOwners?: LegacyLaneOwner[],
   ) {
-    return this.store.write(expectedGeneration, entries, legacyOwners, (commit) => this.fenceDaemonCommit(commit));
+    const previous = await this.store.load();
+    return this.store.write(expectedGeneration, entries, legacyOwners, (commit) => this.fenceDaemonCommit(async () => {
+      // The audit identity check, manifest rename, and derived journal append
+      // share the daemon commit fence with launch.import_events. Neither side
+      // can win a race that leaves cross-room history attached to an entry.
+      for (const entry of entries) {
+        if (!entry.id.startsWith("supervised_")) continue;
+        const imported = await this.audit.readLaunchEvents(entry.id.slice("supervised_".length));
+        if (imported.some((event) => event.room_id !== entry.room_id || event.provider !== entry.provider)) {
+          throw new Error("Imported launch history does not match the supervised manifest identity.");
+        }
+      }
+      await commit();
+      try {
+        await this.appendDerivedLaunchEvents(previous.entries, entries);
+      } catch {
+        // The manifest CAS already committed and must remain usable. The next
+        // launch.list_events call deterministically repairs this audit tail
+        // from the manifest snapshot instead of stranding daemon generation.
+      }
+    }));
+  }
+
+  private async importLaunchEvents(launchId: string, rawEvents: unknown[]): Promise<DaemonLaunchEvent[]> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(launchId)) throw new Error("A valid launch id is required.");
+    const expectedEntryId = `supervised_${launchId}`;
+    return this.serializeManifestCommit(async () => {
+      const manifestEntry = (await this.store.load()).entries.find((entry) => entry.id === expectedEntryId) ?? null;
+      const existing = await this.audit.readLaunchEvents(launchId);
+      const bySequence = new Map(existing.map((event) => [event.sequence, event]));
+      const imported: DaemonLaunchEvent[] = [];
+      let sequenceOffset = 0;
+      let maximumSequence = existing.reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
+      for (const raw of rawEvents) {
+        const event = this.paramsRecord(raw);
+        const sourceSequence = Number(event.sequence);
+        const type = String(event.type ?? "") as DaemonLaunchEvent["type"];
+        if (String(event.launchId ?? event.launch_id ?? "") !== launchId) throw new Error("Imported launch event id does not match the request.");
+        if (!Number.isSafeInteger(sourceSequence) || sourceSequence < 1) throw new Error("Imported launch event sequence is invalid.");
+        if (!LAUNCH_EVENT_TYPES.has(type)) throw new Error("Imported launch event type is invalid.");
+        let sequence = sourceSequence + sequenceOffset;
+        const occupied = bySequence.get(sequence);
+        // A retry can begin after daemon-owned milestones that Electron never
+        // held in its transient sequence allocator. Rebase the new attempt as
+        // one contiguous suffix; reconcileLaunchEvents returns this authority
+        // to Electron before it emits the next fact.
+        if (occupied && occupied.type !== type && type === "launch.requested" && sequenceOffset === 0) {
+          sequenceOffset = maximumSequence + 1 - sourceSequence;
+          sequence = sourceSequence + sequenceOffset;
+        }
+        const entryId = typeof event.entryId === "string" ? event.entryId : typeof event.entry_id === "string" ? event.entry_id : null;
+        if (entryId !== null && entryId !== expectedEntryId) throw new Error("Imported launch event entry does not match the launch id.");
+        const importedAt = typeof event.at === "string" && Number.isFinite(Date.parse(event.at))
+          ? new Date(event.at).toISOString()
+          : new Date().toISOString();
+        const normalized: DaemonLaunchEvent = {
+          launch_id: launchId,
+          entry_id: entryId,
+          room_id: String(event.roomIdentifier ?? event.room_id ?? manifestEntry?.room_id ?? ""),
+          provider: String(event.provider ?? manifestEntry?.provider ?? ""),
+          sequence,
+          type,
+          at: importedAt,
+          detail: typeof event.detail === "string" ? event.detail : null,
+          recovery: LAUNCH_RECOVERY_ACTIONS.has(String(event.recovery ?? ""))
+            ? String(event.recovery) as DaemonLaunchEvent["recovery"]
+            : null,
+          // Crossing the daemon commit boundary makes even Electron-owned
+          // pre-claim observations durable. Before import they remain false in
+          // the transient desktop buffer; every replay from here is persisted.
+          durable: true,
+        };
+        if (!normalized.room_id || !normalized.provider) throw new Error("Imported launch event room and provider are required.");
+        if (manifestEntry && (normalized.room_id !== manifestEntry.room_id || normalized.provider !== manifestEntry.provider)) {
+          throw new Error("Imported launch event does not match the supervised manifest identity.");
+        }
+        const prior = bySequence.get(sequence);
+        if (prior) {
+          if (prior.type !== normalized.type) throw new Error("Imported launch event sequence conflicts with durable history.");
+          if (prior.room_id !== normalized.room_id || prior.provider !== normalized.provider || prior.entry_id !== normalized.entry_id) {
+            throw new Error("Imported launch event identity conflicts with durable history.");
+          }
+          continue;
+        }
+        bySequence.set(sequence, normalized);
+        imported.push(normalized);
+        maximumSequence = Math.max(maximumSequence, sequence);
+      }
+      if (imported.length) await this.appendLaunchJournalEvents(imported.sort((left, right) => left.sequence - right.sequence));
+      if (manifestEntry) await this.appendDerivedLaunchEventsForEntry(null, manifestEntry);
+      return this.audit.readLaunchEvents(launchId);
+    });
+  }
+
+  private async listLaunchEvents(launchId: string, afterSequence: number): Promise<DaemonLaunchEvent[]> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(launchId)) return [];
+    const cursor = Number.isSafeInteger(afterSequence) && afterSequence > 0 ? afterSequence : 0;
+    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === `supervised_${launchId}`) ?? null;
+    // Repair a journal tail if the process died after the manifest CAS but
+    // before the audit append. Snapshot-derived facts are idempotent within the
+    // current launch.requested attempt.
+    if (entry) await this.serializeManifestCommit(() => this.appendDerivedLaunchEventsForEntry(null, entry));
+    return (await this.audit.readLaunchEvents(launchId)).filter((event) => event.sequence > cursor);
+  }
+
+  private async waitLaunchEvents(launchId: string, afterSequence: number, requestedTimeoutMs: number): Promise<DaemonLaunchEvent[]> {
+    const immediate = await this.listLaunchEvents(launchId, afterSequence);
+    if (immediate.length) return immediate;
+    const timeoutMs = Number.isFinite(requestedTimeoutMs)
+      ? Math.min(Math.max(Math.trunc(requestedTimeoutMs), 1_000), 30_000)
+      : 25_000;
+    return new Promise<DaemonLaunchEvent[]>((resolve, reject) => {
+      let settled = false;
+      const finish = (events: DaemonLaunchEvent[], error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.launchJournalEmitter.off("changed", onChanged);
+        if (error) reject(error); else resolve(events);
+      };
+      const onChanged = (changedLaunchId: string | null) => {
+        if (changedLaunchId !== null && changedLaunchId !== launchId) return;
+        void this.listLaunchEvents(launchId, afterSequence).then((events) => finish(events), (error) => finish([], error));
+      };
+      const timer = setTimeout(() => finish([]), timeoutMs);
+      timer.unref();
+      this.launchJournalEmitter.on("changed", onChanged);
+      // Close the check→listen race: an append between the initial read and
+      // listener registration is returned immediately instead of waiting for
+      // the heartbeat timeout.
+      void this.listLaunchEvents(launchId, afterSequence).then((events) => {
+        if (events.length) finish(events);
+      }, (error) => finish([], error));
+    });
+  }
+
+  private async appendLaunchJournalEvents(events: readonly DaemonLaunchEvent[]): Promise<void> {
+    if (!events.length) return;
+    await this.audit.appendLaunchEvents(events);
+    for (const launchId of new Set(events.map((event) => event.launch_id))) {
+      this.launchJournalEmitter.emit("changed", launchId);
+    }
+  }
+
+  private async appendDerivedLaunchEvents(previous: DaemonManifestEntry[], current: DaemonManifestEntry[]): Promise<void> {
+    const priorById = new Map(previous.map((entry) => [entry.id, entry]));
+    for (const entry of current) {
+      if (!entry.id.startsWith("supervised_")) continue;
+      await this.appendDerivedLaunchEventsForEntry(priorById.get(entry.id) ?? null, entry);
+    }
+  }
+
+  private async appendDerivedLaunchEventsForEntry(previous: DaemonManifestEntry | null, current: DaemonManifestEntry): Promise<void> {
+    const launchId = current.id.slice("supervised_".length);
+    const existing = await this.audit.readLaunchEvents(launchId);
+    if (!existing.some((event) => event.type === "launch.requested")) return;
+    let lastRequestIndex = -1;
+    for (let index = existing.length - 1; index >= 0; index -= 1) {
+      if (existing[index]!.type === "launch.requested") { lastRequestIndex = index; break; }
+    }
+    const attemptTypes = new Set(existing.slice(lastRequestIndex + 1).map((event) => event.type));
+    let sequence = existing.reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
+    const facts: DaemonLaunchEvent[] = [];
+    const append = (type: DaemonLaunchEvent["type"], detail: string, recovery: DaemonLaunchEvent["recovery"] = null, at = new Date().toISOString()) => {
+      if (attemptTypes.has(type)) return;
+      attemptTypes.add(type);
+      sequence += 1;
+      facts.push({
+        launch_id: launchId,
+        entry_id: current.id,
+        room_id: current.room_id,
+        provider: current.provider,
+        sequence,
+        type,
+        at,
+        detail,
+        recovery,
+        durable: true,
+      });
+    };
+    if (!previous) append("agent.saved", "Your request is recorded and will survive an app restart.", null, current.created_at);
+    if (current.desired_state === "running") append("launch.activated", "LetAgents is responsible for this agent launch.");
+    if (current.workspace_path && current.work_attempt_id) append("workspace.prepared", "The project workspace is prepared.");
+    if (current.provider_ref?.execution_generation_id) append("provider.started", `${current.provider} started.`);
+    if (current.workplace_liveness?.state === "reachable") append("room.connected", "The agent connected to the room.", null, current.workplace_liveness.observed_at ?? undefined);
+    if (current.last_worker_binding?.agent_session_id) append("identity.registered", "The launched agent identity is registered.", null, current.last_worker_binding.updated_at);
+    if (current.ready_reached_at) append("agent.ready", `${current.display_name} is ready.`, null, current.ready_reached_at);
+    if (current.desired_state === "stopped" && !current.ready_reached_at) {
+      append("launch.cancelled", "You stopped this launch.");
+    } else if (current.condition === "auth_blocked" || current.condition === "budget_blocked" || current.condition === "security_blocked") {
+      append("launch.blocked", "The launch needs your attention before it can continue.", current.condition === "auth_blocked" ? "sign_in" : "retry");
+    } else if (current.condition === "quarantined" || current.observed_state === "failed") {
+      append("launch.failed", "The launch could not be completed. You can try again.", "retry");
+    }
+    if (facts.length) await this.appendLaunchJournalEvents(facts);
   }
 
   private fenceDaemonCommit(commit: () => Promise<void>): Promise<void> {

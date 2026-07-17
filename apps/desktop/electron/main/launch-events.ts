@@ -16,11 +16,11 @@ import type {
  * has its own monotonically increasing `sequence`; `getLaunchEvents` lets a
  * reopened modal replay everything after a cursor (at-least-once + idempotent).
  *
- * This buffer is intentionally in-memory and transient: the durable record of a
- * launch is the daemon manifest entry itself. On app restart mid-launch the
- * buffer is empty, and the renderer recovers post-claim progress from the
- * manifest snapshot it already polls. The fully-durable daemon journal is a
- * tracked follow-up.
+ * This buffer remains the live source for pre-claim observations. Once the
+ * daemon is reachable those observations are imported into its audit-backed
+ * launch journal; post-claim facts are daemon-owned. A reopened renderer merges
+ * this buffer with the durable replay, preferring the daemon for matching
+ * sequences.
  */
 
 const MAX_EVENTS_PER_LAUNCH = 64;
@@ -34,6 +34,9 @@ interface LaunchRecord {
 
 const launches = new Map<string, LaunchRecord>();
 const emitter = new EventEmitter();
+const DURABLE_LAUNCH_TERMINALS = new Set<DesktopLaunchEventType>([
+  "agent.ready", "launch.blocked", "launch.failed", "launch.cancelled",
+]);
 
 export interface EmitLaunchEventInput {
   launchId: string;
@@ -82,6 +85,72 @@ export function getLaunchEvents(launchId: string, afterSequence?: number | null)
   if (!record) return [];
   const cursor = typeof afterSequence === "number" && Number.isFinite(afterSequence) ? afterSequence : 0;
   return record.events.filter((event) => event.sequence > cursor);
+}
+
+/**
+ * Replace the transient buffer with the daemon-authoritative replay. This also
+ * advances the local sequence allocator, which is essential when a retry under
+ * the same launch id follows daemon-owned milestones created after Electron's
+ * last local event.
+ */
+export function reconcileLaunchEvents(events: readonly DesktopLaunchEvent[]): void {
+  if (events.length === 0) return;
+  const launchId = events[0]!.launchId;
+  if (events.some((event) => event.launchId !== launchId)) throw new Error("Launch replay contains mixed launch ids.");
+  const bySequence = new Map(events.map((event) => [event.sequence, event]));
+  const ordered = [...bySequence.values()].sort((left, right) => left.sequence - right.sequence).slice(-MAX_EVENTS_PER_LAUNCH);
+  launches.set(launchId, {
+    events: ordered,
+    sequence: ordered.reduce((maximum, event) => Math.max(maximum, event.sequence), 0),
+    updatedAt: Date.now(),
+  });
+  // Live consumers fold at-least-once and prefer the durable fact for an
+  // occupied sequence, so replaying the reconciled tail is safe.
+  for (const event of ordered) emitter.emit("launch-event", event);
+}
+
+/**
+ * Follow the daemon's long-poll journal feed until this attempt reaches a
+ * semantic terminal. This is event delivery, not manifest polling: each wait
+ * blocks inside the daemon and wakes only when the audit journal appends.
+ */
+export async function followDurableLaunchEvents(
+  launchId: string,
+  waitForEvents: (afterSequence: number) => Promise<DesktopLaunchEvent[]>,
+  retryDelay: () => Promise<void>,
+): Promise<void> {
+  let cursor = getLaunchEvents(launchId).reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
+  while (true) {
+    try {
+      const durable = await waitForEvents(cursor);
+      if (!durable.length) continue;
+      reconcileLaunchEvents([...getLaunchEvents(launchId), ...durable]);
+      cursor = durable.reduce((maximum, event) => Math.max(maximum, event.sequence), cursor);
+      if (latestLaunchAttemptIsTerminal(getLaunchEvents(launchId))) return;
+    } catch {
+      await retryDelay();
+    }
+  }
+}
+
+/**
+ * A launch id survives retries, so replay can contain a terminal from an old
+ * attempt followed by a newer `launch.requested`. Only the newest attempt may
+ * stop the live follower; otherwise reopening during a retry would silently
+ * miss every durable fact appended after that historical terminal.
+ */
+function latestLaunchAttemptIsTerminal(events: readonly DesktopLaunchEvent[]): boolean {
+  let sawRequest = false;
+  let terminal = false;
+  for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
+    if (event.type === "launch.requested") {
+      sawRequest = true;
+      terminal = false;
+      continue;
+    }
+    if (sawRequest && DURABLE_LAUNCH_TERMINALS.has(event.type)) terminal = true;
+  }
+  return sawRequest && terminal;
 }
 
 export function onLaunchEvent(listener: (event: DesktopLaunchEvent) => void): () => void {

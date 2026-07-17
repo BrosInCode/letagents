@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.17";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.19";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -158,6 +158,36 @@ export type Transition = {
   cause: string;
   actor: string;
   generation: number;
+};
+
+/**
+ * Durable launch-history fact stored in the daemon audit JSONL. The desktop
+ * may import pre-claim observations after the manifest claim succeeds; every
+ * post-claim fact is derived and appended by the daemon itself.
+ */
+export type DaemonLaunchEvent = {
+  launch_id: string;
+  entry_id: string | null;
+  room_id: string;
+  provider: string;
+  sequence: number;
+  type:
+    | "launch.requested"
+    | "supervisor.connected"
+    | "agent.saved"
+    | "launch.activated"
+    | "workspace.prepared"
+    | "provider.started"
+    | "room.connected"
+    | "identity.registered"
+    | "agent.ready"
+    | "launch.blocked"
+    | "launch.failed"
+    | "launch.cancelled";
+  at: string;
+  detail: string | null;
+  recovery: "retry" | "reconnect" | "sign_in" | "choose_project" | null;
+  durable: boolean;
 };
 
 export type DaemonRequest = { version: number; id?: string; method: string; params?: unknown };

@@ -151,9 +151,10 @@ import {
   classifyLaunchFailure,
   emitLaunchEvent,
   getLaunchEvents,
+  followDurableLaunchEvents,
   LaunchBlockedError,
   onLaunchEvent,
-  supervisedLaunchEverReady,
+  reconcileLaunchEvents,
 } from "./launch-events.js";
 import {
   desktopSmokeControlTurn,
@@ -240,6 +241,27 @@ import {
 const { ipcMain } = electron as typeof import("electron");
 let supervisorActivityBridgeRegistered = false;
 let supervisorLaunchBridgeRegistered = false;
+const launchJournalSubscriptions = new Map<string, Promise<void>>();
+
+function backgroundDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
+}
+
+function ensureLaunchJournalSubscription(launchId: string): void {
+  if (launchJournalSubscriptions.has(launchId)) return;
+  const subscription = followDurableLaunchEvents(
+    launchId,
+    (cursor) => supervisorDaemonClient.waitLaunchEvents(launchId, cursor),
+    () => backgroundDelay(1_000),
+  );
+  launchJournalSubscriptions.set(launchId, subscription);
+  void subscription.finally(() => {
+    if (launchJournalSubscriptions.get(launchId) === subscription) launchJournalSubscriptions.delete(launchId);
+  });
+}
 
 /** A launch id shared by the durable entry (`supervised_<id>`) and every launch
  * fact. Must satisfy the daemon's creation-request-id shape; fall back to a
@@ -859,13 +881,24 @@ export function registerDesktopIpcHandlers(
       const launchId = normalizeLaunchId(rawInput.creationRequestId);
       const input: DesktopSupervisorCreateInput = { ...rawInput, creationRequestId: launchId };
       const entryId = `supervised_${launchId}`;
+      ensureLaunchJournalSubscription(launchId);
       const provider = input.providerId;
       const roomIdentifier = input.roomIdentifier;
       const launchFact = (
         type: Parameters<typeof emitLaunchEvent>[0]["type"],
         extra: { entryId?: string | null; detail?: string | null; recovery?: import("./launch-events.js").EmitLaunchEventInput["recovery"]; durable?: boolean } = {},
-      ): void => {
-        emitLaunchEvent({ launchId, roomIdentifier, provider, type, ...extra });
+      ) => emitLaunchEvent({ launchId, roomIdentifier, provider, type, ...extra });
+      const persistLaunchFacts = async (): Promise<void> => {
+        const replay = await supervisorDaemonClient.importLaunchEvents(launchId, getLaunchEvents(launchId));
+        reconcileLaunchEvents(replay);
+      };
+      const latestAttemptHas = (type: Parameters<typeof emitLaunchEvent>[0]["type"]): boolean => {
+        const events = getLaunchEvents(launchId);
+        let start = 0;
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          if (events[index]!.type === "launch.requested") { start = index; break; }
+        }
+        return events.slice(start).some((event) => event.type === type);
       };
       // The user clicked Start: the first server-side fact of this launch.
       launchFact("launch.requested", { entryId, detail: "You asked LetAgents to add this agent." });
@@ -893,6 +926,10 @@ export function registerDesktopIpcHandlers(
           throw new LaunchBlockedError("LetAgents could not reach background agent management. Make sure the app can start its background service, then try again.", "reconnect");
         }
         launchFact("supervisor.connected", { entryId, detail: "Background agent management is available." });
+        // Once the daemon is reachable, import the desktop-owned pre-claim
+        // observations before the durable manifest claim. The daemon can then
+        // append every post-claim fact with the next monotonic sequence.
+        await persistLaunchFacts();
         // Claim the lane durably first. Every legacy start consults this daemon
         // fence, so no new legacy owner may appear while transfer is in flight.
         return await transferSupervisorOwnership({
@@ -900,7 +937,10 @@ export function registerDesktopIpcHandlers(
             const manifest = await supervisorDaemonClient.create(input);
             // The paused ownership claim is now persisted: setup survives an app
             // restart from here on.
-            launchFact("agent.saved", { entryId: manifest.id, detail: "Your request is recorded and will survive an app restart.", durable: true });
+            if (!latestAttemptHas("agent.saved")) {
+              launchFact("agent.saved", { entryId: manifest.id, detail: "Your request is recorded and will survive an app restart.", durable: true });
+            }
+            await persistLaunchFacts();
             return manifest;
           },
           listLegacy: () => listDesktopManagedAgentSessions(roomIdentifier)
@@ -910,7 +950,10 @@ export function registerDesktopIpcHandlers(
           // launches the native provider and remains authoritative after quit.
           activate: async (manifest) => {
             const activated = await supervisorDaemonClient.setDesiredState(manifest.id, "running");
-            launchFact("launch.activated", { entryId: manifest.id, detail: "LetAgents is now responsible for starting this agent.", durable: true });
+            if (!latestAttemptHas("launch.activated")) {
+              launchFact("launch.activated", { entryId: manifest.id, detail: "LetAgents is now responsible for starting this agent.", durable: true });
+            }
+            await persistLaunchFacts();
             return activated;
           },
           rollback: (manifest) => supervisorDaemonClient.setDesiredState(manifest.id, "stopped").then(() => undefined),
@@ -918,38 +961,37 @@ export function registerDesktopIpcHandlers(
       } catch (error) {
         const failure = classifyLaunchFailure(error);
         launchFact(failure.type, { entryId, detail: failure.detail, recovery: failure.recovery });
+        await persistLaunchFacts().catch(() => undefined);
         throw error;
       }
     },
   );
   targetIpcMain.handle(
     "desktop:supervisor:get-launch-events",
-    async (_event, launchId: string, afterSequence?: number | null) =>
-      getLaunchEvents(launchId, afterSequence ?? null),
+    async (_event, launchId: string, afterSequence?: number | null) => {
+      ensureLaunchJournalSubscription(launchId);
+      const cursor = afterSequence ?? null;
+      const local = getLaunchEvents(launchId, cursor);
+      try {
+        const durable = await supervisorDaemonClient.listLaunchEvents(launchId, cursor);
+        const merged = new Map<number, (typeof durable)[number]>();
+        for (const event of local) merged.set(event.sequence, event);
+        // The daemon journal is authoritative for a sequence once persisted.
+        for (const event of durable) merged.set(event.sequence, event);
+        return [...merged.values()].sort((left, right) => left.sequence - right.sequence);
+      } catch {
+        return local;
+      }
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
       if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
-      // Cancelling belongs to launch history only when the launch never reached
-      // ready. "Ever ready" is durable/monotonic (readyReachedAt), so a launch
-      // that reached ready and later degraded before Stop is still a lifecycle
-      // stop (an agent event), while a bound-but-never-reachable pre-ready
-      // attempt correctly records as a cancelled launch.
-      if (desiredState === "stopped" && id.startsWith("supervised_")) {
-        if (!supervisedLaunchEverReady(updated)) {
-          emitLaunchEvent({
-            launchId: id.slice("supervised_".length),
-            entryId: id,
-            roomIdentifier: updated.roomId,
-            provider: updated.provider,
-            type: "launch.cancelled",
-            detail: "You stopped this launch.",
-            durable: true,
-          });
-        }
-      }
+      // The daemon derives and durably appends launch.cancelled while it
+      // commits a pre-ready stopped state. Do not mint a second Electron-local
+      // sequence here; replay uses the authoritative daemon journal.
       return updated;
     },
   );
