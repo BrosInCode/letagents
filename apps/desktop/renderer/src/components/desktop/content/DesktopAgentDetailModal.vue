@@ -227,7 +227,7 @@
               <p>Its durable lifecycle and exact room binding are available in Supervision below.</p>
             </div>
 
-            <div v-else class="desktop-agent-detail-empty">
+            <div v-else-if="detailSelection.showExternalFallback" class="desktop-agent-detail-empty">
               <strong>No local agent session matched this agent.</strong>
               <p>External agents still appear here through their published room activity.</p>
               <button type="button" @click="emit('open-add-agent')">Add agent</button>
