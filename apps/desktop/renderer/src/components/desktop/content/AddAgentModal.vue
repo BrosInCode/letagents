@@ -457,8 +457,12 @@
               </article>
             </section>
 
-            <p v-if="supervisedConflictLookupError" class="desktop-add-agent-feedback">
-              {{ supervisedConflictLookupError }}
+            <p
+              v-if="supervisedConflictLookupError"
+              class="desktop-add-agent-feedback"
+              data-testid="desktop-add-agent-supervised-lookup-error"
+            >
+              We lost track of this launch. Please try adding the agent again.
             </p>
 
             <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
@@ -1818,8 +1822,16 @@ function handleLaunchRecover(action: DesktopLaunchRecoveryAction): void {
     emit("choose-repo");
     return;
   }
-  // retry / reconnect / sign_in: re-attempt under the same launch id so the
-  // retry stays idempotent once the user has addressed the cause.
+  if (action === "sign_in" && authCommand.value) {
+    // Real provider-auth action: copy the exact provider sign-in command so the
+    // user can authenticate, then retry. (Reuses the modal's existing sign-in
+    // command flow.)
+    void copyAgentAuthCommand();
+    return;
+  }
+  // retry / reconnect (and sign_in when no provider command exists): re-attempt
+  // under the same launch id so the retry stays idempotent once the user has
+  // addressed the cause.
   if (activeLaunchId.value) supervisedCreationRequestId = activeLaunchId.value;
   void startManagedAgent();
 }

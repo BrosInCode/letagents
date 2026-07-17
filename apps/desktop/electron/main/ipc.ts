@@ -151,9 +151,9 @@ import {
   classifyLaunchFailure,
   emitLaunchEvent,
   getLaunchEvents,
-  launchReachedReady,
   LaunchBlockedError,
   onLaunchEvent,
+  supervisedLaunchEverBound,
 } from "./launch-events.js";
 import {
   desktopSmokeControlTurn,
@@ -932,13 +932,12 @@ export function registerDesktopIpcHandlers(
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
       if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
-      // Cancelling belongs to launch history only when the attempt had not yet
-      // reached ready. setDesiredState records the new desired state but returns
-      // before convergence, so `updated` still reflects the pre-stop binding /
-      // liveness — enough to tell a mid-launch cancel from a post-ready
-      // lifecycle stop (which is an agent event, not a launch fact).
+      // Cancelling belongs to launch history only when the launch never bound a
+      // room identity. "Ever bound" is durable/monotonic, so a launch that
+      // reached ready and later degraded before Stop is still a lifecycle stop
+      // (an agent event), not a cancelled launch.
       if (desiredState === "stopped" && id.startsWith("supervised_")) {
-        if (!launchReachedReady(updated)) {
+        if (!supervisedLaunchEverBound(updated)) {
           emitLaunchEvent({
             launchId: id.slice("supervised_".length),
             entryId: id,
