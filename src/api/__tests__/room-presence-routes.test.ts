@@ -9,6 +9,7 @@ const {
   registerRoomPresenceRoutes,
 } = await import("../routes/rooms/presence/index.js");
 const {
+  canonicalBaseDisplayName,
   desktopManagedPausePresence,
   normalizeReplayedAgentDisplayName,
 } = await import("../routes/rooms/presence/agent-session-routes.js");
@@ -30,6 +31,30 @@ test("replayed collision suffixes normalize to the canonical agent display name"
   assert.equal(normalizeReplayedAgentDisplayName("SilverHarbor East", "SilverHarbor"), "SilverHarbor East");
   assert.equal(normalizeReplayedAgentDisplayName("Agent 47", "Agent"), "Agent");
   assert.equal(normalizeReplayedAgentDisplayName("Agent 47A", "Agent"), "Agent 47A");
+});
+
+test("canonicalBaseDisplayName strips accumulated numeric collision suffixes only", () => {
+  // The stored agent.display_name may itself have drifted to a decorated form;
+  // the base must be recovered so replay normalization is not a no-op.
+  assert.equal(canonicalBaseDisplayName("MistyMorrow 2 1 1 1"), "MistyMorrow");
+  assert.equal(canonicalBaseDisplayName("SilverHarbor 2"), "SilverHarbor");
+  assert.equal(canonicalBaseDisplayName("MistyMorrow"), "MistyMorrow");
+  // Non-numeric words are preserved (custom names, alphanumeric tails).
+  assert.equal(canonicalBaseDisplayName("SilverHarbor East"), "SilverHarbor East");
+  assert.equal(canonicalBaseDisplayName("Agent 47A"), "Agent 47A");
+  assert.equal(canonicalBaseDisplayName("  MistyMorrow 3  "), "MistyMorrow");
+  // Never strips to empty even for a pathological all-numeric label.
+  assert.equal(canonicalBaseDisplayName("7 7 7"), "7");
+});
+
+test("canonical base makes replay normalization idempotent from a decorated stored label", () => {
+  // Regression for the compounding bug: passing the already-decorated stored
+  // label as canonical made normalize a no-op. Deriving the base first fixes it.
+  const drifted = "MistyMorrow 2 1 1 1";
+  assert.equal(
+    normalizeReplayedAgentDisplayName(drifted, canonicalBaseDisplayName(drifted)),
+    "MistyMorrow",
+  );
 });
 
 function createDeps() {
