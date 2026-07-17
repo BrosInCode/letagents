@@ -126,12 +126,14 @@ async function startWireDaemon(
               at: event.at,
               detail: event.detail,
               recovery: event.recovery,
-              durable: event.durable,
+              durable: true,
             });
           }
         }
         result = launchEvents.filter((event) => event.launch_id === request.params!.launch_id);
       } else if (request.method === "launch.list_events") {
+        result = launchEvents.filter((event) => event.launch_id === request.params!.launch_id && event.sequence > (request.params!.after_sequence ?? 0));
+      } else if (request.method === "launch.wait_events") {
         result = launchEvents.filter((event) => event.launch_id === request.params!.launch_id && event.sequence > (request.params!.after_sequence ?? 0));
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
@@ -324,8 +326,9 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
       recovery: null,
       durable: false,
     }]);
-    assert.deepEqual(launchHistory.map((event) => [event.launchId, event.type, event.durable]), [["request_alpha", "launch.requested", false]]);
+    assert.deepEqual(launchHistory.map((event) => [event.launchId, event.type, event.durable]), [["request_alpha", "launch.requested", true]]);
     assert.equal((await client.listLaunchEvents("request_alpha", 0))[0]?.roomIdentifier, created.roomId);
+    assert.equal((await client.waitLaunchEvents("request_alpha", 0, 1_000))[0]?.durable, true);
     await client.create({
       roomIdentifier: "git-room:github.com:owner/claude-repo",
       displayName: "Durable Claude",

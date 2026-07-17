@@ -195,6 +195,7 @@ function foldEvents(events: readonly DesktopLaunchEvent[]): {
       case "agent.ready":
         activeIndex = JOURNEY_PHASE_ORDER.length - 1;
         ready = true;
+        terminal = null;
         break;
       case "launch.blocked":
       case "launch.failed":
@@ -278,11 +279,12 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       ? JOURNEY_PHASE_ORDER.length - 1
       : PREPARING + Math.max(manifestActiveOffset, 0);
     const activeIndex = Math.max(manifestActiveIndex, eventFold.activeIndex);
-    const eventCancelled = terminal?.type === "launch.cancelled";
-    const eventFailed = terminal?.type === "launch.blocked" || terminal?.type === "launch.failed";
-    const ready = manifest.ready || eventFold.ready;
-    const stopped = manifest.stopped || eventCancelled;
-    const failed = manifest.failed || eventFailed;
+    // The manifest is authoritative current state once an entry exists. The
+    // journal explains completed history and phase progress, but a historical
+    // ready/blocked fact must never override a later stop or recovery snapshot.
+    const ready = manifest.ready;
+    const stopped = manifest.stopped;
+    const failed = manifest.failed;
     const failedIndex = failed ? activeIndex : null;
     // A stop of an agent that already reached ready is a lifecycle stop, not a
     // cancelled launch — the launch succeeded and was later retired. Uses the
@@ -293,10 +295,10 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       { activeIndex, failedIndex, ready, settled: stopped },
       ctx,
     );
-    const status: LaunchJourneyStatus = ready
-      ? "ready"
-      : stopped
+    const status: LaunchJourneyStatus = stopped
         ? "cancelled"
+      : ready
+        ? "ready"
         : failed
           ? "failed"
           : "in_progress";
@@ -310,8 +312,8 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       agentName,
       providerLabel,
       headline: headlineFor(status, ctx, { stoppedAfterReady: everReady }),
-      failureDetail: eventFailed ? terminal?.detail ?? null : manifest.failed ? manifest.failureDetail : null,
-      recovery: eventFailed ? terminal?.recovery ?? "retry" : manifest.failed ? manifestRecovery(entry, input.hasSignInCommand ?? false) : null,
+      failureDetail: failed ? manifest.failureDetail : null,
+      recovery: failed ? manifestRecovery(entry, input.hasSignInCommand ?? false) : null,
       joinHint: status === "in_progress" ? JOIN_HINT : null,
     };
   }

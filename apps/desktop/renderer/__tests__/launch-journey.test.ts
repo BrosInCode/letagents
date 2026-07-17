@@ -163,6 +163,53 @@ test("a bound, reachable, unblocked entry resolves to ready with the real name",
   assert.equal(view.joinHint, null);
 });
 
+test("durable ready history cannot override a later stopped manifest", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1, durable: true }),
+      evt("agent.ready", { sequence: 9, durable: true }),
+    ],
+    entry: entry({
+      displayName: "SilverCanyon",
+      desiredState: "stopped",
+      observedState: "stopped",
+      readyReachedAt: "2026-07-17T00:05:00.000Z",
+      agentSessionId: "agent_session_9",
+      agentSessionBindingState: "historical",
+    }),
+  });
+  assert.equal(view.status, "cancelled");
+  assert.equal(view.ready, false);
+  assert.equal(view.stopped, true);
+  assert.equal(view.failed, false);
+  assert.equal(view.recovery, null);
+  assert.match(view.headline, /stopped/i);
+});
+
+test("a resolved durable block does not leak failure UI into ready", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1, durable: true }),
+      evt("launch.blocked", { sequence: 7, durable: true, detail: "Sign in", recovery: "sign_in" }),
+      evt("agent.ready", { sequence: 9, durable: true }),
+    ],
+    entry: entry({
+      displayName: "SilverCanyon",
+      observedState: "working",
+      workspacePath: "/tmp/wt",
+      providerPid: 4242,
+      agentSessionId: "agent_session_9",
+      agentSessionBindingState: "active",
+      workplaceLiveness: { state: "reachable", observedAt: "2026-07-17T00:01:00.000Z", detail: null },
+    }),
+  });
+  assert.equal(view.status, "ready");
+  assert.equal(view.ready, true);
+  assert.equal(view.failed, false);
+  assert.equal(view.failureDetail, null);
+  assert.equal(view.recovery, null);
+});
+
 test("a pre-durable connection failure blocks on connecting to the supervisor with a recovery action", () => {
   const view = foldLaunchJourney({
     events: [

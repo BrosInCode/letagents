@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -342,6 +343,7 @@ export class SupervisorDaemon {
   private readonly gitCommand: GitCommand;
   private readonly workerBindings: WorkerBindingStore;
   private readonly socket: DaemonControlSocket;
+  private readonly launchJournalEmitter = new EventEmitter();
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
   private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
   private readonly scheduledConvergenceCancels = new Map<string, () => void>();
@@ -456,6 +458,14 @@ export class SupervisorDaemon {
         const params = this.paramsRecord(request.params);
         return this.listLaunchEvents(String(params.launch_id ?? ""), Number(params.after_sequence ?? 0));
       }
+      if (request.method === "launch.wait_events") {
+        const params = this.paramsRecord(request.params);
+        return this.waitLaunchEvents(
+          String(params.launch_id ?? ""),
+          Number(params.after_sequence ?? 0),
+          Number(params.timeout_ms ?? 25_000),
+        );
+      }
       if (request.method === "manifest.update_workplace_liveness") {
         const params = this.paramsRecord(request.params);
         return this.updateWorkplaceLiveness(
@@ -543,6 +553,7 @@ export class SupervisorDaemon {
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
     this.liveDisposers.clear();
     await Promise.all([...this.providerCallbacks]);
+    this.launchJournalEmitter.emit("changed", null);
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
   }
@@ -561,6 +572,7 @@ export class SupervisorDaemon {
     this.scheduledConvergence.clear();
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
     this.liveDisposers.clear();
+    this.launchJournalEmitter.emit("changed", null);
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
     // Existing convergence/provider callbacks are generation-fenced below.
@@ -2485,7 +2497,10 @@ export class SupervisorDaemon {
           recovery: LAUNCH_RECOVERY_ACTIONS.has(String(event.recovery ?? ""))
             ? String(event.recovery) as DaemonLaunchEvent["recovery"]
             : null,
-          durable: event.durable === true,
+          // Crossing the daemon commit boundary makes even Electron-owned
+          // pre-claim observations durable. Before import they remain false in
+          // the transient desktop buffer; every replay from here is persisted.
+          durable: true,
         };
         if (!normalized.room_id || !normalized.provider) throw new Error("Imported launch event room and provider are required.");
         if (manifestEntry && (normalized.room_id !== manifestEntry.room_id || normalized.provider !== manifestEntry.provider)) {
@@ -2503,7 +2518,7 @@ export class SupervisorDaemon {
         imported.push(normalized);
         maximumSequence = Math.max(maximumSequence, sequence);
       }
-      if (imported.length) await this.audit.appendLaunchEvents(imported.sort((left, right) => left.sequence - right.sequence));
+      if (imported.length) await this.appendLaunchJournalEvents(imported.sort((left, right) => left.sequence - right.sequence));
       if (manifestEntry) await this.appendDerivedLaunchEventsForEntry(null, manifestEntry);
       return this.audit.readLaunchEvents(launchId);
     });
@@ -2518,6 +2533,45 @@ export class SupervisorDaemon {
     // current launch.requested attempt.
     if (entry) await this.serializeManifestCommit(() => this.appendDerivedLaunchEventsForEntry(null, entry));
     return (await this.audit.readLaunchEvents(launchId)).filter((event) => event.sequence > cursor);
+  }
+
+  private async waitLaunchEvents(launchId: string, afterSequence: number, requestedTimeoutMs: number): Promise<DaemonLaunchEvent[]> {
+    const immediate = await this.listLaunchEvents(launchId, afterSequence);
+    if (immediate.length) return immediate;
+    const timeoutMs = Number.isFinite(requestedTimeoutMs)
+      ? Math.min(Math.max(Math.trunc(requestedTimeoutMs), 1_000), 30_000)
+      : 25_000;
+    return new Promise<DaemonLaunchEvent[]>((resolve, reject) => {
+      let settled = false;
+      const finish = (events: DaemonLaunchEvent[], error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.launchJournalEmitter.off("changed", onChanged);
+        if (error) reject(error); else resolve(events);
+      };
+      const onChanged = (changedLaunchId: string | null) => {
+        if (changedLaunchId !== null && changedLaunchId !== launchId) return;
+        void this.listLaunchEvents(launchId, afterSequence).then((events) => finish(events), (error) => finish([], error));
+      };
+      const timer = setTimeout(() => finish([]), timeoutMs);
+      timer.unref();
+      this.launchJournalEmitter.on("changed", onChanged);
+      // Close the check→listen race: an append between the initial read and
+      // listener registration is returned immediately instead of waiting for
+      // the heartbeat timeout.
+      void this.listLaunchEvents(launchId, afterSequence).then((events) => {
+        if (events.length) finish(events);
+      }, (error) => finish([], error));
+    });
+  }
+
+  private async appendLaunchJournalEvents(events: readonly DaemonLaunchEvent[]): Promise<void> {
+    if (!events.length) return;
+    await this.audit.appendLaunchEvents(events);
+    for (const launchId of new Set(events.map((event) => event.launch_id))) {
+      this.launchJournalEmitter.emit("changed", launchId);
+    }
   }
 
   private async appendDerivedLaunchEvents(previous: DaemonManifestEntry[], current: DaemonManifestEntry[]): Promise<void> {
@@ -2570,7 +2624,7 @@ export class SupervisorDaemon {
     } else if (current.condition === "quarantined" || current.observed_state === "failed") {
       append("launch.failed", "The launch could not be completed. You can try again.", "retry");
     }
-    if (facts.length) await this.audit.appendLaunchEvents(facts);
+    if (facts.length) await this.appendLaunchJournalEvents(facts);
   }
 
   private fenceDaemonCommit(commit: () => Promise<void>): Promise<void> {

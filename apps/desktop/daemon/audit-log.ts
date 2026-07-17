@@ -106,5 +106,6 @@ function sanitizeLaunchEvent(event: DaemonLaunchEvent): DaemonLaunchEvent {
     room_id: redactCredentialText(event.room_id).value,
     provider: redactCredentialText(event.provider).value,
     detail: event.detail === null ? null : redactCredentialText(event.detail).value,
+    durable: true,
   };
 }

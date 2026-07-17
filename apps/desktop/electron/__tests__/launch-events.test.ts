@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   classifyLaunchFailure,
   emitLaunchEvent,
+  followDurableLaunchEvents,
   getLaunchEvents,
   LaunchBlockedError,
   onLaunchEvent,
@@ -67,6 +68,82 @@ test("durable replay reconciles the local allocator before a same-id retry", () 
   ]);
   const retry = emitLaunchEvent({ launchId: "a", roomIdentifier: "r", provider: "codex", type: "launch.requested" });
   assert.equal(retry.sequence, 10);
+});
+
+test("daemon journal subscription streams durable suffixes without manifest polling", async () => {
+  emitLaunchEvent({ launchId: "a", roomIdentifier: "r", provider: "codex", type: "launch.requested" });
+  const cursors: number[] = [];
+  const suffixes = [
+    [{
+      launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+      sequence: 2, type: "supervisor.connected" as const, at: "2026-07-17T00:00:02.000Z", detail: null, recovery: null, durable: true,
+    }],
+    [{
+      launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+      sequence: 3, type: "agent.ready" as const, at: "2026-07-17T00:00:03.000Z", detail: null, recovery: null, durable: true,
+    }],
+  ];
+  await followDurableLaunchEvents(
+    "a",
+    async (cursor) => {
+      cursors.push(cursor);
+      return suffixes.shift() ?? [];
+    },
+    async () => assert.fail("a healthy subscription must not back off"),
+  );
+  assert.deepEqual(cursors, [1, 2]);
+  assert.deepEqual(getLaunchEvents("a").map((event) => [event.sequence, event.type, event.durable]), [
+    [1, "launch.requested", false],
+    [2, "supervisor.connected", true],
+    [3, "agent.ready", true],
+  ]);
+});
+
+test("daemon journal subscription ignores an old terminal when a newer same-id retry is active", async () => {
+  emitLaunchEvent({ launchId: "a", roomIdentifier: "r", provider: "codex", type: "launch.requested" });
+  const cursors: number[] = [];
+  const suffixes = [
+    [
+      {
+        launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+        sequence: 2, type: "launch.failed" as const, at: "2026-07-17T00:00:02.000Z",
+        detail: "Try again.", recovery: "retry" as const, durable: true,
+      },
+      {
+        launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+        sequence: 3, type: "launch.requested" as const, at: "2026-07-17T00:00:03.000Z",
+        detail: null, recovery: null, durable: true,
+      },
+      {
+        launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+        sequence: 4, type: "supervisor.connected" as const, at: "2026-07-17T00:00:04.000Z",
+        detail: null, recovery: null, durable: true,
+      },
+    ],
+    [{
+      launchId: "a", entryId: "supervised_a", roomIdentifier: "r", provider: "codex",
+      sequence: 5, type: "agent.ready" as const, at: "2026-07-17T00:00:05.000Z",
+      detail: null, recovery: null, durable: true,
+    }],
+  ];
+
+  await followDurableLaunchEvents(
+    "a",
+    async (cursor) => {
+      cursors.push(cursor);
+      return suffixes.shift() ?? [];
+    },
+    async () => assert.fail("a healthy subscription must not back off"),
+  );
+
+  assert.deepEqual(cursors, [1, 4]);
+  assert.deepEqual(getLaunchEvents("a").map((event) => [event.sequence, event.type]), [
+    [1, "launch.requested"],
+    [2, "launch.failed"],
+    [3, "launch.requested"],
+    [4, "supervisor.connected"],
+    [5, "agent.ready"],
+  ]);
 });
 
 test("carries entryId, recovery, and durable flags through", () => {

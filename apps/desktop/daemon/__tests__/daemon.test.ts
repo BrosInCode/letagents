@@ -1896,15 +1896,28 @@ test("durable launch journal replays exact ordered facts across daemon restart a
         updated_at: "2026-07-17T00:00:06.000Z",
       },
     };
+    const subscribed = daemonRequest(paths.socketPath, "launch.wait_events", {
+      launch_id: launchId,
+      after_sequence: 2,
+      timeout_ms: 1_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
     const putReady = await daemonRequest(paths.socketPath, "manifest.put", { entry: readyEntry });
     assert.equal(putReady.ok, true, putReady.error ?? "manifest.put failed");
+    const pushed = await subscribed;
+    assert.equal(pushed.ok, true, pushed.error ?? "launch subscription failed");
+    assert.deepEqual(
+      (pushed.result as DaemonLaunchEvent[]).map((event) => event.sequence),
+      [3, 4, 5, 6, 7, 8, 9],
+      "the daemon pushes the journal suffix without waiting for a manifest poll",
+    );
     const firstReplay = await daemonRequest(paths.socketPath, "launch.list_events", { launch_id: launchId, after_sequence: 0 });
     assert.equal(firstReplay.ok, true);
     assert.deepEqual(
       (firstReplay.result as DaemonLaunchEvent[]).map((event) => [event.sequence, event.type, event.durable]),
       [
-        [1, "launch.requested", false],
-        [2, "supervisor.connected", false],
+        [1, "launch.requested", true],
+        [2, "supervisor.connected", true],
         [3, "agent.saved", true],
         [4, "launch.activated", true],
         [5, "workspace.prepared", true],

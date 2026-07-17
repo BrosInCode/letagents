@@ -151,6 +151,7 @@ import {
   classifyLaunchFailure,
   emitLaunchEvent,
   getLaunchEvents,
+  followDurableLaunchEvents,
   LaunchBlockedError,
   onLaunchEvent,
   reconcileLaunchEvents,
@@ -240,6 +241,27 @@ import {
 const { ipcMain } = electron as typeof import("electron");
 let supervisorActivityBridgeRegistered = false;
 let supervisorLaunchBridgeRegistered = false;
+const launchJournalSubscriptions = new Map<string, Promise<void>>();
+
+function backgroundDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
+}
+
+function ensureLaunchJournalSubscription(launchId: string): void {
+  if (launchJournalSubscriptions.has(launchId)) return;
+  const subscription = followDurableLaunchEvents(
+    launchId,
+    (cursor) => supervisorDaemonClient.waitLaunchEvents(launchId, cursor),
+    () => backgroundDelay(1_000),
+  );
+  launchJournalSubscriptions.set(launchId, subscription);
+  void subscription.finally(() => {
+    if (launchJournalSubscriptions.get(launchId) === subscription) launchJournalSubscriptions.delete(launchId);
+  });
+}
 
 /** A launch id shared by the durable entry (`supervised_<id>`) and every launch
  * fact. Must satisfy the daemon's creation-request-id shape; fall back to a
@@ -859,6 +881,7 @@ export function registerDesktopIpcHandlers(
       const launchId = normalizeLaunchId(rawInput.creationRequestId);
       const input: DesktopSupervisorCreateInput = { ...rawInput, creationRequestId: launchId };
       const entryId = `supervised_${launchId}`;
+      ensureLaunchJournalSubscription(launchId);
       const provider = input.providerId;
       const roomIdentifier = input.roomIdentifier;
       const launchFact = (
@@ -946,6 +969,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:get-launch-events",
     async (_event, launchId: string, afterSequence?: number | null) => {
+      ensureLaunchJournalSubscription(launchId);
       const cursor = afterSequence ?? null;
       const local = getLaunchEvents(launchId, cursor);
       try {

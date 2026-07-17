@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.18";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.19";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -350,6 +350,17 @@ export class SupervisorDaemonClient {
     return wire.map(mapLaunchEvent);
   }
 
+  async waitLaunchEvents(launchId: string, afterSequence?: number | null, timeoutMs = 25_000): Promise<DesktopLaunchEvent[]> {
+    await this.ensureRunning();
+    const boundedTimeout = Math.min(Math.max(Math.trunc(timeoutMs), 1_000), 30_000);
+    const wire = await this.request<WireLaunchEvent[]>("launch.wait_events", {
+      launch_id: launchId,
+      after_sequence: afterSequence ?? 0,
+      timeout_ms: boundedTimeout,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, boundedTimeout + 5_000, true);
+    return wire.map(mapLaunchEvent);
+  }
+
   async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.update_workplace_liveness", {
@@ -434,10 +445,12 @@ export class SupervisorDaemonClient {
     params?: unknown,
     version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
     timeoutMs = this.requestTimeoutMs,
+    unrefSocket = false,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);
+      if (unrefSocket) socket.unref();
       let buffer = "";
       let settled = false;
       const finish = (error?: Error, value?: T) => {
