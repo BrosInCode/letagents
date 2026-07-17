@@ -408,7 +408,7 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
   streamSequence = 0;
-  readonly turnResultWaiters = new Set<() => void>();
+  readonly turnResultWaiters = new Set<(message: ClaudeStreamMessage) => void>();
 
   constructor(
     readonly workAttemptId: string,
@@ -517,7 +517,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       // A control_response acknowledgement is intentionally insufficient. The
       // subsequent result event is the only proof that the queued/live turn
       // actually reached an interrupted boundary.
-      await resultBoundary;
+      const result = await resultBoundary;
+      const subtype = typeof result.subtype === "string" ? result.subtype.toLowerCase() : "";
+      if (subtype !== "interrupted" || sessionIdOf(result) !== handle.providerContinuationId) {
+        throw new Error(`Claude returned ${streamMethod(result)} instead of an exact-session interrupted boundary.`);
+      }
       handle.state = "idle";
     }
     if (text) {
@@ -845,11 +849,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
+      const exactInterrupted = typeof message.subtype === "string"
+        && message.subtype.toLowerCase() === "interrupted"
+        && sessionIdOf(message) === handle.providerContinuationId;
       if (handle.turnResultWaiters.size) {
         const waiters = [...handle.turnResultWaiters];
         handle.turnResultWaiters.clear();
+        for (const resolve of waiters) resolve(message);
+      }
+      if (exactInterrupted) {
         handle.state = "idle";
-        for (const resolve of waiters) resolve();
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
@@ -897,15 +906,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private waitForNextTurnResult(handle: ClaudeProviderHandle): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  private waitForNextTurnResult(handle: ClaudeProviderHandle): Promise<ClaudeStreamMessage> {
+    return new Promise<ClaudeStreamMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         handle.turnResultWaiters.delete(done);
         reject(new Error("Claude did not prove the active turn reached an interrupted boundary."));
       }, 10_000);
-      const done = () => {
+      const done = (message: ClaudeStreamMessage) => {
         clearTimeout(timer);
-        resolve();
+        resolve(message);
       };
       handle.turnResultWaiters.add(done);
     });

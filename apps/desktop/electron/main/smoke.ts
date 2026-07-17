@@ -23,6 +23,7 @@ const smokeCodexWorkerSessionId = "worker_smoke_codex";
 const smokeCodexLiveSessionId = "local_smoke_codex";
 const smokeCodexReasoningSessionId = "reasoning_smoke_codex";
 let smokeUserDataPath: string | null = null;
+let smokeTurnControl: DesktopSupervisorManifestEntry["turnControl"] = null;
 
 function electronApp(): App {
   const app = (electron as { app?: App }).app;
@@ -51,6 +52,7 @@ export function configureDesktopSmokeEnvironment(): void {
 
 export function seedDesktopSmokeState(): void {
   if (!isDesktopSmokeCheck()) return;
+  smokeTurnControl = null;
 
   const userDataPath = electronApp().getPath("userData");
   mkdirSync(userDataPath, { recursive: true });
@@ -399,6 +401,7 @@ export function desktopSmokeSupervisorEntries(): DesktopSupervisorManifestEntry[
     restartCount: 0,
     lastTerminal: null,
     activity: [],
+    turnControl: smokeTurnControl,
   }];
 }
 
@@ -413,8 +416,11 @@ export function desktopSmokeControlTurn(
   ) {
     throw new Error("Smoke turn-control fence mismatch.");
   }
+  if (input.correction?.trim() === "Reject the stale smoke control.") {
+    throw new Error("Smoke stale generation rejected before provider dispatch.");
+  }
   const correction = input.correction?.trim() || null;
-  return {
+  const result: DesktopSupervisorTurnControlResult = {
     entryId: entry.id,
     workAttemptId: entry.workAttemptId!,
     executionGenerationId: entry.executionGenerationId!,
@@ -428,4 +434,20 @@ export function desktopSmokeControlTurn(
       ? ["delivered", "interrupting", "applied", "resumed"]
       : ["delivered", "interrupting", "applied"],
   };
+  const now = new Date().toISOString();
+  smokeTurnControl = {
+    actionId: input.actionId,
+    workAttemptId: input.workAttemptId,
+    executionGenerationId: input.executionGenerationId,
+    status: "completed",
+    capability: result.capability,
+    interrupted: result.interrupted,
+    resumed: result.resumed,
+    state: result.state,
+    stages: result.stages,
+    error: null,
+    recordedAt: now,
+    updatedAt: now,
+  };
+  return result;
 }

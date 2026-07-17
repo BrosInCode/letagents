@@ -704,6 +704,42 @@ test("Claude turn control waits for the interrupted result before applying a cor
   assert.equal(handle.observedState(), "working");
 });
 
+test("Claude turn control does not misclassify a racing success result as interruption", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const controlled = adapter.controlTurn!(handle, "This correction must not be sent.");
+  const writesAfterRequest = child.written.length;
+
+  child.emit({ type: "result", subtype: "success", session_id: handle.providerContinuationId, result: "natural completion" });
+
+  await assert.rejects(controlled, /result\/success instead of an exact-session interrupted boundary/);
+  assert.equal(child.written.length, writesAfterRequest, "a natural completion never receives the correction");
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Claude turn control preserves a racing provider error instead of swallowing it", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const controlled = adapter.controlTurn!(handle, "This correction must not be sent.");
+  const writesAfterRequest = child.written.length;
+
+  child.emit({
+    type: "result",
+    subtype: "error_during_execution",
+    session_id: handle.providerContinuationId,
+    is_error: true,
+    result: "provider failed before interruption",
+  });
+
+  await assert.rejects(controlled, /result\/error_during_execution instead of an exact-session interrupted boundary/);
+  assert.equal(child.written.length, writesAfterRequest, "a failed turn never receives the correction");
+  assert.equal(handle.observedState(), "failed");
+});
+
 test("error result messages settle the observed state to failed", async () => {
   const harness = createHarness();
   const stream: ProviderStreamEvent[] = [];

@@ -413,6 +413,20 @@ export interface DesktopSupervisorManifestEntry {
   restartCount: number;
   lastTerminal: Record<string, unknown> | null;
   activity: DesktopSupervisorActivityEvent[];
+  turnControl: {
+    actionId: string;
+    workAttemptId: string;
+    executionGenerationId: string;
+    status: "accepted" | "completed" | "uncertain";
+    capability: "native_interrupt" | "restart_resume" | "unsupported";
+    interrupted: boolean | null;
+    resumed: boolean | null;
+    state: "idle" | "working" | null;
+    stages: DesktopSupervisorTurnControlResult["stages"];
+    error: string | null;
+    recordedAt: string;
+    updatedAt: string;
+  } | null;
 }
 
 export interface DesktopSupervisorCreateInput {
