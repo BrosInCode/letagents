@@ -77,7 +77,8 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
       return handle;
     },
     async poke(handle, message) { calls.push(`${provider}:poke:${handle.workAttemptId}:${message}`); },
-    async controlTurn(handle, correction) {
+    async controlTurn(handle, correction, options) {
+      await options?.markDispatched?.();
       calls.push(`${provider}:control:${handle.workAttemptId}:${correction ?? "stop"}`);
       return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
     },
@@ -327,6 +328,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   let nextPid = 5000;
   let continuation = "claude-continuation";
   let rejectControlAfterDispatch = false;
+  let proveControlNotApplied = false;
   let sawAcceptedControlBeforeProvider = false;
   const adapter: NativeProviderAdapter = {
     capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
@@ -334,11 +336,17 @@ test("daemon convergence drives Claude through the router across stop and same-a
     async attach() { calls.push("attach"); return null; },
     async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async poke() { throw new Error("Claude poke is intentionally unavailable"); },
-    async controlTurn(handle, correction) {
+    async controlTurn(handle, correction, options) {
+      await options?.markDispatched?.();
       calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
       const current = (await new ManifestStore(paths.manifestPath).load()).entries.find((candidate) => candidate.id === entry.id);
-      sawAcceptedControlBeforeProvider = current?.turn_control?.status === "accepted"
+      sawAcceptedControlBeforeProvider = current?.turn_control?.status === "dispatching"
         && current.turn_control.stages.length === 0;
+      if (proveControlNotApplied) {
+        throw Object.assign(new Error("provider proved the native effect was not applied"), {
+          turnControlOutcome: "not_applied" as const,
+        });
+      }
       if (rejectControlAfterDispatch) throw new Error("injected ambiguous provider outcome");
       return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
     },
@@ -423,7 +431,19 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.equal(stale.ok, false);
     assert.match(stale.error ?? "", /stale or incomplete/);
     assert.equal(calls.filter((call) => call.startsWith("control:")).length, 1, "duplicate and stale requests never reach the provider");
-    assert.equal(sawAcceptedControlBeforeProvider, true, "the action is durable before provider dispatch and carries no optimistic ack stages");
+    assert.equal(sawAcceptedControlBeforeProvider, true, "native dispatch is durably fenced and carries no optimistic ack stages");
+    proveControlNotApplied = true;
+    const retryableParams = { ...controlParams, action_id: "human-control-retryable", correction: "Retry only after proof" };
+    const provenNotApplied = await daemonRequest(paths.socketPath, "manifest.control_turn", retryableParams);
+    assert.equal(provenNotApplied.ok, false);
+    assert.match(provenNotApplied.error ?? "", /proved the native effect was not applied/);
+    const retryableJournal = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
+    assert.equal(retryableJournal?.status, "retryable");
+    assert.deepEqual(retryableJournal?.stages, []);
+    proveControlNotApplied = false;
+    const safeRetry = await daemonRequest(paths.socketPath, "manifest.control_turn", retryableParams);
+    assert.equal(safeRetry.ok, true, "the exact correction is dispatchable again only after definitive non-application");
+    assert.equal((safeRetry.result as { duplicate?: boolean }).duplicate, false);
     rejectControlAfterDispatch = true;
     const uncertainParams = { ...controlParams, action_id: "human-control-uncertain", correction: "Do not replay this correction" };
     const uncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
@@ -432,14 +452,14 @@ test("daemon convergence drives Claude through the router across stop and same-a
     rejectControlAfterDispatch = false;
     const retryUncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
     assert.equal(retryUncertain.ok, false);
-    assert.match(retryUncertain.error ?? "", /durably accepted.*uncertain.*not replayed/i);
+    assert.match(retryUncertain.error ?? "", /durably dispatched.*unresolved.*not replayed/i);
     const competing = await daemonRequest(paths.socketPath, "manifest.control_turn", {
       ...uncertainParams,
       action_id: "human-control-competing",
     });
     assert.equal(competing.ok, false);
     assert.match(competing.error ?? "", /unresolved.*refusing a second action/i);
-    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 2, "an ambiguous accepted effect is never dispatched twice");
+    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 4, "an ambiguous accepted effect is never dispatched twice");
     const journaled = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
     assert.equal(journaled?.status, "uncertain");
     assert.deepEqual(journaled?.stages, []);
@@ -466,7 +486,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   }
 });
 
-test("daemon restart never replays a durably accepted turn-control effect", async () => {
+test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native dispatch", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-control-restart-"));
   const calls: string[] = [];
   const adapter = fakeAdapter("claude-code", calls);
@@ -489,11 +509,11 @@ test("daemon restart never replays a durably accepted turn-control effect", asyn
       provider_connection: { kind: "claude_cli", pid: 4242, processIdentity: "claude:4242" },
     },
     turn_control: {
-      action_id: "action_accepted_before_crash",
+      action_id: "action_dispatching_before_crash",
       work_attempt_id: "attempt_exact",
       execution_generation_id: "generation_exact",
       has_correction: true,
-      status: "accepted",
+      status: "dispatching",
       capability: "native_interrupt",
       interrupted: null,
       resumed: null,
@@ -504,22 +524,79 @@ test("daemon restart never replays a durably accepted turn-control effect", asyn
       updated_at: recordedAt,
     },
   };
+  const preparedEntry: DaemonManifestEntry = {
+    ...entry,
+    id: "restart_prepared_control",
+    turn_control: {
+      ...entry.turn_control!,
+      action_id: "action_prepared_before_crash",
+      status: "prepared",
+    },
+  };
+  const appliedEntry: DaemonManifestEntry = {
+    ...entry,
+    id: "restart_applied_control",
+    turn_control: {
+      ...entry.turn_control!,
+      action_id: "action_operator_verified_applied",
+    },
+  };
   try {
-    await new ManifestStore(paths.manifestPath).write(0, [entry]);
+    await new ManifestStore(paths.manifestPath).write(0, [entry, preparedEntry, appliedEntry]);
     await daemon.start();
-    const recovered = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
+    const recoveredEntries = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    const recovered = recoveredEntries.find((candidate) => candidate.id === entry.id)?.turn_control;
+    const prepared = recoveredEntries.find((candidate) => candidate.id === preparedEntry.id)?.turn_control;
     assert.equal(recovered?.status, "uncertain");
-    assert.match(recovered?.error ?? "", /restarted.*not replayed/i);
+    assert.match(recovered?.error ?? "", /after native dispatch began/i);
+    assert.equal(prepared?.status, "retryable");
+    assert.match(prepared?.error ?? "", /before native dispatch.*safe to retry/i);
     const replay = await daemonRequest(paths.socketPath, "manifest.control_turn", {
       id: entry.id,
       work_attempt_id: "attempt_exact",
       execution_generation_id: "generation_exact",
-      action_id: "action_accepted_before_crash",
+      action_id: "action_dispatching_before_crash",
       correction: "one correction",
     });
     assert.equal(replay.ok, false);
-    assert.match(replay.error ?? "", /durably accepted.*not replayed/i);
+    assert.match(replay.error ?? "", /durably dispatched.*unresolved.*not replayed/i);
     assert.equal(calls.some((call) => call.includes(":control:")), false);
+    const resolved = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
+      id: entry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_dispatching_before_crash",
+      resolution: "not_applied",
+    });
+    assert.equal(resolved.ok, true);
+    const resolvedEntry = resolved.result as DaemonManifestEntry;
+    assert.equal(resolvedEntry.turn_control?.status, "retryable");
+    assert.equal(resolvedEntry.activity?.at(-1)?.method, "supervisor/resolve-turn-control");
+    assert.deepEqual(resolvedEntry.activity?.at(-1)?.payload, {
+      action_id: "action_dispatching_before_crash",
+      resolution: "not_applied",
+    });
+    const appliedResolution = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
+      id: appliedEntry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_operator_verified_applied",
+      resolution: "applied",
+    });
+    assert.equal(appliedResolution.ok, true);
+    const operatorApplied = appliedResolution.result as DaemonManifestEntry;
+    assert.equal(operatorApplied.turn_control?.status, "completed");
+    assert.deepEqual(operatorApplied.turn_control?.stages, ["already_applied"]);
+    assert.equal(operatorApplied.activity?.at(-1)?.method, "supervisor/resolve-turn-control");
+    const appliedDuplicate = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: appliedEntry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_operator_verified_applied",
+      correction: "one correction",
+    });
+    assert.equal(appliedDuplicate.ok, true);
+    assert.equal((appliedDuplicate.result as { duplicate?: boolean }).duplicate, true);
   } finally {
     await daemon.stop();
     await rm(root, { recursive: true, force: true });

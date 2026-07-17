@@ -875,6 +875,11 @@ export function registerDesktopIpcHandlers(
       isDesktopSmokeCheck() ? desktopSmokeControlTurn(input) : supervisorDaemonClient.controlTurn(input),
   );
   targetIpcMain.handle(
+    "desktop:supervisor:resolve-turn-control",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlResolutionInput) =>
+      supervisorDaemonClient.resolveTurnControl(input),
+  );
+  targetIpcMain.handle(
     "desktop:supervisor:read-attempt",
     async (_event, id: string): Promise<DesktopSupervisorAttemptDetail> => supervisorDaemonClient.readAttempt(id),
   );

@@ -49,7 +49,10 @@ export interface ProviderActionPort {
   attachAction(actionId: string, workAttemptId: string): Promise<ProviderActionAttachment>;
   resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   poke(handle: ProviderActionHandle, message: string, options?: { actionId?: string }): Promise<void>;
-  controlTurn?(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string }): Promise<ProviderTurnControlResult>;
+  controlTurn?(handle: ProviderActionHandle, correction?: string | null, options?: {
+    actionId?: string;
+    markDispatched?: () => Promise<void>;
+  }): Promise<ProviderTurnControlResult>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;

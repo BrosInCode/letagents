@@ -102,7 +102,7 @@ export type DaemonManifestEntry = {
     work_attempt_id: string;
     execution_generation_id: string;
     has_correction: boolean;
-    status: "accepted" | "completed" | "uncertain";
+    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
     capability: "native_interrupt" | "restart_resume" | "unsupported";
     interrupted: boolean | null;
     resumed: boolean | null;

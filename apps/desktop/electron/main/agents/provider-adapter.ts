@@ -60,6 +60,19 @@ export interface ProviderTurnControlResult {
   state: "idle" | "working";
 }
 
+export interface ProviderTurnControlOptions {
+  /** Persist the dispatching journal state before the first native side effect. */
+  markDispatched?: () => Promise<void>;
+}
+
+export class ProviderTurnControlError extends Error {
+  readonly turnControlOutcome: "not_applied" | "uncertain";
+  constructor(message: string, outcome: "not_applied" | "uncertain") {
+    super(message);
+    this.turnControlOutcome = outcome;
+  }
+}
+
 export type ProviderTerminalCause =
   | "exited"        // clean process exit
   | "killed"        // SIGKILL / force stop
@@ -259,7 +272,7 @@ export interface ProviderAdapter {
    * Stop only the current native turn and optionally apply a correction on the
    * same provider continuation. This must never make the work attempt terminal.
    */
-  controlTurn?(handle: ProviderHandle, correction?: string | null): Promise<ProviderTurnControlResult>;
+  controlTurn?(handle: ProviderHandle, correction?: string | null, options?: ProviderTurnControlOptions): Promise<ProviderTurnControlResult>;
 
   /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
   stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;

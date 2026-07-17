@@ -684,6 +684,7 @@ test("Claude turn control waits for the interrupted result before applying a cor
   let settled = false;
   const controlled = adapter.controlTurn!(handle, "Follow the revised user direction.")
     .then((result) => { settled = true; return result; });
+  await Promise.resolve();
   const request = JSON.parse(child.written.at(-1)!) as Record<string, unknown>;
   assert.equal(request.type, "control_request");
   assert.deepEqual(request.request, { subtype: "interrupt" });
@@ -714,7 +715,11 @@ test("Claude turn control does not misclassify a racing success result as interr
 
   child.emit({ type: "result", subtype: "success", session_id: handle.providerContinuationId, result: "natural completion" });
 
-  await assert.rejects(controlled, /result\/success instead of an exact-session interrupted boundary/);
+  await assert.rejects(controlled, (error: unknown) => {
+    assert.match(String(error), /result\/success before the interrupt was dispatched/);
+    assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "not_applied");
+    return true;
+  });
   assert.equal(child.written.length, writesAfterRequest, "a natural completion never receives the correction");
   assert.equal(handle.observedState(), "idle");
 });
@@ -735,7 +740,11 @@ test("Claude turn control preserves a racing provider error instead of swallowin
     result: "provider failed before interruption",
   });
 
-  await assert.rejects(controlled, /result\/error_during_execution instead of an exact-session interrupted boundary/);
+  await assert.rejects(controlled, (error: unknown) => {
+    assert.match(String(error), /result\/error_during_execution before the interrupt was dispatched/);
+    assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "not_applied");
+    return true;
+  });
   assert.equal(child.written.length, writesAfterRequest, "a failed turn never receives the correction");
   assert.equal(handle.observedState(), "failed");
 });

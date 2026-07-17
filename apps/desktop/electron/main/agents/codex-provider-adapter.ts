@@ -36,6 +36,8 @@ import {
   type ProviderSpawnRequest,
   type ProviderStopOptions,
   type ProviderTurnControlResult,
+  type ProviderTurnControlOptions,
+  ProviderTurnControlError,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -330,6 +332,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   async controlTurn(
     providerHandle: ProviderHandle,
     correction?: string | null,
+    options: ProviderTurnControlOptions = {},
   ): Promise<ProviderTurnControlResult> {
     const handle = this.requireHandle(providerHandle);
     if (handle.terminal) throw new Error("Codex continuation is terminal; no turn can be controlled.");
@@ -352,6 +355,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex returned an unknown latest-turn state; refusing ambiguous turn control.");
     }
     if (active) {
+      await options.markDispatched?.();
+      const dispatchRead = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: handle.providerContinuationId,
+        includeTurns: true,
+      });
+      const dispatchTurn = dispatchRead.thread?.turns?.find((candidate) => candidate.id === turnId);
+      const dispatchStatus = typeof dispatchTurn?.status === "string"
+        ? dispatchTurn.status
+        : dispatchTurn?.status?.status;
+      if (!dispatchTurn || !isActiveCodexTurnStatus(dispatchStatus)) {
+        throw new ProviderTurnControlError(
+          "Codex reached a terminal turn boundary before native interrupt dispatch.",
+          "not_applied",
+        );
+      }
       await handle.client.request("turn/interrupt", {
         threadId: handle.providerContinuationId,
         turnId,
@@ -360,6 +378,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.state = "idle";
     }
     if (text) {
+      if (!active) await options.markDispatched?.();
       const turn = await handle.client.request<TurnStartResult>("turn/start", {
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text, text_elements: [] }],

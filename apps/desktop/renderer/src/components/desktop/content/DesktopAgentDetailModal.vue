@@ -292,6 +292,26 @@
                 >
                   {{ turnControlJournalMessage(entry) }}
                 </p>
+                <div
+                  v-if="hasUnresolvedTurnControl(entry) && entry.turnControl?.status === 'uncertain'"
+                  class="desktop-agent-turn-control-resolution"
+                  aria-label="Resolve uncertain turn control"
+                >
+                  <button
+                    type="button"
+                    :disabled="resolvingTurnControlEntryId === entry.id"
+                    @click="resolveTurnControl(entry, 'not_applied')"
+                  >
+                    Verified not applied · allow retry
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="resolvingTurnControlEntryId === entry.id"
+                    @click="resolveTurnControl(entry, 'applied')"
+                  >
+                    Verified applied
+                  </button>
+                </div>
                 <ol
                   v-if="turnControlStages[entry.id]?.length"
                   class="desktop-agent-turn-control-stages"
@@ -430,6 +450,7 @@ const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 const supervisorError = ref<string | null>(null);
 const updatingSupervisorEntryId = ref<string | null>(null);
 const controllingSupervisorEntryId = ref<string | null>(null);
+const resolvingTurnControlEntryId = ref<string | null>(null);
 const turnControlDrafts = ref<Record<string, string>>({});
 const turnControlStages = ref<Record<string, DesktopSupervisorTurnControlResult["stages"]>>({});
 const turnControlActions = new Map<string, {
@@ -502,9 +523,11 @@ watch(directMatchingSupervisorEntries, (entries) => {
 });
 watch(supervisorEntries, (entries) => {
   for (const entry of entries) {
-    if (entry.turnControl?.status === "completed") {
+    if (entry.turnControl?.status === "completed"
+      && entry.turnControl.workAttemptId === entry.workAttemptId
+      && entry.turnControl.executionGenerationId === entry.executionGenerationId) {
       turnControlStages.value[entry.id] = entry.turnControl.stages;
-    } else if (entry.turnControl?.status === "accepted" || entry.turnControl?.status === "uncertain") {
+    } else if (entry.turnControl) {
       turnControlStages.value[entry.id] = [];
     }
   }
@@ -635,6 +658,7 @@ function clearTransientState(): void {
   resolvingPermissionIds.value = {};
   updatingSupervisorEntryId.value = null;
   controllingSupervisorEntryId.value = null;
+  resolvingTurnControlEntryId.value = null;
   turnControlDrafts.value = {};
   turnControlStages.value = {};
   turnControlActions.clear();
@@ -734,15 +758,21 @@ function canSteerSupervisorEntry(entry: DesktopSupervisorManifestEntry): boolean
 function hasUnresolvedTurnControl(entry: DesktopSupervisorManifestEntry): boolean {
   return entry.turnControl?.workAttemptId === entry.workAttemptId
     && entry.turnControl.executionGenerationId === entry.executionGenerationId
-    && entry.turnControl.status !== "completed";
+    && entry.turnControl.status !== "completed"
+    && entry.turnControl.status !== "retryable";
 }
 
 function turnControlJournalMessage(entry: DesktopSupervisorManifestEntry): string | null {
+  if (entry.turnControl?.workAttemptId === entry.workAttemptId
+    && entry.turnControl.executionGenerationId === entry.executionGenerationId
+    && entry.turnControl.status === "retryable") {
+    return "The previous control was proven not applied. It is safe to retry.";
+  }
   if (!hasUnresolvedTurnControl(entry)) return null;
   if (entry.turnControl?.status === "uncertain") {
     return "The last control may have reached the provider. It was not replayed; verify the agent before steering again.";
   }
-  return "The control was durably accepted and is awaiting a proven provider boundary.";
+  return "The control is durably prepared or dispatching and is awaiting a proven provider boundary.";
 }
 
 function canStopSupervisorTurn(entry: DesktopSupervisorManifestEntry): boolean {
@@ -794,6 +824,30 @@ async function runTurnControl(entry: DesktopSupervisorManifestEntry, correction:
     supervisorError.value = error instanceof Error ? error.message : "Could not control the active turn.";
   } finally {
     controllingSupervisorEntryId.value = null;
+  }
+}
+
+async function resolveTurnControl(
+  entry: DesktopSupervisorManifestEntry,
+  resolution: "not_applied" | "applied",
+): Promise<void> {
+  const control = entry.turnControl;
+  if (!control || control.status !== "uncertain" || resolvingTurnControlEntryId.value) return;
+  resolvingTurnControlEntryId.value = entry.id;
+  supervisorError.value = null;
+  try {
+    const updated = await desktopIpc.supervisor.resolveTurnControl({
+      entryId: entry.id,
+      workAttemptId: control.workAttemptId,
+      executionGenerationId: control.executionGenerationId,
+      actionId: control.actionId,
+      resolution,
+    });
+    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((candidate) => candidate.id !== entry.id)];
+  } catch (error) {
+    supervisorError.value = error instanceof Error ? error.message : "Could not resolve the uncertain turn control.";
+  } finally {
+    resolvingTurnControlEntryId.value = null;
   }
 }
 

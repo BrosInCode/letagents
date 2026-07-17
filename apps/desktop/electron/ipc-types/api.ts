@@ -38,6 +38,7 @@ import type {
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
@@ -301,6 +302,7 @@ export interface DesktopApi {
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
     controlTurn: (input: DesktopSupervisorTurnControlInput) => Promise<DesktopSupervisorTurnControlResult>;
+    resolveTurnControl: (input: DesktopSupervisorTurnControlResolutionInput) => Promise<DesktopSupervisorManifestEntry>;
     readAttempt: (id: string) => Promise<DesktopSupervisorAttemptDetail>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
   };

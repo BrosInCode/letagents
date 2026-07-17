@@ -25,7 +25,7 @@ export type NativeProviderAdapter = {
   attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
-  controlTurn(handle: NativeHandle, correction?: string | null): Promise<ProviderTurnControlResult>;
+  controlTurn(handle: NativeHandle, correction?: string | null, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -104,9 +104,11 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
   }
 
-  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string }): Promise<ProviderTurnControlResult> {
+  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
     const remembered = this.required(handle);
-    const result = await (await this.adapter(remembered.provider)).controlTurn(remembered.handle, correction);
+    const result = await (await this.adapter(remembered.provider)).controlTurn(remembered.handle, correction, {
+      markDispatched: options?.markDispatched,
+    });
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
     return result;
   }
