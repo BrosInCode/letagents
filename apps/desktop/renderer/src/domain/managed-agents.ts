@@ -329,9 +329,12 @@ export function supervisedAgentWorkIndicators(
         ? presence.find((candidate) => candidate.agentSessionId === entry.agentSessionId)
         : null;
       return [{
-        id: `${entry.id}:${latest.sequence}`,
+        // Stable per-entry id so the indicator updates its echo in place as the
+        // native stream progresses instead of remounting (and re-animating) on
+        // every new activity event.
+        id: entry.id,
         displayName: boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
-        summary: latest.summary.trim() || "Working in the room.",
+        summary: liveActivityEchoText(latest.summary),
         startedAt: latest.observedAt,
       }];
     })
@@ -447,6 +450,53 @@ export interface ManagedAgentWorkIndicator {
   displayName: string;
   summary: string;
   startedAt: string;
+}
+
+/** Longest live-activity echo shown in the room work indicator. */
+export const LIVE_ACTIVITY_ECHO_MAX_LENGTH = 100;
+
+/** Default number of concurrent work indicators shown before collapsing. */
+export const WORK_INDICATOR_VISIBLE_LIMIT = 3;
+
+/**
+ * Last-mile guard for the live-activity echo. The daemon already sanitizes and
+ * redacts native activity, but the echo is human-facing in a shared room, so
+ * collapse whitespace/control characters to a single line and length-bound it
+ * to keep the indicator unobtrusive and prevent any multi-line payload from
+ * widening the row.
+ */
+export function liveActivityEchoText(summary: string | null | undefined): string {
+  const collapsed = (summary ?? "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!collapsed) return "Working in the room.";
+  if (collapsed.length <= LIVE_ACTIVITY_ECHO_MAX_LENGTH) return collapsed;
+  return `${collapsed.slice(0, LIVE_ACTIVITY_ECHO_MAX_LENGTH - 1).trimEnd()}…`;
+}
+
+export interface CollapsedWorkIndicators {
+  visible: ManagedAgentWorkIndicator[];
+  hiddenCount: number;
+}
+
+/**
+ * Keep the work-indicator area unobtrusive when many agents are active at once
+ * (EmmyMay's ten-agent noise constraint): show the most recent `maxVisible` and
+ * report the rest as an overflow count instead of an unbounded list.
+ */
+export function collapseWorkIndicators(
+  indicators: readonly ManagedAgentWorkIndicator[],
+  maxVisible: number = WORK_INDICATOR_VISIBLE_LIMIT,
+): CollapsedWorkIndicators {
+  if (maxVisible <= 0 || indicators.length <= maxVisible) {
+    return { visible: [...indicators], hiddenCount: 0 };
+  }
+  return {
+    visible: indicators.slice(0, maxVisible),
+    hiddenCount: indicators.length - maxVisible,
+  };
 }
 
 export interface ManagedAgentPermissionApproval {
