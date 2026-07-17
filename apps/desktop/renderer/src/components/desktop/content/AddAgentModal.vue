@@ -616,6 +616,7 @@ import {
   managedAgentSessionMatchesRoom,
   managedAgentSessionStatusLabel,
   managedAgentStopResultMessage,
+  normalizeManagedAgentRoomIdentifier,
   shouldShowCursorMcpPolicySelector,
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
@@ -645,6 +646,7 @@ import DesktopModelPicker from "../controls/DesktopModelPicker.vue";
 
 const props = defineProps<{
   open: boolean;
+  activeRoomIdentifier: string | null;
   roomIdentifier: string;
   roomGitRoom: DesktopGitRoomInfo | null;
   gitRoomMatchesActiveRepo: boolean;
@@ -1164,6 +1166,14 @@ async function loadProviders(): Promise<void> {
 async function startManagedAgent(): Promise<void> {
   if (!selectedProviderId.value || !props.repoRootPath || startingAgent.value) return;
   if (!hasDesktopManagedRuntime(selectedProvider.value)) return;
+  if (
+    !props.activeRoomIdentifier
+    || normalizeManagedAgentRoomIdentifier(props.activeRoomIdentifier)
+      !== normalizeManagedAgentRoomIdentifier(props.roomIdentifier)
+  ) {
+    setupMessage.value = "The visible room changed. Close Add Agent and reopen it from the room you want to use.";
+    return;
+  }
   const requestVersion = modalStateVersion;
   startingAgent.value = true;
   setupMessage.value = null;
@@ -1189,6 +1199,9 @@ async function startManagedAgent(): Promise<void> {
       const entry = await desktopIpc.supervisor.createAgent({
         creationRequestId: supervisedCreationRequestId,
         providerId: selectedProviderId.value,
+        activeRoomIdentifier: props.activeRoomIdentifier,
+        projectRoomIdentifier: props.roomIdentifier,
+        projectRootPath: props.repoRootPath,
         roomIdentifier: props.roomIdentifier,
         displayName: `${selectedProvider.value?.name ?? "Agent"} supervised agent`,
         repoRootPath: props.repoRootPath,

@@ -13,6 +13,16 @@ const progressSource = readFileSync(fileURLToPath(new URL(
   import.meta.url,
 )), "utf8");
 
+const shellSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/DesktopRoomShell.vue",
+  import.meta.url,
+)), "utf8");
+
+const appSource = readFileSync(fileURLToPath(new URL(
+  "../src/App.vue",
+  import.meta.url,
+)), "utf8");
+
 test("Add Agent modal renders the phased launch row from real supervisor state", () => {
   assert.match(modalSource, /import SupervisedLaunchProgress from "\.\/SupervisedLaunchProgress\.vue"/);
   assert.match(modalSource, /import \{ supervisedLaunchProgress \} from "\.\.\/\.\.\/\.\.\/domain\/supervised-launch"/);
@@ -30,6 +40,15 @@ test("Add Agent modal shows the launch card the instant Start is clicked, backed
   assert.match(startBody, /subscribeLaunchEvents\(supervisedCreationRequestId\)[\s\S]*await desktopIpc\.supervisor\.createAgent\(/);
   assert.match(modalSource, /desktopIpc\.supervisor\.onLaunchEvent/);
   assert.match(modalSource, /desktopIpc\.supervisor\.getLaunchEvents/);
+});
+
+test("Add Agent supervised Start carries independently derived active, project, and requested room evidence", () => {
+  assert.match(appSource, /:active-room-identifier="activeEntry\.roomIdentifier"/);
+  assert.match(shellSource, /addAgentModalOpen && activeRoomMatchesShell/);
+  assert.match(shellSource, /props\.roomLoading \|\| !activeRoomMatchesShell\.value/);
+  assert.match(modalSource, /activeRoomIdentifier: props\.activeRoomIdentifier/);
+  assert.match(modalSource, /projectRoomIdentifier: props\.roomIdentifier/);
+  assert.match(modalSource, /projectRootPath: props\.repoRootPath/);
 });
 
 test("Add Agent modal folds launch events idempotently by sequence", () => {
