@@ -7,6 +7,7 @@ import {
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getLastEndedWorkerSessionDisplayName,
+  getWorkerSessionDisplayNamesForIdentity,
   getRoomAgentSessionByCredentials,
   getRoomParticipants,
   recordNativeHarnessActivity,
@@ -173,7 +174,7 @@ export function registerAgentSessionRoutes(
       const isGenericName = !requestedDisplayName || requestedTokens.every((token) => genericKeywords.has(token));
 
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
-      const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
+      const [activeParticipants, activeSessionsForIdentity, priorWorkerDisplayNames] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
         requestedSessionKind === "worker"
           ? getActiveRoomAgentSessionsForWorkerIdentity({
@@ -181,18 +182,23 @@ export function registerAgentSessionRoutes(
               agent_key: agent.canonical_key,
             })
           : Promise.resolve([]),
+        requestedSessionKind === "worker"
+          ? getWorkerSessionDisplayNamesForIdentity({
+              room_id: project.id,
+              agent_key: agent.canonical_key,
+            })
+          : Promise.resolve([] as string[]),
       ]);
 
       // Provenance for replay normalization: the labels THIS identity has
-      // actually held (durable participant history + live sessions). The
-      // stored `agent.display_name` is the canonical codename, not the
-      // per-session label, so the base is recovered from history — never by
-      // blindly stripping trailing digits (which would demote "Agent 47").
+      // actually held here (every worker session name it has used, active or
+      // ended). The stored `agent.display_name` is the canonical codename, not
+      // the per-session label, so the base is recovered from session history —
+      // never by blindly stripping trailing digits (which would demote a
+      // legitimate numeric-ending name like "Agent 47").
       const identityHeldDisplayNames = new Set<string>([
         ...activeSessionsForIdentity.map((session) => session.display_name),
-        ...activeParticipants
-          .filter((participant) => participant.kind === "agent" && participant.agent_key === agent.canonical_key)
-          .map((participant) => participant.display_name),
+        ...priorWorkerDisplayNames,
       ]);
       const canonicalDisplayName = resolveReplayCanonicalBase(
         requestedDisplayName,
