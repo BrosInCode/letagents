@@ -91,7 +91,9 @@ function recoveryLabel(action: DesktopLaunchRecoveryAction): string {
   switch (action) {
     case "retry": return "Try again";
     case "reconnect": return "Reconnect";
-    case "sign_in": return "Open provider to sign in";
+    // Honest copy: the action retries the launch. Provider sign-in happens in
+    // the provider itself; a dedicated open-provider action is a follow-up.
+    case "sign_in": return "Try again after signing in";
     case "choose_project": return "Choose project";
   }
 }

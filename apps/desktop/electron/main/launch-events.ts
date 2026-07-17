@@ -4,6 +4,7 @@ import type {
   DesktopLaunchEvent,
   DesktopLaunchEventType,
   DesktopLaunchRecoveryAction,
+  DesktopSupervisorManifestEntry,
 } from "../ipc-types.js";
 
 /**
@@ -125,6 +126,21 @@ export class LaunchBlockedError extends Error {
  * gets a generic, secret-free message with a retry affordance (the raw error is
  * still thrown to the caller for diagnostics).
  */
+/**
+ * True when a supervised entry has reached the ready milestone (bound,
+ * reachable, live, unblocked). Stopping a ready agent is a lifecycle event, not
+ * a cancelled launch, so `launch.cancelled` must not be emitted for it. Mirrors
+ * the renderer's launch readiness so the two stay consistent.
+ */
+export function launchReachedReady(
+  entry: Pick<DesktopSupervisorManifestEntry, "agentSessionBindingState" | "workplaceLiveness" | "observedState" | "condition">,
+): boolean {
+  return entry.agentSessionBindingState === "active"
+    && entry.workplaceLiveness?.state === "reachable"
+    && (entry.observedState === "working" || entry.observedState === "idle" || entry.observedState === "checkpointing")
+    && entry.condition === "none";
+}
+
 export function classifyLaunchFailure(error: unknown): {
   type: Extract<DesktopLaunchEventType, "launch.blocked" | "launch.failed">;
   recovery: DesktopLaunchRecoveryAction;

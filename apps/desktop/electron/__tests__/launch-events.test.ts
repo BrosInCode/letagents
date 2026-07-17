@@ -5,10 +5,12 @@ import {
   classifyLaunchFailure,
   emitLaunchEvent,
   getLaunchEvents,
+  launchReachedReady,
   LaunchBlockedError,
   onLaunchEvent,
   resetLaunchEventsForTest,
 } from "../main/launch-events.js";
+import type { DesktopSupervisorManifestEntry } from "../ipc-types.js";
 
 test.beforeEach(() => resetLaunchEventsForTest());
 
@@ -96,4 +98,25 @@ test("classifyLaunchFailure maps unexpected errors to a safe generic failure", (
   assert.equal(failure.type, "launch.failed");
   assert.equal(failure.recovery, "retry");
   assert.doesNotMatch(failure.detail, /secret|EACCES/);
+});
+
+function readinessFields(
+  overrides: Partial<Pick<DesktopSupervisorManifestEntry, "agentSessionBindingState" | "workplaceLiveness" | "observedState" | "condition">> = {},
+): Pick<DesktopSupervisorManifestEntry, "agentSessionBindingState" | "workplaceLiveness" | "observedState" | "condition"> {
+  return {
+    agentSessionBindingState: "active",
+    workplaceLiveness: { state: "reachable", observedAt: null, detail: null },
+    observedState: "working",
+    condition: "none",
+    ...overrides,
+  };
+}
+
+test("launchReachedReady is true only for a bound, reachable, live, unblocked entry", () => {
+  assert.equal(launchReachedReady(readinessFields()), true);
+  assert.equal(launchReachedReady(readinessFields({ agentSessionBindingState: "none" })), false);
+  assert.equal(launchReachedReady(readinessFields({ agentSessionBindingState: "historical" })), false);
+  assert.equal(launchReachedReady(readinessFields({ workplaceLiveness: { state: "unknown", observedAt: null, detail: null } })), false);
+  assert.equal(launchReachedReady(readinessFields({ observedState: "recovering" })), false);
+  assert.equal(launchReachedReady(readinessFields({ condition: "coordination_blocked" })), false);
 });

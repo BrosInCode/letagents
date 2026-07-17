@@ -1237,8 +1237,15 @@ async function startManagedAgent(): Promise<void> {
         supervisedConflict.value = recovery.entry?.desiredState === "running" ? recovery.entry : null;
         supervisedConflictLookupError.value = recovery.entry ? null : recovery.error;
       }
+      // The event-backed launch card owns failure display with safe product
+      // copy; keep the raw supervised error out of the primary UI. A pre-launch
+      // guard that fails before the card appears still surfaces its own message.
+      setupMessage.value = launchStarted.value
+        ? null
+        : (error instanceof Error ? error.message : "Could not start this agent.");
+    } else {
+      setupMessage.value = error instanceof Error ? error.message : "Could not start this agent.";
     }
-    setupMessage.value = error instanceof Error ? error.message : "Could not start this agent.";
   } finally {
     if (isCurrentModalState(requestVersion)) {
       startingAgent.value = false;
