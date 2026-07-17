@@ -9,10 +9,10 @@ import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-
 import { WorkDurabilityStore } from "./durability-store.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
-import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal } from "./provider-action-port.js";
+import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal, ProviderTurnControlResult } from "./provider-action-port.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
-import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure } from "./reconciler-state.js";
+import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
@@ -34,6 +34,14 @@ type RecoveryClock = {
   nowMs?: () => number;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+};
+type DaemonTurnControlResult = ProviderTurnControlResult & {
+  entryId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  actionId: string;
+  duplicate: boolean;
+  stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
 };
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
@@ -159,6 +167,8 @@ export class SupervisorDaemon {
   private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
+  private readonly turnControlRequests = new Map<string, Promise<DaemonTurnControlResult>>();
+  private readonly turnControlActiveEntries = new Set<string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
   private readonly pendingResumeBindings = new Map<string, PendingResumeBinding>();
@@ -204,6 +214,16 @@ export class SupervisorDaemon {
         const params = this.paramsRecord(request.params);
         const updated = await this.setDesiredState(String(params.id ?? ""), String(params.desired_state ?? "") as DesiredState);
         return this.entryWithDerivedLiveness(updated);
+      }
+      if (request.method === "manifest.control_turn") {
+        const params = this.paramsRecord(request.params);
+        return this.controlTurn({
+          entryId: String(params.id ?? ""),
+          workAttemptId: String(params.work_attempt_id ?? ""),
+          executionGenerationId: String(params.execution_generation_id ?? ""),
+          actionId: String(params.action_id ?? ""),
+          correction: typeof params.correction === "string" ? params.correction : null,
+        });
       }
       if (request.method === "lane.reserve_legacy") {
         const params = this.paramsRecord(request.params);
@@ -430,6 +450,148 @@ export class SupervisorDaemon {
     if (desiredState !== "running") this.clearRecoveryConvergence(id);
     this.requestConvergence(id);
     return updated;
+  }
+
+  private controlTurn(input: {
+    entryId: string;
+    workAttemptId: string;
+    executionGenerationId: string;
+    actionId: string;
+    correction: string | null;
+  }): Promise<DaemonTurnControlResult> {
+    for (const [field, value] of Object.entries({
+      id: input.entryId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      action_id: input.actionId,
+    })) {
+      if (!value.trim()) throw new Error(`Turn control ${field} is required.`);
+    }
+    const requestKey = `${input.entryId}:${input.actionId}`;
+    const existing = this.turnControlRequests.get(requestKey);
+    if (existing) return existing;
+    if (this.turnControlActiveEntries.has(input.entryId)) {
+      throw new Error("A turn-control action is already in flight for this exact supervised entry.");
+    }
+    this.turnControlActiveEntries.add(input.entryId);
+    const operation = this.controlTurnOnce(input).finally(() => {
+      this.turnControlRequests.delete(requestKey);
+      this.turnControlActiveEntries.delete(input.entryId);
+    });
+    this.turnControlRequests.set(requestKey, operation);
+    return operation;
+  }
+
+  private async controlTurnOnce(input: {
+    entryId: string;
+    workAttemptId: string;
+    executionGenerationId: string;
+    actionId: string;
+    correction: string | null;
+  }): Promise<DaemonTurnControlResult> {
+    await this.singleton.assertCurrent();
+    const manifest = await this.store.load();
+    const entry = manifest.entries.find((candidate) => candidate.id === input.entryId);
+    if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entryId}`);
+    const ref = entry.provider_ref;
+    if (entry.desired_state !== "running") throw new Error("Turn control requires desired_state=running.");
+    if (entry.condition !== "none" || (entry.observed_state !== "working" && entry.observed_state !== "idle")) {
+      throw new Error("Turn control requires a healthy working or idle supervised entry.");
+    }
+    if (!entry.work_attempt_id || entry.work_attempt_id !== input.workAttemptId || ref?.work_attempt_id !== input.workAttemptId) {
+      throw new Error("Turn control work attempt is stale or belongs to a different entry.");
+    }
+    if (!ref || ref.execution_generation_id !== input.executionGenerationId) {
+      throw new Error("Turn control execution generation is stale or incomplete.");
+    }
+    const reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs());
+    const capabilities = await this.providerPort?.capabilities(input.workAttemptId, entry.provider);
+    const capability = capabilities?.turnControl ?? "unsupported";
+    if (reconciliation.completed_action_ids.includes(input.actionId)) {
+      return {
+        entryId: input.entryId,
+        workAttemptId: input.workAttemptId,
+        executionGenerationId: input.executionGenerationId,
+        actionId: input.actionId,
+        capability,
+        interrupted: false,
+        resumed: Boolean(input.correction?.trim()),
+        state: entry.observed_state === "working" ? "working" : "idle",
+        duplicate: true,
+        stages: ["already_applied"],
+      };
+    }
+    if (!this.providerPort?.controlTurn || capability === "unsupported") {
+      throw new Error(`Provider '${entry.provider}' does not support supervised turn control.`);
+    }
+    const binding = await this.workerBindings.get(entry.id);
+    if (!binding
+      || binding.room_id !== entry.room_id
+      || binding.work_attempt_id !== input.workAttemptId
+      || binding.execution_generation_id !== input.executionGenerationId) {
+      throw new Error("Turn control requires the exact active worker binding for this execution generation.");
+    }
+    const attempt = await this.durability.getAttempt(input.workAttemptId);
+    const execution = attempt.execution_generations.find((candidate) =>
+      candidate.execution_generation_id === input.executionGenerationId);
+    if (!execution || execution.terminal) throw new Error("Turn control execution generation is no longer live.");
+    let handle = this.liveHandles.get(entry.id) ?? null;
+    if (!handle) handle = await this.attachLiveProvider(entry);
+    if (!handle
+      || handle.workAttemptId !== input.workAttemptId
+      || handle.providerContinuationId !== ref.provider_continuation_id) {
+      throw new Error("Turn control could not resolve the exact live provider continuation.");
+    }
+    const correction = input.correction?.trim() || null;
+    const providerResult = await this.providerPort.controlTurn(handle, correction, { actionId: input.actionId });
+    const stages: DaemonTurnControlResult["stages"] = ["delivered"];
+    if (providerResult.interrupted) stages.push("interrupting");
+    stages.push("applied");
+    if (providerResult.resumed) stages.push("resumed");
+    const observedAt = new Date().toISOString();
+    await this.updateManifestEntry(entry.id, (current) => {
+      if (current.work_attempt_id !== input.workAttemptId
+        || current.provider_ref?.execution_generation_id !== input.executionGenerationId) {
+        throw new Error("Turn control completed after its execution generation was superseded.");
+      }
+      const nextReconciliation = rememberCompletedControlAction(
+        advanceReconciliationState(current.reconciliation, providerResult.state, this.nowMs()),
+        input.actionId,
+      );
+      const activity = [...(current.activity ?? []), sanitizeDaemonActivityEvent({
+        observed_at: observedAt,
+        sequence: ((current.activity ?? []).at(-1)?.sequence ?? 0) + 1,
+        provider: current.provider,
+        kind: "turn_lifecycle",
+        method: correction ? "supervisor/steer" : "supervisor/stop-turn",
+        summary: correction ? "Human correction applied; same continuation resumed" : "Active turn interrupted; worker remains available",
+        status: providerResult.state === "working" ? "working" : "idle",
+        payload: { action_id: input.actionId, capability, stages },
+        payload_truncated: false,
+        payload_redacted: false,
+        durable_payload_ref: null,
+      })].slice(-200);
+      return {
+        ...current,
+        observed_state: providerResult.state,
+        native_liveness: {
+          state: providerResult.state === "working" ? "active" : "idle",
+          observed_at: observedAt,
+          detail: correction ? "human correction resumed on the same continuation" : "turn interrupted; worker available",
+        },
+        activity,
+        reconciliation: nextReconciliation,
+      };
+    });
+    return {
+      entryId: input.entryId,
+      workAttemptId: input.workAttemptId,
+      executionGenerationId: input.executionGenerationId,
+      actionId: input.actionId,
+      duplicate: false,
+      stages,
+      ...providerResult,
+    };
   }
 
   private async reserveLegacyLane(input: { reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string }): Promise<LegacyLaneOwner> {

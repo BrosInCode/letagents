@@ -429,6 +429,29 @@ export interface DesktopSupervisorCreateInput {
   repoRootPath: string;
 }
 
+export interface DesktopSupervisorTurnControlInput {
+  entryId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  /** Stable for one click/retry; a distinct human action gets a new id. */
+  actionId: string;
+  /** Null/blank is the non-destructive Stop-turn primitive. */
+  correction?: string | null;
+}
+
+export interface DesktopSupervisorTurnControlResult {
+  entryId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  actionId: string;
+  capability: "native_interrupt" | "restart_resume" | "unsupported";
+  interrupted: boolean;
+  resumed: boolean;
+  state: "idle" | "working";
+  duplicate: boolean;
+  stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
+}
+
 export interface DesktopSupervisorAttemptDetail {
   entryId: string;
   workAttemptId: string | null;

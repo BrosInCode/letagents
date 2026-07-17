@@ -13,6 +13,8 @@ import type {
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import { desktopRoot } from "./paths.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
@@ -21,7 +23,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.13";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.14";
 const REQUEST_TIMEOUT_MS = 3_000;
 const START_TIMEOUT_MS = 8_000;
 const activityEmitter = new EventEmitter();
@@ -238,6 +240,17 @@ export class SupervisorDaemonClient {
   async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
+  }
+
+  async controlTurn(input: DesktopSupervisorTurnControlInput): Promise<DesktopSupervisorTurnControlResult> {
+    await this.ensureRunning();
+    return this.request<DesktopSupervisorTurnControlResult>("manifest.control_turn", {
+      id: input.entryId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      action_id: input.actionId,
+      correction: input.correction ?? null,
+    });
   }
 
   async readAttempt(id: string): Promise<DesktopSupervisorAttemptDetail> {

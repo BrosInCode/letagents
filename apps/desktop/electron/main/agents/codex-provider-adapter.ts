@@ -17,6 +17,7 @@ import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
 } from "./codex-runtime-reasoning.js";
+import { isActiveCodexTurnStatus } from "./codex-session-status.js";
 import {
   buildCodexStartPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
@@ -34,6 +35,7 @@ import {
   type ProviderObservedState,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
+  type ProviderTurnControlResult,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -103,6 +105,7 @@ const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
   transcriptAccess: true,
   permissionPromptBridging: false,
   survivesRestart: true,
+  turnControl: "native_interrupt",
 };
 
 const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input"]);
@@ -322,6 +325,54 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
   async poke(_handle: ProviderHandle, _message: string): Promise<void> {
     throw new Error("Codex mid-turn injection is not enabled: P0 proved room delivery, not native poke.");
+  }
+
+  async controlTurn(
+    providerHandle: ProviderHandle,
+    correction?: string | null,
+  ): Promise<ProviderTurnControlResult> {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.terminal) throw new Error("Codex continuation is terminal; no turn can be controlled.");
+    const text = correction?.trim() || null;
+    const read = await handle.client.request<ThreadReadResult>("thread/read", {
+      threadId: handle.providerContinuationId,
+      includeTurns: true,
+    });
+    if (read.thread?.id !== handle.providerContinuationId) {
+      throw new Error("Codex turn control resolved a different continuation thread.");
+    }
+    const latestTurn = read.thread?.turns?.at(-1);
+    const turnId = latestTurn?.id;
+    const rawStatus = typeof latestTurn?.status === "string"
+      ? latestTurn.status
+      : latestTurn?.status?.status;
+    const terminal = /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(rawStatus ?? ""));
+    const active = Boolean(turnId && isActiveCodexTurnStatus(rawStatus));
+    if (turnId && !active && !terminal) {
+      throw new Error("Codex returned an unknown latest-turn state; refusing ambiguous turn control.");
+    }
+    if (active) {
+      await handle.client.request("turn/interrupt", {
+        threadId: handle.providerContinuationId,
+        turnId,
+      });
+      await this.waitForTurnBoundary(handle, turnId!);
+      handle.state = "idle";
+    }
+    if (text) {
+      const turn = await handle.client.request<TurnStartResult>("turn/start", {
+        threadId: handle.providerContinuationId,
+        input: [{ type: "text", text, text_elements: [] }],
+      });
+      if (!turn.turn?.id) throw new Error("Codex did not acknowledge the redirected turn.");
+      handle.state = "working";
+    }
+    return {
+      capability: "native_interrupt",
+      interrupted: active,
+      resumed: Boolean(text),
+      state: text ? "working" : "idle",
+    };
   }
 
   async stop(
@@ -689,6 +740,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
     } catch {
       // Runtime evidence is best effort and must never end the worker turn.
     }
+  }
+
+  private async waitForTurnBoundary(handle: CodexProviderHandle, turnId: string): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const read = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: handle.providerContinuationId,
+        includeTurns: true,
+      });
+      const turn = read.thread?.turns?.find((candidate) => candidate.id === turnId);
+      const status = typeof turn?.status === "string" ? turn.status : turn?.status?.status;
+      if (!turn || /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(status ?? ""))) return;
+      await delay(50);
+    }
+    throw new Error("Codex did not prove the active turn reached an interrupted boundary.");
   }
 
   private publishStream(

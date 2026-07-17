@@ -8,6 +8,7 @@ import type {
   ProviderActionSpawn,
   ProviderActionStreamEvent,
   ProviderActionTerminal,
+  ProviderTurnControlResult,
 } from "./provider-action-port.js";
 
 type NativeHandle = {
@@ -24,6 +25,7 @@ type NativeAdapter = {
   attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
+  controlTurn(handle: NativeHandle, correction?: string | null): Promise<ProviderTurnControlResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -97,6 +99,13 @@ export class CodexProviderActionPort implements ProviderActionPort {
     const native = this.required(handle);
     await (await this.adapter()).poke(native, message);
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
+  }
+
+  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string }): Promise<ProviderTurnControlResult> {
+    const native = this.required(handle);
+    const result = await (await this.adapter()).controlTurn(native, correction);
+    if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
+    return result;
   }
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {

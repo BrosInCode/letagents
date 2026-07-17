@@ -676,6 +676,34 @@ test("result messages settle the observed state to idle and publish activity evi
   assert.equal(handle.observedState(), "idle");
 });
 
+test("Claude turn control waits for the interrupted result before applying a correction on the same session", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  let settled = false;
+  const controlled = adapter.controlTurn!(handle, "Follow the revised user direction.")
+    .then((result) => { settled = true; return result; });
+  const request = JSON.parse(child.written.at(-1)!) as Record<string, unknown>;
+  assert.equal(request.type, "control_request");
+  assert.deepEqual(request.request, { subtype: "interrupt" });
+
+  child.emit({ type: "control_response", request_id: request.request_id, response: { subtype: "success" } });
+  await Promise.resolve();
+  assert.equal(settled, false, "an acknowledgement before the result cannot prove interruption");
+
+  child.emit({ type: "result", subtype: "interrupted", is_error: true, session_id: handle.providerContinuationId });
+  assert.deepEqual(await controlled, {
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: true,
+    state: "working",
+  });
+  const redirected = JSON.parse(child.written.at(-1)!) as { message?: { content?: Array<{ text?: string }> } };
+  assert.equal(redirected.message?.content?.[0]?.text, "Follow the revised user direction.");
+  assert.equal(handle.observedState(), "working");
+});
+
 test("error result messages settle the observed state to failed", async () => {
   const harness = createHarness();
   const stream: ProviderStreamEvent[] = [];

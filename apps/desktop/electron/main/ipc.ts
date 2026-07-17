@@ -147,6 +147,11 @@ import {
 import { emitToMainWindow } from "./window.js";
 import { transferSupervisorOwnership } from "./supervisor-ownership.js";
 import {
+  desktopSmokeControlTurn,
+  desktopSmokeSupervisorEntries,
+  isDesktopSmokeCheck,
+} from "./smoke.js";
+import {
   buildDiagnosticsSnapshot,
   buildWorkerSnapshots,
   clearJoinedRoomInfoCache,
@@ -820,7 +825,9 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:list-agents",
     async (_event, roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> =>
-      supervisorDaemonClient.list(roomIdentifier ?? null),
+      isDesktopSmokeCheck()
+        ? desktopSmokeSupervisorEntries().filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier)
+        : supervisorDaemonClient.list(roomIdentifier ?? null),
   );
   targetIpcMain.handle(
     "desktop:supervisor:create-agent",
@@ -861,6 +868,11 @@ export function registerDesktopIpcHandlers(
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
       return updated;
     },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:control-turn",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlInput) =>
+      isDesktopSmokeCheck() ? desktopSmokeControlTurn(input) : supervisorDaemonClient.controlTurn(input),
   );
   targetIpcMain.handle(
     "desktop:supervisor:read-attempt",
