@@ -259,7 +259,8 @@
     />
 
     <AddAgentModal
-      :open="addAgentModalOpen"
+      :open="addAgentModalOpen && activeRoomMatchesShell"
+      :active-room-identifier="activeRoomIdentifier"
       :room-identifier="room.identifier"
       :room-git-room="room.gitRoom"
       :room-display-name="room.displayName"
@@ -325,6 +326,7 @@ import {
   withUpsertedManagedAgentSession,
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import { normalizeRoomIdentifier } from "../../../domain/sidebar-rooms";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
@@ -380,6 +382,7 @@ type RoomTabIndicatorTone = NonNullable<NonNullable<RoomTab["indicator"]>["tone"
 const props = defineProps<{
   sidebarMode: SidebarMode;
   roomLoading: boolean;
+  activeRoomIdentifier: string | null;
   room: DesktopRoomInfo;
   storage: DesktopRoomStorageState;
   focusRooms: DesktopFocusRoomInfo[];
@@ -426,6 +429,10 @@ const activeTab = ref<RoomTabId>(readRoomActiveTab(props.room.identifier));
 const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
+const activeRoomMatchesShell = computed(() => Boolean(
+  normalizeRoomIdentifier(props.activeRoomIdentifier)
+  && normalizeRoomIdentifier(props.activeRoomIdentifier) === normalizeRoomIdentifier(props.room.identifier)
+));
 const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
@@ -704,6 +711,10 @@ watch(addAgentModalOpen, (open) => {
   }
 });
 
+watch(activeRoomMatchesShell, (matches) => {
+  if (!matches) addAgentModalOpen.value = false;
+});
+
 watch(() => actionPanelOpen.value || searchOpen.value, (toolSurfaceOpen) => {
   if (toolSurfaceOpen && environmentPanelOpen.value) {
     environmentPanelOpen.value = false;
@@ -721,7 +732,7 @@ watch(
 
 watch(() => props.openAddAgentRequested, (requested) => {
   if (!requested) return;
-  addAgentModalOpen.value = true;
+  openAddAgentModal();
   emit("add-agent-open-request-consumed");
 }, { immediate: true });
 
@@ -1483,6 +1494,11 @@ function openRules(): void {
 }
 
 function openAddAgentModal(): void {
+  if (props.roomLoading || !activeRoomMatchesShell.value) {
+    pushActionToast("Wait for the selected room to finish opening before adding an agent.", "info");
+    emit("refresh-room");
+    return;
+  }
   addAgentModalOpen.value = true;
 }
 
@@ -1602,7 +1618,7 @@ function openAgentDetail(target: AgentModalTarget): void {
 
 function openAddAgentModalFromDetail(): void {
   selectedAgentDetailTarget.value = null;
-  addAgentModalOpen.value = true;
+  openAddAgentModal();
 }
 
 function openReasoningFromAgentDetail(sessionId: string): void {

@@ -9,6 +9,7 @@ import type {
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode } from "../components/desktop/types";
 import { systemEntries } from "../domain/desktop-navigation";
+import { snapshotMatchesRoom } from "../domain/desktop-room-snapshots";
 import { readStoredString } from "../domain/desktop-storage";
 import {
   buildSidebarProjectGroups,
@@ -86,6 +87,13 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   });
 
   const selectedRoomInfo = computed<DesktopRoomInfo>(() => {
+    const selectedRoomEntry = activeEntry.value.type === "room" ? activeEntry.value : null;
+    if (
+      selectedRoomEntry?.roomIdentifier
+      && !snapshotMatchesRoom(options.selectedSnapshot.value, selectedRoomEntry.roomIdentifier)
+    ) {
+      return roomInfoFromSidebarEntry(selectedRoomEntry);
+    }
     if (!options.selectedSnapshot.value?.room) {
       return {
         identifier: options.selectedSnapshot.value?.roomIdentifier || repoName.value,
@@ -120,6 +128,21 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   });
 
   const selectedAccess = computed<DesktopRoomAccess>(() => {
+    const selectedRoomEntry = activeEntry.value.type === "room" ? activeEntry.value : null;
+    if (
+      selectedRoomEntry?.roomIdentifier
+      && !snapshotMatchesRoom(options.selectedSnapshot.value, selectedRoomEntry.roomIdentifier)
+    ) {
+      return {
+        status: "unavailable",
+        title: "Opening room",
+        message: "Loading the selected room before enabling room actions.",
+        roomIdentifier: selectedRoomEntry.roomIdentifier,
+        deviceFlowUrl: null,
+        code: null,
+        httpStatus: null,
+      };
+    }
     return options.selectedSnapshot.value?.access || {
       status: "unavailable",
       title: "Room unavailable",
@@ -391,6 +414,31 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     toggleProject,
     togglePinnedCollapsed,
     toggleRoomsCollapsed,
+  };
+}
+
+function roomInfoFromSidebarEntry(entry: RoomEntry): DesktopRoomInfo {
+  return {
+    identifier: entry.roomIdentifier || "",
+    code: "",
+    name: entry.title,
+    displayName: entry.title,
+    role: "participant",
+    authenticated: false,
+    kind: entry.kind === "focus" ? "focus" : "main",
+    parentRoomId: entry.parentRoomIdentifier || null,
+    focusKey: entry.focusKey || null,
+    sourceTaskId: null,
+    focusStatus: null,
+    focusParentVisibility: null,
+    focusActivityScope: null,
+    focusGitHubEventRouting: null,
+    focusSettings: null,
+    focusArchivedAt: null,
+    concludedAt: null,
+    conclusionSummary: null,
+    conclusionDetails: null,
+    gitRoom: entry.gitRoom || null,
   };
 }
 

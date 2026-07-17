@@ -435,6 +435,12 @@ export interface DesktopSupervisorManifestEntry {
 export interface DesktopSupervisorCreateInput {
   /** Stable across retries of one Start action; a new intentional agent gets a new id. */
   creationRequestId?: string | null;
+  /** Visible sidebar room at click time. Required and cross-checked by Electron. */
+  activeRoomIdentifier?: string | null;
+  /** Room whose project context populated the modal. Required and cross-checked by Electron. */
+  projectRoomIdentifier?: string | null;
+  /** Project root whose context populated the modal. Required and cross-checked by Electron. */
+  projectRootPath?: string | null;
   roomIdentifier: string;
   displayName: string;
   providerId: DesktopAgentProviderId;

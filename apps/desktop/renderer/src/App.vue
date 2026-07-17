@@ -153,6 +153,7 @@
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
+          :active-room-identifier="activeEntry.roomIdentifier"
           :room="selectedRoomWithProjectContext"
           :storage="selectedRoomStorage"
           :focus-rooms="selectedFocusRooms"

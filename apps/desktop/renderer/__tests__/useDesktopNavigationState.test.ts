@@ -12,10 +12,93 @@ import type {
 import { useDesktopNavigationState } from "../src/composables/useDesktopNavigationState";
 import {
   resolveAccountRoomAliasIdentifier,
+  rootRoomEntryId,
   type RecentRootRoom,
 } from "../src/domain/sidebar-rooms";
 
 describe("useDesktopNavigationState", () => {
+  it("fails closed on focus A to focus B navigation until B's snapshot arrives", () => {
+    withLocalStorage(() => {
+      const selectedSnapshot = ref<DesktopRoomSnapshot | null>(roomSnapshot("focus_a", {
+        displayName: "Focus A",
+      }));
+      const state = useDesktopNavigationState({
+        accountRooms: ref<DesktopAccountRoomEntry[]>([
+          accountRoom("focus_a", "Focus A"),
+          accountRoom("focus_b", "Focus B"),
+        ]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(roomSnapshot("focus_a", {
+          displayName: "Focus A",
+        })),
+        selectedRootRoomIdentifier: ref<string | null>("focus_a"),
+        selectedSnapshot,
+      });
+
+      const focusB = state.projectEntries.value
+        .map((project) => project.parent)
+        .find((entry) => entry.roomIdentifier === "focus_b");
+      assert.ok(focusB);
+      state.selectSidebarEntry(focusB);
+
+      assert.equal(state.selectedRoomInfo.value.identifier, "focus_b");
+      assert.equal(state.selectedRoomInfo.value.displayName, "Focus B");
+      assert.equal(state.selectedNeedsAccess.value, true);
+      assert.equal(state.selectedRoomIdentifier.value, null);
+      assert.equal(state.selectedAccess.value.title, "Opening room");
+
+      selectedSnapshot.value = roomSnapshot("focus_b", { displayName: "Focus B" });
+      assert.equal(state.selectedNeedsAccess.value, false);
+      assert.equal(state.selectedRoomIdentifier.value, "focus_b");
+    });
+  });
+
+  it("restores focus B after restart without reusing focus A's cached snapshot", () => {
+    withLocalStorage(() => {
+      const state = useDesktopNavigationState({
+        accountRooms: ref<DesktopAccountRoomEntry[]>([
+          accountRoom("focus_a", "Focus A"),
+          accountRoom("focus_b", "Focus B"),
+        ]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(roomSnapshot("focus_a", {
+          displayName: "Focus A",
+        })),
+        selectedRootRoomIdentifier: ref<string | null>("focus_a"),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(roomSnapshot("focus_a", {
+          displayName: "Focus A",
+        })),
+      });
+
+      state.reconcileActiveEntry();
+
+      assert.equal(state.activeEntry.value.type, "room");
+      assert.equal(state.activeEntry.value.type === "room" && state.activeEntry.value.roomIdentifier, "focus_b");
+      assert.equal(state.selectedRoomInfo.value.identifier, "focus_b");
+      assert.equal(state.selectedNeedsAccess.value, true);
+    }, { "active-entry": rootRoomEntryId("focus_b") });
+  });
+
   it("does not let temporary rooms inherit the active repo branch label", () => {
     withLocalStorage(() => {
       const recentRootRooms = ref<RecentRootRoom[]>([]);
@@ -1022,16 +1105,19 @@ function gitRoom(options: {
   };
 }
 
-function withLocalStorage(callback: () => void): void {
+function withLocalStorage(callback: () => void, initial: Record<string, string> = {}): void {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const stored = new Map(Object.entries(initial));
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
       localStorage: {
-        getItem(): string | null {
-          return null;
+        getItem(key: string): string | null {
+          return stored.get(key) ?? null;
         },
-        setItem(): void {},
+        setItem(key: string, value: string): void {
+          stored.set(key, value);
+        },
       },
     },
   });

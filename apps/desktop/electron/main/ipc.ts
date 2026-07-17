@@ -155,6 +155,7 @@ import {
   onLaunchEvent,
   supervisedLaunchEverReady,
 } from "./launch-events.js";
+import { assertDesktopSupervisorLaunchTarget } from "./supervisor-launch-target.js";
 import {
   desktopSmokeControlTurn,
   desktopSmokeSupervisorEntries,
@@ -853,6 +854,10 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:create-agent",
     async (_event, rawInput: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> => {
+      // The renderer supplies three independently derived facts: the visible
+      // sidebar room, the modal's project room, and the requested daemon room.
+      // Reject before recording or mutating anything if navigation made them diverge.
+      assertDesktopSupervisorLaunchTarget(rawInput);
       // Pin the launch id up front so every launch fact — and the durable entry
       // id (`supervised_<launchId>`) — shares one stable key across retries and
       // reopen. The renderer normally supplies it; fall back defensively.
