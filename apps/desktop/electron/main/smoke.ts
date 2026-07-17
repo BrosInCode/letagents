@@ -8,6 +8,9 @@ import type {
   DesktopAccountRoomEntry,
   DesktopAuthStatus,
   DesktopRoomSnapshot,
+  DesktopSupervisorManifestEntry,
+  DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import {
   localChatDatabasePath,
@@ -365,4 +368,64 @@ export function desktopSmokeAccountRooms(): DesktopAccountRoomEntry[] {
       focusRooms: [],
     },
   ];
+}
+
+export function desktopSmokeSupervisorEntries(): DesktopSupervisorManifestEntry[] {
+  const now = new Date().toISOString();
+  return [{
+    id: "supervisor_smoke_codex",
+    roomId: smokeRoomIdentifier,
+    displayName: "MapleRidge",
+    provider: "codex",
+    model: "gpt-5-codex",
+    charter: "Exercise native turn control without replacing the supervised agent.",
+    desiredState: "running",
+    observedState: "working",
+    condition: "none",
+    lastError: null,
+    permissionProfileId: "full_access",
+    createdBy: "desktop-smoke",
+    createdAt: now,
+    workspacePath: process.cwd(),
+    workAttemptId: "attempt_smoke_codex",
+    agentSessionId: smokeCodexWorkerSessionId,
+    agentSessionBindingState: "active",
+    bindingUpdatedAt: now,
+    executionGenerationId: "execution_smoke_codex",
+    providerContinuationId: "thread_smoke_codex",
+    providerPid: process.pid,
+    workplaceLiveness: { state: "active", observedAt: now, detail: "Smoke room binding" },
+    nativeLiveness: { state: "active", observedAt: now, detail: "Smoke provider turn" },
+    restartCount: 0,
+    lastTerminal: null,
+    activity: [],
+  }];
+}
+
+export function desktopSmokeControlTurn(
+  input: DesktopSupervisorTurnControlInput,
+): DesktopSupervisorTurnControlResult {
+  const entry = desktopSmokeSupervisorEntries()[0];
+  if (
+    input.entryId !== entry.id ||
+    input.workAttemptId !== entry.workAttemptId ||
+    input.executionGenerationId !== entry.executionGenerationId
+  ) {
+    throw new Error("Smoke turn-control fence mismatch.");
+  }
+  const correction = input.correction?.trim() || null;
+  return {
+    entryId: entry.id,
+    workAttemptId: entry.workAttemptId!,
+    executionGenerationId: entry.executionGenerationId!,
+    actionId: input.actionId,
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: Boolean(correction),
+    state: correction ? "working" : "idle",
+    duplicate: false,
+    stages: correction
+      ? ["delivered", "interrupting", "applied", "resumed"]
+      : ["delivered", "interrupting", "applied"],
+  };
 }

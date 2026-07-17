@@ -250,6 +250,52 @@
                 <div><dt>Last terminal</dt><dd>{{ terminalLabel(entry.lastTerminal) }}</dd></div>
               </dl>
               <p>{{ entry.charter }}</p>
+              <section
+                class="desktop-agent-turn-control"
+                data-testid="desktop-agent-turn-control"
+                :data-capability="turnControlCapability(entry)"
+              >
+                <div class="desktop-agent-turn-control-heading">
+                  <div>
+                    <strong>Steer this agent</strong>
+                    <small>{{ turnControlCapabilityLabel(entry) }}</small>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="desktop-agent-stop-turn"
+                    :disabled="!canStopSupervisorTurn(entry) || controllingSupervisorEntryId === entry.id"
+                    @click="runTurnControl(entry, null)"
+                  >
+                    Stop turn
+                  </button>
+                </div>
+                <label :for="`supervisor-steer-${entry.id}`">Correction for the same session</label>
+                <textarea
+                  :id="`supervisor-steer-${entry.id}`"
+                  v-model="turnControlDrafts[entry.id]"
+                  rows="3"
+                  placeholder="Tell the agent what to change, then resume on the same session."
+                  :disabled="!canSteerSupervisorEntry(entry) || controllingSupervisorEntryId === entry.id"
+                />
+                <button
+                  type="button"
+                  data-testid="desktop-agent-steer"
+                  :disabled="!canSteerSupervisorEntry(entry) || !turnControlDrafts[entry.id]?.trim() || controllingSupervisorEntryId === entry.id"
+                  @click="runTurnControl(entry, turnControlDrafts[entry.id])"
+                >
+                  {{ controllingSupervisorEntryId === entry.id ? "Applying correction…" : "Interrupt & apply correction" }}
+                </button>
+                <ol
+                  v-if="turnControlStages[entry.id]?.length"
+                  class="desktop-agent-turn-control-stages"
+                  aria-live="polite"
+                  aria-label="Turn control progress"
+                >
+                  <li v-for="stage in turnControlStages[entry.id]" :key="stage">
+                    {{ turnControlStageLabel(stage) }}
+                  </li>
+                </ol>
+              </section>
               <div class="desktop-agent-detail-permission-actions" aria-label="Desired state controls">
                 <button type="button" :disabled="entry.desiredState === 'running' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'running')">Run</button>
                 <button type="button" :disabled="entry.desiredState === 'paused' || Boolean(updatingSupervisorEntryId)" @click="setSupervisorDesiredState(entry.id, 'paused')">Pause</button>
@@ -324,6 +370,7 @@ import type {
   DesktopSupervisorDesiredState,
   DesktopSupervisorLivenessAxis,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorTurnControlResult,
 } from "../../../../../electron/ipc-types";
 import {
   latestReasoningSessionForTarget,
@@ -375,6 +422,15 @@ const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
 const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 const supervisorError = ref<string | null>(null);
 const updatingSupervisorEntryId = ref<string | null>(null);
+const controllingSupervisorEntryId = ref<string | null>(null);
+const turnControlDrafts = ref<Record<string, string>>({});
+const turnControlStages = ref<Record<string, DesktopSupervisorTurnControlResult["stages"]>>({});
+const turnControlActions = new Map<string, {
+  id: string;
+  correction: string | null;
+  workAttemptId: string;
+  executionGenerationId: string;
+}>();
 const expandedSupervisorActivity = ref<Record<string, boolean>>({});
 const knownSupervisorEntryIds = ref<string[]>([]);
 const loadingManagedSessions = ref(false);
@@ -562,6 +618,10 @@ function clearTransientState(): void {
   expandedChangeSummaryIds.value = {};
   resolvingPermissionIds.value = {};
   updatingSupervisorEntryId.value = null;
+  controllingSupervisorEntryId.value = null;
+  turnControlDrafts.value = {};
+  turnControlStages.value = {};
+  turnControlActions.clear();
   expandedSupervisorActivity.value = {};
   knownSupervisorEntryIds.value = [];
 }
@@ -629,6 +689,81 @@ async function setSupervisorDesiredState(id: string, desiredState: DesktopSuperv
     supervisorError.value = error instanceof Error ? error.message : "Could not update desired state.";
   } finally {
     updatingSupervisorEntryId.value = null;
+  }
+}
+
+function turnControlCapability(entry: DesktopSupervisorManifestEntry): DesktopSupervisorTurnControlResult["capability"] {
+  if (entry.provider === "codex" || entry.provider === "claude-code") return "native_interrupt";
+  if (entry.provider === "cursor") return "restart_resume";
+  return "unsupported";
+}
+
+function turnControlCapabilityLabel(entry: DesktopSupervisorManifestEntry): string {
+  const capability = turnControlCapability(entry);
+  if (capability === "native_interrupt") return "Native interrupt · preserves this provider session";
+  if (capability === "restart_resume") return "Stops the turn child · resumes the same provider session";
+  return "This provider does not expose turn-level control";
+}
+
+function canSteerSupervisorEntry(entry: DesktopSupervisorManifestEntry): boolean {
+  return turnControlCapability(entry) !== "unsupported"
+    && entry.desiredState === "running"
+    && entry.condition === "none"
+    && entry.agentSessionBindingState === "active"
+    && Boolean(entry.workAttemptId && entry.executionGenerationId && entry.providerContinuationId)
+    && (entry.observedState === "working" || entry.observedState === "idle");
+}
+
+function canStopSupervisorTurn(entry: DesktopSupervisorManifestEntry): boolean {
+  return canSteerSupervisorEntry(entry) && entry.observedState === "working";
+}
+
+function turnControlStageLabel(stage: DesktopSupervisorTurnControlResult["stages"][number]): string {
+  return ({
+    delivered: "Delivered",
+    interrupting: "Interrupting current turn",
+    applied: "Applied",
+    resumed: "Resumed same session",
+    already_applied: "Already applied",
+  } as const)[stage];
+}
+
+async function runTurnControl(entry: DesktopSupervisorManifestEntry, correction: string | null | undefined): Promise<void> {
+  if (controllingSupervisorEntryId.value || !entry.workAttemptId || !entry.executionGenerationId) return;
+  const normalized = correction?.trim() || null;
+  const prior = turnControlActions.get(entry.id);
+  const action = prior?.correction === normalized
+    && prior.workAttemptId === entry.workAttemptId
+    && prior.executionGenerationId === entry.executionGenerationId
+    ? prior
+    : {
+      id: globalThis.crypto.randomUUID(),
+      correction: normalized,
+      workAttemptId: entry.workAttemptId,
+      executionGenerationId: entry.executionGenerationId,
+    };
+  turnControlActions.set(entry.id, action);
+  controllingSupervisorEntryId.value = entry.id;
+  supervisorError.value = null;
+  turnControlStages.value[entry.id] = entry.observedState === "working"
+    ? ["delivered", "interrupting"]
+    : ["delivered"];
+  try {
+    const result = await desktopIpc.supervisor.controlTurn({
+      entryId: entry.id,
+      workAttemptId: entry.workAttemptId,
+      executionGenerationId: entry.executionGenerationId,
+      actionId: action.id,
+      correction: normalized,
+    });
+    turnControlStages.value[entry.id] = result.stages;
+    turnControlActions.delete(entry.id);
+    if (normalized) turnControlDrafts.value[entry.id] = "";
+    await loadManagedSessions({ quiet: true, refreshChanges: false });
+  } catch (error) {
+    supervisorError.value = error instanceof Error ? error.message : "Could not control the active turn.";
+  } finally {
+    controllingSupervisorEntryId.value = null;
   }
 }
 

@@ -65,3 +65,8 @@ export function recordReconciliationActionFailure(previous: ReconciliationState,
 export function completeReconciliationAction(previous: ReconciliationState, actionId: string): ReconciliationState {
   return { ...previous, consecutive_action_failures: 0, next_restart_at_ms: null, completed_action_ids: completed(previous, actionId), pending_action: null };
 }
+
+/** Persist an orthogonal human control id without disturbing reconciler work. */
+export function rememberCompletedControlAction(previous: ReconciliationState, actionId: string): ReconciliationState {
+  return { ...previous, completed_action_ids: completed(previous, actionId) };
+}

@@ -3,7 +3,20 @@
  * control-socket bridge; keeping this structural port here keeps reconciliation
  * outside Electron's failure domain.
  */
-export type ProviderActionCapabilities = { resume: boolean; midTurnInjection: boolean; transcriptAccess: boolean; permissionPromptBridging: boolean; survivesRestart: boolean };
+export type ProviderActionCapabilities = {
+  resume: boolean;
+  midTurnInjection: boolean;
+  transcriptAccess: boolean;
+  permissionPromptBridging: boolean;
+  survivesRestart: boolean;
+  turnControl?: "native_interrupt" | "restart_resume" | "unsupported";
+};
+export type ProviderTurnControlResult = {
+  capability: NonNullable<ProviderActionCapabilities["turnControl"]>;
+  interrupted: boolean;
+  resumed: boolean;
+  state: "idle" | "working";
+};
 export type ProviderActionConnectionRef =
   | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
   | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
@@ -36,6 +49,7 @@ export interface ProviderActionPort {
   attachAction(actionId: string, workAttemptId: string): Promise<ProviderActionAttachment>;
   resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   poke(handle: ProviderActionHandle, message: string, options?: { actionId?: string }): Promise<void>;
+  controlTurn?(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string }): Promise<ProviderTurnControlResult>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;

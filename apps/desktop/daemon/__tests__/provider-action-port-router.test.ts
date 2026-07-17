@@ -19,6 +19,7 @@ import type {
 import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +57,7 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
       transcriptAccess: true,
       permissionPromptBridging: false,
       survivesRestart: provider === "codex",
+      turnControl: "native_interrupt",
     }),
     async spawn(input: ProviderActionSpawn) {
       calls.push(`${provider}:spawn:${input.workAttemptId}`);
@@ -74,6 +76,10 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
       return handle;
     },
     async poke(handle, message) { calls.push(`${provider}:poke:${handle.workAttemptId}:${message}`); },
+    async controlTurn(handle, correction) {
+      calls.push(`${provider}:control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
+    },
     async stop(handle): Promise<ProviderActionTerminal> {
       calls.push(`${provider}:stop:${handle.workAttemptId}`);
       return { endedAt: "2026-07-15T00:00:00.000Z", exitCode: 0, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: handle.providerContinuationId };
@@ -106,7 +112,7 @@ test("provider router selects the native adapter by manifest provider and fences
   };
 
   assert.deepEqual(await router.capabilities("claude-attempt", "claude-code"), {
-    resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false,
+    resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt",
   });
   const handle = await router.spawn(claudeSpawn);
   assert.equal(handle.providerConnection?.kind, "claude_cli");
@@ -121,10 +127,14 @@ test("provider router selects the native adapter by manifest provider and fences
     { ...claudeSpawn, actionId: "resume-claude" },
   );
   await router.poke(resumed, "continue", { actionId: "poke-claude" });
+  assert.deepEqual(await router.controlTurn(resumed, "redirect", { actionId: "control-claude" }), {
+    capability: "native_interrupt", interrupted: true, resumed: true, state: "working",
+  });
   assert.deepEqual(calls, [
     "claude-code:spawn:claude-attempt",
     "claude-code:resume:claude-attempt",
     "claude-code:poke:claude-attempt:continue",
+    "claude-code:control:claude-attempt:redirect",
   ]);
 
   await assert.rejects(
@@ -149,7 +159,7 @@ test("provider router selects the native adapter by manifest provider and fences
   );
   await assert.rejects(
     router.spawn({ ...claudeSpawn, provider: "cursor" }),
-    /No supervised native adapter is available for cursor/,
+    /requires the durable agent display name/,
   );
 });
 
@@ -316,11 +326,15 @@ test("daemon convergence drives Claude through the router across stop and same-a
   let nextPid = 5000;
   let continuation = "claude-continuation";
   const adapter: NativeProviderAdapter = {
-    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false }),
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
     async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async attach() { calls.push("attach"); return null; },
     async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async poke() { throw new Error("Claude poke is intentionally unavailable"); },
+    async controlTurn(handle, correction) {
+      calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
+    },
     async stop(handle) {
       calls.push(`stop:${handle.workAttemptId}`);
       const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
@@ -350,6 +364,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   const paths = {
     lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+    workerBindingsPath: join(root, "worker-bindings.json"),
   };
   const daemon = new SupervisorDaemon(paths, "darwin", router, true);
   const entry: DaemonManifestEntry = {
@@ -364,6 +379,44 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.equal(first.provider_ref?.provider_connection?.kind, "claude_cli");
     assert.ok(first.work_attempt_id);
     const firstGeneration = first.provider_ref?.execution_generation_id;
+    assert.ok(firstGeneration);
+    await new WorkerBindingStore(paths.workerBindingsPath).bind({
+      entry_id: entry.id,
+      room_id: entry.room_id,
+      work_attempt_id: first.work_attempt_id!,
+      execution_generation_id: firstGeneration!,
+      agent_session_id: "agent_session_exact",
+      agent_session_token: "test-session-token",
+      api_url: "https://letagents.test",
+    });
+    const controlParams = {
+      id: entry.id,
+      work_attempt_id: first.work_attempt_id,
+      execution_generation_id: firstGeneration,
+      action_id: "human-control-1",
+      correction: "Use the revised direction",
+    };
+    const controlled = await daemonRequest(paths.socketPath, "manifest.control_turn", controlParams);
+    assert.equal(controlled.ok, true);
+    assert.deepEqual(controlled.result, {
+      entryId: entry.id,
+      workAttemptId: first.work_attempt_id,
+      executionGenerationId: firstGeneration,
+      actionId: "human-control-1",
+      duplicate: false,
+      stages: ["delivered", "interrupting", "applied", "resumed"],
+      capability: "native_interrupt",
+      interrupted: true,
+      resumed: true,
+      state: "working",
+    });
+    const duplicate = await daemonRequest(paths.socketPath, "manifest.control_turn", controlParams);
+    assert.equal((duplicate.result as { duplicate: boolean }).duplicate, true, "durable action id makes transport retries idempotent");
+    const stale = await daemonRequest(paths.socketPath, "manifest.control_turn", { ...controlParams, action_id: "human-control-stale", execution_generation_id: "wrong-generation" });
+    assert.equal(stale.ok, false);
+    assert.match(stale.error ?? "", /stale or incomplete/);
+    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 1, "duplicate and stale requests never reach the provider");
+    await new WorkerBindingStore(paths.workerBindingsPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "Claude router stop");
