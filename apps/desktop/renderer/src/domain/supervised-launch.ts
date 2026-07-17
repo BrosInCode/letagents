@@ -115,19 +115,17 @@ function reachedIndex(entry: LaunchFields): number {
     || entry.observedState === "working"
     || entry.observedState === "checkpointing";
   const workplaceReachable = entry.workplaceLiveness?.state === "reachable";
-  // Ready only on real end-to-end evidence: the exact worker is bound, its
-  // workplace is reachable, the provider is live, and nothing is blocked. A
-  // native-working-but-unbound provider is NOT ready.
+  // Ready ONLY on complete end-to-end evidence: the exact worker is bound, its
+  // workplace is reachable, the provider is live, and nothing is blocked.
   if (bound && live && workplaceReachable && entry.condition === "none") return 4; // ready
-  if (bound) return 3;                                        // registering done
-  // Connecting completes only on actual workplace/session evidence — a room
-  // session id or a reachable workplace. A provider that is merely "working"
-  // locally but has not reached the room stays at "provider started"
-  // (Connecting in progress), not advanced to Registering.
-  if (entry.providerPid != null && (workplaceReachable || entry.agentSessionId != null)) return 2; // connecting done
-  if (entry.providerPid != null) return 1;                    // provider started, connecting
-  if (entry.workspacePath != null) return 0;                  // workspace ready
-  return -1;                                                  // preparing
+  // Registering stays ACTIVE (never a "done" resting state) until fully ready:
+  // a bound-but-unreachable worker, or one with room/session evidence but not
+  // yet fully ready, remains registering_identity — it must never show Ready.
+  // There is deliberately no intermediate `if (bound) return 3`.
+  if (entry.providerPid != null && (bound || workplaceReachable || entry.agentSessionId != null)) return 2; // connecting done, registering active
+  if (entry.providerPid != null) return 1;                    // provider started, connecting active
+  if (entry.workspacePath != null) return 0;                  // workspace ready, starting provider
+  return -1;                                                  // preparing workspace
 }
 
 export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchProgress {

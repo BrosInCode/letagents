@@ -144,14 +144,16 @@ test("an idle bound reachable entry is also ready", () => {
   assert.equal(supervisedLaunchProgress(readyEntry({ observedState: "idle" })).ready, true);
 });
 
-test("a bound entry whose workplace is not yet reachable is NOT ready (still Registering)", () => {
+test("a bound entry whose workplace is not yet reachable stays Registering (Ready must never show)", () => {
   const progress = supervisedLaunchProgress(readyEntry({
     workplaceLiveness: { state: "unknown", observedAt: null, detail: "Awaiting room registration." },
   }));
   assert.equal(progress.ready, false);
-  assert.equal(progress.currentPhaseId, "ready"); // reached registering-done(3); Ready phase active, not done
-  assert.equal(stateOf(progress, "registering_identity"), "done");
-  assert.equal(stateOf(progress, "ready"), "active");
+  // Bound but unreachable: Registering ACTIVE, Ready PENDING — not a done/Ready state.
+  assert.equal(progress.currentPhaseId, "registering_identity");
+  assert.equal(stateOf(progress, "connecting_room"), "done");
+  assert.equal(stateOf(progress, "registering_identity"), "active");
+  assert.equal(stateOf(progress, "ready"), "pending");
 });
 
 test("P1: a working+unbound entry advances to ready in the SAME derivation once it binds and its workplace is reachable", () => {
