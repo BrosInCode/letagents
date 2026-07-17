@@ -13,6 +13,25 @@ const daemonDir = join(home, ".letagents");
 const socketPath = join(daemonDir, "daemon.sock");
 await Promise.all([mkdir(daemonDir, { recursive: true }), mkdir(workspace, { recursive: true })]);
 
+const controlledEnvironmentKeys = [
+  "HOME",
+  "LETAGENTS_API_URL",
+  "LETAGENTS_TOKEN",
+  "LETAGENTS_AGENT_NAME",
+  "LETAGENTS_AGENT_OWNER_LABEL",
+  "LETAGENTS_STATE_PATH",
+  "LETAGENTS_SUPERVISOR_ENTRY_ID",
+  "LETAGENTS_SUPERVISOR_DAEMON_SOCKET",
+  "LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID",
+  "LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID",
+] as const;
+const originalEnvironment = Object.fromEntries(
+  controlledEnvironmentKeys.map((key) => [key, process.env[key]]),
+) as Record<(typeof controlledEnvironmentKeys)[number], string | undefined>;
+
+for (const key of controlledEnvironmentKeys.slice(6)) {
+  delete process.env[key];
+}
 process.env.HOME = home;
 process.env.LETAGENTS_API_URL = "https://letagents.test";
 process.env.LETAGENTS_TOKEN = "owner-token";
@@ -39,12 +58,11 @@ function registrationHandler(): ToolHandler {
 }
 
 test.after(async () => {
-  delete process.env.HOME;
-  delete process.env.LETAGENTS_API_URL;
-  delete process.env.LETAGENTS_TOKEN;
-  delete process.env.LETAGENTS_AGENT_NAME;
-  delete process.env.LETAGENTS_AGENT_OWNER_LABEL;
-  delete process.env.LETAGENTS_STATE_PATH;
+  for (const key of controlledEnvironmentKeys) {
+    const original = originalEnvironment[key];
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  }
   await rm(root, { recursive: true, force: true });
 });
 
