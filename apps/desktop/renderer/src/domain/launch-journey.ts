@@ -107,6 +107,10 @@ export interface LaunchJourneyInput {
   roomLabel?: string;
   /** True once Start was clicked and the request is in flight (optimistic card). */
   requested?: boolean;
+  /** Whether the selected provider has a real sign-in command available. Gates
+   * the `sign_in` recovery so its "Copy sign-in command" label always has a
+   * command behind it. */
+  hasSignInCommand?: boolean;
 }
 
 function phaseCopy(
@@ -181,10 +185,15 @@ function foldEvents(events: readonly DesktopLaunchEvent[]): {
   return { connected, saved, activated, terminal };
 }
 
-function manifestRecovery(entry: DesktopSupervisorManifestEntry): DesktopLaunchRecoveryAction {
+function manifestRecovery(
+  entry: DesktopSupervisorManifestEntry,
+  hasSignInCommand: boolean,
+): DesktopLaunchRecoveryAction {
   switch (entry.condition) {
     case "auth_blocked":
-      return "sign_in";
+      // Only offer the sign-in action when a real provider command exists;
+      // otherwise honest retry copy.
+      return hasSignInCommand ? "sign_in" : "retry";
     default:
       return "retry";
   }
@@ -245,9 +254,10 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       ? JOURNEY_PHASE_ORDER.length - 1
       : PREPARING + Math.max(manifestActiveOffset, 0);
     const failedIndex = manifest.failed ? activeIndex : null;
-    // A stop of an agent that already bound a room identity is a lifecycle stop,
-    // not a cancelled launch — the launch succeeded and was later retired.
-    const everBound = entry.agentSessionBindingState !== "none";
+    // A stop of an agent that already reached ready is a lifecycle stop, not a
+    // cancelled launch — the launch succeeded and was later retired. Uses the
+    // durable ready stamp, consistent with the electron cancel gate.
+    const everReady = entry.readyReachedAt != null;
 
     const phases = buildPhases(
       { activeIndex, failedIndex, ready: manifest.ready, settled: manifest.stopped },
@@ -269,9 +279,9 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       stopped: manifest.stopped,
       agentName,
       providerLabel,
-      headline: headlineFor(status, ctx, { stoppedAfterReady: everBound }),
+      headline: headlineFor(status, ctx, { stoppedAfterReady: everReady }),
       failureDetail: manifest.failed ? manifest.failureDetail : null,
-      recovery: manifest.failed ? manifestRecovery(entry) : null,
+      recovery: manifest.failed ? manifestRecovery(entry, input.hasSignInCommand ?? false) : null,
       joinHint: status === "in_progress" ? JOIN_HINT : null,
     };
   }

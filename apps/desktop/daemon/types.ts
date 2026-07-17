@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.16";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.17";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -92,6 +92,13 @@ export type DaemonManifestEntry = {
   } | null;
   workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
+  /**
+   * First time this entry converged to ready (bound + reachable + running +
+   * unblocked). Set once, monotonically, and never cleared — durable evidence
+   * that the launch succeeded, so a later Stop is a lifecycle event rather than
+   * a cancelled launch. Absent for entries that never reached ready.
+   */
+  ready_reached_at?: string | null;
   activity?: DaemonActivityEvent[];
   /**
    * Durable human turn-control effect journal. `accepted` is written before

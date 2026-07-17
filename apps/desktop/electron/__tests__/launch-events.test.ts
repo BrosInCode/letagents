@@ -8,7 +8,7 @@ import {
   LaunchBlockedError,
   onLaunchEvent,
   resetLaunchEventsForTest,
-  supervisedLaunchEverBound,
+  supervisedLaunchEverReady,
 } from "../main/launch-events.js";
 
 test.beforeEach(() => resetLaunchEventsForTest());
@@ -99,12 +99,11 @@ test("classifyLaunchFailure maps unexpected errors to a safe generic failure", (
   assert.doesNotMatch(failure.detail, /secret|EACCES/);
 });
 
-test("supervisedLaunchEverBound uses durable binding evidence, not instantaneous readiness", () => {
-  // Never bound → a stop is a cancelled launch.
-  assert.equal(supervisedLaunchEverBound({ agentSessionBindingState: "none" }), false);
-  // Currently bound → launched.
-  assert.equal(supervisedLaunchEverBound({ agentSessionBindingState: "active" }), true);
-  // Previously bound then degraded/unreachable → STILL a launched agent, so a
-  // stop is a lifecycle event, not a cancelled launch (the finding-2 case).
-  assert.equal(supervisedLaunchEverBound({ agentSessionBindingState: "historical" }), true);
+test("supervisedLaunchEverReady uses the durable ready stamp, not instantaneous state", () => {
+  // Never reached ready → a stop is a cancelled launch, even if it had bound.
+  assert.equal(supervisedLaunchEverReady({ readyReachedAt: null }), false);
+  assert.equal(supervisedLaunchEverReady({ readyReachedAt: undefined }), false);
+  // Reached ready at some point → a later stop (even after degrading) is a
+  // lifecycle event, not a cancelled launch (the finding-2 case).
+  assert.equal(supervisedLaunchEverReady({ readyReachedAt: "2026-07-17T00:00:00.000Z" }), true);
 });
