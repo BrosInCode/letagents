@@ -290,6 +290,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
   assert.match(prompt, /join_room/);
   assert.match(prompt, /focus_37/);
   assert.match(prompt, /register_agent_session/);
+  assert.match(prompt, /cwd="\/tmp\/letagents-work-attempt"/, "registration binds from the exact daemon-owned worktree rather than the MCP process cwd");
   assert.match(prompt, /wait_for_messages/);
   assert.match(prompt, /LanternSparrow/);
   assert.equal(await adapter.attach({

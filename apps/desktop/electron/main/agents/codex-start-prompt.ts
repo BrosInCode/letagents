@@ -126,7 +126,7 @@ export function buildCodexStartPrompt(input: {
     `1. ${buildJoinInstruction(input.joinedVia, input.roomIdentifier)}`,
     "2. Call read_messages once, then call get_board once so you know the current participants and active work.",
     ...codenameInstructionLines(input.suggestedDisplayName, providerLabel),
-    `6. Call register_agent_session with session_kind="worker", runtime=${JSON.stringify(`${runtimeKey}:${input.token}`)}, and the same chosen display_name. Keep the returned agent_session_id.`,
+    `6. Call register_agent_session with session_kind="worker", runtime=${JSON.stringify(`${runtimeKey}:${input.token}`)}, the same chosen display_name, and cwd=${JSON.stringify(input.cwd)}. Keep the returned agent_session_id.`,
     "7. Do not continue into the room loop until register_agent_session succeeds. If LetAgents MCP auth is required, call get_onboarding_status and finish with a short public setup-needed note instead of claiming availability.",
     "8. Pass that agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, post_reasoning, and task tools whenever the tool accepts it.",
     "9. If get_board shows accepted unassigned work that is appropriate for you, claim it with claim_task using the registered agent_session_id before entering the wait loop.",
