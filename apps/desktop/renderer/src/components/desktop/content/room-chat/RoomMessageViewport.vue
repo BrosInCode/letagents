@@ -30,6 +30,7 @@
           :active-thread-root="entry.message.id === activeThreadParentId"
           :highlight-query="searchQuery"
           :message-reference-ids="messageReferenceIds"
+          :task-reference-ids="taskReferenceIds"
           :search-active="entry.message.id === activeSearchMessageId"
           :animate-arrival="arrivingMessageIds.has(entry.message.id)"
           @quote-reply="$emit('quote-reply', $event)"
@@ -39,6 +40,7 @@
           @open-image="$emit('open-image', $event)"
           @open-agent="$emit('open-agent', $event)"
           @open-github-event="$emit('open-github-event', $event)"
+          @open-task="$emit('open-task', $event)"
         />
       </template>
 
@@ -162,6 +164,7 @@ const props = defineProps<{
   githubActivityAvailable: boolean;
   roomLoading: boolean;
   searchQuery: string;
+  taskReferenceIds: ReadonlySet<string>;
   initialScrollTop?: number | null;
 }>();
 
@@ -174,6 +177,7 @@ const emit = defineEmits<{
   "quote-selection": [messageId: string, text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
+  "open-task": [taskId: string];
 }>();
 
 const emptyStateTitle = computed(() => {

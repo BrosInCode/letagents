@@ -40,7 +40,17 @@
         <span class="github-chip github-chip-kind">{{ event.kindLabel }}</span>
         <span v-if="event.statusLabel" class="github-chip github-chip-status">{{ event.statusLabel }}</span>
         <span v-if="event.repository" class="github-chip github-chip-repo">{{ event.repository }}</span>
-        <span v-if="event.taskId" class="github-chip github-chip-task">{{ event.taskId }}</span>
+        <button
+          v-if="event.taskId && taskLinkEnabled"
+          class="github-chip github-chip-task interactive"
+          type="button"
+          :title="`Open ${event.taskId} on the Board`"
+          :data-task-reference-id="event.taskId"
+          @click="emit('openTask', event.taskId)"
+        >
+          {{ event.taskId }}
+        </button>
+        <span v-else-if="event.taskId" class="github-chip github-chip-task">{{ event.taskId }}</span>
       </div>
 
       <p class="github-event-headline">{{ event.headline }}</p>
@@ -64,6 +74,11 @@ import type { GitHubEventPresentation } from './githubEventMessage'
 
 defineProps<{
   event: GitHubEventPresentation
+  taskLinkEnabled?: boolean
+}>()
+
+const emit = defineEmits<{
+  openTask: [taskId: string]
 }>()
 </script>
 
@@ -141,6 +156,18 @@ defineProps<{
 .github-chip-task {
   color: var(--amber, #f59e0b);
   border-color: var(--amber-dim, rgba(245, 158, 11, 0.1));
+}
+
+.github-chip-task.interactive {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.github-chip-task.interactive:hover,
+.github-chip-task.interactive:focus-visible {
+  border-color: color-mix(in srgb, var(--amber, #f59e0b) 54%, transparent);
+  background: color-mix(in srgb, var(--amber, #f59e0b) 15%, transparent);
+  outline: none;
 }
 
 .github-event-headline {

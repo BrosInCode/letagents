@@ -5,7 +5,7 @@
       class="long-message-content"
       :class="{ collapsed: isLong && !expanded }"
     >
-      <div class="md-content" v-html="html" />
+      <div class="md-content" v-html="html" @click="handleInlineReferenceClick" />
       <span v-if="isLong && !expanded" class="long-message-fade" aria-hidden="true" />
     </div>
 
@@ -50,7 +50,7 @@
             </button>
           </header>
 
-          <div class="reader-content md-content" v-html="html" />
+          <div class="reader-content md-content" v-html="html" @click="handleInlineReferenceClick" />
 
           <footer class="reader-footer">
             <button class="reader-action" type="button" @click="copyText">
@@ -79,6 +79,10 @@ const props = withDefaults(defineProps<{
   collapseAfterChars: 1400,
   collapseAfterLines: 18,
 })
+
+const emit = defineEmits<{
+  taskReferenceClick: [taskId: string]
+}>()
 
 const expanded = ref(false)
 const readerOpen = ref(false)
@@ -120,6 +124,18 @@ function openReader() {
 
 function closeReader() {
   readerOpen.value = false
+}
+
+function handleInlineReferenceClick(event: MouseEvent) {
+  const target = event.target instanceof Element
+    ? event.target.closest<HTMLElement>('[data-task-reference-id]')
+    : null
+  const taskId = target?.dataset.taskReferenceId || ''
+  if (!taskId) return
+  event.preventDefault()
+  event.stopPropagation()
+  readerOpen.value = false
+  emit('taskReferenceClick', taskId)
 }
 
 async function copyText() {
@@ -300,6 +316,29 @@ async function copyText() {
 .reader-content :deep(a:hover),
 .long-message-content :deep(a:hover) {
   text-decoration: underline;
+}
+
+.reader-content :deep(.task-reference-link),
+.long-message-content :deep(.task-reference-link) {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #60a5fa;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 38%, transparent);
+  text-underline-offset: 0.14em;
+}
+
+.reader-content :deep(.task-reference-link:hover),
+.reader-content :deep(.task-reference-link:focus-visible),
+.long-message-content :deep(.task-reference-link:hover),
+.long-message-content :deep(.task-reference-link:focus-visible) {
+  color: #93c5fd;
+  text-decoration-color: currentColor;
 }
 
 .reader-content :deep(code),
