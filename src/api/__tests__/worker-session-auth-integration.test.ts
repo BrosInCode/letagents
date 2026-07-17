@@ -175,6 +175,20 @@ function createResponseRecorder() {
   };
 }
 
+function createPendingResponseRecorder() {
+  let resolveSettled!: (response: ReturnType<typeof createResponseRecorder>) => void;
+  const settled = new Promise<ReturnType<typeof createResponseRecorder>>((resolve) => {
+    resolveSettled = resolve;
+  });
+  const response = createResponseRecorder();
+  response.json = function json(payload: unknown) {
+    this.body = payload;
+    resolveSettled(this);
+    return this;
+  };
+  return { response, settled };
+}
+
 function ownerTokenRequest(body: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   return {
     body,
@@ -415,7 +429,6 @@ test(
       actor_label: worker.actor_label,
       display_name: worker.display_name,
       ide_label: "Antigravity",
-      agent_instance_id: "different-antigravity-instance",
       session_kind: "worker",
       runtime: "antigravity",
       repo_branch: "codex/git-rooms",
@@ -423,11 +436,17 @@ test(
     const [secondRegistration, thirdRegistration] = await Promise.all([
       invoke(
         registerHandler,
-        ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+        ownerTokenRequest({
+          ...registrationBody,
+          agent_instance_id: "different-antigravity-instance-2",
+        }, { params: { 0: room.id } })
       ),
       invoke(
         registerHandler,
-        ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+        ownerTokenRequest({
+          ...registrationBody,
+          agent_instance_id: "different-antigravity-instance-3",
+        }, { params: { 0: room.id } })
       ),
     ]);
 
@@ -966,19 +985,21 @@ test(
       ],
     );
     const baselineMessage = await addMessage(room.id, "Human", "task_85 pending-poll baseline");
-    let predecessorPollSettled = false;
-    const predecessorPoll = invoke(
-      handlers.get.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/"),
+    const predecessorPollHandler = handlers.get.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/");
+    assert.ok(predecessorPollHandler, "expected long-poll route handler to be registered");
+    const predecessorPollRecorder = createPendingResponseRecorder();
+    await predecessorPollHandler(
       requestWithDeliveryHeaders(firstSession, {
         params: { 0: room.id },
         query: { after: baselineMessage.id, timeout: "5000" },
       }),
-    ).then((result) => {
-      predecessorPollSettled = true;
-      return result;
-    });
-    await sleep(50);
-    assert.equal(predecessorPollSettled, false, "predecessor poll is live before rotation");
+      predecessorPollRecorder.response,
+    );
+    const pollBeforeRotation = await Promise.race([
+      predecessorPollRecorder.settled.then(() => "settled" as const),
+      sleep(50).then(() => "pending" as const),
+    ]);
+    assert.equal(pollBeforeRotation, "pending", "predecessor poll is live before rotation");
 
     // The exact prior credential is the reconnect proof. It rotates behind
     // the instance fence and keeps the base display name.
@@ -1000,7 +1021,7 @@ test(
     );
     assert.notEqual(resumedSession.session_token, firstSession.session_token);
     const disconnectedPredecessorPoll = await Promise.race([
-      predecessorPoll,
+      predecessorPollRecorder.settled,
       sleep(1_000).then(() => null),
     ]);
     assert.ok(disconnectedPredecessorPoll, "rotation wakes the already-authenticated predecessor poll");
