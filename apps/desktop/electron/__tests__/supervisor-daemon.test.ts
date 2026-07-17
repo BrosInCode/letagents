@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, stat, unlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,6 +17,7 @@ import {
 } from "../main/supervisor-daemon.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
+const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-electron-supervisor-"));
@@ -312,6 +313,12 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
   }
 });
 
+test("desktop and daemon implementation identities stay in lockstep", async () => {
+  const daemonTypes = await readFile(daemonTypesPath, "utf8");
+  const daemonIdentity = daemonTypes.match(/DAEMON_IMPLEMENTATION_VERSION\s*=\s*"([^"]+)"/)?.[1];
+  assert.equal(daemonIdentity, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+});
+
 test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -349,13 +356,17 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
   let oldServer: Server | null = null;
   let replacementServer: Server | null = null;
+  let handoffPrepared = false;
   let spawnedCwd: string | null = null;
   const stableCwd = join(env.root, "stable-daemon-cwd");
   const old = await startWireDaemon(
     env.socketPath,
     SUPERVISOR_DAEMON_PROTOCOL_VERSION,
     11,
-    () => { void closeServer(oldServer, env.socketPath); },
+    () => {
+      handoffPrepared = true;
+      void closeServer(oldServer, env.socketPath);
+    },
     "2.0.0-stale",
   );
   oldServer = old.server;
@@ -372,6 +383,7 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
       },
     });
     const status = await client.ensureRunning();
+    assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     assert.equal(spawnedCwd, stableCwd);
