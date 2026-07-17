@@ -14,5 +14,9 @@ test("agent inspector renders the shared provider artwork and accessible exact-b
   assert.match(detailModalSource, /:aria-label="`Provider: \$\{providerIdentity\.accessibleLabel\}`"/);
   assert.match(detailModalSource, /data-testid="desktop-agent-detail-managed-provider"/);
   assert.match(detailModalSource, /managedAgentDetailSelection\(/);
+  assert.match(detailModalSource, /matchingManagedSessions = computed\(\(\) => detailSelection\.value\.managedSessions\)/);
+  assert.match(detailModalSource, /matchingSupervisorEntries = computed\(\(\) => detailSelection\.value\.supervisorEntries\)/);
+  assert.match(detailModalSource, /providerIdentity = computed\(\(\) => detailSelection\.value\.providerIdentity\)/);
+  assert.match(detailModalSource, /v-else-if="detailSelection\.showExternalFallback"/);
   assert.doesNotMatch(detailModalSource, /providerIdentity[^\n]*displayName/);
 });
