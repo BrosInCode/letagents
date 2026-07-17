@@ -13,6 +13,7 @@ import {
   SupervisorDaemonClient,
   onSupervisorActivity,
   publishSupervisorActivity,
+  supervisorDaemonSpawnEnvironment,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
 
@@ -317,6 +318,29 @@ test("desktop and daemon implementation identities stay in lockstep", async () =
   const daemonTypes = await readFile(daemonTypesPath, "utf8");
   const daemonIdentity = daemonTypes.match(/DAEMON_IMPLEMENTATION_VERSION\s*=\s*"([^"]+)"/)?.[1];
   assert.equal(daemonIdentity, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+});
+
+test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches ignore inherited overrides", () => {
+  const sourceRoot = '/tmp/LetAgents source "quoted"';
+  const inherited = {
+    LETAGENTS_API_URL: "https://letagents.chat",
+    LETAGENTS_DEV_MCP_SERVER_ENTRY: "/tmp/unrelated-cwd/stale-cache/server.js",
+  };
+
+  const packaged = supervisorDaemonSpawnEnvironment(inherited, sourceRoot);
+  assert.equal(packaged.LETAGENTS_DEV_MCP_SERVER_ENTRY, undefined, "packaged launch keeps the installed MCP fallback");
+  assert.equal(packaged.LETAGENTS_API_URL, inherited.LETAGENTS_API_URL, "unrelated auth/runtime environment is preserved");
+
+  const development = supervisorDaemonSpawnEnvironment({
+    ...inherited,
+    LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://127.0.0.1:5174",
+  }, sourceRoot);
+  assert.equal(
+    development.LETAGENTS_DEV_MCP_SERVER_ENTRY,
+    join(sourceRoot, "dist", "mcp", "server.js"),
+    "dev launch derives the exact repo build instead of trusting inherited cwd or cache state",
+  );
+  assert.equal(development.ELECTRON_RUN_AS_NODE, "1");
 });
 
 test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async () => {

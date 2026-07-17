@@ -412,7 +412,9 @@ test("Codex supervisor bridge context is owner-only, atomic, and contains no wor
 test("Codex dev MCP entry override adds exact command/args/cwd overrides when devMcpServerEntryPath is supplied", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-dev-mcp-entry-"));
   try {
-    const entryPath = join(root, "server.js");
+    const quotedDirectory = join(root, 'path with spaces and "quotes"');
+    await mkdir(quotedDirectory);
+    const entryPath = join(quotedDirectory, "server.js");
     await writeFile(entryPath, "// stub");
     const harness = createHarness();
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

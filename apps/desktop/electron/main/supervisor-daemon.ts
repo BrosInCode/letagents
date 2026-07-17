@@ -17,14 +17,14 @@ import type {
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
-import { desktopRoot } from "./paths.js";
+import { desktopRoot, workspaceRoot } from "./paths.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.15";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.16";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -129,6 +129,20 @@ export interface SupervisorDaemonLifecycleOptions {
   now?: () => Date;
 }
 
+export function supervisorDaemonSpawnEnvironment(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+  sourceWorkspaceRoot = workspaceRoot,
+): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { ...env, ELECTRON_RUN_AS_NODE: "1" };
+  // Never trust a caller's cwd/cache-derived dev entry. The desktop's compiled
+  // location is the authority for the repo build paired with this dev renderer.
+  delete result.LETAGENTS_DEV_MCP_SERVER_ENTRY;
+  if (env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()) {
+    result.LETAGENTS_DEV_MCP_SERVER_ENTRY = join(sourceWorkspaceRoot, "dist", "mcp", "server.js");
+  }
+  return result;
+}
+
 export class SupervisorDaemonClient {
   readonly socketPath: string;
   readonly daemonScriptPath: string;
@@ -155,7 +169,7 @@ export class SupervisorDaemonClient {
         cwd,
         detached: true,
         stdio: "ignore",
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        env: supervisorDaemonSpawnEnvironment(),
       });
       child.unref();
       return child;
