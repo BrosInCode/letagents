@@ -13,7 +13,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
+import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -33,6 +33,34 @@ const TEST_PROCESS_IDENTITY = execFileSync(
   ["-p", String(process.pid), "-o", "lstart=", "-o", "command="],
   { encoding: "utf8" },
 ).trim();
+
+test("resolveReadyReachedAt stamps ready once, monotonically, and only when running + unblocked + live (task_84)", () => {
+  const now = "2026-07-17T00:00:00.000Z";
+  // A bind that clears the pre-bind coordination latch reaches ready.
+  assert.equal(
+    resolveReadyReachedAt({ desired_state: "running", observed_state: "recovering", condition: "coordination_blocked", ready_reached_at: null }, true, now),
+    now,
+  );
+  // An idempotent bind of an already working/none entry is ready without clearing a latch.
+  assert.equal(
+    resolveReadyReachedAt({ desired_state: "running", observed_state: "working", condition: "none", ready_reached_at: null }, false, now),
+    now,
+  );
+  // Already stamped → keeps the original timestamp (monotonic, set-once).
+  assert.equal(
+    resolveReadyReachedAt({ desired_state: "running", observed_state: "working", condition: "none", ready_reached_at: "2026-07-16T00:00:00.000Z" }, false, now),
+    "2026-07-16T00:00:00.000Z",
+  );
+  // Not running, or still blocked → never stamped.
+  assert.equal(
+    resolveReadyReachedAt({ desired_state: "paused", observed_state: "working", condition: "none", ready_reached_at: null }, false, now),
+    null,
+  );
+  assert.equal(
+    resolveReadyReachedAt({ desired_state: "running", observed_state: "recovering", condition: "auth_blocked", ready_reached_at: null }, false, now),
+    null,
+  );
+});
 
 test("legacy lane owner liveness compares the stable process birth prefix, not the whole ps line", () => {
   // Repro of the supervised Start reserve->activate failure: Electron records the

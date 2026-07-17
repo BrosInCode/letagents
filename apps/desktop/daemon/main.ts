@@ -93,6 +93,28 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
  * or an MCP tool lifecycle event (Codex and compatible adapters) can make the
  * supervised worker project as quietly polling.
  */
+/**
+ * Durable, set-once "reached ready" stamp for a manifest entry. Once an entry
+ * has reached ready (running + unblocked + live, with this bind restoring
+ * reachability), the timestamp is fixed and never cleared, so a later
+ * degradation followed by Stop reads as a lifecycle event rather than a
+ * cancelled launch. `clearsCoordinationLatch` is true when this bind clears the
+ * normal pre-bind coordination latch (running + coordination_blocked).
+ */
+export function resolveReadyReachedAt(
+  current: Pick<DaemonManifestEntry, "desired_state" | "observed_state" | "condition" | "ready_reached_at">,
+  clearsCoordinationLatch: boolean,
+  now: string,
+): string | null {
+  if (current.ready_reached_at) return current.ready_reached_at;
+  const resultingObserved = clearsCoordinationLatch ? "working" : current.observed_state;
+  const resultingCondition = clearsCoordinationLatch ? "none" : current.condition;
+  const reachedReady = current.desired_state === "running"
+    && resultingCondition === "none"
+    && (resultingObserved === "working" || resultingObserved === "idle" || resultingObserved === "checkpointing");
+  return reachedReady ? now : null;
+}
+
 export function isSupervisedWaitProviderEvent(event: ProviderActionStreamEvent): boolean {
   const isWaitName = (value: unknown): boolean => typeof value === "string"
     && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages");
@@ -1881,33 +1903,39 @@ export class SupervisorDaemon {
       updatedAt: binding.updated_at,
     });
     this.pendingResumeBindings.delete(input.entry_id);
-    await this.updateManifestEntry(input.entry_id, (current) => ({
-      ...current,
-      // A successful exact-generation bind proves that an ambiguous live
-      // provider has its MCP control route. Restore workplace reachability on
-      // fresh and persisted-idempotent binds; clear only the coordination
-      // latch, while quarantine and native terminal failures stay authoritative.
-      workplace_liveness: {
-        state: "reachable" as const,
-        observed_at: new Date().toISOString(),
-        detail: exactCurrentBinding
-          ? "exact supervised worker session binding confirmed"
-          : "supervised worker session bound",
-      },
-      ...(current.desired_state === "running" && current.condition === "coordination_blocked"
-        ? {
-          observed_state: "working" as const,
-          condition: "none" as const,
-          last_error: null,
-        }
-        : {}),
-      last_worker_binding: {
-        agent_session_id: binding.agent_session_id,
-        work_attempt_id: binding.work_attempt_id,
-        execution_generation_id: binding.execution_generation_id,
-        updated_at: binding.updated_at,
-      },
-    }));
+    await this.updateManifestEntry(input.entry_id, (current) => {
+      const clearsCoordinationLatch = current.desired_state === "running" && current.condition === "coordination_blocked";
+      return {
+        ...current,
+        // A successful exact-generation bind proves that an ambiguous live
+        // provider has its MCP control route. Restore workplace reachability on
+        // fresh and persisted-idempotent binds; clear only the coordination
+        // latch, while quarantine and native terminal failures stay authoritative.
+        workplace_liveness: {
+          state: "reachable" as const,
+          observed_at: new Date().toISOString(),
+          detail: exactCurrentBinding
+            ? "exact supervised worker session binding confirmed"
+            : "supervised worker session bound",
+        },
+        ...(clearsCoordinationLatch
+          ? {
+            observed_state: "working" as const,
+            condition: "none" as const,
+            last_error: null,
+          }
+          : {}),
+        // Durable set-once ready stamp: this bind restores reachability, so the
+        // entry is ready when it is running + unblocked + live.
+        ready_reached_at: resolveReadyReachedAt(current, clearsCoordinationLatch, new Date().toISOString()),
+        last_worker_binding: {
+          agent_session_id: binding.agent_session_id,
+          work_attempt_id: binding.work_attempt_id,
+          execution_generation_id: binding.execution_generation_id,
+          updated_at: binding.updated_at,
+        },
+      };
+    });
     if (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable") {
       await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
     }

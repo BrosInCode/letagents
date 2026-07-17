@@ -727,6 +727,7 @@ const supervisedLaunchView = computed(() =>
         provider: selectedProviderId.value ?? undefined,
         roomLabel: roomLabel.value,
         requested: launchStarted.value,
+        hasSignInCommand: Boolean(authCommand.value),
       })
     : null
 );
