@@ -91,27 +91,33 @@ export function resolveAgentSession(
 /**
  * The stable base this client declares as `requested_base_display_name` when
  * registering. Rules (task_66):
- * - An explicit display_name that replays a PRIOR stored session label for
- *   this room+identity is a resume, not a rename: reuse the base recorded
- *   when that label was allocated, so a server-decorated label converges.
+ * - An explicit display_name that replays the EXACT label of any prior stored
+ *   session for this room+identity is a resume, not a rename: reuse the base
+ *   recorded when THAT label was allocated, so a server-decorated label
+ *   converges. The whole lineage is consulted (most recent first) because a
+ *   latest-only lookup would lose an older concurrent sibling's base and
+ *   misread its restart as a deliberate rename.
  * - Any other explicit display_name is deliberate intent and IS the base —
  *   a numeric-ending custom name ("Agent 47") is therefore never demoted.
- * - With no explicit name, fall back to the prior session's recorded base,
- *   then to the durable identity's display name.
+ * - With no explicit name, fall back to the most recent recorded base in the
+ *   lineage, then to the durable identity's display name.
  */
 export function resolveClientRequestedBase(input: {
   explicitDisplayName?: string | null;
   identityDisplayName: string;
-  priorSession?: Pick<StoredAgentSessionState, "display_name" | "requested_base_display_name"> | null;
+  priorSessions?: readonly Pick<StoredAgentSessionState, "display_name" | "requested_base_display_name">[] | null;
 }): string {
   const explicit = input.explicitDisplayName?.trim() || "";
-  const priorLabel = input.priorSession?.display_name?.trim() || "";
-  const priorBase = input.priorSession?.requested_base_display_name?.trim() || "";
+  const lineage = input.priorSessions ?? [];
   if (explicit) {
-    if (priorLabel && explicit === priorLabel && priorBase) return priorBase;
-    return explicit;
+    const replayed = lineage.find((session) => session.display_name?.trim() === explicit);
+    const replayedBase = replayed?.requested_base_display_name?.trim() || "";
+    return replayedBase || explicit;
   }
-  return priorBase || input.identityDisplayName.trim();
+  const latestBase = lineage
+    .map((session) => session.requested_base_display_name?.trim() || "")
+    .find((base) => base.length > 0);
+  return latestBase || input.identityDisplayName.trim();
 }
 
 export function identityFromAgentSession(session: StoredAgentSessionState): StoredAgentIdentityState {
