@@ -15,6 +15,7 @@
     "build:daemon": "tsc -p tsconfig.daemon.json",
     "package:artifact": "npm run build && node electron/scripts/package-artifact.mjs",
     "smoke:electron": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 electron .",
+    "screenshot:agent-detail": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT=/tmp/letagents-agent-detail-responsive.png electron .",
     "smoke:packaged-supervisor": "npm run package:artifact && node electron/scripts/packaged-supervisor-smoke.mjs",
     "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon",
