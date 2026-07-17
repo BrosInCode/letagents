@@ -1003,8 +1003,22 @@
   to { transform: rotate(360deg); }
 }
 
+.supervised-launch-phase-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
 .supervised-launch-phase-label {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supervised-launch-phase-detail {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1013,6 +1027,7 @@
 .supervised-launch-phase-status {
   color: var(--text-tertiary);
   font-size: 0.7rem;
+  align-self: start;
 }
 
 .supervised-launch-progress-hint {
@@ -1021,8 +1036,30 @@
 }
 
 .supervised-launch-progress-failure {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
   color: #fca5a5;
   font-size: 0.76rem;
+}
+
+.supervised-launch-progress-failure p {
+  margin: 0;
+}
+
+.supervised-launch-recovery {
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.supervised-launch-recovery:hover {
+  background: rgba(255, 255, 255, 0.14);
 }
 
 @media (prefers-reduced-motion: reduce) {
