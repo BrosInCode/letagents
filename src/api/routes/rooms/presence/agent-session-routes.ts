@@ -345,6 +345,16 @@ export function registerAgentSessionRoutes(
             session_id: replacementSessionId,
             session_token: replacementSessionToken,
           } : null);
+          // The database fence invalidates credentials first. Only after that
+          // commit succeeds, wake any already-authenticated long-poll/SSE
+          // request for the stable session id before returning the successor
+          // credential. The successor cannot connect until this response.
+          for (const replacedSessionId of created.replaced_session_ids) {
+            await disconnectRoomAgentDeliverySession({
+              room_id: project.id,
+              agent_session_id: replacedSessionId,
+            });
+          }
           res.status(201).json(created.session);
           return;
         } catch (error) {
