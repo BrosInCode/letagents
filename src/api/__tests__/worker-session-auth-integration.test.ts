@@ -888,7 +888,7 @@ test(
     const { room } = await seedHarness();
     const handlers = registerRoutesForRoom(room);
     const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
-    if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions || !pool) {
+    if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions || !pool || !createTask || !updateTask) {
       throw new Error("DB-backed worker session tests require TEST_DB_URL");
     }
 
@@ -936,6 +936,35 @@ test(
       }, { params: { 0: room.id } }),
     );
     assert.equal(firstPresence.statusCode, 200, JSON.stringify(firstPresence.body));
+    const proposedContinuityTask = await createTask(room.id, "SwiftCrest continuity", "Human");
+    const continuityTask = await updateTask(room.id, proposedContinuityTask.id, { status: "accepted" });
+    assert.ok(continuityTask);
+    const assignedContinuityTask = await invoke(
+      handlers.patch.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/"),
+      ownerTokenRequest({
+        status: "assigned",
+        assignee: firstSession.actor_label,
+        ...sessionCredentials(firstSession),
+      }, { params: { 0: room.id, 1: continuityTask.id }, query: {} }),
+    );
+    assert.equal(assignedContinuityTask.statusCode, 200, JSON.stringify(assignedContinuityTask.body));
+    const assignmentNow = new Date().toISOString();
+    await pool.query(
+      `INSERT INTO board_manager_assignments
+        (id, room_id, agent_session_id, agent_key, actor_label, runtime_source,
+         assigned_by, status, last_heartbeat_at, released_by, release_reason,
+         released_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'external', 'task_85_test', 'active',
+         $6, NULL, NULL, NULL, $6, $6)`,
+      [
+        "board_manager_task85_continuity",
+        room.id,
+        firstSession.session_id,
+        firstSession.agent_key,
+        firstSession.actor_label,
+        assignmentNow,
+      ],
+    );
 
     // The exact prior credential is the reconnect proof. It rotates behind
     // the instance fence and keeps the base display name.
@@ -950,7 +979,12 @@ test(
     assert.equal(resumed.statusCode, 201, JSON.stringify(resumed.body));
     const resumedSession = resumed.body as CreatedSession;
     assert.equal(resumedSession.display_name, "SwiftCrest");
-    assert.notEqual(resumedSession.session_id, firstSession.session_id);
+    assert.equal(
+      resumedSession.session_id,
+      firstSession.session_id,
+      "credential rotation preserves every session-bound authority reference",
+    );
+    assert.notEqual(resumedSession.session_token, firstSession.session_token);
 
     const afterResume = await pool.query<{
       session_id: string;
@@ -962,9 +996,9 @@ test(
         ORDER BY created_at`,
       [room.id, agentIdentity.canonical_key, registrationBody.agent_instance_id],
     );
-    assert.equal(afterResume.rows.length, 2);
-    assert.ok(afterResume.rows.find((row) => row.session_id === firstSession.session_id)?.ended_at);
-    assert.equal(afterResume.rows.find((row) => row.session_id === resumedSession.session_id)?.ended_at, null);
+    assert.equal(afterResume.rows.length, 1);
+    assert.equal(afterResume.rows[0]?.session_id, firstSession.session_id);
+    assert.equal(afterResume.rows[0]?.ended_at, null);
     assert.equal(afterResume.rows.filter((row) => row.ended_at === null).length, 1);
     const deliveries = await getRoomAgentDeliverySessions(room.id);
     assert.equal(
@@ -986,6 +1020,39 @@ test(
       resumedSession.session_id,
       "the replacement owns the single current presence projection",
     );
+    const rejectedPredecessorWrite = await invoke(
+      handlers.post.get("/^\\/rooms\\/(.+)\\/messages$/"),
+      ownerTokenRequest({
+        text: "old SwiftCrest credential must be fenced",
+        ...sessionCredentials(firstSession),
+      }, { params: { 0: room.id } }),
+    );
+    assert.equal(rejectedPredecessorWrite.statusCode, 401, JSON.stringify(rejectedPredecessorWrite.body));
+    const resumedTaskUpdate = await invoke(
+      handlers.patch.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/"),
+      ownerTokenRequest({
+        status: "in_progress",
+        ...sessionCredentials(resumedSession),
+      }, { params: { 0: room.id, 1: continuityTask.id }, query: {} }),
+    );
+    assert.equal(resumedTaskUpdate.statusCode, 200, JSON.stringify(resumedTaskUpdate.body));
+    assert.equal((resumedTaskUpdate.body as { status?: string }).status, "in_progress");
+    const continuityAuthority = await pool.query<{
+      active_leases: string;
+      lease_session_id: string | null;
+      manager_session_id: string | null;
+    }>(
+      `SELECT
+         (SELECT COUNT(*)::text FROM task_leases WHERE task_id = $1 AND status = 'active') AS active_leases,
+         (SELECT agent_session_id FROM task_leases WHERE task_id = $1 AND status = 'active' LIMIT 1) AS lease_session_id,
+         (SELECT agent_session_id FROM board_manager_assignments WHERE room_id = $2 AND status = 'active' LIMIT 1) AS manager_session_id`,
+      [continuityTask.id, room.id],
+    );
+    assert.deepEqual(continuityAuthority.rows[0], {
+      active_leases: "1",
+      lease_session_id: resumedSession.session_id,
+      manager_session_id: resumedSession.session_id,
+    });
 
     // A separate live transport cannot steal the instance with a public
     // session id and a forged credential, even if it copies the bridge label.

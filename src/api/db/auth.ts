@@ -492,6 +492,75 @@ async function insertRoomAgentSessionTx(
   return { ...toRoomAgentSession(created as RoomAgentSessionRow), session_token: sessionToken, worker_bearer: workerBearer };
 }
 
+async function rotateRoomAgentSessionTx(
+  tx: any,
+  current: RoomAgentSessionRow,
+  input: CreateRoomAgentSessionInput,
+): Promise<CreatedRoomAgentSession> {
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+  const sessionToken = makeAgentSessionToken();
+  const workerBearer = isAgentSessionBearerFeatureEnabled()
+    ? makeAgentSessionBearerToken()
+    : null;
+  const [latestBearer] = await tx.select()
+    .from(room_agent_session_bearers)
+    .where(eq(room_agent_session_bearers.session_id, current.session_id))
+    .orderBy(desc(room_agent_session_bearers.generation))
+    .limit(1);
+
+  const [updated] = await tx.update(room_agent_sessions).set({
+    token_hash: hashToken(sessionToken),
+    session_kind: "worker" as RoomAgentSessionKind,
+    runtime: input.runtime || "unknown",
+    host_id: input.registration_liveness?.host_id ?? null,
+    host_kind: input.registration_liveness?.host_kind ?? null,
+    host_label: input.registration_liveness?.host_label ?? null,
+    liveness_capability: input.registration_liveness?.liveness_capability ?? null,
+    tool_bridge_id: input.registration_liveness?.tool_bridge_id ?? null,
+    repo_branch: input.repo_branch ?? null,
+    actor_label: input.actor_label,
+    agent_key: input.agent_key,
+    agent_instance_id: input.agent_instance_id ?? null,
+    display_name: input.display_name,
+    assigned_base_display_name: input.assigned_base_display_name ?? null,
+    owner_account_id: input.owner_account_id,
+    supervisor_grant_id: input.supervisor_grant_id ?? null,
+    owner_label: input.owner_label,
+    ide_label: input.ide_label,
+    updated_at: now,
+    last_seen_at: now,
+    ended_at: null,
+  }).where(and(
+    eq(room_agent_sessions.session_id, current.session_id),
+    isNull(room_agent_sessions.ended_at),
+  )).returning();
+  if (!updated) throw new Error("Agent session replacement target disappeared.");
+
+  if (workerBearer) {
+    await tx.insert(room_agent_session_bearers).values({
+      bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
+      session_id: current.session_id,
+      room_id: input.room_id,
+      supervisor_grant_id: input.supervisor_grant_id ?? null,
+      token_hash: hashToken(workerBearer),
+      generation: (latestBearer?.generation ?? 0) + 1,
+      capabilities: DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES,
+      issued_at: now,
+      expires_at: input.worker_bearer_expires_at ?? newBearerExpiry(nowDate),
+      revoked_at: null,
+      rotated_from_bearer_id: latestBearer?.bearer_id ?? null,
+      created_at: now,
+    });
+  }
+
+  return {
+    ...toRoomAgentSession(updated as RoomAgentSessionRow),
+    session_token: sessionToken,
+    worker_bearer: workerBearer,
+  };
+}
+
 export async function createRoomAgentSession(
   input: CreateRoomAgentSessionInput,
 ): Promise<CreatedRoomAgentSession> {
@@ -558,15 +627,23 @@ export async function createFencedRoomAgentSession(
       }
     }
 
+    const replacementTarget = predecessors.find((row: RoomAgentSessionRow) =>
+      replacementProofMatches(row, replacementProof)
+    ) ?? predecessors[0] ?? null;
     const replacedSessionIds = predecessors.map((row: RoomAgentSessionRow) => row.session_id);
     if (replacedSessionIds.length > 0) {
       const now = new Date(nowMs).toISOString();
-      await tx.update(room_agent_sessions)
-        .set({ ended_at: now, updated_at: now, last_seen_at: now })
-        .where(and(
-          inArray(room_agent_sessions.session_id, replacedSessionIds),
-          isNull(room_agent_sessions.ended_at),
-        ));
+      const supersededSessionIds = replacedSessionIds.filter(
+        (sessionId) => sessionId !== replacementTarget?.session_id,
+      );
+      if (supersededSessionIds.length > 0) {
+        await tx.update(room_agent_sessions)
+          .set({ ended_at: now, updated_at: now, last_seen_at: now })
+          .where(and(
+            inArray(room_agent_sessions.session_id, supersededSessionIds),
+            isNull(room_agent_sessions.ended_at),
+          ));
+      }
       await tx.update(room_agent_session_bearers)
         .set({ revoked_at: now })
         .where(and(
@@ -581,16 +658,21 @@ export async function createFencedRoomAgentSession(
           updated_at: now,
         })
         .where(inArray(room_agent_delivery_sessions.agent_session_id, replacedSessionIds));
-      // Presence is actor-label keyed and rejects writes from a different
-      // session owner. Remove only the replaced session's current projection
-      // so the successor can publish immediately; durable session/liveness
-      // history remains intact.
+      // Presence is actor-label keyed. Clear the replaced projection so an
+      // intentional rename cannot leave an old-label ghost; the stable session
+      // id keeps task leases, Board Manager authority, and liveness lineage.
       await tx.delete(room_agent_presence)
         .where(inArray(room_agent_presence.agent_session_id, replacedSessionIds));
     }
 
     return {
-      session: await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId }),
+      session: replacementTarget
+        ? await rotateRoomAgentSessionTx(
+            tx,
+            replacementTarget as RoomAgentSessionRow,
+            { ...input, agent_instance_id: instanceId },
+          )
+        : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId }),
       replaced_session_ids: replacedSessionIds,
     };
   });
