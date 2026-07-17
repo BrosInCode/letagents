@@ -108,6 +108,16 @@ test("provider router selects the native adapter by manifest provider and fences
   const router = new ProviderActionPortRouter({
     codex: async () => fakeAdapter("codex", calls),
     "claude-code": async () => fakeAdapter("claude-code", calls),
+    cursor: async () => {
+      const adapter = fakeAdapter("claude-code", calls);
+      return {
+        ...adapter,
+        async spawn(input) {
+          if (!input.displayName?.trim()) throw new Error("Cursor requires the durable agent display name.");
+          return adapter.spawn(input);
+        },
+      };
+    },
   });
   const claudeSpawn: ProviderActionSpawn = {
     provider: "claude-code", workAttemptId: "claude-attempt", roomId: "room", cwd: "/tmp/claude", launchPolicy: { permissionMode: "acceptEdits" }, actionId: "launch-claude",
