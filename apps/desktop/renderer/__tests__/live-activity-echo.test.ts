@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   LIVE_ACTIVITY_ECHO_MAX_LENGTH,
+  WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
+  coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
   liveActivityEchoText,
   supervisedAgentWorkIndicators,
@@ -54,8 +56,12 @@ function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): Desktop
   };
 }
 
-function indicator(id: string): ManagedAgentWorkIndicator {
-  return { id, displayName: id, summary: "working", startedAt: "2026-07-17T00:00:00.000Z" };
+function indicator(
+  id: string,
+  startedAt = "2026-07-17T00:00:00.000Z",
+  summary = "working",
+): ManagedAgentWorkIndicator {
+  return { id, displayName: id, summary, startedAt };
 }
 
 test("echo trims, collapses whitespace, and keeps short summaries verbatim", () => {
@@ -89,12 +95,54 @@ test("collapse keeps all indicators when at or under the limit", () => {
   assert.equal(result.hiddenCount, 0);
 });
 
-test("collapse caps visible indicators and reports the overflow", () => {
-  const ten = Array.from({ length: 10 }, (_, i) => indicator(`agent_${i}`));
+test("collapse shows the MOST RECENT indicators (newest first) and reports the overflow", () => {
+  // Intentionally oldest-first input to prove recency selection, not head-slice.
+  const ten = Array.from({ length: 10 }, (_, i) =>
+    indicator(`agent_${i}`, `2026-07-17T00:00:${String(i).padStart(2, "0")}.000Z`));
   const result = collapseWorkIndicators(ten, 3);
   assert.equal(result.visible.length, 3);
   assert.equal(result.hiddenCount, 7);
-  assert.deepEqual(result.visible.map((w) => w.id), ["agent_0", "agent_1", "agent_2"]);
+  assert.deepEqual(result.visible.map((w) => w.id), ["agent_9", "agent_8", "agent_7"]);
+});
+
+test("echo coalescing shows a new entry immediately", () => {
+  const { state, indicators, hasPending } = coalesceWorkIndicatorEchoes(
+    {}, [indicator("a", "2026-07-17T00:00:00.000Z", "step one")], 1_000,
+  );
+  assert.equal(indicators[0]!.summary, "step one");
+  assert.equal(hasPending, false);
+  assert.equal(state["a"]!.summary, "step one");
+});
+
+test("echo coalescing holds a change inside the window (latest value wins after it elapses)", () => {
+  const t0 = 10_000;
+  const first = coalesceWorkIndicatorEchoes({}, [indicator("a", "t", "step one")], t0);
+  // A change 1s later (< 2.5s window) is held back; prior text stays shown.
+  const withinWindow = coalesceWorkIndicatorEchoes(first.state, [indicator("a", "t", "step two")], t0 + 1_000);
+  assert.equal(withinWindow.indicators[0]!.summary, "step one", "held inside window");
+  assert.equal(withinWindow.hasPending, true);
+  // A newer change still inside the window — latest value must win once flushed.
+  const stillWithin = coalesceWorkIndicatorEchoes(withinWindow.state, [indicator("a", "t", "step three")], t0 + 2_000);
+  assert.equal(stillWithin.indicators[0]!.summary, "step one", "still held");
+  // After the window elapses, the latest summary surfaces.
+  const afterWindow = coalesceWorkIndicatorEchoes(stillWithin.state, [indicator("a", "t", "step three")], t0 + WORK_INDICATOR_ECHO_MIN_INTERVAL_MS + 1);
+  assert.equal(afterWindow.indicators[0]!.summary, "step three", "latest value wins after window");
+  assert.equal(afterWindow.hasPending, false);
+});
+
+test("echo coalescing keeps an unchanged summary stable without pending", () => {
+  const first = coalesceWorkIndicatorEchoes({}, [indicator("a", "t", "same")], 0);
+  const again = coalesceWorkIndicatorEchoes(first.state, [indicator("a", "t", "same")], 100_000);
+  assert.equal(again.indicators[0]!.summary, "same");
+  assert.equal(again.hasPending, false);
+  assert.equal(again.state["a"]!.shownAtMs, first.state["a"]!.shownAtMs, "shownAt unchanged when text is stable");
+});
+
+test("echo coalescing drops entries that go idle (cancellation, no stale echo)", () => {
+  const first = coalesceWorkIndicatorEchoes({}, [indicator("a"), indicator("b")], 0);
+  const idle = coalesceWorkIndicatorEchoes(first.state, [indicator("a")], 1_000);
+  assert.deepEqual(idle.indicators.map((w) => w.id), ["a"]);
+  assert.equal("b" in idle.state, false, "idle entry cleared from state");
 });
 
 test("supervised indicator echoes a bounded summary and uses a stable per-entry id", () => {

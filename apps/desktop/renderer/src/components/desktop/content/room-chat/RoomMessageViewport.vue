@@ -133,7 +133,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
-import { collapseWorkIndicators, type ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
+import {
+  WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
+  coalesceWorkIndicatorEchoes,
+  collapseWorkIndicators,
+  type ManagedAgentWorkIndicator,
+  type WorkIndicatorEchoState,
+} from "../../../../domain/managed-agents";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
@@ -302,7 +308,39 @@ watch(
   { immediate: true },
 );
 
-const collapsedAgentWork = computed(() => collapseWorkIndicators(props.localAgentWork));
+// Rate-limit the live echo text: an entry's summary changes at most once per
+// WORK_INDICATOR_ECHO_MIN_INTERVAL_MS. State persists across polls; a trailing
+// timer flushes any summary held back inside the window so the latest value
+// still surfaces if native updates stop arriving.
+let echoState: WorkIndicatorEchoState = {};
+let echoFlushTimer: number | null = null;
+const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
+
+function applyEchoCoalescing(): void {
+  const { state, indicators, hasPending } = coalesceWorkIndicatorEchoes(
+    echoState,
+    props.localAgentWork,
+    Date.now(),
+    WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
+  );
+  echoState = state;
+  displayedAgentWork.value = indicators;
+  if (echoFlushTimer !== null) {
+    window.clearTimeout(echoFlushTimer);
+    echoFlushTimer = null;
+  }
+  if (hasPending) {
+    echoFlushTimer = window.setTimeout(applyEchoCoalescing, WORK_INDICATOR_ECHO_MIN_INTERVAL_MS);
+  }
+}
+
+watch(
+  () => props.localAgentWork,
+  () => applyEchoCoalescing(),
+  { immediate: true, deep: true },
+);
+
+const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value));
 
 watch(
   () => props.localAgentWork.map((work) => `${work.id}:${work.summary}`).join("|"),
@@ -483,6 +521,10 @@ onBeforeUnmount(() => {
   cancelLayoutAnchorRestore();
   rememberScrollAnchor();
   emitScrollPosition();
+  if (echoFlushTimer !== null) {
+    window.clearTimeout(echoFlushTimer);
+    echoFlushTimer = null;
+  }
 });
 
 function markMessagesArriving(messageIds: readonly string[]): void {

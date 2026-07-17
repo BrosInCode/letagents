@@ -493,10 +493,73 @@ export function collapseWorkIndicators(
   if (maxVisible <= 0 || indicators.length <= maxVisible) {
     return { visible: [...indicators], hiddenCount: 0 };
   }
+  // Show the MOST RECENT maxVisible (newest first). The upstream list may be
+  // sorted oldest-first, so select by startedAt descending rather than taking
+  // the head, which would surface the stalest agents.
+  const byRecency = [...indicators].sort((left, right) => right.startedAt.localeCompare(left.startedAt));
   return {
-    visible: indicators.slice(0, maxVisible),
+    visible: byRecency.slice(0, maxVisible),
     hiddenCount: indicators.length - maxVisible,
   };
+}
+
+/** Minimum time an entry's echo text is held before it may change again. */
+export const WORK_INDICATOR_ECHO_MIN_INTERVAL_MS = 2500;
+
+export interface WorkIndicatorEchoEntryState {
+  /** The summary currently shown for this entry. */
+  summary: string;
+  /** When that shown summary last changed (ms epoch). */
+  shownAtMs: number;
+  /** A newer summary held back inside the throttle window, if any. */
+  pending: string | null;
+}
+
+export type WorkIndicatorEchoState = Record<string, WorkIndicatorEchoEntryState>;
+
+export interface CoalescedWorkIndicatorEchoes {
+  state: WorkIndicatorEchoState;
+  indicators: ManagedAgentWorkIndicator[];
+  /** True when at least one newer echo is held back awaiting the next window. */
+  hasPending: boolean;
+}
+
+/**
+ * Rate-limit live echo text per entry: an entry's shown summary changes at
+ * most once per `minIntervalMs`. Newer summaries arriving inside the window are
+ * held as `pending` (latest value wins) and surface on the next call once the
+ * window has elapsed. Entries absent from `incoming` are dropped from state
+ * (idle clear / cancellation). Pure and deterministic — `nowMs` is injected.
+ */
+export function coalesceWorkIndicatorEchoes(
+  previous: WorkIndicatorEchoState,
+  incoming: readonly ManagedAgentWorkIndicator[],
+  nowMs: number,
+  minIntervalMs: number = WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
+): CoalescedWorkIndicatorEchoes {
+  const state: WorkIndicatorEchoState = {};
+  let hasPending = false;
+  const indicators = incoming.map((indicator) => {
+    const prior = previous[indicator.id];
+    if (!prior) {
+      state[indicator.id] = { summary: indicator.summary, shownAtMs: nowMs, pending: null };
+      return indicator;
+    }
+    if (indicator.summary === prior.summary) {
+      state[indicator.id] = { summary: prior.summary, shownAtMs: prior.shownAtMs, pending: null };
+      return { ...indicator, summary: prior.summary };
+    }
+    if (nowMs - prior.shownAtMs >= minIntervalMs) {
+      state[indicator.id] = { summary: indicator.summary, shownAtMs: nowMs, pending: null };
+      return indicator;
+    }
+    // Inside the throttle window: keep showing the prior summary, hold the
+    // newest incoming as pending so the latest value wins once it elapses.
+    state[indicator.id] = { summary: prior.summary, shownAtMs: prior.shownAtMs, pending: indicator.summary };
+    hasPending = true;
+    return { ...indicator, summary: prior.summary };
+  });
+  return { state, indicators, hasPending };
 }
 
 export interface ManagedAgentPermissionApproval {
