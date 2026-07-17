@@ -79,3 +79,45 @@ test("the launch progress component exposes phased, accessible, honest UI hooks"
   assert.match(progressSource, /data-testid="supervised-launch-failure"/);
   assert.match(progressSource, /data-testid="supervised-launch-ready-name"/);
 });
+
+test("Add Agent modal is run-mode-first: a runMode gate drives the form", () => {
+  assert.match(modalSource, /const runMode = ref<null \| "supervised" \| "connect">\(null\)/);
+  assert.match(modalSource, /role="radiogroup"/);
+  assert.match(modalSource, /data-testid="desktop-add-agent-runmode-supervised"/);
+  assert.match(modalSource, /data-testid="desktop-add-agent-runmode-connect"/);
+  assert.match(modalSource, /function chooseRunMode/);
+  // runMode DRIVES launchMode; it does not replace it.
+  assert.match(modalSource, /const launchMode = ref<"legacy" \| "supervised">\("legacy"\)/);
+  const chooseBody = modalSource.slice(modalSource.indexOf("function chooseRunMode"));
+  assert.match(chooseBody, /launchMode\.value = "supervised"/);
+});
+
+test("Add Agent modal keeps advanced config behind a Customize disclosure", () => {
+  assert.match(modalSource, /data-testid="desktop-add-agent-customize-toggle"/);
+  assert.match(modalSource, /:aria-expanded="customizeOpen"/);
+  assert.match(modalSource, /aria-controls="desktop-add-agent-customize-panel"/);
+  assert.match(modalSource, /id="desktop-add-agent-customize-panel"/);
+  // Charter is relabeled but keeps its binding and testid.
+  assert.match(modalSource, /What should this agent help with\?/);
+  assert.match(modalSource, /v-model="supervisedCharter"/);
+  assert.match(modalSource, /data-testid="desktop-add-agent-supervised-charter"/);
+});
+
+test("Add Agent modal exposes the ready-launch affordances", () => {
+  assert.match(modalSource, /data-testid="desktop-add-agent-view-agent"/);
+  assert.match(modalSource, /data-testid="desktop-add-agent-send-first-message"/);
+  assert.match(modalSource, /data-testid="desktop-add-agent-add-another"/);
+  assert.match(modalSource, /"open-agent-detail": \[target: AgentModalTarget\]/);
+  assert.match(modalSource, /"start-first-message": \[\]/);
+});
+
+test("Add Agent modal gates the connect join prompt on connectJoinPrompt", () => {
+  assert.match(modalSource, /const connectJoinPrompt = computed\(/);
+  const testidIndex = modalSource.indexOf('data-testid="desktop-add-agent-external-prompt"');
+  assert.ok(testidIndex > 0);
+  const sectionOpen = modalSource.slice(testidIndex - 200, testidIndex);
+  assert.match(sectionOpen, /v-if="connectJoinPrompt"/);
+  assert.doesNotMatch(sectionOpen, /v-if="externalJoinPrompt"/);
+  // The full instructions render the connect prompt, not the legacy computed.
+  assert.match(modalSource, /<pre><code>\{\{ connectJoinPrompt \}\}<\/code><\/pre>/);
+});
