@@ -190,6 +190,24 @@ test("a manifest auth block surfaces a sign-in recovery when a command exists", 
   assert.equal(view.recovery, "sign_in");
 });
 
+test("an unattached prior process becomes a live blocked state without a fake retry", () => {
+  const view = foldLaunchJourney({
+    entry: entry({
+      observedState: "recovering",
+      condition: "coordination_blocked",
+      lastError: "durable execution generation remains live without an attachable provider handle",
+      workspacePath: "/tmp/wt",
+      providerPid: 10,
+    }),
+  });
+
+  assert.equal(view.status, "blocked");
+  assert.equal(view.failed, true);
+  assert.equal(view.recovery, null, "retrying the same durable identity cannot repair an attach failure");
+  assert.match(view.headline, /help reconnecting/i);
+  assert.match(view.failureDetail ?? "", /wait.*cancel/i);
+});
+
 test("folding is idempotent under duplicate and out-of-order delivery", () => {
   const ordered = foldLaunchJourney({
     events: [
@@ -251,7 +269,7 @@ test("stopping an agent that reached ready reads as stopped, not launch cancelle
     entry: entry({
       displayName: "SilverCanyon",
       desiredState: "stopped",
-      observedState: "absent",
+      observedState: "stopped",
       agentSessionId: "agent_session_9",
       agentSessionBindingState: "historical",
       readyReachedAt: "2026-07-17T00:05:00.000Z",
@@ -269,7 +287,7 @@ test("cancelling a launch that never reached ready reads as launch cancelled (fi
   const view = foldLaunchJourney({
     entry: entry({
       desiredState: "stopped",
-      observedState: "absent",
+      observedState: "stopped",
       agentSessionBindingState: "historical",
       readyReachedAt: null,
     }),
@@ -300,10 +318,48 @@ test("a terminal cancelled/stopped outcome leaves zero active steps and marks th
   assert.equal(cancelled.phases.some((phase) => phase.state === "cancelled"), true);
 
   const stopped = foldLaunchJourney({
-    entry: entry({ desiredState: "stopped", observedState: "absent", agentSessionBindingState: "none" }),
+    entry: entry({ desiredState: "stopped", observedState: "stopped", agentSessionBindingState: "none" }),
   });
   assert.equal(stopped.phases.filter((phase) => phase.state === "active").length, 0);
   assert.equal(stopped.phases.some((phase) => phase.state === "cancelled"), true);
+});
+
+test("persisted stop intent is shown as Cancelling until observed stop", () => {
+  const view = foldLaunchJourney({
+    entry: entry({ desiredState: "stopped", observedState: "stopping", workspacePath: "/tmp/wt", providerPid: 7 }),
+  });
+
+  assert.equal(view.status, "stopping");
+  assert.equal(view.stopped, false);
+  assert.equal(view.stopFailed, false);
+  assert.match(view.headline, /Cancelling Codex launch/);
+  const cancelling = view.phases.find((phase) => phase.state === "stopping");
+  assert.equal(cancelling?.label, "Cancelling launch");
+  assert.match(cancelling?.detail ?? "", /stop safely/);
+  assert.equal(view.phases.some((phase) => phase.state === "active"), false);
+});
+
+test("a failed persisted stop becomes actionable instead of staying Cancelling", () => {
+  const view = foldLaunchJourney({
+    entry: entry({
+      desiredState: "stopped",
+      observedState: "failed",
+      workspacePath: "/tmp/wt",
+      providerPid: 7,
+      lastError: "provider did not exit",
+    }),
+  });
+
+  assert.equal(view.status, "failed");
+  assert.equal(view.failed, true);
+  assert.equal(view.stopFailed, true);
+  assert.equal(view.stopped, false);
+  assert.doesNotMatch(view.headline, /Cancelling/);
+  assert.match(view.headline, /Couldn't stop the Codex agent/);
+  assert.equal(view.failureDetail, "provider did not exit");
+  assert.equal(view.recovery, null, "the stop control owns retry; launch retry must not create a replacement");
+  assert.equal(view.phases.some((phase) => phase.state === "stopping"), false);
+  assert.equal(view.phases.some((phase) => phase.state === "failed"), true);
 });
 
 test("a connected-then-cancelled launch keeps the connected step done (finding 4)", () => {

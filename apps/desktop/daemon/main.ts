@@ -72,6 +72,19 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
     (payload.latestTurn as Record<string, unknown> | undefined)?.status,
     (payload.item as Record<string, unknown> | undefined)?.status,
   ].flatMap(nestedStatus);
+  const item = payload.item as Record<string, unknown> | undefined;
+  const failedMcpToolCall = /^item\/completed$/i.test(method)
+    && item?.type === "mcpToolCall"
+    && (item.status === "failed" || Boolean(item.error));
+  // A tool can fail while the provider process and persistent worker turn are
+  // healthy. In particular, a room long-poll or local supervisor checkpoint
+  // timeout is retryable coordination evidence, never a process terminal.
+  if (failedMcpToolCall) {
+    const failedToolName = [item?.tool, item?.name, item?.toolName, item?.tool_name];
+    const failedRoomWait = failedToolName.some((value) => typeof value === "string"
+      && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages"));
+    return failedRoomWait ? "idle" : "working";
+  }
   const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
   const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
   const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
@@ -394,6 +407,15 @@ export class SupervisorDaemon {
         const updated = await this.setDesiredState(String(params.id ?? ""), String(params.desired_state ?? "") as DesiredState);
         return this.entryWithDerivedLiveness(updated);
       }
+      if (request.method === "manifest.compare_and_set_desired_state") {
+        const params = this.paramsRecord(request.params);
+        const result = await this.compareAndSetDesiredState(
+          String(params.id ?? ""),
+          String(params.expected_desired_state ?? "") as DesiredState,
+          String(params.desired_state ?? "") as DesiredState,
+        );
+        return { applied: result.applied, entry: await this.entryWithDerivedLiveness(result.entry) };
+      }
       if (request.method === "manifest.control_turn") {
         const params = this.paramsRecord(request.params);
         return this.controlTurn({
@@ -462,6 +484,18 @@ export class SupervisorDaemon {
           api_url: String(params.api_url ?? ""),
         });
       }
+      if (request.method === "supervisor.verify_worker_session") {
+        const params = this.paramsRecord(request.params);
+        return this.verifyWorkerSession({
+          entry_id: String(params.entry_id ?? ""),
+          room_id: String(params.room_id ?? ""),
+          work_attempt_id: String(params.work_attempt_id ?? ""),
+          execution_generation_id: String(params.execution_generation_id ?? ""),
+          agent_session_id: String(params.agent_session_id ?? ""),
+          agent_session_token: String(params.agent_session_token ?? ""),
+          api_url: String(params.api_url ?? ""),
+        });
+      }
       if (request.method === "supervisor.checkpoint_worker_cursor") {
         const params = this.paramsRecord(request.params);
         return this.checkpointWorkerCursor({
@@ -485,6 +519,7 @@ export class SupervisorDaemon {
     await this.singleton.acquire();
     this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
     this.manifestGeneration = (await this.store.load()).generation;
+    await this.quarantineDuplicateSupervisedLaneOwners();
     await this.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
     await this.socket.start();
@@ -590,6 +625,39 @@ export class SupervisorDaemon {
     if (!["running", "paused", "stopped"].includes(entry.desired_state)) throw new Error("Invalid desired state.");
   }
 
+  private isSupervisedLaneOwner(entry: DaemonManifestEntry): boolean {
+    return !(entry.desired_state === "stopped" && entry.observed_state === "stopped");
+  }
+
+  private async quarantineDuplicateSupervisedLaneOwners(): Promise<void> {
+    await this.serializeManifestMutation(async () => {
+      const manifest = await this.store.load();
+      const ownersByLane = new Map<string, DaemonManifestEntry[]>();
+      for (const entry of manifest.entries) {
+        if (!this.isSupervisedLaneOwner(entry)) continue;
+        const key = `${entry.room_id}\u0000${entry.provider}`;
+        const owners = ownersByLane.get(key) ?? [];
+        owners.push(entry);
+        ownersByLane.set(key, owners);
+      }
+      const duplicateIds = new Set(
+        [...ownersByLane.values()]
+          .filter((owners) => owners.length > 1)
+          .flatMap((owners) => owners.map((entry) => entry.id)),
+      );
+      if (!duplicateIds.size) return;
+      const entries = manifest.entries.map((entry) => duplicateIds.has(entry.id)
+        ? {
+            ...entry,
+            desired_state: "stopped" as const,
+            last_error: "LetAgents found multiple supervised agents for this provider lane after restart and stopped them to prevent duplicate work.",
+          }
+        : entry);
+      const next = await this.writeManifest(this.manifestGeneration, entries, manifest.legacy_lane_owners);
+      this.manifestGeneration = next.generation;
+    });
+  }
+
   private async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
     this.validateEntry(entry);
     const updated = await this.serializeManifestMutation(async () => {
@@ -619,6 +687,14 @@ export class SupervisorDaemon {
         return existing;
       }
       if (entry.desired_state !== "stopped") {
+        const supervisedOwner = manifest.entries.find((candidate) =>
+          candidate.id !== entry.id
+          && candidate.room_id === entry.room_id
+          && candidate.provider === entry.provider
+          && this.isSupervisedLaneOwner(candidate));
+        if (supervisedOwner) {
+          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
+        }
         // A paused supervised entry may atomically become the pending transfer
         // claim while one legacy engine is still running. It cannot activate
         // until that exact legacy reservation has been released.
@@ -653,6 +729,14 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       if (desiredState !== "stopped") {
+        const supervisedOwner = manifest.entries.find((candidate) =>
+          candidate.id !== entry.id
+          && candidate.room_id === entry.room_id
+          && candidate.provider === entry.provider
+          && this.isSupervisedLaneOwner(candidate));
+        if (supervisedOwner) {
+          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
+        }
         const legacyOwner = legacyOwners.find((candidate) =>
           candidate.room_id === entry.room_id && candidate.provider === entry.provider);
         if (legacyOwner && desiredState === "running") {
@@ -667,6 +751,48 @@ export class SupervisorDaemon {
     if (desiredState !== "running") this.clearRecoveryConvergence(id);
     this.requestConvergence(id);
     return updated;
+  }
+
+  private async compareAndSetDesiredState(
+    id: string,
+    expectedDesiredState: DesiredState,
+    desiredState: DesiredState,
+  ): Promise<{ applied: boolean; entry: DaemonManifestEntry }> {
+    if (!id) throw new Error("Manifest entry id is required.");
+    if (!["running", "paused", "stopped"].includes(expectedDesiredState)) throw new Error("Invalid expected desired state.");
+    if (!["running", "paused", "stopped"].includes(desiredState)) throw new Error("Invalid desired state.");
+    const result = await this.serializeManifestMutation(async () => {
+      await this.singleton.assertCurrent();
+      const manifest = await this.store.load();
+      const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
+      const entry = manifest.entries.find((candidate) => candidate.id === id);
+      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
+      if (entry.desired_state !== expectedDesiredState) return { applied: false, entry };
+      if (desiredState !== "stopped") {
+        const supervisedOwner = manifest.entries.find((candidate) =>
+          candidate.id !== entry.id
+          && candidate.room_id === entry.room_id
+          && candidate.provider === entry.provider
+          && this.isSupervisedLaneOwner(candidate));
+        if (supervisedOwner) {
+          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
+        }
+        const legacyOwner = legacyOwners.find((candidate) =>
+          candidate.room_id === entry.room_id && candidate.provider === entry.provider);
+        if (legacyOwner && desiredState === "running") {
+          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
+        }
+      }
+      const updated = { ...entry, desired_state: desiredState };
+      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate), legacyOwners);
+      this.manifestGeneration = next.generation;
+      return { applied: true, entry: updated };
+    });
+    if (result.applied) {
+      if (desiredState !== "running") this.clearRecoveryConvergence(id);
+      this.requestConvergence(id);
+    }
+    return result;
   }
 
   private controlTurn(input: {
@@ -1038,7 +1164,7 @@ export class SupervisorDaemon {
         return duplicate;
       }
       const supervisedOwner = manifest.entries.find((candidate) =>
-        candidate.room_id === input.room_id && candidate.provider === input.provider && candidate.desired_state !== "stopped");
+        candidate.room_id === input.room_id && candidate.provider === input.provider && this.isSupervisedLaneOwner(candidate));
       if (supervisedOwner) {
         throw new Error(`Provider lane '${input.room_id}/${input.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
       }
@@ -1814,8 +1940,15 @@ export class SupervisorDaemon {
     await this.serializeCursorCheckpoint(entry.id, async () => {
       const executionGenerationId = entry.provider_ref?.execution_generation_id;
       if (!entry.work_attempt_id || !executionGenerationId) return;
+      const currentEntry = (await this.store.load()).entries.find((candidate) => candidate.id === entry.id);
+      if (!currentEntry
+        || currentEntry.room_id !== entry.room_id
+        || currentEntry.work_attempt_id !== entry.work_attempt_id
+        || currentEntry.provider_ref?.execution_generation_id !== executionGenerationId) return;
       const binding = await this.workerBindings.get(entry.id);
       if (!binding
+        || binding.entry_id !== entry.id
+        || binding.room_id !== entry.room_id
         || binding.work_attempt_id !== entry.work_attempt_id
         || binding.agent_session_id !== agentSessionId
         || binding.execution_generation_id !== executionGenerationId) return;
@@ -1825,9 +1958,11 @@ export class SupervisorDaemon {
         executionGenerationId,
         roomCursor,
       );
-      if (!checkpoint.advanced) return;
+      const durableAttempt = await this.durability.getAttempt(entry.work_attempt_id);
+      const durableCursor = checkpoint.binding.room_cursor;
+      if (!durableCursor || (!checkpoint.advanced && durableAttempt.checkpoints.at(-1)?.room_cursor === durableCursor)) return;
       await this.durability.checkpoint(entry.work_attempt_id, {
-        room_cursor: roomCursor,
+        room_cursor: durableCursor,
         provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
       });
     });
@@ -1880,16 +2015,26 @@ export class SupervisorDaemon {
   }
 
   private async bindWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
+    return this.serializeEntryTick(input.entry_id, () => this.bindWorkerSessionLocked(input));
+  }
+
+  private async bindWorkerSessionLocked(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
     if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
     if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker session work attempt does not match the supervised manifest entry.");
+    if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
+      throw new Error("Worker session execution generation does not match the active supervised manifest entry.");
+    }
     const attempt = await this.durability.getAttempt(input.work_attempt_id);
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
     const currentBinding = await this.workerBindings.get(input.entry_id);
     const normalizedApiUrl = new URL(input.api_url).origin;
     const exactCurrentBinding = Boolean(currentBinding
+      && currentBinding.entry_id === input.entry_id
+      && currentBinding.room_id === input.room_id
+      && currentBinding.work_attempt_id === input.work_attempt_id
       && currentBinding.execution_generation_id === input.execution_generation_id
       && currentBinding.agent_session_id === input.agent_session_id
       && currentBinding.agent_session_token === input.agent_session_token
@@ -1905,6 +2050,12 @@ export class SupervisorDaemon {
     this.pendingResumeBindings.delete(input.entry_id);
     await this.updateManifestEntry(input.entry_id, (current) => {
       const clearsCoordinationLatch = current.desired_state === "running" && current.condition === "coordination_blocked";
+      const manifestBindingIsCurrent = current.last_worker_binding?.agent_session_id === binding.agent_session_id
+        && current.last_worker_binding?.work_attempt_id === binding.work_attempt_id
+        && current.last_worker_binding?.execution_generation_id === binding.execution_generation_id;
+      if (current.workplace_liveness?.state === "reachable"
+        && !clearsCoordinationLatch
+        && manifestBindingIsCurrent) return current;
       return {
         ...current,
         // A successful exact-generation bind proves that an ambiguous live
@@ -1942,35 +2093,82 @@ export class SupervisorDaemon {
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
 
+  private async verifyWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
+    return this.serializeEntryTick(input.entry_id, () => this.verifyWorkerSessionLocked(input));
+  }
+
+  private async verifyWorkerSessionLocked(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
+    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
+    if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
+    if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
+    if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker session work attempt does not match the supervised manifest entry.");
+    if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
+      throw new Error("Worker session execution generation does not match the active supervised manifest entry.");
+    }
+    const attempt = await this.durability.getAttempt(input.work_attempt_id);
+    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
+    if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
+    const binding = await this.workerBindings.get(input.entry_id);
+    const normalizedApiUrl = new URL(input.api_url).origin;
+    if (!binding
+      || binding.entry_id !== input.entry_id
+      || binding.room_id !== input.room_id
+      || binding.work_attempt_id !== input.work_attempt_id
+      || binding.execution_generation_id !== input.execution_generation_id
+      || binding.agent_session_id !== input.agent_session_id
+      || binding.agent_session_token !== input.agent_session_token
+      || binding.api_url !== normalizedApiUrl) {
+      throw new Error("Worker session verification does not match the active supervised binding.");
+    }
+    return { verified: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
+  }
+
   private async checkpointWorkerCursor(input: { entry_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; room_cursor: string }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {
-    return this.serializeCursorCheckpoint(input.entry_id, async () => {
+    return this.serializeEntryTick(input.entry_id, () => this.serializeCursorCheckpoint(input.entry_id, async () => {
       const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
       if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker cursor work attempt does not match the supervised manifest entry.");
+      if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
+        throw new Error("Worker cursor execution generation does not match the active supervised manifest entry.");
+      }
       const attempt = await this.durability.getAttempt(input.work_attempt_id);
       const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
       if (!execution || execution.terminal) throw new Error("Worker cursor execution generation is absent or terminal.");
       const currentBinding = await this.workerBindings.get(input.entry_id);
       if (!currentBinding
+        || currentBinding.entry_id !== input.entry_id
+        || currentBinding.room_id !== entry.room_id
+        || currentBinding.work_attempt_id !== input.work_attempt_id
         || currentBinding.agent_session_id !== input.agent_session_id
         || currentBinding.execution_generation_id !== input.execution_generation_id) {
         throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
       }
-      if (currentBinding.room_cursor === input.room_cursor) {
-        return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
-      }
-      await this.workerBindings.checkpointCursor(
+      const checkpoint = await this.workerBindings.checkpointCursorMonotonic(
         input.entry_id,
         input.agent_session_id,
         input.execution_generation_id,
         input.room_cursor,
       );
+      if (!checkpoint.advanced) {
+        const durableCursor = checkpoint.binding.room_cursor;
+        if (durableCursor && attempt.checkpoints.at(-1)?.room_cursor !== durableCursor) {
+          await this.durability.checkpoint(input.work_attempt_id, {
+            room_cursor: durableCursor,
+            provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
+          });
+        }
+        return {
+          checkpointed: true,
+          entry_id: input.entry_id,
+          room_cursor: checkpoint.binding.room_cursor ?? input.room_cursor,
+        };
+      }
       await this.durability.checkpoint(input.work_attempt_id, {
         room_cursor: input.room_cursor,
         provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
       });
       return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
-    });
+    }));
   }
 
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
@@ -2048,6 +2246,7 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
       const updated = update(entry);
+      if (updated === entry) return entry;
       const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
       this.manifestGeneration = next.generation;
       return updated;

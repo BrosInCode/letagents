@@ -24,7 +24,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.17";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.18";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -279,6 +279,20 @@ export class SupervisorDaemonClient {
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
   }
 
+  async compareAndSetDesiredState(
+    id: string,
+    expectedDesiredState: DesktopSupervisorDesiredState,
+    desiredState: DesktopSupervisorDesiredState,
+  ): Promise<DesktopSupervisorManifestEntry | null> {
+    await this.ensureRunning();
+    const result = await this.request<{ applied: boolean; entry: WireEntry }>("manifest.compare_and_set_desired_state", {
+      id,
+      expected_desired_state: expectedDesiredState,
+      desired_state: desiredState,
+    });
+    return result.applied ? mapEntry(result.entry) : null;
+  }
+
   async controlTurn(input: DesktopSupervisorTurnControlInput): Promise<DesktopSupervisorTurnControlResult> {
     await this.ensureRunning();
     return this.request<DesktopSupervisorTurnControlResult>("manifest.control_turn", {
@@ -363,6 +377,11 @@ export class SupervisorDaemonClient {
         const status = mapStatus(result);
         if (status.protocolVersion !== SUPERVISOR_DAEMON_PROTOCOL_VERSION) {
           throw new SupervisorDaemonProtocolMismatchError(SUPERVISOR_DAEMON_PROTOCOL_VERSION, status.protocolVersion, "Replacement daemon protocol does not match the desktop.");
+        }
+        if (status.implementationVersion !== SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION) {
+          throw new Error(
+            `Replacement supervisor daemon is still ${status.implementationVersion}; expected ${SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION}. Rebuild the desktop daemon and try again.`,
+          );
         }
         return status;
       } catch (error) {

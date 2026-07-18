@@ -29,6 +29,7 @@ import {
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
+  type ProviderAttachTerminal,
   type ProviderConnectionRef,
   type ProviderContinuationRef,
   type ProviderHandle,
@@ -206,11 +207,23 @@ function configuredMcpServerNames(value: unknown): string[] {
   });
 }
 
+function isTransientWorkplaceProbeFailure(error: unknown): boolean {
+  return /(?:timed?\s*out|timeout|aborted|temporar(?:y|ily)|unavailable|connection\s+(?:closed|reset)|socket\s+hang\s+up)/i.test(
+    errorMessage(error),
+  );
+}
+
 async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void> {
   let response: unknown;
   try {
     response = await client.request("mcpServerStatus/list", {});
   } catch (error) {
+    // This RPC is only an observability probe. The daemon already injects the
+    // exact LetAgents MCP config into the Codex app-server launch, and the
+    // worker's register_agent_session + wait evidence is the authoritative
+    // readiness gate. A busy MCP host can time this probe out while the room
+    // worker is healthy; do not kill or strand that durable execution.
+    if (isTransientWorkplaceProbeFailure(error)) return;
     throw new Error(`Unable to verify the LetAgents MCP workplace: ${errorMessage(error)}`);
   }
   if (!configuredMcpServerNames(response).some((name) => name.toLowerCase() === "letagents")) {
@@ -265,7 +278,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly handles = new Map<string, CodexProviderHandle>();
-  private readonly pendingAttaches = new Map<string, Promise<CodexProviderHandle | null>>();
+  private readonly pendingAttaches = new Map<string, Promise<CodexProviderHandle | ProviderAttachTerminal | null>>();
   private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
   // P0 proved app-server thread/resume on the supported Codex runtime. Start
   // optimistic so a fresh reconciler can select resume, then durably downgrade
@@ -289,7 +302,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return this.start(req, null);
   }
 
-  async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | null> {
+  async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
     const handle = this.handles.get(ref.workAttemptId);
     if (
       !handle ||
@@ -632,7 +645,30 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private async attachRunning(
     ref: ProviderContinuationRef,
     connection: Extract<ProviderConnectionRef, { kind: "codex_app_server" }>,
-  ): Promise<CodexProviderHandle | null> {
+  ): Promise<CodexProviderHandle | ProviderAttachTerminal | null> {
+    if (connection.pid === null || !connection.processIdentity) {
+      throw new Error(
+        "Codex app-server attach is ambiguous; refusing to launch a second writer: the durable endpoint has no verified process identity.",
+      );
+    }
+    const initialIdentity = this.deps.getProcessIdentity(connection.pid);
+    if (initialIdentity === undefined) {
+      throw new Error(
+        "Codex app-server attach is ambiguous; refusing to launch a second writer: the recorded process identity cannot be verified.",
+      );
+    }
+    if (initialIdentity === null || !sameProcessBirthIdentity(initialIdentity, connection.processIdentity)) {
+      return {
+        state: "terminal",
+        terminal: {
+          endedAt: this.deps.now(),
+          exitCode: null,
+          signal: null,
+          terminalCause: "crashed",
+          providerContinuationId: ref.providerContinuationId,
+        },
+      };
+    }
     let handle: CodexProviderHandle | null = null;
     let exactEndpointVerified = false;
     const pendingNotifications: RpcNotification[] = [];
@@ -700,7 +736,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
         && connection.processIdentity
         && currentIdentity !== undefined
         && (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity))
-      ) return null;
+      ) {
+        return {
+          state: "terminal",
+          terminal: {
+            endedAt: this.deps.now(),
+            exitCode: null,
+            signal: null,
+            terminalCause: "crashed",
+            providerContinuationId: ref.providerContinuationId,
+          },
+        };
+      }
       throw new Error(
         `Codex app-server attach is ambiguous; refusing to launch a second writer: ${errorMessage(error)}`,
       );

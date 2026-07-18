@@ -117,6 +117,37 @@ test("real workplace/session evidence advances Connecting -> Registering (coordi
   assert.equal(progress.joinHint, "The agent will join the room shortly.");
 });
 
+test("an unattached durable generation is an actionable recovery failure, not an endless join", () => {
+  const progress = supervisedLaunchProgress(entry({
+    workspacePath: "/tmp/wt",
+    providerPid: 4242,
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "durable execution generation remains live without an attachable provider handle",
+  }));
+
+  assert.equal(progress.failed, true);
+  assert.equal(progress.recoverableBlocked, true);
+  assert.equal(progress.currentPhaseId, "connecting_room");
+  assert.equal(stateOf(progress, "connecting_room"), "failed");
+  assert.match(progress.failureDetail ?? "", /can't currently reconnect/i);
+  assert.equal(progress.joinHint, null);
+});
+
+test("expected exact-bind coordination remains an in-progress registration", () => {
+  const progress = supervisedLaunchProgress(entry({
+    workspacePath: "/tmp/wt",
+    providerPid: 4242,
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "resumed provider awaits exact worker wait evidence",
+  }));
+
+  assert.equal(progress.failed, false);
+  assert.equal(progress.recoverableBlocked, false);
+  assert.equal(progress.currentPhaseId, "connecting_room");
+});
+
 const readyEntry = (overrides = {}) => entry({
   displayName: "QuartzMeadow",
   workspacePath: "/tmp/wt",
@@ -216,17 +247,79 @@ test("observedState failed is a failure even with condition none", () => {
   assert.equal(stateOf(progress, progress.currentPhaseId), "failed");
 });
 
-test("a stopped launch is reported as stopped, not failed", () => {
+test("stop intent stays nonterminal until the daemon observes the provider stopped", () => {
   const progress = supervisedLaunchProgress(entry({
     desiredState: "stopped",
     workspacePath: "/tmp/wt",
     providerPid: 4242,
     observedState: "stopping",
   }));
-  assert.equal(progress.stopped, true);
+  assert.equal(progress.stopping, true);
+  assert.equal(progress.stopFailed, false);
+  assert.equal(progress.stopped, false);
   assert.equal(progress.failed, false);
   assert.equal(progress.ready, false);
   assert.equal(progress.joinHint, null);
+
+  const stopped = supervisedLaunchProgress(entry({
+    desiredState: "stopped",
+    observedState: "stopped",
+  }));
+  assert.equal(stopped.stopping, false);
+  assert.equal(stopped.stopFailed, false);
+  assert.equal(stopped.stopped, true);
+});
+
+test("a failed stop is actionable instead of remaining in Cancelling", () => {
+  const progress = supervisedLaunchProgress(entry({
+    desiredState: "stopped",
+    observedState: "failed",
+    workspacePath: "/tmp/wt",
+    providerPid: 4242,
+    lastError: "provider did not exit",
+  }));
+
+  assert.equal(progress.stopping, false);
+  assert.equal(progress.stopFailed, true);
+  assert.equal(progress.failed, true);
+  assert.match(progress.headline, /Couldn't stop the Codex agent/);
+  assert.equal(progress.failureDetail, "provider did not exit");
+  assert.equal(stateOf(progress, progress.currentPhaseId), "failed");
+});
+
+test("an actionable condition after stop intent is a failed stop", () => {
+  const progress = supervisedLaunchProgress(entry({
+    desiredState: "stopped",
+    observedState: "recovering",
+    condition: "security_blocked",
+    lastError: "policy prevented termination",
+  }));
+
+  assert.equal(progress.stopping, false);
+  assert.equal(progress.stopFailed, true);
+  assert.equal(progress.failed, true);
+  assert.equal(progress.failureDetail, "policy prevented termination");
+});
+
+test("stop intent suppresses stale ready but surfaces an actionable stop condition", () => {
+  const formerlyReady = supervisedLaunchProgress(readyEntry({
+    desiredState: "stopped",
+    observedState: "working",
+  }));
+  assert.equal(formerlyReady.stopping, true);
+  assert.equal(formerlyReady.ready, false);
+  assert.equal(formerlyReady.failed, false);
+
+  const formerlyBlocked = supervisedLaunchProgress(entry({
+    desiredState: "stopped",
+    observedState: "stopping",
+    condition: "coordination_blocked",
+    lastError: "durable execution generation remains live without an attachable provider handle",
+  }));
+  assert.equal(formerlyBlocked.stopping, false);
+  assert.equal(formerlyBlocked.stopFailed, true);
+  assert.equal(formerlyBlocked.recoverableBlocked, false);
+  assert.equal(formerlyBlocked.failed, true);
 });
 
 test("provider label is human-readable and provider-neutral", () => {

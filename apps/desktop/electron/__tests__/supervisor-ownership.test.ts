@@ -1,10 +1,26 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   launchLegacyWithOwnership,
   transferSupervisorOwnership,
 } from "../main/supervisor-ownership.js";
+
+const ipcSource = readFileSync(fileURLToPath(new URL("../main/ipc.ts", import.meta.url)), "utf8");
+
+test("paused launch recovery reuses the guarded ownership transfer path", () => {
+  const resumeHandler = ipcSource.slice(
+    ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),
+    ipcSource.indexOf('"desktop:supervisor:set-desired-state"'),
+  );
+  assert.match(resumeHandler, /transferSupervisorOwnership\(/);
+  assert.match(resumeHandler, /listDesktopManagedAgentSessions\(entry\.roomId\)/);
+  assert.match(resumeHandler, /stopDesktopManagedAgent/);
+  assert.match(resumeHandler, /compareAndSetDesiredState\(manifest\.id, "paused", "running"\)/);
+  assert.match(resumeHandler, /entry\.provider === "claude-code"[\s\S]*refreshInstalledLetAgentsMcpServerAuth/);
+});
 
 test("supervisor ownership claims before legacy teardown and activates last", async () => {
   const order: string[] = [];
@@ -28,6 +44,25 @@ test("supervisor ownership rolls back its durable claim when legacy teardown fai
     activate: async (manifest) => { order.push("activate"); return manifest; },
     rollback: async () => { order.push("rollback"); },
   }), /teardown failed/);
+  assert.deepEqual(order, ["claim", "stop", "rollback"]);
+});
+
+test("supervisor ownership preserves teardown and rollback failures", async () => {
+  const order: string[] = [];
+  const teardownError = new Error("teardown failed");
+  const rollbackError = new Error("rollback failed");
+  await assert.rejects(() => transferSupervisorOwnership({
+    claim: async () => { order.push("claim"); return { id: "supervised_3" }; },
+    listLegacy: () => ["legacy_a"],
+    stopLegacy: async () => { order.push("stop"); throw teardownError; },
+    activate: async (manifest) => { order.push("activate"); return manifest; },
+    rollback: async () => { order.push("rollback"); throw rollbackError; },
+  }), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.match(error.message, /could not be rolled back/);
+    assert.deepEqual(error.errors, [teardownError, rollbackError]);
+    return true;
+  });
   assert.deepEqual(order, ["claim", "stop", "rollback"]);
 });
 
@@ -91,5 +126,43 @@ test("post-spawn activation failure stops the legacy engine before releasing its
     stop: async () => { order.push("stop"); },
     release: async () => { order.push("release"); },
   }), /activation failed/);
+  assert.deepEqual(order, ["reserve", "spawn", "activate", "stop", "release"]);
+});
+
+test("a pre-spawn failure preserves both the start and reservation release failures", async () => {
+  const order: string[] = [];
+  const startError = new Error("spawn failed");
+  const releaseError = new Error("release failed");
+  await assert.rejects(() => launchLegacyWithOwnership({
+    reserve: async () => { order.push("reserve"); },
+    start: async () => { order.push("spawn"); throw startError; },
+    activate: async () => { order.push("activate"); },
+    stop: async () => { order.push("stop"); },
+    release: async () => { order.push("release"); throw releaseError; },
+  }), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.match(error.message, /before spawn/);
+    assert.deepEqual(error.errors, [startError, releaseError]);
+    return true;
+  });
+  assert.deepEqual(order, ["reserve", "spawn", "release"]);
+});
+
+test("a post-spawn failure preserves both activation and reservation release failures", async () => {
+  const order: string[] = [];
+  const activationError = new Error("activation failed");
+  const releaseError = new Error("release failed");
+  await assert.rejects(() => launchLegacyWithOwnership({
+    reserve: async () => { order.push("reserve"); },
+    start: async () => { order.push("spawn"); return { sessionId: "legacy_session" }; },
+    activate: async () => { order.push("activate"); throw activationError; },
+    stop: async () => { order.push("stop"); },
+    release: async () => { order.push("release"); throw releaseError; },
+  }), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.match(error.message, /after spawn cleanup/);
+    assert.deepEqual(error.errors, [activationError, releaseError]);
+    return true;
+  });
   assert.deepEqual(order, ["reserve", "spawn", "activate", "stop", "release"]);
 });

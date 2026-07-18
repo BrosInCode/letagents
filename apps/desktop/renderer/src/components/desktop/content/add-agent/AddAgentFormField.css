@@ -1,0 +1,23 @@
+.desktop-add-agent-model-custom-input {
+  display: grid;
+  gap: 4px;
+}
+
+.desktop-add-agent-model-custom-input small {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+}
+
+.desktop-add-agent-model-custom-input textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
