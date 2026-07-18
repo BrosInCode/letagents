@@ -544,6 +544,7 @@ test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native
   const preparedEntry: DaemonManifestEntry = {
     ...entry,
     id: "restart_prepared_control",
+    room_id: "room-prepared-control",
     turn_control: {
       ...entry.turn_control!,
       action_id: "action_prepared_before_crash",
@@ -553,6 +554,7 @@ test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native
   const appliedEntry: DaemonManifestEntry = {
     ...entry,
     id: "restart_applied_control",
+    room_id: "room-applied-control",
     turn_control: {
       ...entry.turn_control!,
       action_id: "action_operator_verified_applied",

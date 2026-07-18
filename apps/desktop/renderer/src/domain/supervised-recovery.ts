@@ -14,6 +14,7 @@ export interface SupervisedRecoveryClient {
 export interface SupervisedRecoveryLookup {
   entry: DesktopSupervisorManifestEntry | null;
   error: string | null;
+  cause: unknown | null;
 }
 
 /**
@@ -31,11 +32,12 @@ export async function refreshSupervisedRuntimeEntry(
 ): Promise<SupervisedRecoveryLookup> {
   try {
     const entry = (await client.listAgents(roomIdentifier)).find((candidate) => candidate.id === entryId) || null;
-    return { entry, error: null };
-  } catch {
+    return { entry, error: null, cause: null };
+  } catch (cause) {
     return {
       entry: null,
       error: "Could not refresh the supervised runtime. Check the daemon connection; the existing runtime was not restarted.",
+      cause,
     };
   }
 }

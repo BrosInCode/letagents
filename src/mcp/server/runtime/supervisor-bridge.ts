@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
@@ -9,6 +9,7 @@ import type { StoredAgentSessionState } from "../../local-state.js";
 const NEGOTIATION_PROTOCOL_VERSION = 1;
 const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2]);
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const CONFIRMED_BINDING_VERIFY_TIMEOUT_MS = 250;
 const SUPERVISOR_CONTEXT_FILE = ".letagents-supervisor-context.json";
 const WORK_ATTEMPT_MARKER_FILE = ".letagents-work-attempt.json";
 const MAX_SUPERVISOR_CONTEXT_BYTES = 4 * 1024;
@@ -19,6 +20,10 @@ type SupervisorBridgeOptions = {
   cwd?: string;
   /** Tests may inject a private socket; production always uses the canonical local daemon path. */
   trustedDaemonSocketPath?: string;
+  /** Keep an already-proven exact generation off the room-delivery latency path. */
+  allowConfirmedFastPath?: boolean;
+  /** Internal snapshot used to keep an async checkpoint on its original generation. */
+  resolvedCoordinates?: ResolvedSupervisorCoordinates;
 };
 type SupervisorCoordinates = {
   entryId: string;
@@ -29,6 +34,24 @@ type SupervisorCoordinates = {
 type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
   supervisorContextCwd: string | null;
 };
+type NegotiatedSupervisor = {
+  protocolVersion: number;
+  daemonIdentity: string | null;
+};
+
+const confirmedBindingsBySession = new Map<string, string>();
+const confirmedRequestsBySession = new Map<string, string>();
+const confirmedProtocolsBySession = new Map<string, number>();
+const pendingCursorCheckpoints = new Map<string, {
+  session: StoredAgentSessionState;
+  roomCursor: string;
+  env: NodeJS.ProcessEnv;
+  options: SupervisorBridgeOptions;
+  retryAttempt: number;
+}>();
+const activeCursorCheckpointDrains = new Set<string>();
+const cursorCheckpointRetryTimers = new Map<string, NodeJS.Timeout>();
+const CURSOR_CHECKPOINT_RETRY_DELAYS_MS = [250, 1_000, 3_000] as const;
 
 export type SupervisedWorkerBindingResult = {
   bound: boolean;
@@ -55,21 +78,39 @@ export async function bindSupervisedWorkerSessionWithContext(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<SupervisedWorkerBindingResult> {
-  const coordinates = await resolveSupervisorCoordinates(session, env, options);
+  const coordinates = options.resolvedCoordinates ?? await resolveSupervisorCoordinates(session, env, options);
   if (!coordinates) return { bound: false, supervisorContextCwd: null };
   const { entryId, socketPath, workAttemptId, executionGenerationId } = coordinates;
   if (session.session_kind !== "worker") throw new Error("A supervised provider must register a worker session.");
 
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Supervisor bridge timeout must be a positive integer.");
-  const negotiation = await supervisorRequest(socketPath, {
-    version: NEGOTIATION_PROTOCOL_VERSION,
-    id: randomUUID(),
-    method: "daemon.negotiate",
-  }, timeoutMs);
-  if (!negotiation.ok) throw new Error(negotiation.error || "Supervisor protocol negotiation failed.");
-  const protocolVersion = negotiationProtocolVersion(negotiation.result);
-  if (negotiation.version !== protocolVersion) throw new Error("Supervisor negotiation response version does not match its negotiated protocol.");
+  const requestKey = bindingRequestKey(session, coordinates, env);
+  if (options.allowConfirmedFastPath && confirmedRequestsBySession.get(session.session_id) === requestKey) {
+    const confirmedProtocol = confirmedProtocolsBySession.get(session.session_id);
+    if (!confirmedProtocol) throw new Error("The supervised worker binding protocol is not confirmed.");
+    try {
+      await verifyConfirmedBinding(
+        session,
+        coordinates,
+        env,
+        confirmedProtocol,
+        Math.min(timeoutMs, CONFIRMED_BINDING_VERIFY_TIMEOUT_MS),
+      );
+    } catch (error) {
+      clearBindingConfirmationIfCurrent(session.session_id, requestKey);
+      throw error;
+    }
+    return { bound: true, supervisorContextCwd: coordinates.supervisorContextCwd };
+  }
+  const deadline = Date.now() + timeoutMs;
+  const { protocolVersion, daemonIdentity } = await negotiateSupervisor(socketPath, timeoutMs);
+  const bindingKey = daemonIdentity ? `${requestKey}\u0000${daemonIdentity}` : null;
+  if (bindingKey && confirmedBindingsBySession.get(session.session_id) === bindingKey) {
+    confirmedRequestsBySession.set(session.session_id, requestKey);
+    confirmedProtocolsBySession.set(session.session_id, protocolVersion);
+    return { bound: true, supervisorContextCwd: coordinates.supervisorContextCwd };
+  }
 
   const response = await supervisorRequest(socketPath, {
     version: protocolVersion,
@@ -84,10 +125,71 @@ export async function bindSupervisedWorkerSessionWithContext(
       agent_session_token: session.session_token,
       api_url: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
     },
-  }, timeoutMs);
+  }, remainingRequestTimeout(deadline));
   if (!response.ok) throw new Error(response.error || "Supervisor rejected the worker session binding.");
   if (response.version !== protocolVersion) throw new Error("Supervisor binding response used an unexpected protocol version.");
+  if (bindingKey) {
+    confirmedRequestsBySession.set(session.session_id, requestKey);
+    confirmedBindingsBySession.set(session.session_id, bindingKey);
+    confirmedProtocolsBySession.set(session.session_id, protocolVersion);
+  } else {
+    // Without a stable daemon identity we cannot prove that a later process at
+    // the same socket owns this confirmation, so every wait binds strictly.
+    confirmedRequestsBySession.delete(session.session_id);
+    confirmedBindingsBySession.delete(session.session_id);
+    confirmedProtocolsBySession.delete(session.session_id);
+  }
   return { bound: true, supervisorContextCwd: coordinates.supervisorContextCwd };
+}
+
+function bindingRequestKey(
+  session: StoredAgentSessionState,
+  coordinates: SupervisorCoordinates,
+  env: NodeJS.ProcessEnv,
+): string {
+  const tokenDigest = createHash("sha256").update(session.session_token).digest("hex");
+  return [
+    coordinates.socketPath,
+    coordinates.entryId,
+    coordinates.workAttemptId,
+    coordinates.executionGenerationId,
+    session.session_id,
+    session.room_id,
+    tokenDigest,
+    new URL(env.LETAGENTS_API_URL?.trim() || "https://letagents.chat").origin,
+  ].join("\u0000");
+}
+
+async function verifyConfirmedBinding(
+  session: StoredAgentSessionState,
+  coordinates: SupervisorCoordinates,
+  env: NodeJS.ProcessEnv,
+  protocolVersion: number,
+  timeoutMs: number,
+): Promise<void> {
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: protocolVersion,
+    id: randomUUID(),
+    method: "supervisor.verify_worker_session",
+    params: {
+      entry_id: coordinates.entryId,
+      room_id: session.room_id,
+      work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId,
+      agent_session_id: session.session_id,
+      agent_session_token: session.session_token,
+      api_url: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
+    },
+  }, timeoutMs);
+  if (!response.ok) throw new Error(response.error || "Supervisor rejected the worker session verification.");
+  if (response.version !== protocolVersion) throw new Error("Supervisor verification response used an unexpected protocol version.");
+}
+
+function clearBindingConfirmationIfCurrent(sessionId: string, requestKey: string): void {
+  if (confirmedRequestsBySession.get(sessionId) !== requestKey) return;
+  confirmedRequestsBySession.delete(sessionId);
+  confirmedBindingsBySession.delete(sessionId);
+  confirmedProtocolsBySession.delete(sessionId);
 }
 
 /** Persist the room-delivery cursor beside the daemon-private exact worker credential. */
@@ -97,21 +199,15 @@ export async function checkpointSupervisedWorkerCursor(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<boolean> {
-  const coordinates = await resolveSupervisorCoordinates(session, env, options);
+  const coordinates = options.resolvedCoordinates ?? await resolveSupervisorCoordinates(session, env, options);
   if (!coordinates) return false;
   const { entryId, socketPath, workAttemptId, executionGenerationId } = coordinates;
   if (session.session_kind !== "worker") throw new Error("A supervised provider must use a worker session.");
   if (!roomCursor.trim()) throw new Error("Supervised worker cursor is required.");
 
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const negotiation = await supervisorRequest(socketPath, {
-    version: NEGOTIATION_PROTOCOL_VERSION,
-    id: randomUUID(),
-    method: "daemon.negotiate",
-  }, timeoutMs);
-  if (!negotiation.ok) throw new Error(negotiation.error || "Supervisor protocol negotiation failed.");
-  const protocolVersion = negotiationProtocolVersion(negotiation.result);
-  if (negotiation.version !== protocolVersion) throw new Error("Supervisor negotiation response version does not match its negotiated protocol.");
+  const deadline = Date.now() + timeoutMs;
+  const { protocolVersion } = await negotiateSupervisor(socketPath, timeoutMs);
   const response = await supervisorRequest(socketPath, {
     version: protocolVersion,
     id: randomUUID(),
@@ -123,10 +219,157 @@ export async function checkpointSupervisedWorkerCursor(
       agent_session_id: session.session_id,
       room_cursor: roomCursor,
     },
-  }, timeoutMs);
+  }, remainingRequestTimeout(deadline));
   if (!response.ok) throw new Error(response.error || "Supervisor rejected the worker cursor checkpoint.");
   if (response.version !== protocolVersion) throw new Error("Supervisor cursor checkpoint response used an unexpected protocol version.");
   return true;
+}
+
+/**
+ * Coalesce an already-acknowledged cursor outside the MCP response path. The
+ * caller acknowledges a prior delivery by passing it as `after_message_id` on
+ * the next wait; newly observed output must never be checkpointed here.
+ */
+export function scheduleSupervisedWorkerCursorCheckpoint(
+  session: StoredAgentSessionState,
+  roomCursor: string,
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+): void {
+  void enqueueSupervisedWorkerCursorCheckpoint(session, roomCursor, env, options).catch((error) => {
+    console.error("[letagents] Supervised cursor checkpoint could not be scheduled:", error instanceof Error ? error.message : "unknown supervisor error");
+  });
+}
+
+async function enqueueSupervisedWorkerCursorCheckpoint(
+  session: StoredAgentSessionState,
+  roomCursor: string,
+  env: NodeJS.ProcessEnv,
+  options: SupervisorBridgeOptions,
+): Promise<void> {
+  const coordinates = await resolveSupervisorCoordinates(session, env, options);
+  if (!coordinates) return;
+  const key = [
+    session.session_id,
+    session.room_id,
+    coordinates.socketPath,
+    coordinates.entryId,
+    coordinates.workAttemptId,
+    coordinates.executionGenerationId,
+  ].join("\u0000");
+  const existing = pendingCursorCheckpoints.get(key);
+  if (existing && !isNewerRoomCursor(roomCursor, existing.roomCursor)) return;
+  pendingCursorCheckpoints.set(key, {
+    session,
+    roomCursor,
+    env,
+    options: { ...options, resolvedCoordinates: coordinates },
+    retryAttempt: 0,
+  });
+  const retryTimer = cursorCheckpointRetryTimers.get(key);
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    cursorCheckpointRetryTimers.delete(key);
+  }
+  startCursorCheckpointDrain(key);
+}
+
+async function drainCursorCheckpoints(key: string): Promise<void> {
+  try {
+    while (true) {
+      const pending = pendingCursorCheckpoints.get(key);
+      if (!pending) return;
+      pendingCursorCheckpoints.delete(key);
+      try {
+        await checkpointSupervisedWorkerCursor(
+          pending.session,
+          pending.roomCursor,
+          pending.env,
+          pending.options,
+        );
+      } catch (error) {
+        const queued = pendingCursorCheckpoints.get(key);
+        if (queued && isNewerRoomCursor(queued.roomCursor, pending.roomCursor)) continue;
+        if (isRetryableSupervisorBridgeError(error)
+          && pending.retryAttempt < CURSOR_CHECKPOINT_RETRY_DELAYS_MS.length) {
+          // A failed newer acknowledgement must not be replaced by an older
+          // concurrent wait that happened to enqueue while I/O was in flight.
+          if (queued) pendingCursorCheckpoints.delete(key);
+          const delayMs = CURSOR_CHECKPOINT_RETRY_DELAYS_MS[pending.retryAttempt]!;
+          pendingCursorCheckpoints.set(key, { ...pending, retryAttempt: pending.retryAttempt + 1 });
+          const timer = setTimeout(() => {
+            cursorCheckpointRetryTimers.delete(key);
+            startCursorCheckpointDrain(key);
+          }, delayMs);
+          timer.unref?.();
+          cursorCheckpointRetryTimers.set(key, timer);
+          console.warn("[letagents] Supervised cursor checkpoint is pending:", error instanceof Error ? error.message : "unknown supervisor error");
+          return;
+        }
+        // An authority/generation rejection is not a harmless transport blip.
+        // Make the next wait prove the exact binding again before it can read.
+        await clearCheckpointBindingConfirmationIfCurrent(pending);
+        pendingCursorCheckpoints.delete(key);
+        console.error("[letagents] Supervised cursor checkpoint was rejected:", error instanceof Error ? error.message : "unknown supervisor error");
+      }
+    }
+  } finally {
+    activeCursorCheckpointDrains.delete(key);
+    if (pendingCursorCheckpoints.has(key) && !cursorCheckpointRetryTimers.has(key)) {
+      startCursorCheckpointDrain(key);
+    }
+  }
+}
+
+async function clearCheckpointBindingConfirmationIfCurrent(pending: {
+  session: StoredAgentSessionState;
+  env: NodeJS.ProcessEnv;
+  options: SupervisorBridgeOptions;
+}): Promise<void> {
+  try {
+    const coordinates = pending.options.resolvedCoordinates
+      ?? await resolveSupervisorCoordinates(pending.session, pending.env, pending.options);
+    if (!coordinates) return;
+    clearBindingConfirmationIfCurrent(
+      pending.session.session_id,
+      bindingRequestKey(pending.session, coordinates, pending.env),
+    );
+  } catch {
+    // Missing or invalid context already fails the next wait closed.
+  }
+}
+
+function startCursorCheckpointDrain(key: string): void {
+  if (activeCursorCheckpointDrains.has(key) || cursorCheckpointRetryTimers.has(key)) return;
+  activeCursorCheckpointDrains.add(key);
+  setImmediate(() => { void drainCursorCheckpoints(key); });
+}
+
+function isNewerRoomCursor(candidate: string, current: string): boolean {
+  if (candidate === current) return false;
+  const candidateNumber = parseRoomMessageNumber(candidate);
+  const currentNumber = parseRoomMessageNumber(current);
+  if (candidateNumber !== null && currentNumber !== null) return candidateNumber > currentNumber;
+  return true;
+}
+
+function parseRoomMessageNumber(cursor: string): bigint | null {
+  const match = /^msg_(\d+)$/.exec(cursor.trim());
+  return match ? BigInt(match[1]!) : null;
+}
+
+/** Transport failures are retryable bookkeeping failures, not worker failures. */
+export function isRetryableSupervisorBridgeError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code && ["ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "ETIMEDOUT"].includes(code)) return true;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /timed out communicating|socket hang up|connection (?:closed|refused|reset)|broken pipe/i.test(message);
+}
+
+function remainingRequestTimeout(deadline: number): number {
+  const remaining = deadline - Date.now();
+  if (remaining < 1) throw new Error("Timed out communicating with the supervisor daemon.");
+  return remaining;
 }
 
 async function resolveSupervisorCoordinates(
@@ -152,7 +395,12 @@ async function resolveSupervisorCoordinates(
   const context = await readCodexSupervisorContext(
     options.cwd ?? session.supervisor_context_cwd ?? process.cwd(),
   );
-  if (!context) return null;
+  if (!context) {
+    if (session.supervisor_context_cwd?.trim()) {
+      throw new Error("The persisted supervised worker context is missing.");
+    }
+    return null;
+  }
   if (!/^codex(?::|$)/i.test(session.runtime.trim())) {
     throw new Error("Codex supervisor bridge context cannot bind a non-Codex worker session.");
   }
@@ -253,6 +501,28 @@ function negotiationProtocolVersion(result: unknown): number {
     throw new Error(`Supervisor protocol negotiation returned unsupported version ${String(protocolVersion)}.`);
   }
   return protocolVersion;
+}
+
+async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promise<NegotiatedSupervisor> {
+  const negotiation = await supervisorRequest(socketPath, {
+    version: NEGOTIATION_PROTOCOL_VERSION,
+    id: randomUUID(),
+    method: "daemon.negotiate",
+  }, timeoutMs);
+  if (!negotiation.ok) throw new Error(negotiation.error || "Supervisor protocol negotiation failed.");
+  const protocolVersion = negotiationProtocolVersion(negotiation.result);
+  if (negotiation.version !== protocolVersion) throw new Error("Supervisor negotiation response version does not match its negotiated protocol.");
+  const result = negotiation.result as Record<string, unknown>;
+  const hasCompleteIdentity = typeof result.generation === "number"
+    && Number.isSafeInteger(result.generation)
+    && typeof result.pid === "number"
+    && Number.isSafeInteger(result.pid)
+    && typeof result.started_at === "string"
+    && Boolean(result.started_at.trim());
+  const daemonIdentity = hasCompleteIdentity
+    ? [result.generation, result.pid, result.started_at].join(":")
+    : null;
+  return { protocolVersion, daemonIdentity };
 }
 
 function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number): Promise<SupervisorResponse> {

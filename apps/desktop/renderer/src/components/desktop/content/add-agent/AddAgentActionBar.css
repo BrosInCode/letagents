@@ -1,0 +1,99 @@
+.desktop-add-agent-actions {
+  position: sticky;
+  bottom: -36px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 24px;
+  margin-right: -34px;
+  margin-bottom: -36px;
+  margin-left: -34px;
+  padding: 18px 34px 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: #0e0e0f;
+  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.2);
+}
+
+.desktop-add-agent-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.desktop-add-agent-primary {
+  min-height: 44px;
+  padding: 0 20px;
+  background: var(--text);
+  color: #080808;
+  font-size: 0.82rem;
+}
+
+.desktop-add-agent-primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.desktop-add-agent-recover {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 17px;
+  border: 1px solid rgba(174, 186, 255, 0.34);
+  border-radius: 999px;
+  background: rgba(174, 186, 255, 0.1);
+  color: #d8dcff;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 820;
+  transition: background-color 140ms ease, border-color 140ms ease, transform 80ms ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-add-agent-recover:hover:not(:disabled) {
+    border-color: rgba(174, 186, 255, 0.55);
+    background: rgba(174, 186, 255, 0.16);
+  }
+}
+
+.desktop-add-agent-recover:active:not(:disabled) { transform: scale(0.98); }
+
+.desktop-add-agent-recover:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.desktop-add-agent-recover:focus-visible {
+  outline: 2px solid #c7ceff;
+  outline-offset: 2px;
+}
+
+.desktop-add-agent-confirmation {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 520px) {
+  .desktop-add-agent-actions {
+      bottom: -24px;
+      margin-right: -20px;
+      margin-bottom: -24px;
+      margin-left: -20px;
+      padding: 14px 20px 20px;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .desktop-add-agent-actions {
+    background: #0d0d0e;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-add-agent-recover { transition: none; }
+}

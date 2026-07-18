@@ -266,11 +266,9 @@
       :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
       :repo-root-path="managedAgentRepoRootPath"
       :repo-status="managedAgentRepoStatus"
-      :managed-sessions="managedAgentSessions"
       @close="addAgentModalOpen = false"
       @choose-repo="openAgentRepoPicker"
       @choose-worktree="openAgentWorktree"
-      @managed-sessions-updated="replaceManagedAgentSessions"
       @managed-session-started="upsertManagedAgentSession"
     />
   </section>
@@ -278,7 +276,7 @@
 
 <script setup lang="ts">
 import { GitBranch } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReadonly, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -321,12 +319,12 @@ import {
   managedAgentRootPathForRoom,
   type ManagedAgentPermissionApproval,
   managedAgentSessionListsEqual,
-  withRoomManagedAgentSessions,
   withUpsertedManagedAgentSession,
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
+import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
 import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
@@ -459,6 +457,11 @@ const eventsUnseenCount = ref(0);
 const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+provide(managedAgentSessionsKey, {
+  sessions: shallowReadonly(managedAgentSessions),
+  refresh: refreshManagedAgentSessions,
+  upsert: upsertManagedAgentSession,
+});
 const composerPermissionError = ref<string | null>(null);
 const resolvingComposerPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let githubEventsRefreshTimer: number | null = null;
@@ -466,6 +469,11 @@ const composerGitHubEventTimers = new Map<string, number>();
 let inboxRefreshTimer: number | null = null;
 let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
+let managedAgentSessionsRefreshRequestId = 0;
+let managedAgentSessionsMutationVersion = 0;
+let managedAgentSessionsRefreshInFlight: Promise<void> | null = null;
+let managedAgentSessionsRefreshQueued = false;
+let managedAgentSessionsRefreshOwnerActive = true;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 let environmentRepoStatusRefreshRequestId = 0;
 let inboxReloadAfterCurrentLoad = false;
@@ -789,6 +797,9 @@ watch(() => props.messages.at(-1)?.id || null, () => {
 });
 
 onBeforeUnmount(() => {
+  managedAgentSessionsRefreshOwnerActive = false;
+  managedAgentSessionsRefreshQueued = false;
+  managedAgentSessionsRefreshRequestId += 1;
   if (githubEventsRefreshTimer !== null) {
     window.clearTimeout(githubEventsRefreshTimer);
     githubEventsRefreshTimer = null;
@@ -1486,9 +1497,28 @@ function openAddAgentModal(): void {
   addAgentModalOpen.value = true;
 }
 
-async function refreshManagedAgentSessions(): Promise<void> {
-  if (!props.room.identifier) return;
+function refreshManagedAgentSessions(): Promise<void> {
+  if (!managedAgentSessionsRefreshOwnerActive) return Promise.resolve();
+  if (managedAgentSessionsRefreshInFlight) {
+    managedAgentSessionsRefreshQueued = true;
+    return managedAgentSessionsRefreshInFlight;
+  }
+  const refresh = performManagedAgentSessionsRefresh();
+  managedAgentSessionsRefreshInFlight = refresh.finally(() => {
+    managedAgentSessionsRefreshInFlight = null;
+    if (managedAgentSessionsRefreshOwnerActive && managedAgentSessionsRefreshQueued) {
+      managedAgentSessionsRefreshQueued = false;
+      void refreshManagedAgentSessions();
+    }
+  });
+  return managedAgentSessionsRefreshInFlight;
+}
+
+async function performManagedAgentSessionsRefresh(): Promise<void> {
+  if (!managedAgentSessionsRefreshOwnerActive || !props.room.identifier) return;
   const roomIdentifier = props.room.identifier;
+  const requestId = ++managedAgentSessionsRefreshRequestId;
+  const mutationVersion = managedAgentSessionsMutationVersion;
   const [sessions, entries] = await Promise.all([
     desktopIpc.workers?.listManagedAgentSessions
       ? desktopIpc.workers.listManagedAgentSessions(roomIdentifier).catch(() => null)
@@ -1497,12 +1527,16 @@ async function refreshManagedAgentSessions(): Promise<void> {
       ? desktopIpc.supervisor.listAgents(roomIdentifier).catch(() => null)
       : Promise.resolve(null),
   ]);
-  if (props.room.identifier !== roomIdentifier) return;
-  if (sessions) {
+  if (
+    !managedAgentSessionsRefreshOwnerActive
+    || props.room.identifier !== roomIdentifier
+    || requestId !== managedAgentSessionsRefreshRequestId
+  ) return;
+  if (sessions && mutationVersion === managedAgentSessionsMutationVersion) {
     if (!managedAgentSessionListsEqual(managedAgentSessions.value, sessions)) {
       managedAgentSessions.value = sessions;
     }
-  } else {
+  } else if (!sessions && mutationVersion === managedAgentSessionsMutationVersion) {
     const scoped = managedAgentSessions.value.filter((session) =>
       managedAgentSessionMatchesRoom(session, roomIdentifier)
     );
@@ -1517,15 +1551,8 @@ async function refreshManagedAgentSessions(): Promise<void> {
   }
 }
 
-function replaceManagedAgentSessions(sessions: DesktopManagedAgentSession[]): void {
-  managedAgentSessions.value = withRoomManagedAgentSessions(
-    managedAgentSessions.value,
-    props.room.identifier,
-    sessions,
-  );
-}
-
 function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
+  managedAgentSessionsMutationVersion += 1;
   managedAgentSessions.value = withUpsertedManagedAgentSession(
     managedAgentSessions.value,
     session,

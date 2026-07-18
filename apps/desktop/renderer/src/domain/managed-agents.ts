@@ -17,6 +17,7 @@ import type {
   RepoStatus,
   RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
+import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
 
 export interface AgentSetupConfirmation {
@@ -954,7 +955,7 @@ export function managedAgentStopResultMessage(
   session: Pick<DesktopManagedAgentSession, "lastError" | "status">,
 ): string {
   if (session.lastError?.trim()) {
-    return session.lastError.trim();
+    return safeUserVisibleErrorDetail(session.lastError, "The agent could not be stopped.");
   }
   if (session.status === "unknown") {
     return "Codex turn state is unknown; refresh the agent to inspect it.";

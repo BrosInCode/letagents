@@ -497,6 +497,7 @@ import {
   supervisedStopAgentDisabled,
   supervisedStopAgentFailed,
 } from "../../../domain/supervised-stop";
+import { useManagedAgentSessionsContext } from "./add-agent/managed-agent-sessions-context";
 
 const props = defineProps<{
   open: boolean;
@@ -512,7 +513,8 @@ const emit = defineEmits<{
 }>();
 
 const dialogElement = ref<HTMLElement | null>(null);
-const managedSessions = ref<DesktopManagedAgentSession[]>([]);
+const managedSessionsContext = useManagedAgentSessionsContext();
+const managedSessions = computed(() => managedSessionsContext.sessions.value);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
 const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 const supervisorError = ref<string | null>(null);
@@ -651,7 +653,6 @@ watch(
     if (props.open) {
       modalStateVersion += 1;
       clearTransientState();
-      managedSessions.value = [];
       void loadManagedSessions();
     }
   },
@@ -675,7 +676,7 @@ onBeforeUnmount(() => {
 function startRefreshTimer(): void {
   stopRefreshTimer();
   refreshTimer = window.setInterval(() => {
-    void loadManagedSessions({ quiet: true });
+    void loadManagedSessions({ quiet: true, refreshSessions: false });
   }, 4_000);
 }
 
@@ -716,7 +717,6 @@ function resetTransientState(): void {
   modalStateVersion += 1;
   stopRefreshTimer();
   clearTransientState();
-  managedSessions.value = [];
   supervisorEntries.value = [];
   supervisorStatus.value = null;
 }
@@ -729,7 +729,11 @@ function handleDialogTab(event: KeyboardEvent): void {
   trapFocusInDialog(event, dialogElement.value);
 }
 
-async function loadManagedSessions(options: { quiet?: boolean; refreshChanges?: boolean } = {}): Promise<void> {
+async function loadManagedSessions(options: {
+  quiet?: boolean;
+  refreshChanges?: boolean;
+  refreshSessions?: boolean;
+} = {}): Promise<void> {
   if (!props.open) return;
   const requestVersion = modalStateVersion;
   if (!options.quiet) {
@@ -737,8 +741,8 @@ async function loadManagedSessions(options: { quiet?: boolean; refreshChanges?: 
   }
   managedSessionError.value = null;
   try {
-    const [sessions, entries, daemonStatus] = await Promise.all([
-      desktopIpc.workers.listManagedAgentSessions(props.roomIdentifier),
+    const [, entries, daemonStatus] = await Promise.all([
+      options.refreshSessions === false ? Promise.resolve() : managedSessionsContext.refresh(),
       desktopIpc.supervisor.listAgents(props.roomIdentifier).catch((error) => {
         supervisorError.value = error instanceof Error ? error.message : "Supervisor daemon unavailable.";
         return [];
@@ -746,7 +750,6 @@ async function loadManagedSessions(options: { quiet?: boolean; refreshChanges?: 
       desktopIpc.supervisor.getStatus().catch(() => null),
     ]);
     if (!isCurrentModalState(requestVersion)) return;
-    managedSessions.value = sessions;
     supervisorEntries.value = entries;
     supervisorStatus.value = daemonStatus;
     await refreshMatchingManagedSessionDetails({
@@ -976,10 +979,7 @@ async function inspectManagedSession(
       ...managedSessionInspections.value,
       [sessionId]: inspected,
     };
-    managedSessions.value = [
-      inspected.session,
-      ...managedSessions.value.filter((session) => session.id !== inspected.session.id),
-    ];
+    managedSessionsContext.upsert(inspected.session);
   } catch (error) {
     if (isCurrentModalState(requestVersion) && !options.quiet) {
       managedSessionError.value = error instanceof Error ? error.message : "Could not inspect this agent.";
@@ -1070,10 +1070,7 @@ async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"
       ? managedAgentStopResultMessage(stopped)
       : null;
     if (stopped) {
-      managedSessions.value = [
-        stopped,
-        ...managedSessions.value.filter((session) => session.id !== stopped.id),
-      ];
+      managedSessionsContext.upsert(stopped);
     }
     await loadManagedSessions({ quiet: true });
     if (stopResultMessage && !managedSessionError.value) {
@@ -1110,10 +1107,7 @@ async function retryManagedSession(sessionId: string): Promise<void> {
     if (!resumed) {
       throw new Error("This failed message is no longer available to retry.");
     }
-    managedSessions.value = [
-      resumed,
-      ...managedSessions.value.filter((session) => session.id !== resumed.id),
-    ];
+    managedSessionsContext.upsert(resumed);
     stopStatusMessage.value = "Retry started.";
   } catch (error) {
     managedSessionError.value = error instanceof Error ? error.message : "Could not retry this message.";
@@ -1141,10 +1135,7 @@ async function resolveManagedPermission(
       message: behavior === "deny" ? "Denied from LetAgents Desktop." : null,
     });
     if (result.session) {
-      managedSessions.value = [
-        result.session,
-        ...managedSessions.value.filter((session) => session.id !== result.session?.id),
-      ];
+      managedSessionsContext.upsert(result.session);
     }
     stopStatusMessage.value = result.message;
   } catch (error) {

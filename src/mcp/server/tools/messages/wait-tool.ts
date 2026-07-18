@@ -6,7 +6,7 @@ import {
   appendIncludePromptOnly,
   buildAgentDeliveryHeaders,
   bindSupervisedWorkerSession,
-  checkpointSupervisedWorkerCursor,
+  scheduleSupervisedWorkerCursorCheckpoint,
   currentRoom,
   ensureAgentIdentity,
   getFallbackProjectId,
@@ -372,7 +372,18 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const identity = await ensureAgentIdentity();
       const sessionRoomId = targetRoomId ?? currentRoom?.room_id ?? localRoomId ?? null;
       const agentSession = resolveWaitAgentSession(sessionRoomId, agent_session_id);
-      if (agentSession) await bindSupervisedWorkerSession(agentSession);
+      if (agentSession) {
+        // Registration (or a successor generation) must bind strictly once.
+        // Later waits use a read-only exact verification capped at 250ms, so a
+        // wedged daemon cannot consume the room-poll budget and an old worker
+        // cannot read after a successor generation takes ownership.
+        await bindSupervisedWorkerSession(agentSession, process.env, { allowConfirmedFastPath: true });
+        // A cursor is acknowledged only when the worker explicitly uses it to
+        // request the next page. Persisting a cursor from the response we are
+        // still constructing could skip a message if serialization, presence,
+        // or the provider turn fails afterward.
+        if (after_message_id) scheduleSupervisedWorkerCursorCheckpoint(agentSession, after_message_id);
+      }
       const maxPollMs = getPollTimeoutCapMs();
       const serverTimeout = Math.min(
         Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
@@ -411,7 +422,6 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         const routing = filterSilentActivationMessages(messages);
         const observedCursor = routing.last_observed_message_id ?? getLastMessageId(result);
         touchRoomSession(effectiveLocalRoomId, observedCursor);
-        if (agentSession && observedCursor) await checkpointSupervisedWorkerCursor(agentSession, observedCursor);
         const threadContext = await collectThreadContextMessages({
           messages: routing.messages,
           localRoomId: effectiveLocalRoomId,
@@ -545,7 +555,6 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       if (targetRoomId) {
         const observedCursor = routing.last_observed_message_id ?? getLastMessageId(output);
         touchRoomSession(targetRoomId, observedCursor);
-        if (agentSession && observedCursor) await checkpointSupervisedWorkerCursor(agentSession, observedCursor);
       }
       await syncRoomPresence(
         targetRoomId ?? currentRoom?.room_id ?? null,

@@ -2,7 +2,7 @@
   <div
     class="supervised-launch-progress"
     data-testid="supervised-launch-progress"
-    :data-state="progress.ready ? 'ready' : progress.failed ? 'failed' : progress.stopped ? 'stopped' : 'launching'"
+    :data-state="progress.status === 'stopping' ? 'stopping' : progress.ready ? 'ready' : progress.failed ? 'failed' : progress.stopped ? 'stopped' : 'launching'"
   >
     <div class="supervised-launch-progress-header">
       <span class="supervised-launch-progress-provider">{{ progress.providerLabel }}</span>
@@ -20,19 +20,19 @@
         class="supervised-launch-phase"
         :data-state="phase.state"
         :data-testid="`supervised-launch-phase-${phase.id}`"
-        :aria-current="phase.state === 'active' ? 'step' : undefined"
+        :aria-current="phase.state === 'active' || phase.state === 'stopping' ? 'step' : undefined"
       >
         <span class="supervised-launch-phase-marker" aria-hidden="true">
           <Check v-if="phase.state === 'done'" :size="12" />
           <X v-else-if="phase.state === 'failed'" :size="12" />
           <Minus v-else-if="phase.state === 'cancelled'" :size="12" />
-          <span v-else-if="phase.state === 'active'" class="supervised-launch-phase-spinner" />
+          <span v-else-if="phase.state === 'active' || phase.state === 'stopping'" class="supervised-launch-phase-spinner" />
           <span v-else class="supervised-launch-phase-dot" />
         </span>
         <span class="supervised-launch-phase-text">
           <span class="supervised-launch-phase-label">{{ phase.label }}</span>
           <small
-            v-if="phase.state === 'active' || phase.state === 'failed'"
+            v-if="phase.state === 'active' || phase.state === 'stopping' || phase.state === 'failed'"
             class="supervised-launch-phase-detail"
           >{{ phase.detail }}</small>
         </span>
@@ -83,6 +83,7 @@ function phaseStatusText(state: LaunchJourneyPhaseState): string {
   switch (state) {
     case "done": return "Complete";
     case "active": return "In progress";
+    case "stopping": return "Cancelling";
     case "failed": return "Needs attention";
     case "cancelled": return "Cancelled";
     default: return "Waiting";
@@ -100,13 +101,16 @@ function recoveryLabel(action: DesktopLaunchRecoveryAction): string {
 
 const liveAnnouncement = computed(() => {
   const p = props.progress;
+  if (p.status === "stopping") return p.headline;
   if (p.ready) return p.headline;
-  if (p.failed && p.failureDetail) return p.failureDetail;
+  if (p.failed) return "";
   if (p.stopped) return p.headline;
   const active = p.phases.find((phase) => phase.state === "active");
   return active ? active.label : p.headline;
 });
 </script>
+
+<style scoped src="./SupervisedLaunchProgress.css"></style>
 
 <style scoped>
 .supervised-launch-sr-live {

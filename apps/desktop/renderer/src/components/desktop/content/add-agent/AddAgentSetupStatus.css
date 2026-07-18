@@ -1,0 +1,209 @@
+.desktop-add-agent-status {
+  padding: 30px 34px 36px;
+}
+
+.desktop-add-agent-status-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 30px;
+}
+
+.desktop-add-agent-status-header h4 {
+  font-size: 1.08rem;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.desktop-add-agent-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.desktop-add-agent-status-actions .desktop-add-agent-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.desktop-add-agent-status-actions .desktop-add-agent-status-pill[data-state="ready"] {
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(34, 197, 94, 0.08);
+  color: #86efac;
+}
+
+.desktop-add-agent-checks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 24px 0 0;
+}
+
+.desktop-add-agent-checks div {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 94px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-add-agent-checks dt,
+.desktop-add-agent-checks dd {
+  margin: 0;
+}
+
+.desktop-add-agent-checks dt {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.desktop-add-agent-checks dd {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.desktop-add-agent-status[data-state="ready"] .desktop-add-agent-checks div {
+  border-color: rgba(34, 197, 94, 0.18);
+}
+
+.desktop-add-agent-status[data-state="missing_runtime"] .desktop-add-agent-checks div:first-child,
+.desktop-add-agent-status[data-state="auth_required"] .desktop-add-agent-checks div:first-child,
+.desktop-add-agent-status[data-state="bridge_required"] .desktop-add-agent-checks div:nth-child(2),
+.desktop-add-agent-status[data-state="repo_required"] .desktop-add-agent-checks div:nth-child(3),
+.desktop-add-agent-status[data-state="branch_mismatch"] .desktop-add-agent-checks div:nth-child(3) {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.desktop-add-agent-worktrees {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.desktop-add-agent-worktrees-header {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.desktop-add-agent-worktrees-header p,
+.desktop-add-agent-worktrees-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.desktop-add-agent-worktree {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.desktop-add-agent-worktree:hover,
+.desktop-add-agent-worktree:focus-visible {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.12);
+  outline: none;
+}
+
+.desktop-add-agent-worktree > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.desktop-add-agent-worktree strong,
+.desktop-add-agent-worktree small,
+.desktop-add-agent-worktree code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-add-agent-worktree strong {
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.desktop-add-agent-worktree small {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+}
+
+.desktop-add-agent-worktree code {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.desktop-add-agent-auth-command code {
+  min-width: 0;
+  overflow: hidden;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--text);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:slotted(.desktop-add-agent-feedback) {
+  padding: 10px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+@media (max-width: 800px) {
+  .desktop-add-agent-checks div {
+      min-height: 74px;
+    }
+}
+
+@media (max-width: 520px) {
+  .desktop-add-agent-status {
+      padding: 22px 20px 24px;
+    }
+
+  .desktop-add-agent-status-header {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+  .desktop-add-agent-checks {
+      grid-template-columns: 1fr;
+    }
+}
