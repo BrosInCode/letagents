@@ -20,7 +20,14 @@ export async function transferSupervisorOwnership<TManifest, TLegacy>(
     for (const owner of transfer.listLegacy()) await transfer.stopLegacy(owner);
     return await transfer.activate(manifest);
   } catch (error) {
-    await transfer.rollback(manifest).catch(() => undefined);
+    try {
+      await transfer.rollback(manifest);
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        "Supervisor ownership transfer failed and its durable claim could not be rolled back.",
+      );
+    }
     throw error;
   }
 }
@@ -58,7 +65,16 @@ export async function launchLegacyWithOwnership<TStarted>(
         );
       }
     }
-    await launch.release().catch(() => undefined);
+    try {
+      await launch.release();
+    } catch (releaseError) {
+      throw new AggregateError(
+        [error, releaseError],
+        started === null
+          ? "Legacy launch failed before spawn and its daemon ownership reservation could not be released."
+          : "Legacy launch failed after spawn cleanup and its daemon ownership reservation could not be released.",
+      );
+    }
     throw error;
   }
 }

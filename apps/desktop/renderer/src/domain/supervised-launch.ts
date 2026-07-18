@@ -1,6 +1,7 @@
 import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
+import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
 /**
  * Phased launch progress for a supervised agent, derived purely from the
@@ -47,6 +48,15 @@ export interface SupervisedLaunchProgress {
   ready: boolean;
   /** A phase is blocked or failed and needs the owner's attention. */
   failed: boolean;
+  /** The old process could not be attached, but the daemon may still produce
+   * fresher evidence. Keep observing it instead of treating it as terminal. */
+  recoverableBlocked: boolean;
+  /** Stop intent is persisted, but the daemon has not yet observed the provider stopped. */
+  stopping: boolean;
+  /** Stop intent converged to an actionable failure instead of remaining in flight. */
+  stopFailed: boolean;
+  /** The durable claim exists, but ownership transfer never activated it. */
+  ownershipPaused: boolean;
   /** The launch was retired (desired_state=stopped) before/after readiness. */
   stopped: boolean;
   /** Real registered agent name once ready; null while still launching. */
@@ -88,11 +98,19 @@ type LaunchFields = Pick<
 
 /** A block/failure that genuinely needs the owner, distinct from the normal
  * pre-bind coordination latch. */
-function isBlockingCondition(condition: DesktopSupervisorManifestEntry["condition"]): boolean {
-  return condition === "auth_blocked"
-    || condition === "budget_blocked"
-    || condition === "security_blocked"
-    || condition === "quarantined";
+function isExpectedCoordinationWait(lastError: string | null | undefined): boolean {
+  const detail = lastError?.trim().toLowerCase();
+  if (!detail) return true;
+  return detail.includes("awaiting exact bind")
+    || detail.includes("awaits exact worker wait evidence");
+}
+
+function isBlockingCondition(entry: LaunchFields): boolean {
+  return entry.condition === "auth_blocked"
+    || entry.condition === "budget_blocked"
+    || entry.condition === "security_blocked"
+    || entry.condition === "quarantined"
+    || (entry.condition === "coordination_blocked" && !isExpectedCoordinationWait(entry.lastError));
 }
 
 export function supervisedLaunchProviderLabel(provider: string): string {
@@ -131,11 +149,24 @@ function reachedIndex(entry: LaunchFields): number {
 export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchProgress {
   const providerLabel = supervisedLaunchProviderLabel(entry.provider);
   const reached = reachedIndex(entry);
-  const ready = reached >= 4;
-  const stopped = entry.desiredState === "stopped";
-  const failed = !ready
+  const ownershipPaused = entry.desiredState === "paused";
+  const stopFailed = entry.desiredState === "stopped"
+    && (entry.observedState === "failed" || isBlockingCondition(entry));
+  const stopping = entry.desiredState === "stopped"
+    && entry.observedState !== "stopped"
+    && !stopFailed;
+  const stopped = entry.desiredState === "stopped" && entry.observedState === "stopped";
+  const ready = entry.desiredState === "running" && reached >= 4;
+  const recoverableBlocked = !ready
+    && !stopFailed
+    && !stopping
     && !stopped
-    && (entry.observedState === "failed" || isBlockingCondition(entry.condition));
+    && entry.condition === "coordination_blocked"
+    && !isExpectedCoordinationWait(entry.lastError);
+  const failed = ownershipPaused || stopFailed || (!ready
+    && !stopping
+    && !stopped
+    && (entry.observedState === "failed" || isBlockingCondition(entry)));
 
   // The active phase is the first not-yet-completed phase. `reached` counts
   // completed gates, so the active index is `reached + 1`, clamped.
@@ -157,14 +188,28 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
   const currentPhaseId = phases[Math.min(activeIndex, phases.length - 1)]!.id;
 
   const failureDetail = failed
-    ? (entry.lastError?.trim() || blockedConditionDetail(entry.condition))
+    ? (ownershipPaused
+        ? safeUserVisibleErrorDetail(entry.lastError, `The ${providerLabel} launch was saved, but ownership transfer did not finish. Cancel it before starting a replacement.`)
+        : stopFailed
+        ? safeUserVisibleErrorDetail(entry.lastError, `The supervisor couldn't stop the ${providerLabel} agent. Check its status and try again.`)
+        : entry.condition === "coordination_blocked"
+        ? `LetAgents can't currently reconnect to the previous ${providerLabel} process. It may still reconnect; you can wait or cancel this launch and start a new agent.`
+        : safeUserVisibleErrorDetail(entry.lastError, blockedConditionDetail(entry.condition)))
     : null;
 
   let headline: string;
   if (ready) {
     headline = `${entry.displayName} is ready`;
+  } else if (ownershipPaused) {
+    headline = `${providerLabel} launch needs cleanup`;
+  } else if (stopFailed) {
+    headline = `Couldn't stop the ${providerLabel} agent`;
+  } else if (stopping) {
+    headline = `Cancelling ${providerLabel} launch...`;
   } else if (stopped) {
     headline = `${providerLabel} agent stopped before it finished starting`;
+  } else if (recoverableBlocked) {
+    headline = `${providerLabel} needs help reconnecting`;
   } else if (failed) {
     headline = `${providerLabel} agent needs attention`;
   } else {
@@ -176,12 +221,16 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     currentPhaseId,
     ready,
     failed,
+    recoverableBlocked,
+    stopping,
+    stopFailed,
+    ownershipPaused,
     stopped,
     agentName: ready ? entry.displayName : null,
     providerLabel,
     headline,
     failureDetail,
-    joinHint: ready || failed || stopped ? null : JOIN_HINT,
+    joinHint: ready || failed || stopping || stopped ? null : JOIN_HINT,
   };
 }
 

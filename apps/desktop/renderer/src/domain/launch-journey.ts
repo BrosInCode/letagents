@@ -39,10 +39,11 @@ export type LaunchJourneyPhaseId =
   | "saving_agent"
   | SupervisedLaunchPhaseId; // preparing_workspace | starting_provider | connecting_room | registering_identity | ready
 
-export type LaunchJourneyPhaseState = "pending" | "active" | "done" | "failed" | "cancelled";
+export type LaunchJourneyPhaseState = "pending" | "active" | "done" | "stopping" | "failed" | "cancelled";
 
 export type LaunchJourneyStatus =
   | "in_progress"
+  | "stopping"
   | "ready"
   | "blocked"
   | "failed"
@@ -67,6 +68,8 @@ export interface LaunchJourneyView {
   failed: boolean;
   /** Intentionally retired (cancelled mid-launch, or stopped after ready). */
   stopped: boolean;
+  /** A persisted stop request needs intervention and can be retried. */
+  stopFailed: boolean;
   agentName: string | null;
   providerLabel: string;
   /** Short card title. */
@@ -208,6 +211,8 @@ interface PhaseFold {
   ready: boolean;
   /** Terminal-without-failure (cancelled/stopped): no step is active. */
   settled: boolean;
+  /** Stop intent is persisted but provider stop is not yet observed. */
+  stopping?: boolean;
 }
 
 function buildPhases(
@@ -223,6 +228,13 @@ function buildPhases(
       state = "failed";
     } else if (index < fold.activeIndex) {
       state = "done";
+    } else if (fold.stopping && index === fold.activeIndex) {
+      return {
+        id,
+        label: "Cancelling launch",
+        detail: "Waiting for the provider to stop safely.",
+        state: "stopping",
+      };
     } else if (index === fold.activeIndex && fold.failedIndex === null && !fold.settled) {
       state = "active";
     } else if (fold.settled && index === fold.activeIndex) {
@@ -260,16 +272,26 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     const everReady = entry.readyReachedAt != null;
 
     const phases = buildPhases(
-      { activeIndex, failedIndex, ready: manifest.ready, settled: manifest.stopped },
+      {
+        activeIndex,
+        failedIndex,
+        ready: manifest.ready,
+        settled: manifest.stopped,
+        stopping: manifest.stopping,
+      },
       ctx,
     );
     const status: LaunchJourneyStatus = manifest.ready
       ? "ready"
-      : manifest.stopped
-        ? "cancelled"
-        : manifest.failed
-          ? "failed"
-          : "in_progress";
+      : manifest.stopping
+        ? "stopping"
+        : manifest.stopped
+          ? "cancelled"
+          : manifest.recoverableBlocked
+            ? "blocked"
+            : manifest.failed
+              ? "failed"
+              : "in_progress";
     return {
       phases,
       currentPhaseId: phases[Math.min(activeIndex, phases.length - 1)]!.id,
@@ -277,11 +299,16 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       ready: manifest.ready,
       failed: manifest.failed,
       stopped: manifest.stopped,
+      stopFailed: manifest.stopFailed,
       agentName,
       providerLabel,
-      headline: headlineFor(status, ctx, { stoppedAfterReady: everReady }),
+      headline: manifest.stopFailed
+        ? manifest.headline
+        : headlineFor(status, ctx, { stoppedAfterReady: everReady }),
       failureDetail: manifest.failed ? manifest.failureDetail : null,
-      recovery: manifest.failed ? manifestRecovery(entry, input.hasSignInCommand ?? false) : null,
+      recovery: manifest.failed && !manifest.recoverableBlocked && !manifest.stopFailed && !manifest.ownershipPaused
+        ? manifestRecovery(entry, input.hasSignInCommand ?? false)
+        : null,
       joinHint: status === "in_progress" ? JOIN_HINT : null,
     };
   }
@@ -307,6 +334,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       ready: false,
       failed: status === "blocked" || status === "failed",
       stopped: cancelled,
+      stopFailed: false,
       agentName: null,
       providerLabel,
       headline: headlineFor(status, ctx),
@@ -326,6 +354,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     ready: false,
     failed: false,
     stopped: false,
+    stopFailed: false,
     agentName: null,
     providerLabel,
     headline: headlineFor("in_progress", ctx),
@@ -349,7 +378,10 @@ function headlineFor(
       return opts.stoppedAfterReady
         ? (ctx.agentName ? `${ctx.agentName} stopped` : `${ctx.providerLabel} agent stopped`)
         : "Launch cancelled";
+    case "stopping":
+      return `Cancelling ${ctx.providerLabel} launch...`;
     case "blocked":
+      return `${ctx.providerLabel} needs help reconnecting`;
     case "failed":
       return `Couldn't add the ${ctx.providerLabel} agent`;
     default:

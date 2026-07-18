@@ -909,11 +909,12 @@ export function registerDesktopIpcHandlers(
           // Activation is the second durable CAS. The daemon, not Electron,
           // launches the native provider and remains authoritative after quit.
           activate: async (manifest) => {
-            const activated = await supervisorDaemonClient.setDesiredState(manifest.id, "running");
+            const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
+            if (!activated) throw new Error("The supervised launch changed while ownership was being transferred; it was not restarted.");
             launchFact("launch.activated", { entryId: manifest.id, detail: "LetAgents is now responsible for starting this agent.", durable: true });
             return activated;
           },
-          rollback: (manifest) => supervisorDaemonClient.setDesiredState(manifest.id, "stopped").then(() => undefined),
+          rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
         });
       } catch (error) {
         const failure = classifyLaunchFailure(error);
@@ -926,6 +927,62 @@ export function registerDesktopIpcHandlers(
     "desktop:supervisor:get-launch-events",
     async (_event, launchId: string, afterSequence?: number | null) =>
       getLaunchEvents(launchId, afterSequence ?? null),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:resume-ownership-transfer",
+    async (_event, id: string): Promise<DesktopSupervisorManifestEntry> => {
+      const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
+      if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
+      if (entry.desiredState !== "paused") return entry;
+      const launchId = id.startsWith("supervised_") ? id.slice("supervised_".length) : id;
+      const launchFact = (
+        type: Parameters<typeof emitLaunchEvent>[0]["type"],
+        detail: string,
+      ): void => {
+        emitLaunchEvent({
+          launchId,
+          entryId: entry.id,
+          roomIdentifier: entry.roomId,
+          provider: entry.provider,
+          type,
+          detail,
+          durable: true,
+        });
+      };
+      launchFact("launch.requested", "You asked LetAgents to resume this saved launch.");
+      try {
+        if (entry.provider === "claude-code") await refreshInstalledLetAgentsMcpServerAuth();
+        await supervisorDaemonClient.ensureRunning();
+        launchFact("supervisor.connected", "Background agent management is available.");
+        launchFact("agent.saved", "Your saved launch is ready to resume.");
+        return await transferSupervisorOwnership({
+          claim: async () => entry,
+          listLegacy: () => listDesktopManagedAgentSessions(entry.roomId)
+            .filter((session) => session.providerId === entry.provider && !session.supervisorEntryId),
+          stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
+          activate: async (manifest) => {
+            const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
+            if (!activated) throw new Error("The saved launch changed while ownership was being resumed; it was not restarted.");
+            launchFact("launch.activated", "LetAgents resumed ownership of this agent.");
+            return activated;
+          },
+          rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
+        });
+      } catch (error) {
+        const failure = classifyLaunchFailure(error);
+        emitLaunchEvent({
+          launchId,
+          entryId: entry.id,
+          roomIdentifier: entry.roomId,
+          provider: entry.provider,
+          type: failure.type,
+          detail: failure.detail,
+          recovery: failure.recovery,
+          durable: true,
+        });
+        throw error;
+      }
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",

@@ -300,6 +300,7 @@ export interface DesktopApi {
     getStatus: () => Promise<DesktopSupervisorDaemonStatus>;
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
+    resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
     controlTurn: (input: DesktopSupervisorTurnControlInput) => Promise<DesktopSupervisorTurnControlResult>;
     resolveTurnControl: (input: DesktopSupervisorTurnControlResolutionInput) => Promise<DesktopSupervisorManifestEntry>;

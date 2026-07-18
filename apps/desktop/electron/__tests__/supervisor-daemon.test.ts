@@ -19,6 +19,8 @@ import {
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
+const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
+const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-electron-supervisor-"));
@@ -65,6 +67,11 @@ async function startWireDaemon(
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         entry.desired_state = request.params!.desired_state;
         result = entry;
+      } else if (request.method === "manifest.compare_and_set_desired_state") {
+        const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
+        const applied = entry.desired_state === request.params!.expected_desired_state;
+        if (applied) entry.desired_state = request.params!.desired_state;
+        result = { applied, entry };
       } else if (request.method === "manifest.control_turn") {
         responseDelayMs = controlTurnDelayMs;
         result = {
@@ -286,6 +293,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
       "the paused transfer claim fences a concurrent legacy start before activation",
     );
     assert.equal((await client.setDesiredState(created.id, "running")).desiredState, "running");
+    assert.equal(await client.compareAndSetDesiredState(created.id, "paused", "stopped"), null);
     assert.equal((await client.setDesiredState(second.id, "running")).desiredState, "running");
     assert.equal((await client.setDesiredState(created.id, "stopped")).desiredState, "stopped");
     const listed = await client.list(created.roomId);
@@ -341,6 +349,19 @@ test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches i
     "dev launch derives the exact repo build instead of trusting inherited cwd or cache state",
   );
   assert.equal(development.ELECTRON_RUN_AS_NODE, "1");
+});
+
+test("desktop development watches daemon builds and rejects a stale replacement implementation", async () => {
+  const desktopPackage = JSON.parse(await readFile(desktopPackagePath, "utf8")) as { scripts?: Record<string, string> };
+  assert.match(desktopPackage.scripts?.dev ?? "", /npm:watch:daemon/);
+  assert.match(desktopPackage.scripts?.["watch:daemon"] ?? "", /tsconfig\.daemon\.json --watch/);
+  const clientSource = await readFile(daemonClientPath, "utf8");
+  const healthCheck = clientSource.slice(
+    clientSource.indexOf("private async waitForHealthy"),
+    clientSource.indexOf("private async waitForSocketDown"),
+  );
+  assert.match(healthCheck, /status\.implementationVersion !== SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION/);
+  assert.match(healthCheck, /Rebuild the desktop daemon and try again/);
 });
 
 test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async () => {

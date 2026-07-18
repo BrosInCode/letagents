@@ -237,6 +237,7 @@ const api: DesktopApi = {
     getStatus: () => ipcRenderer.invoke("desktop:supervisor:get-status"),
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
+    resumeOwnershipTransfer: (id) => ipcRenderer.invoke("desktop:supervisor:resume-ownership-transfer", id),
     setDesiredState: (id, desiredState) => ipcRenderer.invoke("desktop:supervisor:set-desired-state", id, desiredState),
     controlTurn: (input) => ipcRenderer.invoke("desktop:supervisor:control-turn", input),
     resolveTurnControl: (input) => ipcRenderer.invoke("desktop:supervisor:resolve-turn-control", input),

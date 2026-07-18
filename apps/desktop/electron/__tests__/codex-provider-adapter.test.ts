@@ -21,12 +21,19 @@ import {
 } from "../main/agents/codex-supervisor-bridge-context.js";
 import type {
   ProviderActivityEvent,
+  ProviderHandle,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
 
 type RecordedRequest = { method: string; params: unknown };
+
+function assertProviderHandle(
+  value: ProviderHandle | { state: "terminal" } | null,
+): asserts value is ProviderHandle {
+  assert.ok(value && !("state" in value && value.state === "terminal"), "expected a live provider handle");
+}
 
 class FakeRpc implements CodexAdapterRpc {
   readonly requests: RecordedRequest[] = [];
@@ -42,6 +49,7 @@ class FakeRpc implements CodexAdapterRpc {
       resumeSupported: boolean;
       placeholderResumeIsFatal: boolean;
       workplacePresent: boolean;
+      workplaceProbeTimesOut: boolean;
       threadReadFails: boolean;
       threadReadTimesOut: boolean;
     },
@@ -54,6 +62,9 @@ class FakeRpc implements CodexAdapterRpc {
   async request<T>(method: string, params?: unknown): Promise<T> {
     this.requests.push({ method, params });
     if (method === "mcpServerStatus/list") {
+      if (this.options.workplaceProbeTimesOut) {
+        throw new Error("Codex app-server request timed out: mcpServerStatus/list");
+      }
       return {
         data: this.options.workplacePresent ? [{ name: "letagents", status: "ready" }] : [],
       } as T;
@@ -129,6 +140,7 @@ function createHarness(options: {
   resumeSupported?: boolean;
   placeholderResumeIsFatal?: boolean;
   workplacePresent?: boolean;
+  workplaceProbeTimesOut?: boolean;
   threadReadFails?: boolean;
   threadReadTimesOut?: boolean;
   identityUnavailableAtLaunch?: boolean;
@@ -176,6 +188,7 @@ function createHarness(options: {
         resumeSupported: options.resumeSupported ?? true,
         placeholderResumeIsFatal: options.placeholderResumeIsFatal ?? false,
         workplacePresent: options.workplacePresent ?? true,
+        workplaceProbeTimesOut: options.workplaceProbeTimesOut ?? false,
         threadReadFails: options.threadReadFails ?? false,
         threadReadTimesOut: options.threadReadTimesOut ?? false,
       });
@@ -321,6 +334,29 @@ test("Codex fresh spawn does not let a fatal placeholder resume probe block thre
     harness.clients[0]!.requests.map((entry) => entry.method),
     ["mcpServerStatus/list", "thread/start", "turn/start", "thread/read"],
   );
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Codex workplace status timeout does not kill launch or durable resume", async () => {
+  const harness = createHarness({ workplaceProbeTimesOut: true });
+  const request = spawnRequest();
+  const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+
+  const first = await firstAdapter.spawn(request);
+  assert.equal(first.observedState(), "working");
+  assert.equal(first.providerContinuationId, "thread-1");
+
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await flush();
+
+  const resumed = await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+  }, request);
+
+  assert.equal(resumed.observedState(), "working");
+  assert.equal(resumed.providerContinuationId, first.providerContinuationId);
+  assert.ok(harness.clients[1]!.requests.some((entry) => entry.method === "thread/resume"));
   assert.deepEqual(harness.signals, []);
 });
 
@@ -557,7 +593,7 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
     providerConnection: first.providerConnection,
   });
 
-  assert.ok(attached);
+  assertProviderHandle(attached);
   assert.equal(attached.providerContinuationId, first.providerContinuationId);
   assert.equal(attached.pid, first.pid);
   assert.equal(harness.launches.length, 1, "reattach must not create a second native writer");
@@ -572,6 +608,25 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
   }), attached);
 });
 
+test("fresh adapter reattaches when only the MCP workplace status probe times out", async () => {
+  const harness = createHarness({ workplaceProbeTimesOut: true });
+  const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const request = spawnRequest();
+  const first = await firstAdapter.spawn(request);
+  assert.ok(first.providerConnection);
+
+  const attached = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  });
+
+  assertProviderHandle(attached);
+  assert.equal(attached.providerContinuationId, first.providerContinuationId);
+  assert.equal(attached.pid, first.pid);
+  assert.equal(harness.launches.length, 1);
+});
+
 test("reattached RPC disconnect fences the exact child and waits for verified exit", async () => {
   const harness = createHarness();
   const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -583,7 +638,7 @@ test("reattached RPC disconnect fences the exact child and waits for verified ex
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
   });
-  assert.ok(attached);
+  assertProviderHandle(attached);
   const terminals: ProviderTerminalPayload[] = [];
   freshAdapter.onExit(attached, (terminal) => terminals.push(terminal));
 
@@ -612,7 +667,7 @@ test("unverifiable process identity keeps RPC loss ambiguous until actual exit",
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
   });
-  assert.ok(attached);
+  assertProviderHandle(attached);
   const terminals: ProviderTerminalPayload[] = [];
   freshAdapter.onExit(attached, (terminal) => terminals.push(terminal));
 
@@ -653,19 +708,23 @@ test("pid-less durable endpoint stays ambiguous even when exact thread RPC succe
   assert.equal(unavailable.launches.length, 1);
 });
 
-test("recycled pid cannot authenticate a durable endpoint or become exit evidence", async () => {
+test("recycled pid terminalizes the recorded writer without touching the replacement process", async () => {
   const harness = createHarness();
   const request = spawnRequest();
   const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
   harness.launches[0]!.processIdentity = "fake-process-4100-birth-2";
 
-  await assert.rejects(new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+  const attached = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
     workAttemptId: request.workAttemptId,
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
-  }), /attach is ambiguous; refusing to launch a second writer/);
+  });
+  assert.ok(attached && "state" in attached);
+  assert.equal(attached.state, "terminal");
+  assert.equal(attached.terminal.terminalCause, "crashed");
   assert.equal(harness.launches.length, 1);
-  assert.deepEqual(harness.signals, [], "the recycled pid must not be signalled");
+  assert.equal(harness.clients.length, 1, "a recycled pid is rejected before endpoint contact");
+  assert.deepEqual(harness.signals, [], "the replacement process must not be signalled");
 });
 
 test("fresh attach fences an unverifiable live app-server instead of allowing a duplicate writer", async () => {
@@ -681,6 +740,26 @@ test("fresh attach fences an unverifiable live app-server instead of allowing a 
     providerConnection: first.providerConnection,
   }), /attach is ambiguous; refusing to launch a second writer/);
   assert.equal(harness.launches.length, 1);
+});
+
+test("fresh attach returns terminal evidence when the recorded app-server is verifiably gone", async () => {
+  const harness = createHarness({ threadReadFails: true });
+  const request = spawnRequest();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+
+  const attached = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  });
+
+  assert.ok(attached && "state" in attached);
+  assert.equal(attached.state, "terminal");
+  assert.equal(attached.terminal.terminalCause, "crashed");
+  assert.equal(attached.terminal.providerContinuationId, first.providerContinuationId);
+  assert.equal(harness.clients.length, 1, "a proven-absent process is rejected before endpoint contact");
+  assert.deepEqual(harness.signals, [], "a proven-absent process is never signalled");
 });
 
 test("resume capability fails honestly when app-server lacks thread/resume", async () => {

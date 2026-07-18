@@ -11,6 +11,8 @@ import {
   bindSupervisedWorkerSession,
   bindSupervisedWorkerSessionWithContext,
   checkpointSupervisedWorkerCursor,
+  isRetryableSupervisorBridgeError,
+  scheduleSupervisedWorkerCursorCheckpoint,
 } from "../server/runtime/supervisor-bridge.js";
 
 const session: StoredAgentSessionState = {
@@ -148,10 +150,11 @@ test("validated supervisor cwd survives MCP restart for bind and cursor checkpoi
     assert.equal(checkpoint?.params.agent_session_id, session.session_id);
     assert.doesNotMatch(JSON.stringify(checkpoint), /session-secret/, "cursor checkpoint never carries worker authority");
 
-    assert.equal(await bindSupervisedWorkerSession({
+    await assert.rejects(() => bindSupervisedWorkerSession({
       ...persistedSession,
       supervisor_context_cwd: unrelated,
-    }, {}, { trustedDaemonSocketPath: socketPath }), false, "an unrelated persisted route cannot inherit the binding");
+    }, {}, { trustedDaemonSocketPath: socketPath }), /persisted supervised worker context is missing/,
+    "a missing persisted supervised route fails closed instead of becoming unsupervised");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
@@ -284,6 +287,154 @@ test("supervisor bridge binds only the exact worker session credential over the 
   }
 });
 
+test("supervisor bridge binds once per exact daemon generation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-cache-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  let daemonGeneration = 41;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: daemonGeneration, pid: 123, started_at: `generation-${daemonGeneration}` }
+        : { bound: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const env = supervisedEnv(socketPath);
+    assert.equal(await bindSupervisedWorkerSession(session, env), true);
+    assert.equal(await bindSupervisedWorkerSession(session, env), true);
+    assert.equal(requests.filter((request) => request.method === "supervisor.bind_worker_session").length, 1,
+      "heartbeat waits negotiate health but do not repeat an unchanged bind");
+
+    daemonGeneration += 1;
+    assert.equal(await bindSupervisedWorkerSession(session, env), true);
+    assert.equal(requests.filter((request) => request.method === "supervisor.bind_worker_session").length, 2,
+      "a replacement daemon receives a fresh exact bind");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("confirmed waits bound a wedged exact-binding verification to 250ms or less", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-fast-wait-"));
+  const socketPath = join(root, "daemon.sock");
+  let wedgeNegotiation = false;
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      if (wedgeNegotiation && (request.method === "daemon.negotiate" || request.method === "supervisor.verify_worker_session")) return;
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 1, pid: 123, started_at: "2026-01-01T00:00:00.000Z" }
+        : { bound: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const env = supervisedEnv(socketPath);
+    assert.equal(await bindSupervisedWorkerSession(session, env, { requestTimeoutMs: 25 }), true);
+    wedgeNegotiation = true;
+    const startedAt = Date.now();
+    await assert.rejects(() => bindSupervisedWorkerSession(session, env, {
+      requestTimeoutMs: 25,
+      allowConfirmedFastPath: true,
+    }), /Timed out communicating/);
+    assert.ok(Date.now() - startedAt < 100, "a wedged local verification cannot consume the room long-poll budget");
+
+    await assert.rejects(() => bindSupervisedWorkerSession(session, {
+      ...env,
+      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_successor",
+    }, { requestTimeoutMs: 25, allowConfirmedFastPath: true }), /Timed out communicating/,
+    "a successor generation still fails closed until its exact binding is proven");
+  } finally {
+    wedgeNegotiation = false;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("binding cache includes protected room and credential identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-protected-cache-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 1, pid: 123, started_at: "2026-01-01T00:00:00.000Z" }
+        : { bound: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const env = supervisedEnv(socketPath);
+    assert.equal(await bindSupervisedWorkerSession(session, env), true);
+    assert.equal(await bindSupervisedWorkerSession({ ...session, session_token: "replacement-secret" }, env, {
+      allowConfirmedFastPath: true,
+    }), true);
+    assert.equal(requests.filter((request) => request.method === "supervisor.bind_worker_session").length, 2,
+      "a changed protected credential cannot inherit the prior confirmation");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a daemon without a stable identity is rebound instead of cached across replacements", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-no-identity-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate" ? { protocol_version: 2 } : { bound: true };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const env = supervisedEnv(socketPath);
+    assert.equal(await bindSupervisedWorkerSession(session, env), true);
+    assert.equal(await bindSupervisedWorkerSession(session, env, { allowConfirmedFastPath: true }), true);
+    assert.equal(requests.filter((request) => request.method === "supervisor.bind_worker_session").length, 2);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supervisor transport timeouts are retryable bookkeeping failures", () => {
+  assert.equal(isRetryableSupervisorBridgeError(new Error("Timed out communicating with the supervisor daemon.")), true);
+  assert.equal(isRetryableSupervisorBridgeError(Object.assign(new Error("connect failed"), { code: "ECONNREFUSED" })), true);
+  assert.equal(isRetryableSupervisorBridgeError(new Error("Worker session room does not match the supervised manifest entry.")), false);
+});
+
 test("supervisor bridge checkpoints the exact worker cursor without sending its session token", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-"));
   const socketPath = join(root, "daemon.sock");
@@ -314,6 +465,45 @@ test("supervisor bridge checkpoints the exact worker cursor without sending its 
       room_cursor: "msg_2819",
     });
     assert.doesNotMatch(JSON.stringify(requests[1]), /session-secret/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduled cursor checkpoints retry transient failures and keep the newest acknowledgement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-retry-"));
+  const socketPath = join(root, "daemon.sock");
+  const checkpoints: string[] = [];
+  let failedOnce = false;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: { protocol_version: 2 } })}\n`);
+        return;
+      }
+      checkpoints.push(request.params.room_cursor);
+      if (!failedOnce) {
+        failedOnce = true;
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: false, error: "connection reset" })}\n`);
+        return;
+      }
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: { checkpointed: true } })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const scheduledSession = { ...session, session_id: "agent_session_scheduled_retry" };
+    const env = supervisedEnv(socketPath);
+    scheduleSupervisedWorkerCursorCheckpoint(scheduledSession, "msg_12", env, { requestTimeoutMs: 50 });
+    scheduleSupervisedWorkerCursorCheckpoint(scheduledSession, "msg_10", env, { requestTimeoutMs: 50 });
+    await eventually(() => checkpoints.length >= 2, 1_500);
+    assert.deepEqual(checkpoints, ["msg_12", "msg_12"], "an older concurrent acknowledgement cannot replace the retry");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
@@ -425,4 +615,12 @@ async function writeSupervisorContext(
 
 async function readContext(root: string): Promise<unknown> {
   return JSON.parse(await readFile(join(root, ".letagents-supervisor-context.json"), "utf8"));
+}
+
+async function eventually(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for supervisor bridge test condition.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
