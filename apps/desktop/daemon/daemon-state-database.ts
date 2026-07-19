@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 4;
+export const DAEMON_STATE_SCHEMA_VERSION = 5;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -37,11 +37,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV3ToV4(database);
     return;
   }
+  if (existingVersion === 4) {
+    this.migrateV4ToV5(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV4Shape(database);
+    this.repairAndValidateV5Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -310,8 +314,8 @@ createSchema(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV4Shape(database);
     this.validateV4Shape(database);
-    this.applyV4Shape(database);
-    this.validateV4Shape(database);
+    this.applyV5Shape(database);
+    this.validateV5Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -335,6 +339,8 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV4Shape(database);
     this.validateV4Shape(database);
+    this.applyV5Shape(database);
+    this.validateV5Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -357,6 +363,8 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV4Shape(database);
     this.validateV4Shape(database);
+    this.applyV5Shape(database);
+    this.validateV5Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -378,6 +386,8 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV4Shape(database);
     this.validateV4Shape(database);
+    this.applyV5Shape(database);
+    this.validateV5Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -422,6 +432,55 @@ repairAndValidateV4Shape(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV4Shape(database);
     this.validateV4Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+migrateV4ToV5(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV2Shape(database);
+    this.validateV3Shape(database);
+    this.validateV4Shape(database);
+    this.applyV5Shape(database);
+    this.validateV5Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+repairAndValidateV5Shape(database: DatabaseSync): void {
+  // Keep the existing v2 repair path, but reject malformed private authority
+  // tables rather than accepting a database whose fencing guarantees changed.
+  let needsRepair = this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")
+    && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
+  try {
+    this.validateV2Shape(database);
+    this.validateV3Shape(database);
+    this.validateV4Shape(database);
+    this.validateV5Shape(database);
+  } catch {
+    needsRepair = true;
+  }
+  if (!needsRepair) return;
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV2Shape(database, true);
+    this.validateV2Shape(database);
+    this.applyV3Shape(database);
+    this.validateV3Shape(database);
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
+    this.applyV5Shape(database);
+    this.validateV5Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -576,6 +635,72 @@ validateV4Shape(database: DatabaseSync): void {
   for (const invalid of [[-1, 1, "reserved"], [0, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"], [1, 1, "working"], [1, 1, ""]]) rejectsCheck("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...publication.slice(0, 5), invalid[0], publication[6], invalid[1], invalid[2], publication[9], null);
   const verification = ["probe", "agent", 1, "from", "to", "session", 1, "2026-01-01T00:00:00.000Z", 1, "reserved", "2026-01-01T00:00:00.000Z", null];
   for (const invalid of [[-1, 1, "reserved"], [0, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"], [1, 1, "working"], [1, 1, ""]]) rejectsCheck("INSERT INTO worker_generation_verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...verification.slice(0, 6), invalid[0], verification[7], invalid[1], invalid[2], verification[10], null);
+}
+
+applyV5Shape(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS worker_binding_watermarks (
+      entry_id TEXT PRIMARY KEY,
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+      last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0),
+      updated_at TEXT NOT NULL
+    ) STRICT;
+  `);
+  // v4 kept authority only with live credentials. Build the independent
+  // tombstone from both the live row and every historic reservation before a
+  // v5 opener can bind again. This runs idempotently during interrupted
+  // migrations as well as a normal upgrade.
+  database.exec(`
+    INSERT INTO worker_binding_watermarks
+      (entry_id, binding_epoch, last_sequence, last_observed_at_ms, updated_at)
+    SELECT entry_id, MAX(binding_epoch), MAX(last_sequence), MAX(last_observed_at_ms), MAX(updated_at)
+    FROM (
+      SELECT entry_id, binding_epoch, last_sequence, last_observed_at_ms, updated_at
+      FROM worker_session_bindings
+      UNION ALL
+      SELECT entry_id, binding_epoch, sequence, observed_at_ms, observed_at
+      FROM worker_binding_publications
+      UNION ALL
+      SELECT entry_id, binding_epoch, sequence, observed_at_ms, observed_at
+      FROM worker_generation_verifications
+    )
+    GROUP BY entry_id
+    ON CONFLICT(entry_id) DO UPDATE SET
+      binding_epoch = MAX(worker_binding_watermarks.binding_epoch, excluded.binding_epoch),
+      last_sequence = MAX(worker_binding_watermarks.last_sequence, excluded.last_sequence),
+      last_observed_at_ms = MAX(worker_binding_watermarks.last_observed_at_ms, excluded.last_observed_at_ms),
+      updated_at = CASE
+        WHEN excluded.last_observed_at_ms >= worker_binding_watermarks.last_observed_at_ms THEN excluded.updated_at
+        ELSE worker_binding_watermarks.updated_at
+      END;
+  `);
+}
+
+validateV5Shape(database: DatabaseSync): void {
+  const canonical = `CREATE TABLE worker_binding_watermarks (entry_id TEXT PRIMARY KEY,binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0),last_observed_at_ms INTEGER NOT NULL CHECK(last_observed_at_ms >= 0),updated_at TEXT NOT NULL) STRICT`;
+  const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").trim().toLowerCase();
+  const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_binding_watermarks'").get() as Row | undefined;
+  if (!actual || normalizeSql(String(actual.sql)) !== normalizeSql(canonical)) throw new Error("Daemon state v5 table worker_binding_watermarks does not match its canonical definition.");
+  const columns = database.prepare("PRAGMA table_xinfo(worker_binding_watermarks)").all() as Array<{ name: string; type: string; notnull: number; pk: number; hidden: number }>;
+  const expected = [
+    ["entry_id", "TEXT", 1, 1], ["binding_epoch", "INTEGER", 1, 0], ["last_sequence", "INTEGER", 1, 0],
+    ["last_observed_at_ms", "INTEGER", 1, 0], ["updated_at", "TEXT", 1, 0],
+  ] as const;
+  if (columns.length !== expected.length || columns.some((column, index) => column.name !== expected[index]![0] || column.type !== expected[index]![1] || Number(column.notnull) !== expected[index]![2] || Number(column.pk) !== expected[index]![3] || Number(column.hidden) !== 0)) {
+    throw new Error("Daemon state v5 table worker_binding_watermarks has invalid columns.");
+  }
+  const table = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === "worker_binding_watermarks" && row.type === "table");
+  if (!table || Number(table.strict) !== 1 || Number(table.wr) !== 0) throw new Error("Daemon state v5 table worker_binding_watermarks must be a STRICT rowid table.");
+  const rejectsCheck = (sql: string, ...values: unknown[]) => {
+    database.exec("SAVEPOINT worker_v5_check_probe");
+    try {
+      try { database.prepare(sql).run(...values as never[]); }
+      catch (error: unknown) { if (!/CHECK constraint failed/i.test(String(error))) throw error; return; }
+      throw new Error("required CHECK accepted an invalid value");
+    } finally { database.exec("ROLLBACK TO worker_v5_check_probe"); database.exec("RELEASE worker_v5_check_probe"); }
+  };
+  for (const invalid of [[0, 0, 0], [1, -1, 0], [1, 0, -1]]) rejectsCheck("INSERT INTO worker_binding_watermarks VALUES (?, ?, ?, ?, ?)", "probe", invalid[0], invalid[1], invalid[2], "2026-01-01T00:00:00.000Z");
 }
 
 applyV3Shape(database: DatabaseSync): void {
