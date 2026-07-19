@@ -355,6 +355,8 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -520,6 +522,32 @@ validateV4Shape(database: DatabaseSync): void {
       throw new Error(`Daemon state v4 index ${name} has an invalid key definition.`);
     }
   }
+  const indexRequirements: Record<string, { table: string; unique: number; columns: string[] }> = {
+    worker_session_binding_authority: { table: "worker_session_bindings", unique: 1, columns: ["entry_id", "binding_epoch", "execution_generation_id", "agent_session_id"] },
+    worker_binding_publications_current: { table: "worker_binding_publications", unique: 0, columns: ["entry_id", "binding_epoch", "sequence"] },
+    worker_generation_verifications_current: { table: "worker_generation_verifications", unique: 0, columns: ["entry_id", "binding_epoch", "sequence"] },
+  };
+  for (const [name, requirement] of Object.entries(indexRequirements)) {
+    const listed = (database.prepare(`PRAGMA index_list(${requirement.table})`).all() as Array<{ name: string; unique: number; partial: number; origin: string }>).find((row) => row.name === name);
+    if (!listed || Number(listed.unique) !== requirement.unique || Number(listed.partial) !== 0 || String(listed.origin) !== "c") throw new Error(`Daemon state v4 index ${name} has invalid ownership or uniqueness.`);
+    const info = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Array<{ key: number; cid: number; name: string | null; desc: number; coll: string }>).filter((row) => Number(row.key) === 1);
+    if (info.length !== requirement.columns.length || info.some((row, index) => Number(row.cid) < 0 || row.name !== requirement.columns[index] || String(row.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v4 index ${name} has invalid terms.`);
+  }
+  for (const table of ["worker_binding_publications", "worker_generation_verifications"]) {
+    const uniqueSequence = (database.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string; unique: number; origin: string }>).some((row) => {
+      if (Number(row.unique) !== 1 || String(row.origin) !== "u") return false;
+      const terms = (database.prepare(`PRAGMA index_xinfo(${row.name})`).all() as Array<{ key: number; name: string | null }>).filter((term) => Number(term.key) === 1).map((term) => term.name);
+      return terms.join(",") === "entry_id,sequence";
+    });
+    if (!uniqueSequence) throw new Error(`Daemon state v4 table ${table} is missing UNIQUE(entry_id, sequence).`);
+  }
+  const schemaSql = new Map((database.prepare("SELECT name, sql FROM sqlite_master WHERE type='table'").all() as Row[]).map((row) => [String(row.name), String(row.sql).replace(/\s+/g, " ").toLowerCase()]));
+  const checks: Record<string, string[]> = {
+    worker_session_bindings: ["check (last_sequence >= 0)", "check (last_observed_at_ms >= 0)", "check (binding_epoch >= 1)"],
+    worker_binding_publications: ["check (sequence > 0)", "check (observed_at_ms >= 0)", "state in ('reserved', 'accepted', 'failed')"],
+    worker_generation_verifications: ["check (sequence > 0)", "check (observed_at_ms >= 0)", "state in ('reserved', 'accepted', 'failed', 'lost_race')"],
+  };
+  for (const [table, fragments] of Object.entries(checks)) if (fragments.some((fragment) => !schemaSql.get(table)?.includes(fragment))) throw new Error(`Daemon state v4 table ${table} is missing required CHECK constraints.`);
 }
 
 applyV3Shape(database: DatabaseSync): void {
