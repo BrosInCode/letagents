@@ -58,6 +58,10 @@ function normalizeManifestEntry(entry: DaemonManifestEntry): DaemonManifestEntry
   return JSON.parse(JSON.stringify(entry)) as DaemonManifestEntry;
 }
 
+function canonicalManifestEntry(entry: DaemonManifestEntry): DaemonManifestEntry {
+  return composeDaemonManifestEntry(projectDaemonManifestEntry(normalizeManifestEntry(entry)));
+}
+
 function run(statement: StatementSync, ...values: unknown[]): void {
   statement.run(...values as never[]);
 }
@@ -79,6 +83,7 @@ export class ManifestStore {
     readonly path: string,
     private readonly legacyJsonPath?: string,
     private readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
+    private readonly schemaInitializationHook?: (database: DatabaseSync) => void,
   ) {}
 
   async load(): Promise<DaemonManifest> {
@@ -156,6 +161,10 @@ export class ManifestStore {
 
   async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
+    return this.readEntryFromDatabase(database, agentId);
+  }
+
+  private readEntryFromDatabase(database: DatabaseSync, agentId: string): DaemonManifestEntry | undefined {
     const row = database.prepare(`
       SELECT
         i.agent_id, i.created_by, i.created_at,
@@ -211,23 +220,17 @@ export class ManifestStore {
     entry: DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
-    const normalized = normalizeManifestEntry(entry);
-    const generation = await this.writeTargeted(expectedGeneration, (database) => {
-      const row = database.prepare(`
-        SELECT identity.sort_order, runtime.deployment_id, runtime.run_id
-        FROM agent_identities identity JOIN runtime_deployments runtime USING (agent_id)
-        WHERE identity.agent_id = ?
-      `).get(normalized.id) as Row | undefined;
+    const normalized = canonicalManifestEntry(entry);
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
       if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
       run(database.prepare("DELETE FROM agent_identities WHERE agent_id = ?"), normalized.id);
       this.insertProjection(database, projectDaemonManifestEntry(normalized), Number(row.sort_order));
-      if (!normalized.provider_ref && row.run_id !== null) {
-        run(database.prepare("UPDATE runtime_deployments SET deployment_id = ?, run_id = ? WHERE agent_id = ?"), row.deployment_id, row.run_id, normalized.id);
-      }
+      const persisted = this.readEntryFromDatabase(database, normalized.id);
+      if (!persisted) throw new Error(`Daemon manifest entry disappeared during replacement: ${normalized.id}`);
+      return persisted;
     }, commitFence);
-    const persisted = await this.getEntry(normalized.id);
-    if (!persisted) throw new Error(`Daemon manifest entry disappeared after replacement: ${normalized.id}`);
-    return { generation, entry: persisted };
+    return { generation: result.generation, entry: result.value };
   }
 
   async replaceEntriesBatch(
@@ -235,30 +238,26 @@ export class ManifestStore {
     entries: DaemonManifestEntry[],
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ generation: number; entries: DaemonManifestEntry[] }> {
-    const normalized = entries.map(normalizeManifestEntry);
+    const normalized = entries.map(canonicalManifestEntry);
     if (new Set(normalized.map((entry) => entry.id)).size !== normalized.length) {
       throw new Error("Targeted manifest batch contains duplicate agent ids.");
     }
-    const generation = await this.writeTargeted(expectedGeneration, (database) => {
-      const findOrder = database.prepare(`
-        SELECT identity.sort_order, runtime.deployment_id, runtime.run_id
-        FROM agent_identities identity JOIN runtime_deployments runtime USING (agent_id)
-        WHERE identity.agent_id = ?
-      `);
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const findOrder = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?");
       const remove = database.prepare("DELETE FROM agent_identities WHERE agent_id = ?");
       for (const entry of normalized) {
         const row = findOrder.get(entry.id) as Row | undefined;
         if (!row) throw new Error(`Unknown daemon manifest entry: ${entry.id}`);
         run(remove, entry.id);
         this.insertProjection(database, projectDaemonManifestEntry(entry), Number(row.sort_order));
-        if (!entry.provider_ref && row.run_id !== null) {
-          run(database.prepare("UPDATE runtime_deployments SET deployment_id = ?, run_id = ? WHERE agent_id = ?"), row.deployment_id, row.run_id, entry.id);
-        }
       }
+      return normalized.map((entry) => {
+        const persisted = this.readEntryFromDatabase(database, entry.id);
+        if (!persisted) throw new Error(`Daemon manifest batch entry disappeared during replacement: ${entry.id}`);
+        return persisted;
+      });
     }, commitFence);
-    const persisted = await Promise.all(normalized.map((entry) => this.getEntry(entry.id)));
-    if (persisted.some((entry) => !entry)) throw new Error("Daemon manifest batch entry disappeared after replacement.");
-    return { generation, entries: persisted as DaemonManifestEntry[] };
+    return { generation: result.generation, entries: result.value };
   }
 
   async appendActivity(
@@ -271,7 +270,7 @@ export class ManifestStore {
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
     const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
-    const generation = await this.writeTargeted(expectedGeneration, (database) => {
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
       const latest = database.prepare("SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1").get(agentId) as Row | undefined;
       const lastSequence = latest ? Number(latest.sequence) : -1;
       if (normalizedEvent.sequence <= lastSequence) throw new Error(`Native activity sequence ${normalizedEvent.sequence} is not newer than ${lastSequence}.`);
@@ -298,10 +297,11 @@ export class ManifestStore {
           SELECT sort_order FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?
         )
       `), agentId, agentId, limit);
+      const persisted = this.readEntryFromDatabase(database, agentId);
+      if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity append: ${agentId}`);
+      return persisted;
     }, commitFence);
-    const persisted = await this.getEntry(agentId);
-    if (!persisted) throw new Error(`Daemon manifest entry disappeared after activity append: ${agentId}`);
-    return { generation, entry: persisted };
+    return { generation: result.generation, entry: result.value };
   }
 
   async updateWorkplaceLiveness(
@@ -310,7 +310,7 @@ export class ManifestStore {
     liveness: NonNullable<DaemonManifestEntry["workplace_liveness"]>,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
-    const generation = await this.writeTargeted(expectedGeneration, (database) => {
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
       const updated = database.prepare(`
         UPDATE runtime_deployments
         SET workplace_liveness_present = 1, workplace_liveness_state = ?,
@@ -318,10 +318,11 @@ export class ManifestStore {
         WHERE agent_id = ?
       `).run(liveness.state, liveness.observed_at ?? null, liveness.detail ?? null, agentId);
       if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+      const persisted = this.readEntryFromDatabase(database, agentId);
+      if (!persisted) throw new Error(`Daemon manifest entry disappeared during liveness update: ${agentId}`);
+      return persisted;
     }, commitFence);
-    const persisted = await this.getEntry(agentId);
-    if (!persisted) throw new Error(`Daemon manifest entry disappeared after liveness update: ${agentId}`);
-    return { generation, entry: persisted };
+    return { generation: result.generation, entry: result.value };
   }
 
   async close(): Promise<void> {
@@ -341,7 +342,7 @@ export class ManifestStore {
   ): Promise<DaemonManifest> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
-      const normalizedEntries = entries.map(normalizeManifestEntry);
+      const normalizedEntries = entries.map(canonicalManifestEntry);
       const owners = legacyLaneOwners ?? this.readLegacyLaneOwners(database);
       let committed = false;
       let transactionOpen = false;
@@ -439,7 +440,9 @@ export class ManifestStore {
       this.repairAndValidateV2Shape(database);
       return;
     }
-    database.exec(`
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(`
       CREATE TABLE IF NOT EXISTS manifest_metadata (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         generation INTEGER NOT NULL CHECK (generation >= 0),
@@ -644,13 +647,19 @@ export class ManifestStore {
         updated_at TEXT NOT NULL,
         sort_order INTEGER NOT NULL UNIQUE
       ) STRICT;
-    `);
-    if (existingVersion === 0) database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
-    if (version !== SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${version}.`);
-    const createdMetadataVersion = this.metadataSchemaVersion(database);
-    if (createdMetadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${createdMetadataVersion}.`);
-    this.validateV2Shape(database);
+      `);
+      this.schemaInitializationHook?.(database);
+      database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+      if (version !== SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${version}.`);
+      const createdMetadataVersion = this.metadataSchemaVersion(database);
+      if (createdMetadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${createdMetadataVersion}.`);
+      this.validateV2Shape(database);
+      database.exec("COMMIT");
+    } catch (error) {
+      try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+      throw error;
+    }
   }
 
   private metadataSchemaVersion(database: DatabaseSync): number | undefined {
@@ -943,7 +952,7 @@ export class ManifestStore {
 
   private replaceEntries(database: DatabaseSync, entries: DaemonManifestEntry[]): void {
     database.exec("DELETE FROM agent_identities");
-    entries.forEach((entry, index) => this.insertProjection(database, projectDaemonManifestEntry(normalizeManifestEntry(entry)), index));
+    entries.forEach((entry, index) => this.insertProjection(database, projectDaemonManifestEntry(canonicalManifestEntry(entry)), index));
   }
 
   private insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
@@ -1165,15 +1174,16 @@ export class ManifestStore {
     owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
   }
 
-  private writeTargeted(
+  private writeTargeted<T>(
     expectedGeneration: number,
-    mutation: (database: DatabaseSync) => void,
+    mutation: (database: DatabaseSync) => T,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<number> {
+  ): Promise<{ generation: number; value: T }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       let committed = false;
       let transactionOpen = false;
+      let value!: T;
       try {
         const commit = async () => {
           if (committed) throw new Error("Manifest transaction was already committed.");
@@ -1187,7 +1197,7 @@ export class ManifestStore {
             const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
             throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
           }
-          mutation(database);
+          value = mutation(database);
           database.exec("COMMIT");
           transactionOpen = false;
           committed = true;
@@ -1195,7 +1205,7 @@ export class ManifestStore {
         if (commitFence) await commitFence(commit);
         else await commit();
         if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
-        return expectedGeneration + 1;
+        return { generation: expectedGeneration + 1, value };
       } catch (error) {
         if (transactionOpen) {
           try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }

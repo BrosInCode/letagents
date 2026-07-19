@@ -44,6 +44,7 @@ const {
 const {
   getLocalChatMessages,
 } = await import("../main/rooms/messages/local-store.js");
+const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
 
 import type {
   DesktopCodexLiveSessionState,
@@ -530,23 +531,29 @@ test("codex turn errors set status 'unknown', stay deliverable, and never park (
 
 test("codex stop with shutdown interrupts the session and disconnects the worker", async () => {
   resetState();
+  const originalReleaseLegacyLane = supervisorDaemonClient.releaseLegacyLane;
+  (supervisorDaemonClient as unknown as { releaseLegacyLane: () => Promise<{ released: boolean }> }).releaseLegacyLane = async () => ({ released: true });
   const roomIdentifier = "local_room_codex_stop_shutdown";
-  const seeded = await seedDeliverableSession({
-    roomIdentifier,
-    sessionId: "codex_stop_shutdown",
-    workerSessionId: "agent_session_stop_shutdown",
-  });
-  // No RPC server needed: the shutdown stop path never touches the app-server.
-  const stopped = await stopDesktopManagedAgent({ sessionId: seeded.session_id, stopMode: "worker" });
+  try {
+    const seeded = await seedDeliverableSession({
+      roomIdentifier,
+      sessionId: "codex_stop_shutdown",
+      workerSessionId: "agent_session_stop_shutdown",
+    });
+    // No RPC server needed: the shutdown stop path never touches the app-server.
+    const stopped = await stopDesktopManagedAgent({ sessionId: seeded.session_id, stopMode: "worker" });
 
-  assert.ok(stopped);
-  assert.equal(stopped?.status, "interrupted");
-  const session = getStoredCodexLiveSession(seeded.session_id);
-  assert.equal(session?.status, "interrupted");
-  assert.equal(session?.active_work, null);
-  // killOwnedAppServer marks the worker session ended (worker disconnected).
-  const worker = getStoredAgentSession(seeded.agent_session_id ?? null);
-  assert.ok(worker?.ended_at, "expected the worker agent-session to be marked ended");
+    assert.ok(stopped);
+    assert.equal(stopped?.status, "interrupted");
+    const session = getStoredCodexLiveSession(seeded.session_id);
+    assert.equal(session?.status, "interrupted");
+    assert.equal(session?.active_work, null);
+    // killOwnedAppServer marks the worker session ended (worker disconnected).
+    const worker = getStoredAgentSession(seeded.agent_session_id ?? null);
+    assert.ok(worker?.ended_at, "expected the worker agent-session to be marked ended");
+  } finally {
+    (supervisorDaemonClient as unknown as { releaseLegacyLane: typeof originalReleaseLegacyLane }).releaseLegacyLane = originalReleaseLegacyLane;
+  }
 });
 
 test("codex non-shutdown stop issues a turn/interrupt RPC for an active turn", async () => {

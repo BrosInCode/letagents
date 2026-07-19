@@ -95,10 +95,15 @@ test("manifest projection separates independently owned records and round-trips 
   // @ts-expect-error Runtime deployment cannot own the readiness stamp.
   void projected.runtime_deployment.ready_reached_at;
 
-  assert.deepEqual(composeDaemonManifestEntry(projected), entry);
+  const composed = composeDaemonManifestEntry(projected);
+  const runtimeIdentity = {
+    run_id: entry.provider_ref.execution_generation_id,
+    deployment_id: projected.runtime_deployment.deployment_id,
+  };
+  assert.deepEqual(composed, { ...entry, ...runtimeIdentity });
   assert.deepEqual(
-    JSON.parse(JSON.stringify(composeDaemonManifestEntry(projected))),
-    JSON.parse(JSON.stringify(entry)),
+    JSON.parse(JSON.stringify(composed)),
+    JSON.parse(JSON.stringify({ ...entry, ...runtimeIdentity })),
     "serialization preserves the flat wire keys and values independent of object insertion order",
   );
 });
@@ -115,6 +120,17 @@ test("deployment ids serialize agent and run ids without delimiter collisions", 
   assert.throws(() => serializeDaemonDeploymentId("agent", ""), /non-empty/);
   assert.throws(() => parseDaemonDeploymentId("daemon-deployment:not-json"), /payload/);
   assert.throws(() => parseDaemonDeploymentId("other:[\"agent\",\"run\"]"), /prefix/);
+  assert.throws(() => projectDaemonManifestEntry({ ...entry, run_id: "run_1" }), /requires both/);
+  assert.throws(() => composeDaemonManifestEntry(projectDaemonManifestEntry({
+    ...entry,
+    run_id: "different-run",
+    deployment_id: serializeDaemonDeploymentId(entry.id, "different-run"),
+  })), /does not match its provider execution/);
+  assert.throws(() => composeDaemonManifestEntry(projectDaemonManifestEntry({
+    ...entry,
+    run_id: entry.provider_ref.execution_generation_id,
+    deployment_id: serializeDaemonDeploymentId(entry.id, "wrong-run"),
+  })), /does not match its agent and run ids/);
 });
 
 test("create-request replay comparison is explicit and does not imply field immutability", () => {
@@ -143,5 +159,10 @@ test("non-Codex provider process facts retain the compatibility wire shape", () 
     },
   };
 
-  assert.deepEqual(composeDaemonManifestEntry(projectDaemonManifestEntry(claudeEntry)), claudeEntry);
+  const projected = projectDaemonManifestEntry(claudeEntry);
+  assert.deepEqual(composeDaemonManifestEntry(projected), {
+    ...claudeEntry,
+    run_id: claudeEntry.provider_ref!.execution_generation_id,
+    deployment_id: projected.runtime_deployment.deployment_id,
+  });
 });

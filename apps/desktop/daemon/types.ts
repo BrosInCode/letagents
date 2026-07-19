@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.19";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.20";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -203,6 +203,9 @@ export type DaemonManifestEntry = {
   source_repo_path?: string | null;
   workspace_path?: string | null;
   work_attempt_id?: string | null;
+  /** Durable runtime identity, explicit when it cannot be derived from provider_ref. */
+  run_id?: string | null;
+  deployment_id?: string | null;
   provider_ref?: DaemonProviderRuntimeReference | null;
   workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;

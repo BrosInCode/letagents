@@ -7,7 +7,7 @@ import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { WorkDurabilityStore } from "./durability-store.js";
-import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
+import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
 import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal, ProviderTurnControlResult } from "./provider-action-port.js";
@@ -1673,6 +1673,8 @@ export class SupervisorDaemon {
     if (!handle.providerContinuationId) throw new Error("Provider launch did not return a durable continuation id.");
     await this.updateManifestEntry(entryId, (current) => ({
       ...current,
+      run_id: executionGenerationId,
+      deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
       provider_ref: {
         work_attempt_id: handle.workAttemptId,
         provider_continuation_id: handle.providerContinuationId!,

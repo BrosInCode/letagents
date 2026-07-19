@@ -55,7 +55,14 @@ export function parseDaemonDeploymentId(deploymentId: string): { agent_id: strin
 
 /** Decomposes the legacy flat transport record without assigning it domain ownership. */
 export function projectDaemonManifestEntry(entry: DaemonManifestEntry): DaemonManifestDomainProjection {
-  const runId = entry.provider_ref?.execution_generation_id ?? null;
+  const hasRunId = Object.hasOwn(entry, "run_id");
+  const hasDeploymentId = Object.hasOwn(entry, "deployment_id");
+  if (hasRunId !== hasDeploymentId) throw new Error("Daemon flat runtime identity requires both run_id and deployment_id.");
+  const providerRunId = entry.provider_ref?.execution_generation_id ?? null;
+  const runId = hasRunId ? entry.run_id ?? null : providerRunId;
+  const deploymentId = hasDeploymentId
+    ? entry.deployment_id ?? null
+    : runId === null ? null : serializeDaemonDeploymentId(entry.id, runId);
   return {
     identity: {
       agent_id: entry.id,
@@ -86,7 +93,7 @@ export function projectDaemonManifestEntry(entry: DaemonManifestEntry): DaemonMa
     runtime_deployment: {
       agent_id: entry.id,
       run_id: runId,
-      deployment_id: runId === null ? null : serializeDaemonDeploymentId(entry.id, runId),
+      deployment_id: deploymentId,
       observed_state: entry.observed_state,
       ...(Object.hasOwn(entry, "workspace_path") ? { workspace_path: entry.workspace_path } : {}),
       ...(Object.hasOwn(entry, "work_attempt_id") ? { work_attempt_id: entry.work_attempt_id } : {}),
@@ -177,6 +184,9 @@ export function composeDaemonManifestEntry(projection: DaemonManifestDomainProje
     ...(Object.hasOwn(launchIntent, "source_repo_path") ? { source_repo_path: launchIntent.source_repo_path } : {}),
     ...(Object.hasOwn(runtime, "workspace_path") ? { workspace_path: runtime.workspace_path } : {}),
     ...(Object.hasOwn(runtime, "work_attempt_id") ? { work_attempt_id: runtime.work_attempt_id } : {}),
+    ...(runtime.run_id !== null
+      ? { run_id: runtime.run_id, deployment_id: runtime.deployment_id }
+      : {}),
     ...(Object.hasOwn(runtime, "provider_ref") ? { provider_ref: runtime.provider_ref } : {}),
     ...(Object.hasOwn(runtime, "workplace_liveness") ? { workplace_liveness: runtime.workplace_liveness } : {}),
     ...(Object.hasOwn(runtime, "native_liveness") ? { native_liveness: runtime.native_liveness } : {}),
