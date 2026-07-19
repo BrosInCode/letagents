@@ -342,6 +342,7 @@ async function startManagedAgent(): Promise<void> {
         throw new Error("Check for previous supervised agents before starting a new one.");
       }
       if (!canStartNewSupervisedLaunch({
+        providerId: requestProviderId,
         scanStatus: supervisedRecoveryScanStatus.value,
         hasActiveLaunch: Boolean(supervisedLaunchView.value || supervisedConflict.value || launchStarted.value),
         hasRecoveryCandidate: Boolean(supervisedRecoveryCandidate.value),

@@ -476,6 +476,7 @@ test("a failed passive recovery check does not fence starting a new supervised a
 
 test("the shared supervised start policy preserves authoritative live fences", () => {
   const base = {
+    providerId: "claude-code" as const,
     scanStatus: "error" as const,
     hasActiveLaunch: false,
     hasRecoveryCandidate: false,
@@ -483,6 +484,7 @@ test("the shared supervised start policy preserves authoritative live fences", (
   };
   assert.equal(canStartNewSupervisedLaunch(base), true);
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasRecoveryCandidate: true }), false);
+  assert.equal(canStartNewSupervisedLaunch({ ...base, providerId: "codex", hasRecoveryCandidate: true }), true);
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasActiveLaunch: true }), false);
   assert.equal(canStartNewSupervisedLaunch({ ...base, recoveringCandidate: true }), false);
 });
@@ -1147,6 +1149,49 @@ test("recovery detection is passive and explicit recovery revalidates stale term
   await Promise.resolve();
   await nextTick();
   assert.equal(launch.view.value, terminalView, "terminal unsubscribe invalidates an in-flight replay");
+});
+
+test("recovery discovery ignores an established agent whose current liveness degraded", async () => {
+  Object.assign(globalThis, {
+    window: {
+      sessionStorage: memorySessionStorage(),
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: {
+        supervisor: {
+          listAgents: async () => [entry({
+            observedState: "working",
+            workspacePath: "/tmp/worktree",
+            providerPid: 42,
+            agentSessionId: "agent-1",
+            agentSessionBindingState: "active",
+            workplaceLiveness: { state: "stale", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+            readyReachedAt: "2026-07-18T00:00:03.000Z",
+          })],
+        },
+      },
+    },
+  });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomLabel: () => "Room one",
+    providerId: () => "codex",
+    authCommand: () => null,
+    authCommandForProvider: () => null,
+    currentVersion: () => 0,
+    isCurrentRequest: () => true,
+    onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined,
+    onRetry: () => undefined,
+    onMessage: () => undefined,
+  });
+
+  await launch.detectRecoverableLaunch();
+
+  assert.equal(launch.recoveryCandidate.value, null);
+  assert.equal(launch.recoveryScanStatus.value, "ready");
+  launch.cleanup();
 });
 
 test("reopening after explicit recovery automatically restores the same live launch", async () => {

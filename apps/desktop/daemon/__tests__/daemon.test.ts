@@ -14,7 +14,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
+import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -35,6 +35,12 @@ const TEST_PROCESS_IDENTITY = execFileSync(
   ["-p", String(process.pid), "-o", "lstart=", "-o", "command="],
   { encoding: "utf8" },
 ).trim();
+
+test("workplace reachability outlives the configured room long poll", () => {
+  assert.equal(workplaceLivenessStaleAfterMs(""), 210_000);
+  assert.equal(workplaceLivenessStaleAfterMs("36000000"), 36_030_000);
+  assert.equal(workplaceLivenessStaleAfterMs("invalid"), 210_000);
+});
 
 test("resolveReadyReachedAt stamps ready once, monotonically, and only when running + unblocked + live (task_84)", () => {
   const now = "2026-07-17T00:00:00.000Z";
@@ -3403,6 +3409,15 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(boundProjection.last_worker_binding?.agent_session_id, "agent_session_exact");
     assert.equal(boundProjection.workplace_liveness?.state, "reachable", "fresh exact binding marks the MCP workplace reachable");
     assert.doesNotMatch(JSON.stringify(boundProjection), /session-secret|api_url/, "renderer projection never exposes worker authority");
+    await daemonRequest(paths.socketPath, "manifest.update_workplace_liveness", {
+      id: "supervised_handoff",
+      state: "reachable",
+      detail: "original bind timestamp",
+      observed_at: "2026-01-01T00:00:00.000Z",
+    });
+    const heartbeatProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(heartbeatProjection.workplace_liveness?.state, "reachable", "fresh exact wait authority outranks the old manifest bind timestamp");
+    assert.equal(heartbeatProjection.workplace_liveness?.observed_at, heartbeatProjection.worker_binding?.updated_at);
     await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.bound"), "initial daemon worker binding activity");
     const manifestAfterFirstBind = await new ManifestStore(paths.manifestPath).load();
     const workplaceObservedAtAfterFirstBind = manifestAfterFirstBind.entries
