@@ -72,8 +72,10 @@ export class WorkerBindingStore {
       const binding: WorkerSessionBinding = {
         ...input, api_url: new URL(input.api_url).origin,
         room_cursor: sameSession ? prior!.room_cursor : null,
-        last_sequence: sameSession ? prior!.last_sequence : 0,
-        last_observed_at_ms: sameSession ? prior!.last_observed_at_ms : 0,
+        // Credentials may rotate, but the native API's sequence authority is
+        // per durable agent entry. Never reuse a journal/API sequence.
+        last_sequence: prior?.last_sequence ?? 0,
+        last_observed_at_ms: prior?.last_observed_at_ms ?? 0,
         updated_at: now,
       };
       // Any formal bind/rebind establishes a new authority epoch. This makes
@@ -120,8 +122,8 @@ export class WorkerBindingStore {
     if (!reservation) return null;
     let result: T;
     try { result = await operation({ binding: reservation.binding, sequence: reservation.sequence, observed_at: reservation.observedAt }); }
-    catch (error) { await this.finalizePublication(reservation, false); throw error; }
-    await this.finalizePublication(reservation, result.accepted);
+    catch (error) { await this.finalizePublication(reservation, "transport_error"); throw error; }
+    await this.finalizePublication(reservation, result.accepted ? "accepted" : "rejected");
     return { ...result, sequence: reservation.sequence, observed_at: reservation.observedAt };
   }
 
@@ -157,15 +159,21 @@ export class WorkerBindingStore {
     }));
   }
 
-  private async finalizePublication(reservation: Reservation, accepted: boolean): Promise<void> {
+  private async finalizePublication(reservation: Reservation, outcome: "accepted" | "rejected" | "transport_error"): Promise<void> {
     await this.withMutation(async (database) => this.transaction(database, async () => {
-      const state = accepted ? "accepted" : "failed"; const now = new Date().toISOString();
+      // v4's state vocabulary predates transport-error observability. Keep a
+      // durable failed reservation, but only an explicit server rejection may
+      // revoke authority; timeout/throw must leave it usable.
+      const state = outcome === "accepted" ? "accepted" : "failed"; const now = new Date().toISOString();
       run(database.prepare("UPDATE worker_binding_publications SET state=?, finalized_at=? WHERE reservation_id=? AND state='reserved'"), state, now, reservation.reservationId);
       // Rejection revokes only the exact still-current authority and only if no
       // later reservation exists. A delayed N response can never erase N+1.
-      if (!accepted) {
-        const latest = database.prepare("SELECT reservation_id FROM worker_binding_publications WHERE entry_id=? ORDER BY sequence DESC LIMIT 1").get(reservation.binding.entry_id) as Row | undefined;
-        if (latest?.reservation_id === reservation.reservationId) run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id=? AND binding_epoch=? AND execution_generation_id=? AND agent_session_id=?"), reservation.binding.entry_id, reservation.bindingEpoch, reservation.binding.execution_generation_id, reservation.binding.agent_session_id);
+      if (outcome === "rejected") {
+        const latest = database.prepare(`SELECT reservation_id, sequence FROM (
+          SELECT reservation_id, sequence FROM worker_binding_publications WHERE entry_id=?
+          UNION ALL SELECT reservation_id, sequence FROM worker_generation_verifications WHERE entry_id=?
+        ) ORDER BY sequence DESC LIMIT 1`).get(reservation.binding.entry_id, reservation.binding.entry_id) as Row | undefined;
+        if (latest?.reservation_id === reservation.reservationId && Number(latest.sequence) === reservation.sequence) run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id=? AND binding_epoch=? AND execution_generation_id=? AND agent_session_id=?"), reservation.binding.entry_id, reservation.bindingEpoch, reservation.binding.execution_generation_id, reservation.binding.agent_session_id);
       }
     }));
   }
@@ -195,7 +203,10 @@ export class WorkerBindingStore {
         return { binding: this.read(database, input.entryId)!, advanced: true, accepted: true };
       }
       run(database.prepare("UPDATE worker_generation_verifications SET state='lost_race', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId);
-      if (current?.execution_generation_id === input.toExecutionGenerationId) return { binding: current, advanced: false, accepted: true };
+      if (current?.execution_generation_id === input.toExecutionGenerationId
+        && current.agent_session_id === input.agentSessionId
+        && current.room_id === reservation.binding.room_id
+        && current.work_attempt_id === reservation.binding.work_attempt_id) return { binding: current, advanced: false, accepted: true };
       return { binding: current ?? reservation.binding, advanced: false, accepted: false };
     }));
   }
@@ -209,7 +220,16 @@ export class WorkerBindingStore {
   private read(database: DatabaseSync, entryId: string): WorkerSessionBinding | null { const row = database.prepare("SELECT * FROM worker_session_bindings WHERE entry_id=?").get(entryId) as Row | undefined; return row ? rowToBinding(row) : null; }
   private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); const url = new URL(input.api_url); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
   private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
-  private async transaction<T>(database: DatabaseSync, operation: () => Promise<T>): Promise<T> { database.exec("BEGIN IMMEDIATE"); let open = true; try { const result = await operation(); const commit = async () => { database.exec("COMMIT"); open = false; }; if (this.commitFence) await this.commitFence(commit); else await commit(); return result; } catch (error) { if (open) try { database.exec("ROLLBACK"); } catch { /* no-op */ } throw error; } }
+  private async transaction<T>(database: DatabaseSync, operation: () => Promise<T>): Promise<T> {
+    database.exec("BEGIN IMMEDIATE"); let open = true; let committed = false;
+    try {
+      const result = await operation();
+      const commit = async () => { if (committed || !open) throw new Error("Worker binding transaction commit was invoked more than once."); database.exec("COMMIT"); open = false; committed = true; };
+      if (this.commitFence) await this.commitFence(commit); else await commit();
+      if (!committed) throw new Error("Worker binding commit fence returned without committing.");
+      return result;
+    } catch (error) { if (open) try { database.exec("ROLLBACK"); } catch { /* no-op */ } throw error; }
+  }
   private async getDatabase(): Promise<DatabaseSync> { if (this.closed) throw new Error("WorkerBindingStore is closed."); if (this.database) return this.database; if (!this.initializing) this.initializing = this.initialize(); return this.initializing; }
   private async initialize(): Promise<DatabaseSync> { let database: DatabaseSync | null = null; try { database = await openDaemonStateDatabase(this.databasePath, (opened) => new DaemonStateSchema().createSchema(opened)); await this.importLegacy(database); this.database = database; return database; } catch (error) { database?.close(); this.initializing = null; throw error; } }
   private async importLegacy(database: DatabaseSync): Promise<void> {
@@ -218,7 +238,14 @@ export class WorkerBindingStore {
     const prior = database.prepare("SELECT 1 FROM migration_records WHERE migration_key=?").get(key);
     if (prior) { await this.finishLegacyBackup(backup); return; }
     const failed = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key=?").get(key) as Row | undefined;
-    if (failed) throw new Error(`Legacy worker binding import was previously quarantined: ${String(failed.reason)} (${String(failed.quarantined_path)}).`);
+    if (failed) {
+      // The durable failure is authoritative; retry only the filesystem
+      // housekeeping left behind by a crash/permission error before failing
+      // closed again.
+      const quarantine = String(failed.quarantined_path);
+      try { await rename(this.legacyJsonPath, quarantine); await chmod(quarantine, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      throw new Error(`Legacy worker binding import was previously quarantined: ${String(failed.reason)} (${quarantine}).`);
+    }
     let raw: string;
     try { raw = await readFile(this.legacyJsonPath, "utf8"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     const checksum = createHash("sha256").update(raw).digest("hex"); let parsed: LegacyBindings;
@@ -253,8 +280,16 @@ export class WorkerBindingStore {
     try { await rename(this.legacyJsonPath, quarantine); await chmod(quarantine, 0o600); } catch (renameError: unknown) { if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError; }
     throw new Error(`Legacy worker binding import refused: ${reason}`);
   }
-  private async finishLegacyBackup(backup: string): Promise<void> { try { await stat(this.legacyJsonPath); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; } try { await stat(backup); throw new Error(`Legacy worker binding backup already exists at ${backup}; refusing to overwrite it.`); } catch (error: unknown) { if (!(error as NodeJS.ErrnoException).code || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } await rename(this.legacyJsonPath, backup); await chmod(backup, 0o600); }
-  private validateLegacy(value: LegacyBindings, raw: string): void { if (!value || value.version !== 1 || !value.bindings || Array.isArray(value.bindings)) throw new Error("invalid v1 envelope"); const seen = new Set<string>(); for (const [key, binding] of Object.entries(value.bindings)) { if (key !== binding.entry_id || seen.has(key)) throw new Error("duplicate or mismatched entry id"); seen.add(key); this.validate(binding); if (!Number.isSafeInteger(binding.last_sequence) || binding.last_sequence < 0 || !Number.isSafeInteger(binding.last_observed_at_ms) || binding.last_observed_at_ms < 0 || !Number.isFinite(Date.parse(binding.updated_at)) || (binding.room_cursor !== null && typeof binding.room_cursor !== "string")) throw new Error(`invalid legacy binding ${key}`); } const ids = [...raw.matchAll(/"entry_id"\s*:\s*"([^"]+)"/g)].map((match) => match[1]); if (new Set(ids).size !== ids.length) throw new Error("duplicate legacy entry_id"); }
+  private async finishLegacyBackup(backup: string): Promise<void> {
+    // Backup housekeeping is non-authoritative: the committed migration record
+    // is the source of truth. Another opener may win the rename between these
+    // calls, so ENOENT/EEXIST are successful convergence, not startup errors.
+    try { await stat(this.legacyJsonPath); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    try { await stat(backup); return; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try { await rename(this.legacyJsonPath, backup); await chmod(backup, 0o600); }
+    catch (error: unknown) { if (!["ENOENT", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+  }
+  private validateLegacy(value: LegacyBindings, raw: string): void { assertNoDuplicateJsonKeys(raw); if (!value || value.version !== 1 || !value.bindings || Array.isArray(value.bindings)) throw new Error("invalid v1 envelope"); const seen = new Set<string>(); for (const [key, binding] of Object.entries(value.bindings)) { if (key !== binding.entry_id || seen.has(key)) throw new Error("duplicate or mismatched entry id"); seen.add(key); this.validate(binding); if (!Number.isSafeInteger(binding.last_sequence) || binding.last_sequence < 0 || !Number.isSafeInteger(binding.last_observed_at_ms) || binding.last_observed_at_ms < 0 || !Number.isFinite(Date.parse(binding.updated_at)) || (binding.room_cursor !== null && typeof binding.room_cursor !== "string")) throw new Error(`invalid legacy binding ${key}`); } }
 }
 
 function rowToBinding(row: Row): WorkerSessionBinding { return { entry_id: String(row.entry_id), room_id: String(row.room_id), work_attempt_id: String(row.work_attempt_id), execution_generation_id: String(row.execution_generation_id), agent_session_id: String(row.agent_session_id), agent_session_token: String(row.agent_session_token), api_url: String(row.api_url), room_cursor: row.room_cursor === null ? null : String(row.room_cursor), last_sequence: Number(row.last_sequence), last_observed_at_ms: Number(row.last_observed_at_ms), updated_at: String(row.updated_at) }; }
@@ -263,4 +298,14 @@ function defaultDatabasePath(legacyJsonPath: string): string {
   // SupervisorDaemon always injects the canonical path. Standalone tooling
   // follows the documented daemon-state filename rather than inventing JSON.
   return `${dirname(legacyJsonPath)}/daemon-state.sqlite`;
+}
+
+/** Parse just enough JSON structure to reject duplicate decoded object keys
+ * before JSON.parse can collapse them (including escaped spellings). */
+function assertNoDuplicateJsonKeys(raw: string): void {
+  let index = 0;
+  const whitespace = () => { while (/\s/.test(raw[index] ?? "")) index += 1; };
+  const string = (): string => { const start = index; if (raw[index++] !== '"') throw new Error("invalid JSON string"); let escaped = false; while (index < raw.length) { const char = raw[index++]; if (escaped) { escaped = false; continue; } if (char === "\\") { escaped = true; continue; } if (char === '"') return JSON.parse(raw.slice(start, index)) as string; } throw new Error("unterminated JSON string"); };
+  const value = (): void => { whitespace(); const token = raw[index]; if (token === "{") { index += 1; const keys = new Set<string>(); whitespace(); if (raw[index] === "}") { index += 1; return; } while (true) { whitespace(); const key = string(); if (keys.has(key)) throw new Error(`duplicate JSON key ${key}`); keys.add(key); whitespace(); if (raw[index++] !== ":") throw new Error("invalid JSON object"); value(); whitespace(); const separator = raw[index++]; if (separator === "}") return; if (separator !== ",") throw new Error("invalid JSON object"); } } if (token === "[") { index += 1; whitespace(); if (raw[index] === "]") { index += 1; return; } while (true) { value(); whitespace(); const separator = raw[index++]; if (separator === "]") return; if (separator !== ",") throw new Error("invalid JSON array"); } } if (token === '"') { string(); return; } const start = index; while (index < raw.length && !/[\s,}\]]/.test(raw[index]!)) index += 1; JSON.parse(raw.slice(start, index)); };
+  value(); whitespace(); if (index !== raw.length) throw new Error("trailing JSON content");
 }

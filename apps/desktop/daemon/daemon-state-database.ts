@@ -310,6 +310,8 @@ createSchema(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV4Shape(database);
     this.validateV4Shape(database);
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -331,6 +333,8 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -484,15 +488,37 @@ validateV4Shape(database: DatabaseSync): void {
     worker_generation_verifications: ["reservation_id", "entry_id", "binding_epoch", "from_execution_generation_id", "to_execution_generation_id", "agent_session_id", "sequence", "observed_at", "observed_at_ms", "state", "created_at", "finalized_at"],
   };
   for (const [table, expected] of Object.entries(required)) {
-    const actual = this.tableColumns(database, table);
+    const columns = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; type: string; notnull: number; pk: number }>;
+    const actual = new Set(columns.map((column) => column.name));
     const missing = expected.filter((column) => !actual.has(column));
-    if (missing.length) throw new Error(`Daemon state v4 table ${table} is missing required columns: ${missing.join(", ")}.`);
+    const extra = columns.map((column) => column.name).filter((column) => !expected.includes(column));
+    if (missing.length || extra.length) throw new Error(`Daemon state v4 table ${table} has invalid columns (missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}).`);
+    for (const column of columns) {
+      const isPrimary = column.name === (table === "worker_session_bindings" ? "entry_id" : "reservation_id");
+      const expectedType = ["last_sequence", "last_observed_at_ms", "binding_epoch", "sequence", "observed_at_ms"].includes(column.name) ? "INTEGER" : "TEXT";
+      const nullable = column.name === "room_cursor" || column.name === "finalized_at";
+      if (column.type !== expectedType || Number(column.notnull) !== (nullable ? 0 : 1) || Number(column.pk) !== (isPrimary ? 1 : 0)) {
+        throw new Error(`Daemon state v4 table ${table} has invalid definition for ${column.name}.`);
+      }
+    }
     const tableRow = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === table && row.type === "table");
     if (!tableRow || Number(tableRow.strict) !== 1) throw new Error(`Daemon state v4 table ${table} must be STRICT.`);
   }
   const indexNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Row[]).map((row) => String(row.name)));
   for (const index of ["worker_session_binding_authority", "worker_binding_publications_current", "worker_generation_verifications_current"]) {
     if (!indexNames.has(index)) throw new Error(`Daemon state v4 is missing required index ${index}.`);
+  }
+  const indexColumns: Record<string, string[]> = {
+    worker_session_binding_authority: ["entry_id", "binding_epoch", "execution_generation_id", "agent_session_id"],
+    worker_binding_publications_current: ["entry_id", "binding_epoch", "sequence"],
+    worker_generation_verifications_current: ["entry_id", "binding_epoch", "sequence"],
+  };
+  for (const [name, expected] of Object.entries(indexColumns)) {
+    const actual = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Array<{ key: number; name: string | null; desc: number }>).filter((row) => Number(row.key) === 1);
+    const descendingLast = name !== "worker_session_binding_authority";
+    if (actual.length !== expected.length || actual.some((row, index) => row.name !== expected[index] || (descendingLast && index === expected.length - 1 && Number(row.desc) !== 1))) {
+      throw new Error(`Daemon state v4 index ${name} has an invalid key definition.`);
+    }
   }
 }
 
