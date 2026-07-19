@@ -8,7 +8,9 @@ import type {
   DesktopRoomSnapshot,
 } from "../../electron/ipc-types";
 import {
+  appendDesktopRoomMessage,
   applyRoomLiveMetadata,
+  mergeDesktopRoomMessages,
   mergeRoomSnapshotMessages,
   messageReferencesMissingThreadContext,
   upsertSnapshotRoomArtifact,
@@ -101,6 +103,78 @@ describe("desktop room snapshot merging", () => {
       "git:commit:id:abc123",
     ]);
     assert.equal(withUpdated?.roomArtifacts[0]?.state, "updated");
+  });
+});
+
+describe("appendDesktopRoomMessage fast path", () => {
+  const loaded = [
+    roomMessage("msg_1", "first"),
+    roomMessage("msg_2", "second"),
+    roomMessage("msg_3", "third"),
+  ];
+
+  it("appends an in-order message byte-identically to the slow path", () => {
+    const incoming = roomMessage("msg_4", "fourth");
+
+    const fast = appendDesktopRoomMessage(loaded, incoming);
+    const slow = mergeDesktopRoomMessages(loaded, [incoming]);
+
+    // Property: fast path must equal the slow path exactly for this case.
+    assert.deepEqual(fast, slow);
+    assert.deepEqual(fast.map((message) => message.id), ["msg_1", "msg_2", "msg_3", "msg_4"]);
+    // The new message is the exact object appended, not a copy.
+    assert.equal(fast[fast.length - 1], incoming);
+  });
+
+  it("fast-appends into an empty list", () => {
+    const incoming = roomMessage("msg_1", "first");
+
+    const fast = appendDesktopRoomMessage([], incoming);
+    const slow = mergeDesktopRoomMessages([], [incoming]);
+
+    assert.deepEqual(fast, slow);
+    assert.deepEqual(fast.map((message) => message.id), ["msg_1"]);
+  });
+
+  it("does not double-append a duplicate id delivered by a second transport", () => {
+    // SSE and the fallback poll can deliver the same message id twice; the
+    // re-delivery must not create a second copy.
+    const redelivery = { ...roomMessage("msg_3", "third (edited)"), text: "third (edited)" };
+
+    const result = appendDesktopRoomMessage(loaded, redelivery);
+    const slow = mergeDesktopRoomMessages(loaded, [redelivery]);
+
+    assert.deepEqual(result, slow);
+    assert.deepEqual(result.map((message) => message.id), ["msg_1", "msg_2", "msg_3"]);
+    // The duplicate routes through the slow path, which replaces in place.
+    assert.equal(result[2]?.text, "third (edited)");
+  });
+
+  it("falls back and re-sorts an out-of-order arrival", () => {
+    // msg_2 sorts before the current last message (msg_3), so it cannot be
+    // appended at the end.
+    const outOfOrder = roomMessage("msg_2", "late arrival");
+    const current = [roomMessage("msg_1", "first"), roomMessage("msg_3", "third")];
+
+    const result = appendDesktopRoomMessage(current, outOfOrder);
+    const slow = mergeDesktopRoomMessages(current, [outOfOrder]);
+
+    assert.deepEqual(result, slow);
+    assert.deepEqual(result.map((message) => message.id), ["msg_1", "msg_2", "msg_3"]);
+  });
+
+  it("still filters a prompt-only message", () => {
+    const promptOnly: DesktopRoomMessage = {
+      ...roomMessage("msg_4", ""),
+      agentPromptKind: "auto",
+      text: "   ",
+    };
+
+    const result = appendDesktopRoomMessage(loaded, promptOnly);
+    const slow = mergeDesktopRoomMessages(loaded, [promptOnly]);
+
+    assert.deepEqual(result, slow);
+    assert.deepEqual(result.map((message) => message.id), ["msg_1", "msg_2", "msg_3"]);
   });
 });
 

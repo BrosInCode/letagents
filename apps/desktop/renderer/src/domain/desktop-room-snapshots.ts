@@ -76,8 +76,46 @@ export function appendSnapshotMessage(
   if (!snapshot) return snapshot;
   return {
     ...snapshot,
-    messages: mergeDesktopRoomMessages(snapshot.messages || [], [message]),
+    messages: appendDesktopRoomMessage(snapshot.messages || [], message),
   };
+}
+
+// Appends a single message, taking a fast path for the overwhelmingly common
+// case: a brand-new message that already belongs at the END of the current
+// (already-sorted) list. That case skips the Map rebuild + full O(n log n)
+// re-sort that `mergeDesktopRoomMessages` performs on every incoming event.
+//
+// The fast path MUST be byte-identical to the slow path for the cases it
+// handles. It relies on the invariant that `current` is already sorted by
+// `compareDesktopRoomMessages` and free of duplicate ids (guaranteed because
+// every stored message list is itself the output of a prior merge). Any case
+// the fast path can't prove safe — prompt-only filtering, a duplicate id
+// (SSE + fallback-poll can deliver the same id twice), or an out-of-order
+// arrival — falls back to the unchanged slow path.
+export function appendDesktopRoomMessage(
+  current: readonly DesktopRoomMessage[],
+  message: DesktopRoomMessage
+): DesktopRoomMessage[] {
+  if (!isPromptOnlyDesktopMessage(message) && canFastAppendDesktopRoomMessage(current, message)) {
+    return [...current, message];
+  }
+  return mergeDesktopRoomMessages(current, [message]);
+}
+
+function canFastAppendDesktopRoomMessage(
+  current: readonly DesktopRoomMessage[],
+  message: DesktopRoomMessage
+): boolean {
+  // Reject out-of-order arrivals: the message must sort at or after the last
+  // element so that appending preserves the sorted invariant.
+  const last = current[current.length - 1];
+  if (last && compareDesktopRoomMessages(message, last) < 0) return false;
+  // Reject a duplicate id so a message delivered twice routes to the slow path
+  // (which replaces in place) instead of double-appending.
+  for (const existing of current) {
+    if (existing.id === message.id) return false;
+  }
+  return true;
 }
 
 export function upsertSnapshotGitHubEvent(
