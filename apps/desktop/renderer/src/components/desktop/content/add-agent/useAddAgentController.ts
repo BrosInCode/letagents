@@ -76,7 +76,8 @@ type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "listAgents" | 
 export async function createSupervisedAgentFromSnapshot(
   client: SupervisedCreateClient,
   snapshot: SupervisedLaunchCreateSnapshot,
-): Promise<DesktopSupervisorManifestEntry> {
+  isCurrent: () => boolean,
+): Promise<DesktopSupervisorManifestEntry | null> {
   let existingDisplayNames: string[] = [];
   try {
     existingDisplayNames = (await client.listAgents(snapshot.roomIdentifier))
@@ -89,6 +90,10 @@ export async function createSupervisedAgentFromSnapshot(
   const displayName = snapshot.providerId === "codex"
     ? suggestSupervisedCodexCodename(existingDisplayNames, snapshot.creationRequestId)
     : `${snapshot.providerName} supervised agent`;
+  // listAgents is an async gap before the durable boundary. Modal close,
+  // provider switch, and request invalidation must all fence createAgent here,
+  // not only after a durable agent has already been created.
+  if (!isCurrent()) return null;
   const input: DesktopSupervisorCreateInput = {
     creationRequestId: snapshot.creationRequestId,
     providerId: snapshot.providerId,
@@ -370,7 +375,12 @@ async function startManagedAgent(): Promise<void> {
       const entry = await createSupervisedAgentFromSnapshot(
         desktopIpc.supervisor,
         creationSnapshot,
+        () => setupActions.isCurrentRequest(requestVersion),
       );
+      if (!entry) {
+        supervisedLaunch.dismiss();
+        return;
+      }
       if (!setupActions.isCurrentRequest(requestVersion)) {
         if (props.open && props.roomIdentifier === requestRoomIdentifier) {
           supervisedLaunch.offerRecoveryCandidate(entry);

@@ -2015,7 +2015,7 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
   const request = createSupervisedAgentFromSnapshot(client as never, {
     creationRequestId: "request-snapshot",
     ...form,
-  });
+  }, () => true);
 
   // These represent editable controls changing while listAgents is pending.
   form.providerId = "claude-code";
@@ -2038,4 +2038,83 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
   assert.equal(createdInput?.permissionProfileId, "read-only");
   assert.deepEqual(createdInput?.launchPolicy, { profile: "read-only" });
   assert.equal(createdInput?.model, "gpt-5.6");
+});
+
+test("modal close or provider invalidation during name lookup fences durable creation", async () => {
+  for (const invalidation of ["modal close", "provider switch"]) {
+    const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
+    let current = true;
+    let createCalls = 0;
+    const request = createSupervisedAgentFromSnapshot({
+      listAgents: () => nameLookup.promise,
+      createAgent: async () => {
+        createCalls += 1;
+        return entry();
+      },
+    }, {
+      creationRequestId: `request-${invalidation}`,
+      providerId: "codex",
+      providerName: "Codex",
+      roomIdentifier: "room-1",
+      repoRootPath: "/repo",
+      charter: "Keep working.",
+      permissionProfileId: null,
+      launchPolicy: null,
+      model: null,
+    }, () => current);
+
+    current = false;
+    nameLookup.resolve([]);
+    assert.equal(await request, null);
+    assert.equal(createCalls, 0, `${invalidation} must prevent createAgent`);
+  }
+});
+
+test("switching away from Codex revokes the shared Add-another eligibility and handler", async () => {
+  const selectedProviderId = ref<"codex" | "claude-code">("codex");
+  Object.assign(globalThis, {
+    window: {
+      crypto: { randomUUID: () => "codex-request" },
+      sessionStorage: memorySessionStorage(),
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: {
+        supervisor: {
+          onLaunchEvent: () => () => undefined,
+          getLaunchEvents: async () => [],
+        },
+      },
+    },
+  });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomLabel: () => "Room one",
+    providerId: selectedProviderId,
+    authCommand: () => null,
+    authCommandForProvider: () => null,
+    currentVersion: () => 0,
+    isCurrentRequest: () => true,
+    onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined,
+    onRetry: () => undefined,
+    onMessage: () => undefined,
+  });
+  launch.begin();
+  launch.complete(entry({
+    observedState: "working",
+    workspacePath: "/tmp/worktree",
+    providerPid: 42,
+    agentSessionId: "agent-1",
+    agentSessionBindingState: "active",
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+  }));
+  assert.equal(launch.canAddAnotherCodexAgent.value, true);
+
+  selectedProviderId.value = "claude-code";
+  await nextTick();
+  assert.equal(launch.canAddAnotherCodexAgent.value, false);
+  launch.dismissReadyCodexLaunchForAnother();
+  assert.equal(launch.view.value?.ready, true, "revoked handler must preserve the Codex card");
+  launch.cleanup();
 });
