@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +18,10 @@ async function fixture() {
 function input(entry_id = "agent_a", generation = "run_1", session = "session_a") {
   return { entry_id, room_id: "room", work_attempt_id: "attempt", execution_generation_id: generation, agent_session_id: session, agent_session_token: `token-${session}`, api_url: "https://letagents.test" };
 }
+function legacyRaw(entry = "agent_a") {
+  return JSON.stringify({ version: 1, bindings: { [entry]: { ...input(entry), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } });
+}
+function checksum(raw: string) { return createHash("sha256").update(raw).digest("hex"); }
 
 test("slow native publication does not block another binding checkpoint or publication", async () => {
   const env = await fixture(); try {
@@ -68,11 +73,34 @@ test("a child-process raw SQLite writer overlaps fenced binding commits", async 
     // Initialize schema before launching the independent SQLite process.
     const seed = new WorkerBindingStore(join(env.root, "seed.json"), undefined, env.database); await seed.list(); await seed.close();
     const one = a.bind(input("agent_a")); const two = b.bind(input("agent_b"));
-    const child = spawn(process.execPath, ["-e", `const {DatabaseSync}=require('node:sqlite'); const db=new DatabaseSync(process.argv[1]); db.exec('PRAGMA busy_timeout=5000'); db.prepare("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run('child','agent_raw',1,'run','session',900001,'2026-01-01T00:00:00.000Z',1,'accepted','2026-01-01T00:00:00.000Z',null); db.close();`, env.database], { stdio: "pipe" });
+    // The child announces only after it owns the write transaction. Releasing
+    // both fenced commits then proves their BEGIN IMMEDIATE attempts overlap a
+    // real independent writer, rather than merely running nearby in time.
+    const child = spawn(process.execPath, ["-e", `const {DatabaseSync}=require('node:sqlite'); const db=new DatabaseSync(process.argv[1]); db.exec('PRAGMA busy_timeout=5000'); db.exec('BEGIN IMMEDIATE'); process.send('holding'); setTimeout(()=>{ db.prepare("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run('child','agent_raw',1,'run','session',900001,'2026-01-01T00:00:00.000Z',1,'accepted','2026-01-01T00:00:00.000Z',null); db.exec('COMMIT'); process.send('released'); db.close(); }, 150);`, env.database], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    await new Promise<void>((resolve, reject) => child.once("message", (message) => message === "holding" ? resolve() : reject(new Error(`child unexpected readiness ${String(message)}`))));
     const exited = new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child SQLite writer exited ${code}`))));
-    release(); await Promise.all([one, two, exited]);
+    const beganAt = Date.now(); release(); await Promise.all([one, two, exited]);
+    assert.ok(Date.now() - beganAt >= 100, "fenced commits waited for the child transaction that acknowledged readiness");
     const check = new DatabaseSync(env.database); assert.equal((check.prepare("SELECT COUNT(*) AS count FROM worker_binding_publications WHERE reservation_id='child'").get() as { count: number }).count, 1); check.close();
     await a.close(); await b.close();
+  } finally { await env.cleanup(); }
+});
+
+test("synchronized fresh multi-process importers converge through WAL and schema bootstrap contention", async () => {
+  const env = await fixture(); try {
+    await writeFile(env.legacy, legacyRaw("agent_a"), { mode: 0o644 });
+    const moduleUrl = new URL("../worker-binding-store.ts", import.meta.url).href;
+    const script = `const {WorkerBindingStore}=await import(${JSON.stringify(moduleUrl)}); const [legacy,database]=process.argv.slice(1); process.send('ready'); await new Promise(resolve=>process.once('message', resolve)); const store=new WorkerBindingStore(legacy,undefined,database); await store.list(); await store.close(); process.send('done');`;
+    for (let round = 0; round < 3; round += 1) {
+      // First round opens and imports the legacy source; later rounds make
+      // repeated fresh openers contend on the same complete DB as well.
+      const children = Array.from({ length: 6 }, () => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.legacy, env.database], { stdio: ["ignore", "pipe", "pipe", "ipc"] }));
+      await Promise.all(children.map((child) => new Promise<void>((resolve, reject) => child.once("message", (message) => message === "ready" ? resolve() : reject(new Error(`child readiness ${String(message)}`))))));
+      for (const child of children) child.send("go");
+      await Promise.all(children.map((child) => new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`fresh importer exited ${code}`))))));
+    }
+    assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), legacyRaw("agent_a"));
+    assert.equal((await stat(`${env.legacy}.migrated-backup`)).mode & 0o777, 0o600);
   } finally { await env.cleanup(); }
 });
 
@@ -127,6 +155,68 @@ test("legacy source substitution during a paused fence cannot import A and back 
     await writeFile(env.legacy, JSON.stringify({ version: 1, bindings: { agent_b: { ...input("agent_b"), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } })); release();
     await assert.rejects(() => pending, /source changed/); await store.close();
     const db = new DatabaseSync(env.database); assert.equal((db.prepare("SELECT COUNT(*) AS count FROM worker_session_bindings").get() as { count: number }).count, 0); db.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a post-commit source swap backs up the exact imported bytes and quarantines the replacement", async () => {
+  const env = await fixture(); try {
+    const rawA = legacyRaw("agent_a"); const rawB = legacyRaw("agent_b");
+    await writeFile(env.legacy, rawA);
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database, async () => { await writeFile(env.legacy, rawB, { mode: 0o644 }); });
+    await assert.rejects(() => store.list(), /unexpected legacy source was quarantined/);
+    await store.close();
+    const db = new DatabaseSync(env.database);
+    assert.equal((db.prepare("SELECT checksum FROM migration_records WHERE migration_key=?").get(`legacy-worker-bindings:${env.legacy}`) as { checksum: string }).checksum, checksum(rawA));
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM worker_session_bindings WHERE entry_id='agent_a'").get() as { count: number }).count, 1);
+    db.close();
+    const backup = `${env.legacy}.migrated-backup`;
+    assert.equal(await readFile(backup, "utf8"), rawA);
+    assert.equal((await stat(backup)).mode & 0o777, 0o600);
+    const unexpected = (await readdir(env.root)).filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
+    assert.equal(unexpected.length, 1);
+    assert.equal(await readFile(join(env.root, unexpected[0]!), "utf8"), rawB);
+    assert.equal((await stat(join(env.root, unexpected[0]!))).mode & 0o777, 0o600);
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    assert.equal((await reopened.list()).map((binding) => binding.entry_id).join(","), "agent_a");
+    await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a mismatched pre-existing backup fails closed without replacing either private artifact", async () => {
+  const env = await fixture(); try {
+    const rawA = legacyRaw("agent_a"); const rawB = legacyRaw("agent_b");
+    await writeFile(env.legacy, rawA);
+    const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await initial.list(); await initial.close();
+    await writeFile(env.legacy, rawA, { mode: 0o644 });
+    await writeFile(`${env.legacy}.migrated-backup`, rawB, { mode: 0o644 });
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => reopened.list(), /migrated backup does not match/);
+    await reopened.close();
+    assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawB);
+    assert.equal(await readFile(env.legacy, "utf8"), rawA);
+    assert.equal((await stat(`${env.legacy}.migrated-backup`)).mode & 0o777, 0o600);
+    assert.equal((await stat(env.legacy)).mode & 0o777, 0o600);
+  } finally { await env.cleanup(); }
+});
+
+test("concurrent valid legacy importers converge on one exact private backup", async () => {
+  const env = await fixture(); try {
+    const rawA = legacyRaw("agent_a");
+    // Create/validate the shared schema before concurrently exercising just
+    // the migration finalizer.
+    const seed = new WorkerBindingStore(join(env.root, "seed.json"), undefined, env.database);
+    await seed.list(); await seed.close();
+    await writeFile(env.legacy, rawA, { mode: 0o644 });
+    const one = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const two = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const [left, right] = await Promise.all([one.list(), two.list()]);
+    assert.equal(left.length, 1); assert.equal(right.length, 1);
+    await one.close(); await two.close();
+    const backup = `${env.legacy}.migrated-backup`;
+    assert.equal(await readFile(backup, "utf8"), rawA);
+    assert.equal((await stat(backup)).mode & 0o777, 0o600);
+    await assert.rejects(() => readFile(env.legacy, "utf8"), { code: "ENOENT" });
   } finally { await env.cleanup(); }
 });
 

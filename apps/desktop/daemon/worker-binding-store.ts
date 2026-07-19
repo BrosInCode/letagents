@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { chmod, readFile, rename, stat } from "node:fs/promises";
+import { chmod, link, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
@@ -25,6 +25,7 @@ type Row = Record<string, unknown>;
 type Reservation = { reservationId: string; binding: WorkerSessionBinding; bindingEpoch: number; sequence: number; observedAt: string; observedAtMs: number };
 type LegacyBindings = { version: 1; bindings: Record<string, WorkerSessionBinding> };
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
+function checksumOf(raw: string): string { return createHash("sha256").update(raw).digest("hex"); }
 
 /**
  * Daemon-private credentials. The JSON path is accepted only as a one-shot
@@ -41,6 +42,8 @@ export class WorkerBindingStore {
     readonly legacyJsonPath: string,
     private readonly commitFence?: (commit: () => Promise<void>) => Promise<void>,
     private readonly databasePath = defaultDatabasePath(legacyJsonPath),
+    /** Test-only seam for the narrow committed-record / backup-finalization window. */
+    private readonly legacyBackupFinalizationHook?: () => Promise<void>,
   ) {}
 
   async close(): Promise<void> {
@@ -251,8 +254,8 @@ export class WorkerBindingStore {
   private async importLegacy(database: DatabaseSync): Promise<void> {
     const key = `legacy-worker-bindings:${this.legacyJsonPath}`;
     const backup = `${this.legacyJsonPath}.migrated-backup`;
-    const prior = database.prepare("SELECT 1 FROM migration_records WHERE migration_key=?").get(key);
-    if (prior) { await this.finishLegacyBackup(backup); return; }
+    const prior = database.prepare("SELECT checksum FROM migration_records WHERE migration_key=?").get(key) as Row | undefined;
+    if (prior) { await this.finishLegacyBackup(backup, String(prior.checksum)); return; }
     const failed = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key=?").get(key) as Row | undefined;
     if (failed) {
       // The durable failure is authoritative; retry only the filesystem
@@ -264,24 +267,45 @@ export class WorkerBindingStore {
       throw new Error(`Legacy worker binding import was previously quarantined: ${String(failed.reason)} (${quarantine}).`);
     }
     let raw: string;
-    try { raw = await readFile(this.legacyJsonPath, "utf8"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    const checksum = createHash("sha256").update(raw).digest("hex"); let parsed: LegacyBindings;
+    try {
+      await chmod(this.legacyJsonPath, 0o600);
+      raw = await readFile(this.legacyJsonPath, "utf8");
+      await chmod(this.legacyJsonPath, 0o600);
+    } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    const checksum = checksumOf(raw); let parsed: LegacyBindings;
     try { parsed = JSON.parse(raw) as LegacyBindings; this.validateLegacy(parsed, raw); } catch (error) {
       await this.quarantineLegacyFailure(database, key, checksum, error);
     }
-    try { await this.transaction(database, () => {
-      if (database.prepare("SELECT 1 FROM migration_records WHERE migration_key=?").get(key)) return;
+    let committedChecksum!: string;
+    try { committedChecksum = await this.transaction(database, () => {
+      const existing = database.prepare("SELECT checksum FROM migration_records WHERE migration_key=?").get(key) as Row | undefined;
+      if (existing) return String(existing.checksum);
       if (database.prepare("SELECT 1 FROM migration_failures WHERE migration_key=?").get(key)) throw new Error("Legacy worker binding import is quarantined.");
       const current = readFileSync(this.legacyJsonPath, "utf8");
-      if (createHash("sha256").update(current).digest("hex") !== checksum) throw new Error("Legacy worker binding source changed during import.");
+      // A checksum guards the durable record; byte equality binds this import
+      // to the exact snapshot whose credentials were validated above.
+      if (current !== raw) throw new Error("Legacy worker binding source changed during import.");
       for (const binding of Object.values(parsed.bindings)) {
         run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, agent_session_token, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, binding.agent_session_token, new URL(binding.api_url).origin, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       }
       run(database.prepare("INSERT INTO migration_records (migration_key, checksum, imported_at) VALUES (?, ?, ?)"), key, checksum, new Date().toISOString());
-    }); } catch (error) { if (error instanceof Error && error.message === "Legacy worker binding source changed during import.") throw error; await this.quarantineLegacyFailure(database, key, checksum, error); }
-    // Rename only after the committed migration record. Failure is safe and
-    // retryable on the next open; the record prevents a second import.
-    await this.finishLegacyBackup(backup);
+      return checksum;
+    }); } catch (error) {
+      if (error instanceof Error && error.message === "Legacy worker binding source changed during import.") {
+        await this.chmodIfPresent(this.legacyJsonPath);
+        throw error;
+      }
+      await this.quarantineLegacyFailure(database, key, checksum, error);
+    }
+    // The committed record is now authoritative.  The backup is written from
+    // that captured snapshot, never by renaming whichever bytes happen to be
+    // at the legacy path after the transaction.
+    if (committedChecksum === checksum) {
+      await this.legacyBackupFinalizationHook?.();
+      await this.finishLegacyBackup(backup, checksum, raw);
+    } else {
+      await this.finishLegacyBackup(backup, committedChecksum);
+    }
   }
   private async quarantineLegacyFailure(database: DatabaseSync, key: string, checksum: string, error: unknown): Promise<never> {
     const reason = error instanceof Error ? error.message : String(error);
@@ -294,15 +318,150 @@ export class WorkerBindingStore {
     try { await rename(this.legacyJsonPath, quarantine); await chmod(quarantine, 0o600); } catch (renameError: unknown) { if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError; }
     throw new Error(`Legacy worker binding import refused: ${reason}`);
   }
-  private async finishLegacyBackup(backup: string): Promise<void> {
-    // Backup housekeeping is non-authoritative: the committed migration record
-    // is the source of truth. Another opener may win the rename between these
-    // calls, so ENOENT/EEXIST are successful convergence, not startup errors.
-    try { await stat(this.legacyJsonPath); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { await chmod(backup, 0o600).catch((chmodError: unknown) => { if ((chmodError as NodeJS.ErrnoException).code !== "ENOENT") throw chmodError; }); return; } throw error; }
-    try { await stat(backup); await chmod(backup, 0o600); await chmod(this.legacyJsonPath, 0o600); return; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    try { await rename(this.legacyJsonPath, backup); }
-    catch (error: unknown) { if (!["ENOENT", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
-    await chmod(backup, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+  private async finishLegacyBackup(backup: string, expectedChecksum: string, capturedRaw?: string): Promise<void> {
+    const source = this.legacyJsonPath;
+    const correctBackup = await this.verifyBackup(backup, expectedChecksum);
+    if (!correctBackup) {
+      let raw = capturedRaw;
+      if (raw === undefined) raw = await this.readOwnerOnly(source);
+      if (raw === undefined) throw new Error(`Legacy worker binding migration integrity error: migration record ${expectedChecksum} has no recoverable backup.`);
+      if (checksumOf(raw) !== expectedChecksum) {
+        await this.quarantineUnexpectedSource();
+        throw new Error("Legacy worker binding migration integrity error: legacy source does not match the committed migration record.");
+      }
+      await this.createBackupExclusively(backup, raw, expectedChecksum);
+    }
+
+    // Once the exact backup exists, the old path is merely an untrusted
+    // leftover. Capture it atomically into a private holding name, then either
+    // discard the known snapshot or preserve unexpected bytes as evidence.
+    const retired = await this.captureAndRemoveLegacySource();
+    if (!retired) return;
+    const raw = await readFile(retired, "utf8");
+    await chmod(retired, 0o600);
+    const checksum = checksumOf(raw);
+    if (checksum === expectedChecksum) {
+      await unlink(retired).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+      return;
+    }
+    const quarantine = await this.moveToUnexpectedQuarantine(retired, checksum);
+    throw new Error(`Legacy worker binding migration integrity error: unexpected legacy source was quarantined at ${quarantine}.`);
+  }
+
+  /** Returns false only when backup is genuinely absent. A wrong backup is
+   * fatal: it must never be overwritten or silently accepted. */
+  private async verifyBackup(backup: string, expectedChecksum: string): Promise<boolean> {
+    let raw: string;
+    try { raw = await readFile(backup, "utf8"); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    await chmod(backup, 0o600);
+    if (checksumOf(raw) !== expectedChecksum) {
+      await this.chmodIfPresent(this.legacyJsonPath);
+      throw new Error("Legacy worker binding migration integrity error: migrated backup does not match the committed migration record.");
+    }
+    return true;
+  }
+
+  private async createBackupExclusively(backup: string, raw: string, expectedChecksum: string): Promise<void> {
+    if (checksumOf(raw) !== expectedChecksum) throw new Error("Legacy worker binding migration integrity error: captured backup bytes do not match the committed migration record.");
+    const temporary = `${backup}.tmp.${randomUUID()}`;
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      handle = await open(temporary, "wx", 0o600);
+      await handle.writeFile(raw, "utf8");
+      await handle.sync();
+    } finally { await handle?.close(); }
+    try {
+      // link(2) is the no-replace atomic convergence primitive that rename(2)
+      // is not: another opener can win, but it can never be overwritten.
+      await link(temporary, backup);
+      await this.syncDirectory(dirname(backup));
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally {
+      await unlink(temporary).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    }
+    // Whether we won or converged with another opener, verify the final name
+    // against the migration record before treating it as a backup.
+    if (!await this.verifyBackup(backup, expectedChecksum)) throw new Error("Legacy worker binding migration integrity error: backup creation did not converge.");
+  }
+
+  private async readOwnerOnly(path: string): Promise<string | undefined> {
+    try {
+      await chmod(path, 0o600);
+      const raw = await readFile(path, "utf8");
+      await chmod(path, 0o600);
+      return raw;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  /** Atomically claims the current source without ever using it as a backup. */
+  private async captureAndRemoveLegacySource(): Promise<string | null> {
+    const source = this.legacyJsonPath;
+    try { await chmod(source, 0o600); }
+    catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+    const holding = `${source}.retired.${randomUUID()}`;
+    try { await link(source, holding); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    await chmod(holding, 0o600);
+    const sourceStat = await stat(source).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    const holdingStat = await stat(holding);
+    if (sourceStat && sourceStat.dev === holdingStat.dev && sourceStat.ino === holdingStat.ino) {
+      await unlink(source).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    } else {
+      // A concurrent writer replaced the path after our hard link. Do not
+      // erase the replacement; ensure it is private before reporting/trying
+      // again on the next open.
+      await this.chmodIfPresent(source);
+    }
+    return holding;
+  }
+
+  private async quarantineUnexpectedSource(): Promise<void> {
+    const retired = await this.captureAndRemoveLegacySource();
+    if (!retired) return;
+    const actual = checksumOf(await readFile(retired, "utf8"));
+    await chmod(retired, 0o600);
+    await this.moveToUnexpectedQuarantine(retired, actual);
+  }
+
+  private async moveToUnexpectedQuarantine(path: string, checksum: string): Promise<string> {
+    const prefix = `${this.legacyJsonPath}.unexpected.${checksum.slice(0, 16)}`;
+    for (;;) {
+      const destination = `${prefix}.${randomUUID()}`;
+      try {
+        // hard-link + unlink is an exclusive move: no pre-existing artifact
+        // is overwritten, even under simultaneous openers.
+        await link(path, destination);
+        await chmod(destination, 0o600);
+        await unlink(path);
+        await this.syncDirectory(dirname(destination));
+        return destination;
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw error;
+      }
+    }
+  }
+
+  private async chmodIfPresent(path: string): Promise<void> {
+    await chmod(path, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+  }
+  private async syncDirectory(path: string): Promise<void> {
+    const handle = await open(path, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
   }
   private validateLegacy(value: LegacyBindings, raw: string): void { assertNoDuplicateJsonKeys(raw); if (!value || value.version !== 1 || !value.bindings || Array.isArray(value.bindings)) throw new Error("invalid v1 envelope"); const seen = new Set<string>(); for (const [key, binding] of Object.entries(value.bindings)) { if (key !== binding.entry_id || seen.has(key)) throw new Error("duplicate or mismatched entry id"); seen.add(key); this.validate(binding); if (!Number.isSafeInteger(binding.last_sequence) || binding.last_sequence < 0 || !Number.isSafeInteger(binding.last_observed_at_ms) || binding.last_observed_at_ms < 0 || !Number.isFinite(Date.parse(binding.updated_at)) || (binding.room_cursor !== null && typeof binding.room_cursor !== "string")) throw new Error(`invalid legacy binding ${key}`); } }
 }
