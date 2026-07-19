@@ -61,6 +61,13 @@ export function buildCodexStartPrompt(input: {
 }): string {
   const providerLabel = input.providerLabel ?? "Codex";
   const runtimeKey = input.runtimeKey ?? "codex";
+  const codexActivationRules = runtimeKey === "codex"
+    ? [
+      "Codex room activation policy: every observed message remains shared transcript context, and you must advance the cursor for every observed message (including last_observed_message_id when no visible messages are returned).",
+      "Only reply or start work for a direct @mention of your exact ID/name, a literal @everyone broadcast, a task assigned or actively leased to your exact worker, or a reply/thread where you were directly addressed or are already a participant.",
+      "Remain silent for plain untagged top-level human or peer messages and unassigned task updates. Never react to your own output, and never answer another agent merely because it spoke; a routing signal is still required.",
+    ]
+    : [];
   const deadlineInstruction =
     input.maxMinutes > 0 && input.deadlineUtc
       ? `Hard stop deadline: ${input.deadlineUtc}. Stop when the stop phrase appears or when that deadline is reached, whichever comes first.`
@@ -82,6 +89,7 @@ export function buildCodexStartPrompt(input: {
       "- When the desktop sends a room event, decide whether action is needed.",
       "- If action is useful, do the local work and make your final answer the public room reply the desktop should publish as you.",
       `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
+      "- The room transcript is shared context; an activation decision never limits what earlier room or thread context you may read.",
       "- Be concise, avoid duplicate responses, and do not narrate hidden chain-of-thought.",
       `- Stop immediately if a future room message text exactly equals: ${input.stopPhrase}`,
       `- When stopping, finish with exactly: ${input.token}_DONE`,
@@ -104,6 +112,7 @@ export function buildCodexStartPrompt(input: {
       "4. Call get_board once to re-read the current lease and task state, then immediately continue wait_for_messages from that cursor.",
       "5. Stay in the wait loop and advance from each returned message id or last_observed_message_id.",
       "6. Continue unfinished room work from the existing transcript, workspace, and lease state.",
+      ...codexActivationRules,
       `7. Stop immediately if a browser/user room message text exactly equals: ${input.stopPhrase}`,
       `8. When stopping, reply in the relevant room thread with exactly: ${input.token}_DONE`,
       "",
@@ -132,7 +141,9 @@ export function buildCodexStartPrompt(input: {
     "9. If get_board shows accepted unassigned work that is appropriate for you, claim it with claim_task using the registered agent_session_id before entering the wait loop.",
     "10. Do not start another live session. Join the room inline in this worker only.",
     "11. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",
-    "12. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive.",
+    ...(codexActivationRules.length
+      ? codexActivationRules
+      : ["12. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive."]),
     "13. When the room asks for coding work, do the work locally in this repository: inspect files, edit code, run checks, commit when asked, and push only when explicitly requested.",
     "14. Post short status updates to the room when you start meaningful work, when you are blocked, and when you finish meaningful work.",
     "15. Also call post_reasoning for concise public progress summaries when you start meaningful work, become blocked, make a useful checkpoint, or finish useful work. This is readable progress for the desktop UI, not hidden chain-of-thought.",

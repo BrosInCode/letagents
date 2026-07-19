@@ -1,5 +1,8 @@
 import type { DesktopRoomStreamEvent } from "../../ipc-types.js";
-import { shouldDeliverRoomStreamEventToSession } from "./codex-event-routing.js";
+import {
+  shouldDeliverCodexRoomStreamEventToSession,
+  shouldDeliverRoomStreamEventToSession,
+} from "./codex-event-routing.js";
 import {
   bindCodexLiveSessionToWorker,
   listDesktopManagedCodexLiveSessions,
@@ -17,5 +20,7 @@ export function listDeliverableCodexSessionsForRoomStreamEvent(
 ): DesktopCodexLiveSessionState[] {
   return listDesktopManagedCodexLiveSessions(event.roomIdentifier)
     .map((session) => bindCodexLiveSessionToWorker(session))
-    .filter((session) => shouldDeliverRoomStreamEventToSession(session, event));
+    .filter((session) => session.provider_id === "open-model"
+      ? shouldDeliverRoomStreamEventToSession(session, event)
+      : shouldDeliverCodexRoomStreamEventToSession(session, event));
 }
