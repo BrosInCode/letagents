@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -135,6 +135,60 @@ test("rebind preserves globally monotonic native sequence", async () => {
   } finally { await env.cleanup(); }
 });
 
+test("unbind and a delayed explicit rejection retain the global watermark across rebind", async () => {
+  const env = await fixture(); try {
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await store.bind(input());
+    const first = await store.publish("agent_a", 1, async () => ({ accepted: true }));
+    await store.unbind("agent_a", "session_a", "run_1");
+    await store.bind(input("agent_a", "run_2", "session_b"));
+    const second = await store.publish("agent_a", 1, async () => ({ accepted: true }));
+    assert.ok(second!.sequence > first!.sequence, "an unbound row cannot reset the native sequence");
+
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    const stale = store.publish("agent_a", 1, async () => { await gate; return { accepted: false }; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await store.unbind("agent_a", "session_b", "run_2");
+    await store.bind(input("agent_a", "run_3", "session_c"));
+    release(); await stale;
+    assert.equal((await store.get("agent_a"))?.agent_session_id, "session_c", "a rejected prior epoch cannot revoke replacement credentials");
+    await store.close();
+
+    const db = new DatabaseSync(env.database);
+    const watermark = db.prepare("SELECT binding_epoch, last_sequence FROM worker_binding_watermarks WHERE entry_id='agent_a'").get() as { binding_epoch: number; last_sequence: number };
+    const live = db.prepare("SELECT binding_epoch FROM worker_session_bindings WHERE entry_id='agent_a'").get() as { binding_epoch: number };
+    assert.equal(watermark.binding_epoch, 3);
+    assert.equal(live.binding_epoch, 3);
+    assert.ok(watermark.last_sequence >= second!.sequence);
+    db.close();
+  } finally { await env.cleanup(); }
+});
+
+test("v4 upgrade reconstructs a deleted binding watermark from both reservation journals", async () => {
+  const env = await fixture(); try {
+    const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await initial.bind(input());
+    const publication = await initial.publish("agent_a", 1, async () => ({ accepted: true }));
+    const rollover = await initial.verifyAndAdvanceExecutionGeneration({ entryId: "agent_a", roomId: "room", workAttemptId: "attempt", fromExecutionGenerationId: "run_1", toExecutionGenerationId: "run_2", agentSessionId: "session_a" }, async () => ({ accepted: true }));
+    assert.equal(rollover.advanced, true); await initial.close();
+
+    const legacyV4 = new DatabaseSync(env.database);
+    legacyV4.exec("DROP TABLE worker_binding_watermarks; DELETE FROM worker_session_bindings; UPDATE manifest_metadata SET schema_version=4 WHERE singleton=1; PRAGMA user_version=4");
+    legacyV4.close();
+
+    const upgraded = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await upgraded.bind(input("agent_a", "run_3", "session_b"));
+    const rebound = await upgraded.publish("agent_a", 1, async () => ({ accepted: true }));
+    assert.ok(rebound!.sequence > publication!.sequence);
+    await upgraded.close();
+    const db = new DatabaseSync(env.database);
+    const watermark = db.prepare("SELECT binding_epoch, last_sequence FROM worker_binding_watermarks WHERE entry_id='agent_a'").get() as { binding_epoch: number; last_sequence: number };
+    assert.ok(watermark.binding_epoch >= 2);
+    assert.equal(watermark.last_sequence, rebound!.sequence);
+    db.close();
+  } finally { await env.cleanup(); }
+});
+
 test("escaped duplicate legacy keys are quarantined before JSON collapse", async () => {
   const env = await fixture(); try {
     const value = JSON.stringify(input());
@@ -146,23 +200,30 @@ test("escaped duplicate legacy keys are quarantined before JSON collapse", async
   } finally { await env.cleanup(); }
 });
 
-test("legacy source substitution during a paused fence cannot import A and back up B", async () => {
+test("an atomic legacy claim imports A while preserving a later B replacement as evidence", async () => {
   const env = await fixture(); try {
     await writeFile(env.legacy, JSON.stringify({ version: 1, bindings: { agent_a: { ...input("agent_a"), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } }));
     let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; }); let reached!: () => void; const reachedFence = new Promise<void>((resolve) => { reached = resolve; });
     const store = new WorkerBindingStore(env.legacy, async (commit) => { reached(); await gate; await commit(); }, env.database);
     const pending = store.list(); await reachedFence;
     await writeFile(env.legacy, JSON.stringify({ version: 1, bindings: { agent_b: { ...input("agent_b"), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } })); release();
-    await assert.rejects(() => pending, /source changed/); await store.close();
-    const db = new DatabaseSync(env.database); assert.equal((db.prepare("SELECT COUNT(*) AS count FROM worker_session_bindings").get() as { count: number }).count, 0); db.close();
+    await assert.rejects(() => pending, /unexpected legacy source was quarantined/); await store.close();
+    const db = new DatabaseSync(env.database); assert.equal((db.prepare("SELECT COUNT(*) AS count FROM worker_session_bindings WHERE entry_id='agent_a'").get() as { count: number }).count, 1); db.close();
+    const unexpected = (await readdir(env.root)).filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
+    assert.equal(unexpected.length, 1);
+    assert.match(await readFile(join(env.root, unexpected[0]!), "utf8"), /agent_b/);
   } finally { await env.cleanup(); }
 });
 
-test("a post-commit source swap backs up the exact imported bytes and quarantines the replacement", async () => {
+test("a durable backup exists before the migration record and an A→B swap quarantines only B", async () => {
   const env = await fixture(); try {
     const rawA = legacyRaw("agent_a"); const rawB = legacyRaw("agent_b");
     await writeFile(env.legacy, rawA);
-    const store = new WorkerBindingStore(env.legacy, undefined, env.database, async () => { await writeFile(env.legacy, rawB, { mode: 0o644 }); });
+    let backupWasDurableBeforeRecord = false;
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database, async () => {
+      backupWasDurableBeforeRecord = await readFile(`${env.legacy}.migrated-backup`, "utf8") === rawA;
+      await writeFile(env.legacy, rawB, { mode: 0o644 });
+    });
     await assert.rejects(() => store.list(), /unexpected legacy source was quarantined/);
     await store.close();
     const db = new DatabaseSync(env.database);
@@ -170,6 +231,7 @@ test("a post-commit source swap backs up the exact imported bytes and quarantine
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM worker_session_bindings WHERE entry_id='agent_a'").get() as { count: number }).count, 1);
     db.close();
     const backup = `${env.legacy}.migrated-backup`;
+    assert.equal(backupWasDurableBeforeRecord, true, "the crash-window hook observes A's fsynced backup before the record commits");
     assert.equal(await readFile(backup, "utf8"), rawA);
     assert.equal((await stat(backup)).mode & 0o777, 0o600);
     const unexpected = (await readdir(env.root)).filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
@@ -179,6 +241,54 @@ test("a post-commit source swap backs up the exact imported bytes and quarantine
     const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
     assert.equal((await reopened.list()).map((binding) => binding.entry_id).join(","), "agent_a");
     await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a crash after atomic claim recovers its one orphan instead of starting with no bindings", async () => {
+  const env = await fixture(); try {
+    const rawA = legacyRaw("agent_a");
+    await writeFile(env.legacy, rawA, { mode: 0o600 });
+    await rename(env.legacy, `${env.legacy}.claimed.crash-window`);
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    assert.equal((await reopened.get("agent_a"))?.agent_session_id, "session_a");
+    await reopened.close();
+    assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
+    const db = new DatabaseSync(env.database);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM migration_records").get() as { count: number }).count, 1);
+    db.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a sibling opener observes a durable legacy-import failure instead of returning an empty store", async () => {
+  const env = await fixture(); try {
+    await writeFile(env.legacy, "{bad", { mode: 0o600 });
+    const first = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const second = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const [left, right] = await Promise.allSettled([first.list(), second.list()]);
+    assert.equal(left.status, "rejected");
+    assert.equal(right.status, "rejected");
+    assert.match(String(left.status === "rejected" && left.reason), /Legacy worker binding import/);
+    assert.match(String(right.status === "rejected" && right.reason), /Legacy worker binding import/);
+    await first.close(); await second.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a valid claimed source survives a retryable pre-existing backup failure", async () => {
+  const env = await fixture(); try {
+    const rawA = legacyRaw("agent_a"); const rawB = legacyRaw("agent_b");
+    await writeFile(env.legacy, rawA, { mode: 0o600 });
+    await writeFile(`${env.legacy}.migrated-backup`, rawB, { mode: 0o600 });
+    const failed = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => failed.list(), /migrated backup does not match/);
+    await failed.close();
+    assert.equal(await readFile(env.legacy, "utf8"), rawA, "the valid source is restored for retry");
+    const db = new DatabaseSync(env.database);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM migration_failures").get() as { count: number }).count, 0);
+    db.close();
+    await rm(`${env.legacy}.migrated-backup`);
+    const retried = new WorkerBindingStore(env.legacy, undefined, env.database);
+    assert.equal((await retried.get("agent_a"))?.agent_session_id, "session_a");
+    await retried.close();
   } finally { await env.cleanup(); }
 });
 
