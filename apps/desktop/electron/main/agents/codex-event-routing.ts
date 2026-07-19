@@ -77,6 +77,46 @@ export function shouldDeliverRoomStreamEventToSession(
   return shouldDeliverRoomStreamEventToManagedAgent(toPublicManagedAgentSession(session), event);
 }
 
+/**
+ * Codex room workers share a transcript, but they do not share an inbox.
+ *
+ * This is deliberately narrower than the legacy, provider-neutral desktop
+ * event router below.  A Codex worker is activated only by an explicit
+ * address, an @everyone broadcast, an assignment/lease to that worker, or an
+ * active thread it participates in.  In particular, an unaddressed message is
+ * context for a later turn, never a reason to start one for every worker.
+ */
+export function shouldDeliverCodexRoomStreamEventToSession(
+  session: DesktopCodexLiveSessionState,
+  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+): boolean {
+  const worker = toPublicManagedAgentSession(session);
+  if (!canDeliverDesktopEventToManagedAgent(worker) || isOwnRoomStreamEventForManagedAgent(worker, event)) {
+    return false;
+  }
+  // A locally-configured stop phrase is supervisor control, not ordinary room
+  // conversation. It must remain deliverable even when unaddressed.
+  if (isStopPhraseRoomStreamEvent(session, event)) {
+    return true;
+  }
+  return shouldDeliverCodexRoomStreamEventToManagedAgent(worker, event);
+}
+
+export function shouldDeliverCodexRoomStreamEventToManagedAgent(
+  worker: DesktopManagedAgentSession,
+  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+): boolean {
+  if (!canDeliverDesktopEventToManagedAgent(worker) || isOwnRoomStreamEventForManagedAgent(worker, event)) {
+    return false;
+  }
+
+  if (event.type === "message") {
+    return codexManagedAgentMessageActivationDecision(worker, event.message) === "activate";
+  }
+
+  return taskTargetsManagedAgent(worker, event.task);
+}
+
 export function shouldDeliverRoomStreamEventToManagedAgent(
   worker: DesktopManagedAgentSession,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
@@ -111,6 +151,38 @@ export function shouldDeliverRoomStreamEventToManagedAgent(
 }
 
 export type DesktopManagedAgentMessageActivationDecision = "activate" | "silent" | "unclear";
+
+/** The deterministic activation rule for Codex room workers. */
+export function codexManagedAgentMessageActivationDecision(
+  worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">,
+  message: DesktopRoomMessage,
+): DesktopManagedAgentMessageActivationDecision {
+  if (normalizeKey(message.source) === "managed_agent_failure") {
+    return "silent";
+  }
+
+  const mentions = extractMentionHandles(message.text);
+  // @everyone is the sole broadcast address for Codex workers. Natural
+  // language such as "anyone" is intentionally not a fan-out signal.
+  if (mentions.some((mention) => normalizeHandle(mention) === "everyone")) {
+    return "activate";
+  }
+  if (mentions.some((mention) => managedAgentAliases(worker).has(normalizeMentionIdentityHandle(mention)))) {
+    return "activate";
+  }
+
+  // A message replying directly to this worker, or continuing a thread where
+  // it already participated, remains directed work without making a thread
+  // into a room-wide subscription.
+  if (senderMatchesManagedAgent(message.replyTo?.sender, worker)) {
+    return "activate";
+  }
+  if (isThreadReply(message) && threadParticipantsIncludeManagedAgent(message, worker)) {
+    return "activate";
+  }
+
+  return "silent";
+}
 
 export function desktopManagedAgentMessageActivationDecision(
   worker: Pick<DesktopManagedAgentSession, "agentKey" | "actorLabel" | "displayName">,
@@ -235,10 +307,12 @@ function senderMatchesManagedAgent(
 }
 
 function managedAgentAliases(
-  worker: Pick<DesktopManagedAgentSession, "agentKey" | "actorLabel" | "displayName">,
+  worker: Pick<DesktopManagedAgentSession, "agentKey" | "actorLabel" | "displayName"> &
+    Partial<Pick<DesktopManagedAgentSession, "agentSessionId">>,
 ): Set<string> {
   const aliases = new Set<string>();
   for (const value of [
+    worker.agentSessionId,
     worker.actorLabel,
     worker.displayName,
     worker.agentKey,
@@ -250,6 +324,27 @@ function managedAgentAliases(
     if (handleAlias) aliases.add(handleAlias);
   }
   return aliases;
+}
+
+function taskTargetsManagedAgent(
+  worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">,
+  task: Extract<DesktopRoomStreamEvent, { type: "task_update" }>['task'],
+): boolean {
+  const workerKeys = [
+    worker.agentSessionId,
+    specificAgentKey(worker.agentKey),
+    worker.actorLabel,
+    worker.displayName,
+  ].map(normalizeKey).filter(Boolean);
+  const taskTargetKeys = [
+    specificAgentKey(task.assigneeAgentKey),
+    task.assignee,
+    ...task.activeLeases
+      .filter((lease) => lease.status === "active")
+      .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey), lease.holderLabel]),
+  ].map(normalizeKey).filter(Boolean);
+
+  return taskTargetKeys.length > 0 && workerKeys.some((key) => taskTargetKeys.includes(key));
 }
 
 function extractMentionHandles(text: string | null | undefined): string[] {

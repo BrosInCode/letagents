@@ -32,9 +32,11 @@ const {
 } = await import("../main/agents/state.js");
 const {
   canDeliverDesktopEventToSession,
+  codexManagedAgentMessageActivationDecision,
   desktopManagedAgentMessageActivationDecision,
   isOwnRoomStreamEvent,
   isStopPhraseRoomStreamEvent,
+  shouldDeliverCodexRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToSession,
 } = await import("../main/agents/codex-event-routing.js");
@@ -48,6 +50,9 @@ const {
   MANAGED_AGENT_CONTEXT_REQUEST_PREFIX,
   parseManagedAgentContextRequest,
 } = await import("../main/agents/managed-agent-context-protocol.js");
+const {
+  executeManagedAgentContextRequest,
+} = await import("../main/agents/managed-agent-context.js");
 const {
   buildManagedAgentRoomToolResultPrompt,
   MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
@@ -658,7 +663,9 @@ test("desktop Codex dispatch selects only deliverable sessions for room events",
     status: "running",
   }));
 
-  const event = messageEvent();
+  const event = messageEvent({
+    message: { ...messageEvent().message, text: "@StoneForge please check this" },
+  });
 
   assert.equal(isManagedRoomStreamEvent(event), true);
   assert.deepEqual(
@@ -1357,6 +1364,11 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.match(pollingPrompt, /Call read_messages once, then call get_board once/);
   assert.match(pollingPrompt, /claim it with claim_task using the registered agent_session_id before entering the wait loop/);
   assert.match(pollingPrompt, /get_onboarding_status/);
+  assert.match(pollingPrompt, /advance the cursor for every observed message/);
+  assert.match(pollingPrompt, /direct @mention of your exact ID\/name/);
+  assert.match(pollingPrompt, /literal @everyone broadcast/);
+  assert.match(pollingPrompt, /unassigned task updates/);
+  assert.match(pollingPrompt, /Never react to your own output/);
   assert.match(eventPrompt, /Do not call wait_for_messages/);
   assert.match(eventPrompt, /already registered this room worker as CedarVista/);
   assert.match(eventPrompt, /Do not call LetAgents MCP room tools during bootstrap/);
@@ -1365,6 +1377,7 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.doesNotMatch(eventPrompt, /register_agent_session/);
   assert.doesNotMatch(eventPrompt, /get_onboarding_status/);
   assert.match(eventPrompt, /desktop app will send room events/);
+  assert.match(eventPrompt, /room transcript is shared context/);
 });
 
 test("Codex start prompts JSON-escape unusual room names", () => {
@@ -1668,7 +1681,7 @@ test("Codex desktop events report malformed brokered room tool requests", async 
       message: {
         ...messageEvent().message,
         id: "msg_codex_malformed_tool",
-        text: "please check the board",
+        text: "@CedarVista please check the board",
         threadRootId: "msg_codex_malformed_tool",
       },
     }));
@@ -1727,7 +1740,7 @@ test("Codex desktop events publish local change summary artifacts", async () => 
       message: {
         ...messageEvent().message,
         id: "msg_codex_change_summary_artifact",
-        text: "please implement the artifact producer",
+        text: "@CedarVista please implement the artifact producer",
         threadRootId: "msg_codex_change_summary_artifact",
       },
     }));
@@ -2889,6 +2902,144 @@ test("desktop message routing keeps broadcasts and unaddressed room messages del
   assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, broadcastReply), true);
   assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, unaddressed), true);
   assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, unaddressed), true);
+});
+
+test("Codex room activation routes only explicit addresses while retaining a shared transcript", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const oak = publicManagedAgentSession({
+    id: "local_oak",
+    agentSessionId: "agent_session_oak",
+    actorLabel: "OakSolar",
+    agentKey: "EmmyMay/oaksolar",
+    displayName: "OakSolar",
+  });
+  const workers = [river, dawn, oak];
+  const dispatchedNames = (event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>) =>
+    workers
+      .filter((worker) => shouldDeliverCodexRoomStreamEventToManagedAgent(worker, event))
+      .map((worker) => worker.displayName);
+
+  const untaggedHuman = messageEvent({
+    message: { ...messageEvent().message, id: "msg_untagged", text: "Can someone investigate this?" },
+  });
+  const directToDawn = messageEvent({
+    message: { ...messageEvent().message, id: "msg_direct_dawn", text: "@DawnRidge investigate this." },
+  });
+  const directToDawnById = messageEvent({
+    message: { ...messageEvent().message, id: "msg_direct_dawn_id", text: "@agent_session_dawn investigate this." },
+  });
+  const broadcast = messageEvent({
+    message: { ...messageEvent().message, id: "msg_everyone", text: "@everyone please review the plan." },
+  });
+  const peerUntargeted = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_peer_untagged",
+      sender: "RiverField",
+      source: "agent",
+      text: "I found another detail.",
+    },
+  });
+  const threadForDawn = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_thread_dawn",
+      text: "Here is the follow-up.",
+      threadRootId: "msg_thread_root",
+      threadReplyToId: "msg_someone_else",
+      replyTo: {
+        id: "msg_someone_else",
+        sender: "EmmyMay",
+        text: "Initial question",
+        source: "browser",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      thread: {
+        rootMessageId: "msg_thread_root",
+        replyCount: 2,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [{
+          sender: "DawnRidge",
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "msg_dawn_prior",
+        }],
+        lastReadMessageId: null,
+      },
+    },
+  });
+
+  assert.deepEqual(dispatchedNames(untaggedHuman), [], "an untagged top-level message is transcript context, not a fan-out event");
+  assert.deepEqual(dispatchedNames(directToDawn), ["DawnRidge"]);
+  assert.deepEqual(dispatchedNames(directToDawnById), ["DawnRidge"]);
+  assert.deepEqual(dispatchedNames(broadcast), ["RiverField", "DawnRidge", "OakSolar"], "each worker receives one broadcast turn");
+  assert.deepEqual(dispatchedNames(peerUntargeted), [], "peer chatter cannot create agent-to-agent ping-pong");
+  assert.deepEqual(dispatchedNames(threadForDawn), ["DawnRidge"], "only existing thread participants receive continuations");
+
+  const assignedToDawn: Extract<DesktopRoomStreamEvent, { type: "task_update" }> = {
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assigneeAgentKey: "EmmyMay/dawnridge" }),
+  };
+  const unassigned: Extract<DesktopRoomStreamEvent, { type: "task_update" }> = {
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary(),
+  };
+  assert.deepEqual(dispatchedNames(assignedToDawn), ["DawnRidge"]);
+  assert.deepEqual(dispatchedNames(unassigned), []);
+
+  const ownBroadcast = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_self",
+      sender: "DawnRidge",
+      source: "agent",
+      text: "@everyone I completed my check.",
+    },
+  });
+  assert.equal(shouldDeliverCodexRoomStreamEventToManagedAgent(dawn, ownBroadcast), false, "a worker never reactivates itself");
+  assert.equal(codexManagedAgentMessageActivationDecision(dawn, directToDawn.message), "activate");
+});
+
+test("Codex activation does not filter earlier untagged room context", async () => {
+  const roomIdentifier = "codex_activation_shared_context";
+  const room = await createLocalRoom({ roomIdentifier, displayName: "Codex activation context" });
+  await setLocalAwareRoomStorageMode(roomIdentifier, "local");
+  await addLocalChatMessage(room.roomIdentifier, {
+    sender: "EmmyMay",
+    text: "Earlier untagged observation that matters.",
+    source: "browser",
+  });
+  await addLocalChatMessage(room.roomIdentifier, {
+    sender: "EmmyMay",
+    text: "@RiverField please investigate using the earlier observation.",
+    source: "browser",
+  });
+
+  const result = await executeManagedAgentContextRequest(liveSession({
+    room_id: roomIdentifier,
+    room_identifier: roomIdentifier,
+  }), {
+    tool: "read_recent_room_messages",
+    arguments: { limit: 20 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.storage, "local");
+  assert.deepEqual(
+    (result.messages as Array<{ text: string }>).map((message) => message.text),
+    ["Earlier untagged observation that matters.", "@RiverField please investigate using the earlier observation."],
+  );
 });
 
 test("desktop message routing keeps human quote replies deliverable", () => {

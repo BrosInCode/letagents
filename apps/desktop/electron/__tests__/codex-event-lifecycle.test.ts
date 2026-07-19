@@ -390,7 +390,7 @@ test("codex dispatch enqueues, delivers, and publishes a room reply", async () =
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_happy",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_happy",
     }));
 
@@ -425,7 +425,7 @@ test("codex delivery waits for the in-flight turn to go idle and never interrupt
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_idle",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_idle",
     }));
 
@@ -462,7 +462,7 @@ test("codex delivery retries a transient thread-not-found response after wake", 
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_after_wake",
-      text: "are you still there?",
+      text: "@RiverField are you still there?",
       threadRootId: "msg_after_wake",
     }));
 
@@ -493,7 +493,7 @@ test("codex turn errors set status 'unknown', stay deliverable, and never park (
     for (let index = 0; index < 5; index += 1) {
       dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
         id: `msg_error_${index}`,
-        text: "please check this",
+        text: "@RiverField please check this",
         threadRootId: `msg_error_${index}`,
       }));
     }
@@ -515,7 +515,7 @@ test("codex turn errors set status 'unknown', stay deliverable, and never park (
     // A further event still delivers (proves infinite retry, no budget gate).
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_error_after",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_error_after",
     }));
     await waitFor(
@@ -746,7 +746,7 @@ test("codex captures the change baseline after the previous turn goes idle, not 
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_baseline_1",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_baseline_1",
     }));
 
@@ -767,7 +767,7 @@ test("codex captures the change baseline after the previous turn goes idle, not 
     // turn (after the baseline) IS attributed to that event's reply.
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_baseline_2",
-      text: "please check this again",
+      text: "@RiverField please check this again",
       threadRootId: "msg_baseline_2",
     }));
     const secondReply = await waitFor(async () => {
@@ -808,12 +808,12 @@ test("codex publishes to the storage destination captured at enqueue time, not a
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_flip_a",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_flip_a",
     }));
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_flip_b",
-      text: "please check this too",
+      text: "@RiverField please check this too",
       threadRootId: "msg_flip_b",
     }));
 
