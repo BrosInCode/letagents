@@ -207,7 +207,7 @@ test("an atomic legacy claim imports A while preserving a later B replacement as
     const store = new WorkerBindingStore(env.legacy, async (commit) => { reached(); await gate; await commit(); }, env.database);
     const pending = store.list(); await reachedFence;
     await writeFile(env.legacy, JSON.stringify({ version: 1, bindings: { agent_b: { ...input("agent_b"), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } })); release();
-    await assert.rejects(() => pending, /unexpected legacy source was quarantined/); await store.close();
+    await assert.rejects(() => pending, /unexpected legacy evidence was quarantined/); await store.close();
     const db = new DatabaseSync(env.database); assert.equal((db.prepare("SELECT COUNT(*) AS count FROM worker_session_bindings WHERE entry_id='agent_a'").get() as { count: number }).count, 1); db.close();
     const unexpected = (await readdir(env.root)).filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
     assert.equal(unexpected.length, 1);
@@ -224,7 +224,7 @@ test("a durable backup exists before the migration record and an A→B swap quar
       backupWasDurableBeforeRecord = await readFile(`${env.legacy}.migrated-backup`, "utf8") === rawA;
       await writeFile(env.legacy, rawB, { mode: 0o644 });
     });
-    await assert.rejects(() => store.list(), /unexpected legacy source was quarantined/);
+    await assert.rejects(() => store.list(), /unexpected legacy evidence was quarantined/);
     await store.close();
     const db = new DatabaseSync(env.database);
     assert.equal((db.prepare("SELECT checksum FROM migration_records WHERE migration_key=?").get(`legacy-worker-bindings:${env.legacy}`) as { checksum: string }).checksum, checksum(rawA));
@@ -259,6 +259,24 @@ test("a crash after atomic claim recovers its one orphan instead of starting wit
   } finally { await env.cleanup(); }
 });
 
+test("a pre-existing A claim plus public B fails closed without importing or moving either", async () => {
+  const env = await fixture(); try {
+    const rawA = legacyRaw("agent_a"); const rawB = legacyRaw("agent_b");
+    const claim = `${env.legacy}.claimed.crashed-a`;
+    await writeFile(claim, rawA, { mode: 0o600 });
+    await writeFile(env.legacy, rawB, { mode: 0o600 });
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => store.list(), /ambiguous source evidence/);
+    await store.close();
+    assert.equal(await readFile(claim, "utf8"), rawA);
+    assert.equal(await readFile(env.legacy, "utf8"), rawB);
+    const db = new DatabaseSync(env.database);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM migration_records").get() as { count: number }).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM migration_failures").get() as { count: number }).count, 0);
+    db.close();
+  } finally { await env.cleanup(); }
+});
+
 test("a sibling opener observes a durable legacy-import failure instead of returning an empty store", async () => {
   const env = await fixture(); try {
     await writeFile(env.legacy, "{bad", { mode: 0o600 });
@@ -270,6 +288,62 @@ test("a sibling opener observes a durable legacy-import failure instead of retur
     assert.match(String(left.status === "rejected" && left.reason), /Legacy worker binding import/);
     assert.match(String(right.status === "rejected" && right.reason), /Legacy worker binding import/);
     await first.close(); await second.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a durable malformed-A failure preserves a later public B under unique evidence", async () => {
+  const env = await fixture(); try {
+    const malformedA = "{bad-a"; const rawB = legacyRaw("agent_b");
+    await writeFile(env.legacy, malformedA, { mode: 0o600 });
+    const first = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => first.list(), /import refused/); await first.close();
+    const quarantine = (await readdir(env.root)).find((name) => name.startsWith("daemon-worker-bindings.json.corrupt."))!;
+    assert.equal(await readFile(join(env.root, quarantine), "utf8"), malformedA);
+
+    await writeFile(env.legacy, rawB, { mode: 0o600 });
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => reopened.list(), /previously quarantined/); await reopened.close();
+    assert.equal(await readFile(join(env.root, quarantine), "utf8"), malformedA, "A remains the durable failure evidence");
+    const unexpected = (await readdir(env.root)).filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
+    assert.equal(unexpected.length, 1);
+    assert.equal(await readFile(join(env.root, unexpected[0]!), "utf8"), rawB, "B is preserved rather than deleted as if it were A");
+    await assert.rejects(() => readFile(env.legacy, "utf8"), { code: "ENOENT" });
+  } finally { await env.cleanup(); }
+});
+
+test("reopen retires matching post-record crash claims and preserves every differing claim", async () => {
+  const env = await fixture(); try {
+    const rawA = legacyRaw("agent_a"); const rawB = legacyRaw("agent_b");
+    await writeFile(env.legacy, rawA, { mode: 0o600 });
+    const initial = new WorkerBindingStore(env.legacy, undefined, env.database); await initial.list(); await initial.close();
+    await writeFile(`${env.legacy}.claimed.after-record-a`, rawA, { mode: 0o600 });
+    await writeFile(`${env.legacy}.claimed.after-record-b`, rawB, { mode: 0o600 });
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => reopened.list(), /unexpected legacy evidence/); await reopened.close();
+    const names = await readdir(env.root);
+    assert.equal(names.some((name) => name.startsWith("daemon-worker-bindings.json.claimed.")), false);
+    const unexpected = names.filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
+    assert.equal(unexpected.length, 1);
+    assert.equal(await readFile(join(env.root, unexpected[0]!), "utf8"), rawB);
+    assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
+  } finally { await env.cleanup(); }
+});
+
+test("reopen consolidates matching post-failure crash claims and preserves differing claims", async () => {
+  const env = await fixture(); try {
+    const malformedA = "{bad-a"; const rawB = legacyRaw("agent_b");
+    await writeFile(env.legacy, malformedA, { mode: 0o600 });
+    const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => initial.list(), /import refused/); await initial.close();
+    await writeFile(`${env.legacy}.claimed.after-failure-a`, malformedA, { mode: 0o600 });
+    await writeFile(`${env.legacy}.claimed.after-failure-b`, rawB, { mode: 0o600 });
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await assert.rejects(() => reopened.list(), /previously quarantined/); await reopened.close();
+    const names = await readdir(env.root);
+    assert.equal(names.some((name) => name.startsWith("daemon-worker-bindings.json.claimed.")), false);
+    const unexpected = names.filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
+    assert.equal(unexpected.length, 1);
+    assert.equal(await readFile(join(env.root, unexpected[0]!), "utf8"), rawB);
   } finally { await env.cleanup(); }
 });
 
