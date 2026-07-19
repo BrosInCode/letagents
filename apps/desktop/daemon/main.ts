@@ -7,6 +7,7 @@ import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { WorkDurabilityStore } from "./durability-store.js";
+import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
 import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal, ProviderTurnControlResult } from "./provider-action-port.js";
@@ -688,19 +689,10 @@ export class SupervisorDaemon {
       const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
       const existing = manifest.entries.find((candidate) => candidate.id === entry.id);
       if (existing) {
-        const creationIdentity = (candidate: DaemonManifestEntry) => ({
-          id: candidate.id,
-          room_id: candidate.room_id,
-          display_name: candidate.display_name,
-          provider: candidate.provider,
-          model: candidate.model,
-          charter: candidate.charter,
-          permission_profile_id: candidate.permission_profile_id,
-          provider_launch_policy: candidate.provider_launch_policy ?? null,
-          created_by: candidate.created_by,
-          source_repo_path: candidate.source_repo_path ?? null,
-        });
-        if (!isDeepStrictEqual(creationIdentity(existing), creationIdentity(entry))) {
+        if (!isDeepStrictEqual(
+          projectDaemonCreateRequestReplayParameters(existing),
+          projectDaemonCreateRequestReplayParameters(entry),
+        )) {
           throw new Error(`Supervised creation request '${entry.id}' is already bound to different agent parameters.`);
         }
         // A retry after a lost response must observe the durable entry as it is

@@ -59,34 +59,40 @@ export type DaemonWorkerBindingProjection = {
   updated_at: string;
 };
 
-/**
- * The durable, addressable agent identity represented by a manifest entry.
- *
- * This intentionally contains no process, host, PID, connection, or liveness
- * fields. A provider execution may be replaced without replacing this agent.
- */
-export type DaemonAgentDefinition = {
-  id: string;
-  room_id: string;
-  display_name: string;
+/** Stable identity plus creation provenance; everything else may change independently. */
+export type DaemonAgentIdentity = {
+  agent_id: string;
   created_by: string;
   created_at: string;
 };
 
-/**
- * Durable launch intent and user-selected configuration for an agent.
- *
- * This is distinct from an observed deployment: desired state is a request to
- * run, while observed state and all process evidence remain runtime facts.
- */
+/** Mutable presentation metadata for one stable agent identity. */
+export type DaemonAgentProfile = {
+  agent_id: string;
+  display_name: string;
+};
+
+/** Room membership is durable but independent of both identity and runtime. */
+export type DaemonAgentRoomMembership = {
+  agent_id: string;
+  room_id: string;
+};
+
+/** Provider behavior, charter, and authority selected for an agent. */
 export type DaemonAgentConfiguration = {
+  agent_id: string;
   provider: string;
   model: string | null;
   charter: string;
-  desired_state: DesiredState;
   permission_profile_id: string | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
+};
+
+/** Requested launch/control state. This is intent, not agent identity or observed runtime. */
+export type DaemonAgentLaunchIntent = {
+  agent_id: string;
+  desired_state: DesiredState;
   /** Read-only source checkout used only to resolve remote + revision. */
   source_repo_path?: string | null;
 };
@@ -104,7 +110,7 @@ export type DaemonProviderRuntimeReference = {
   execution_generation_id: string;
 };
 
-/** Durable human turn-control effect journal attached to the current deployment. */
+/** Durable human turn-control effect journal for one agent. */
 export type DaemonTurnControlEffect = {
   action_id: string;
   work_attempt_id: string;
@@ -122,49 +128,90 @@ export type DaemonTurnControlEffect = {
 };
 
 /**
- * Ephemeral placement and observed runtime facts for an agent.
+ * Replaceable runtime placement, process, and liveness facts.
  *
- * `id` is a compatibility-preserving reference to `DaemonAgentDefinition.id`;
- * it is not a deployment identity. A new deployment can therefore replace all
- * remaining fields while continuing to serve the same durable agent.
+ * A launched deployment receives its own `run_id` and `deployment_id`, derived
+ * from the provider execution generation and stable agent id respectively. Both
+ * remain null before the first provider execution exists.
  */
 export type DaemonRuntimeDeployment = {
-  id: DaemonAgentDefinition["id"];
+  agent_id: string;
+  run_id: string | null;
+  deployment_id: string | null;
   observed_state: ObservedState;
-  condition: PolicyCondition;
-  /** Latest actionable lifecycle failure, retained for Inspector/conflict UX. */
-  last_error?: string | null;
   workspace_path?: string | null;
   work_attempt_id?: string | null;
   provider_ref?: DaemonProviderRuntimeReference | null;
   workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
-  /**
-   * First time this entry converged to ready (bound + reachable + running +
-   * unblocked). Set once, monotonically, and never cleared — durable evidence
-   * that the launch succeeded, so a later Stop is a lifecycle event rather than
-   * a cancelled launch. Absent for entries that never reached ready.
-   */
-  ready_reached_at?: string | null;
   activity?: DaemonActivityEvent[];
-  /**
-   * Durable human turn-control effect journal. `accepted` is written before
-   * provider dispatch; after a daemon restart it is never blindly replayed.
-   */
+};
+
+export type DaemonAgentLifecycleState = {
+  agent_id: string;
+  condition: PolicyCondition;
+  /** Latest actionable lifecycle failure, retained for Inspector/conflict UX. */
+  last_error?: string | null;
+};
+
+/** Set-once evidence that an agent launch reached ready. */
+export type DaemonAgentReadinessRecord = {
+  agent_id: string;
+  ready_reached_at?: string | null;
+};
+
+/** Accepted turn-control effects are durable and are never blindly replayed. */
+export type DaemonTurnControlJournalRecord = {
+  agent_id: string;
   turn_control?: DaemonTurnControlEffect | null;
-  /** Last verified exact room identity; retained when live credentials unbind. */
+};
+
+/** Last verified room-worker binding, retained after live credentials unbind. */
+export type DaemonRetainedWorkerBindingRecord = {
+  agent_id: string;
   last_worker_binding?: DaemonWorkerBindingProjection | null;
+};
+
+/** Crash-loop/backoff state and operator-visible reconciliation notices. */
+export type DaemonReconciliationRecord = {
+  agent_id: string;
   reconciliation?: ReconciliationState;
   reconciliation_notices?: ReconciliationNotice[];
 };
 
 /**
- * Backward-compatible wire contract for the current flat manifest format.
- *
- * New code can depend on the narrower durable or runtime contracts above;
- * existing manifest readers and writers keep the exact same JSON shape.
+ * Backward-compatible flat manifest wire contract. Domain code should project
+ * this transport record into the narrower records above before reasoning about
+ * identity, configuration, runtime, or lifecycle ownership.
  */
-export type DaemonManifestEntry = DaemonAgentDefinition & DaemonAgentConfiguration & DaemonRuntimeDeployment;
+export type DaemonManifestEntry = {
+  id: string;
+  room_id: string;
+  display_name: string;
+  provider: string;
+  model: string | null;
+  charter: string;
+  desired_state: DesiredState;
+  observed_state: ObservedState;
+  condition: PolicyCondition;
+  last_error?: string | null;
+  permission_profile_id: string | null;
+  provider_launch_policy?: unknown;
+  created_by: string;
+  created_at: string;
+  source_repo_path?: string | null;
+  workspace_path?: string | null;
+  work_attempt_id?: string | null;
+  provider_ref?: DaemonProviderRuntimeReference | null;
+  workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
+  native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
+  ready_reached_at?: string | null;
+  activity?: DaemonActivityEvent[];
+  turn_control?: DaemonTurnControlEffect | null;
+  last_worker_binding?: DaemonWorkerBindingProjection | null;
+  reconciliation?: ReconciliationState;
+  reconciliation_notices?: ReconciliationNotice[];
+};
 
 export type DaemonManifestEntryView = DaemonManifestEntry & {
   worker_binding?: DaemonWorkerBindingProjection | null;
