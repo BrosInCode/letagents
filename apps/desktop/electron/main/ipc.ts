@@ -51,6 +51,7 @@ import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
   DesktopInviteRoomCreation,
+  DesktopRoomSharedArtifact,
   DesktopLocalChatSyncResult,
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
@@ -168,6 +169,7 @@ import {
   deleteDesktopAccountRoom,
   fetchRoomSnapshot,
   getDesktopGitHubEvents,
+  getDesktopRoomArtifacts,
   getDesktopGitHubIntegrationStatus,
   getDesktopRoomLatestMessages,
   getDesktopRoomStorage,
@@ -644,6 +646,14 @@ export function registerDesktopIpcHandlers(
       query?: DesktopGitHubEventsQuery,
     ): Promise<DesktopGitHubEventsPage> =>
       getDesktopGitHubEvents(roomIdentifier, query),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-artifacts",
+    async (
+      _event,
+      roomIdentifier: string,
+    ): Promise<DesktopRoomSharedArtifact[]> =>
+      getDesktopRoomArtifacts(roomIdentifier),
   );
   targetIpcMain.handle(
     "desktop:room:get-github-integration-status",

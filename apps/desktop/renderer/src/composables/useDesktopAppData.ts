@@ -19,9 +19,10 @@ import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import {
   appendSnapshotMessage,
   mergeRoomSnapshotMessages,
+  messageReferencesMissingThreadContext,
   removeSnapshotReasoningSession,
+  replaceSnapshotRoomArtifacts,
   roomSnapshotsMatch,
-  shouldRefreshMetadataForMessage,
   snapshotMatchesRoom,
   upsertSnapshotReasoningSession,
   upsertSnapshotGitHubEvent,
@@ -340,8 +341,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     if (event.type === "message") {
+      const priorMessages = options.selectedSnapshot.value?.messages ?? [];
       setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, event.message));
-      if (shouldRefreshMetadataForMessage(event.message)) {
+      if (messageReferencesMissingThreadContext(event.message, priorMessages)) {
         options.scheduleLiveMetadataRefresh();
       }
       return;
@@ -349,13 +351,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (event.type === "task_update") {
       upsertSelectedTask(event.task);
-      options.scheduleLiveMetadataRefresh();
       return;
     }
 
     if (event.type === "github_event") {
       setSelectedSnapshot(upsertSnapshotGitHubEvent(options.selectedSnapshot.value, event.event));
-      options.scheduleLiveMetadataRefresh();
       return;
     }
 
@@ -363,19 +363,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (event.artifact) {
         setSelectedSnapshot(upsertSnapshotRoomArtifact(options.selectedSnapshot.value, event.artifact));
       }
-      options.scheduleLiveMetadataRefresh();
+      void refreshSelectedRoomArtifacts(event.roomIdentifier);
       return;
     }
 
     if (event.type === "reasoning_update") {
       setSelectedSnapshot(upsertSnapshotReasoningSession(options.selectedSnapshot.value, event.session));
-      options.scheduleLiveMetadataRefresh();
       return;
     }
 
     if (event.type === "reasoning_remove") {
       setSelectedSnapshot(removeSnapshotReasoningSession(options.selectedSnapshot.value, event.sessionId));
-      options.scheduleLiveMetadataRefresh();
       return;
     }
 
@@ -408,8 +406,18 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   function handleMessageSent(message: DesktopRoomMessage): void {
+    const priorMessages = options.selectedSnapshot.value?.messages ?? [];
     setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, message));
-    options.scheduleLiveMetadataRefresh();
+    if (messageReferencesMissingThreadContext(message, priorMessages)) {
+      options.scheduleLiveMetadataRefresh();
+    }
+  }
+
+  async function refreshSelectedRoomArtifacts(roomIdentifier: string): Promise<void> {
+    const artifacts = await desktopIpc.room.getArtifacts?.(roomIdentifier).catch(() => null);
+    if (!artifacts) return;
+    if (!snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)) return;
+    setSelectedSnapshot(replaceSnapshotRoomArtifacts(options.selectedSnapshot.value, artifacts));
   }
 
   function handleRoomRenamed(room: DesktopRoomInfo): void {
