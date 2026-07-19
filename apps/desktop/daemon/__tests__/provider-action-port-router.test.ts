@@ -462,7 +462,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(first.work_attempt_id);
     const firstGeneration = first.provider_ref?.execution_generation_id;
     assert.ok(firstGeneration);
-    await new WorkerBindingStore(paths.workerBindingsPath).bind({
+    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
       entry_id: entry.id,
       room_id: entry.room_id,
       work_attempt_id: first.work_attempt_id!,
@@ -530,7 +530,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     const journaled = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
     assert.equal(journaled?.status, "uncertain");
     assert.deepEqual(journaled?.stages, []);
-    await new WorkerBindingStore(paths.workerBindingsPath).unbind(entry.id);
+    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "Claude router stop");
