@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { access, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -29,6 +30,85 @@ test("corrupt legacy attempt state is quarantined and fails closed on every reop
     await assert.rejects(() => reopened.getAttempt("00000000-0000-4000-8000-000000000001"), /previously failed/);
     await reopened.close();
   } finally { await env.cleanup(); }
+});
+
+test("concurrent legacy importers serialize one valid record without poisoning migration state", async () => {
+  const env = await fixture();
+  const children: ChildProcess[] = [];
+  try {
+    const checksum = createHash("sha256").update("[]").digest("hex");
+    await writeFile(env.json, JSON.stringify({ version: 2, attempts: [], checksum }));
+    const schema = new ManifestStore(env.database);
+    await schema.load();
+    await schema.close();
+
+    const count = 8;
+    const moduleUrl = new URL("../durability-store.ts", import.meta.url).href;
+    const childSource = `
+      (async () => {
+        const { AttemptNotFoundError, WorkDurabilityStore } = await import(${JSON.stringify(moduleUrl)});
+        const store = new WorkDurabilityStore(
+          process.env.ATTEMPTS_JSON, process.env.ATTEMPTS_ROOT, undefined, process.env.WORKTREES,
+          undefined, undefined, undefined, undefined, undefined, process.env.DATABASE_PATH,
+          { after_source_read: () => {
+            process.send({ kind: "ready" });
+            return new Promise((resolve) => process.once("message", (message) => {
+              if (message === "go") resolve();
+            }));
+          } },
+        );
+        try {
+          await store.getAttempt("00000000-0000-4000-8000-000000000001");
+          throw new Error("empty legacy import unexpectedly returned an attempt");
+        } catch (error) {
+          if (!(error instanceof AttemptNotFoundError)) throw error;
+        } finally {
+          await store.close();
+        }
+        process.send({ kind: "done" });
+      })().catch((error) => process.send({ kind: "error", error: error?.stack ?? String(error) }));
+    `;
+    const completions: Promise<void>[] = [];
+    let ready = 0;
+    for (let index = 0; index < count; index += 1) {
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", childSource], {
+        cwd: process.cwd(),
+        env: { ...process.env, ATTEMPTS_JSON: env.json, DATABASE_PATH: env.database, ATTEMPTS_ROOT: join(env.root, `attempt-data-${index}`), WORKTREES: join(env.root, `worktrees-${index}`) },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      });
+      children.push(child);
+      completions.push(new Promise<void>((resolveChild, rejectChild) => {
+        let stderr = "";
+        let settled = false;
+        child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+        child.once("error", rejectChild);
+        child.on("message", (message: { kind: "ready" | "done" | "error"; error?: string }) => {
+          if (message.kind === "ready") {
+            ready += 1;
+            if (ready === count) {
+              for (const candidate of children) candidate.send?.("go");
+            }
+          } else if (message.kind === "done") {
+            settled = true;
+            resolveChild();
+          } else {
+            settled = true;
+            rejectChild(new Error(message.error));
+          }
+        });
+        child.once("exit", (code) => { if (!settled) rejectChild(new Error(`legacy import child exited ${code}: ${stderr}`)); });
+      }));
+    }
+    await Promise.all(completions);
+
+    const inspection = new DatabaseSync(env.database);
+    assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM migration_records").get() as { count: number }).count, 1);
+    assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM migration_failures").get() as { count: number }).count, 0);
+    inspection.close();
+  } finally {
+    for (const child of children) child.kill();
+    await env.cleanup();
+  }
 });
 
 test("a migration failure-record INSERT error leaves the corrupt source in place for a safe retry", async () => {
