@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 3;
+export const DAEMON_STATE_SCHEMA_VERSION = 4;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -13,14 +13,14 @@ export class DaemonStateSchema {
 createSchema(database: DatabaseSync): void {
   const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
   const metadataVersion = this.metadataSchemaVersion(database);
-  if (existingVersion === 0 && metadataVersion !== undefined) {
-    throw new Error(`Daemon state version pair is inconsistent: user_version=0, metadata schema_version=${metadataVersion}.`);
-  }
   if (existingVersion > SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (metadataVersion !== undefined && metadataVersion > SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
+  }
+  if (existingVersion === 0 && metadataVersion !== undefined) {
+    throw new Error(`Daemon state version pair is inconsistent: user_version=0, metadata schema_version=${metadataVersion}.`);
   }
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
@@ -33,11 +33,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV2ToV3(database);
     return;
   }
+  if (existingVersion === 3) {
+    this.migrateV3ToV4(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV3Shape(database);
+    this.repairAndValidateV4Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -304,6 +308,8 @@ createSchema(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -355,6 +361,27 @@ migrateV2ToV3(database: DatabaseSync): void {
   }
 }
 
+migrateV3ToV4(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    // A v3 database is already validated before we add private credentials.
+    // Do not advance either version marker until the complete v4 shape exists.
+    this.applyV2Shape(database, true);
+    this.validateV2Shape(database);
+    this.applyV3Shape(database);
+    this.validateV3Shape(database);
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
 repairAndValidateV3Shape(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
@@ -366,6 +393,106 @@ repairAndValidateV3Shape(database: DatabaseSync): void {
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
+  }
+}
+
+repairAndValidateV4Shape(database: DatabaseSync): void {
+  // A completed v4 database is validated read-only on each open. Taking an
+  // IMMEDIATE transaction merely to run CREATE IF NOT EXISTS makes a daemon
+  // handoff contend with an in-flight, fenced mutation for no state benefit.
+  let needsRepair = this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")
+    && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
+  try {
+    this.validateV2Shape(database);
+    this.validateV3Shape(database);
+    this.validateV4Shape(database);
+  } catch { needsRepair = true; }
+  if (!needsRepair) return;
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV2Shape(database, true);
+    this.validateV2Shape(database);
+    this.applyV3Shape(database);
+    this.validateV3Shape(database);
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+applyV4Shape(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS worker_session_bindings (
+      entry_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      work_attempt_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      agent_session_token TEXT NOT NULL,
+      api_url TEXT NOT NULL,
+      room_cursor TEXT,
+      last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+      last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0),
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE UNIQUE INDEX IF NOT EXISTS worker_session_binding_authority
+      ON worker_session_bindings(entry_id, binding_epoch, execution_generation_id, agent_session_id);
+    CREATE TABLE IF NOT EXISTS worker_binding_publications (
+      reservation_id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      execution_generation_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      observed_at TEXT NOT NULL,
+      observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+      state TEXT NOT NULL CHECK (state IN ('reserved', 'accepted', 'failed')),
+      created_at TEXT NOT NULL,
+      finalized_at TEXT,
+      UNIQUE(entry_id, sequence)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS worker_binding_publications_current
+      ON worker_binding_publications(entry_id, binding_epoch, sequence DESC);
+    CREATE TABLE IF NOT EXISTS worker_generation_verifications (
+      reservation_id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+      from_execution_generation_id TEXT NOT NULL,
+      to_execution_generation_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      observed_at TEXT NOT NULL,
+      observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+      state TEXT NOT NULL CHECK (state IN ('reserved', 'accepted', 'failed', 'lost_race')),
+      created_at TEXT NOT NULL,
+      finalized_at TEXT,
+      UNIQUE(entry_id, sequence)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS worker_generation_verifications_current
+      ON worker_generation_verifications(entry_id, binding_epoch, sequence DESC);
+  `);
+}
+
+validateV4Shape(database: DatabaseSync): void {
+  const required: Record<string, string[]> = {
+    worker_session_bindings: ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url", "room_cursor", "last_sequence", "last_observed_at_ms", "binding_epoch", "updated_at"],
+    worker_binding_publications: ["reservation_id", "entry_id", "binding_epoch", "execution_generation_id", "agent_session_id", "sequence", "observed_at", "observed_at_ms", "state", "created_at", "finalized_at"],
+    worker_generation_verifications: ["reservation_id", "entry_id", "binding_epoch", "from_execution_generation_id", "to_execution_generation_id", "agent_session_id", "sequence", "observed_at", "observed_at_ms", "state", "created_at", "finalized_at"],
+  };
+  for (const [table, expected] of Object.entries(required)) {
+    const actual = this.tableColumns(database, table);
+    const missing = expected.filter((column) => !actual.has(column));
+    if (missing.length) throw new Error(`Daemon state v4 table ${table} is missing required columns: ${missing.join(", ")}.`);
+    const tableRow = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === table && row.type === "table");
+    if (!tableRow || Number(tableRow.strict) !== 1) throw new Error(`Daemon state v4 table ${table} must be STRICT.`);
+  }
+  const indexNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Row[]).map((row) => String(row.name)));
+  for (const index of ["worker_session_binding_authority", "worker_binding_publications_current", "worker_generation_verifications_current"]) {
+    if (!indexNames.has(index)) throw new Error(`Daemon state v4 is missing required index ${index}.`);
   }
 }
 

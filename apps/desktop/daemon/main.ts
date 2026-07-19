@@ -395,6 +395,7 @@ export class SupervisorDaemon {
     this.workerBindings = new WorkerBindingStore(
       paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
       (commit) => this.fenceDaemonCommit(commit),
+      paths.manifestPath,
     );
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
       await this.singleton.assertCurrent();
@@ -572,6 +573,7 @@ export class SupervisorDaemon {
     await this.serializeManifestCommit(() => this.singleton.release());
     await this.store.close();
     await this.durability.close();
+    await this.workerBindings.close();
   }
 
   /**
@@ -591,7 +593,8 @@ export class SupervisorDaemon {
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
     await this.store.close();
-    void this.durability.close().catch(() => undefined);
+    await this.durability.close();
+    await this.workerBindings.close();
     // Existing convergence/provider callbacks are generation-fenced below.
     // Do not await them: a wedged native transport must not block an upgrade.
     this.convergenceRequests.clear();

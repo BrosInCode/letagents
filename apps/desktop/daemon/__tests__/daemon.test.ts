@@ -3454,7 +3454,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
       });
     };
     emitCompatWaitCursor("msg_2818");
-    await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
+    await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
     const pollingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(pollingProjection.observed_state, "idle", "Claude room polling is reachable but not projected as active work");
     assert.equal(pollingProjection.activity?.at(-1)?.status, "idle");
@@ -3479,7 +3479,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
       "out-of-order formal acknowledgements report and preserve the newest durable cursor");
     emitCompatWaitCursor("msg_2819");
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 2), "delayed compatibility cursor evidence");
-    const formalCursorWins = await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff");
+    const formalCursorWins = await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff");
     assert.equal(formalCursorWins?.room_cursor, "msg_2820", "delayed compatibility evidence cannot regress the formal response cursor");
     const formalCursorAttempt = (await daemonRequest(paths.socketPath, "attempt.read", { id: "supervised_handoff" })).result as { checkpoints: Array<{ room_cursor: string | null }> };
     assert.equal(formalCursorAttempt.checkpoints.at(-1)?.room_cursor, "msg_2820", "durable attempt progress follows the same serialized no-regression order");
@@ -3495,10 +3495,9 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(published.body.status, "working");
     assert.equal(typeof published.body.sequence, "number");
     assert.ok(published.body.sequence > 0);
-    assert.equal((await stat(paths.workerBindingsPath)).mode & 0o777, 0o600);
-    const bindingFile = await readFile(paths.workerBindingsPath, "utf8");
-    assert.doesNotMatch(bindingFile, /authorization|Bearer|scoped-worker-bearer/, "binding store carries no owner or optional bearer authority");
-    assert.doesNotMatch(await readFile(paths.manifestPath, "utf8"), /session-secret/);
+    assert.equal((await stat(paths.manifestPath)).mode & 0o777, 0o600);
+    await assert.rejects(() => readFile(paths.workerBindingsPath, "utf8"), { code: "ENOENT" });
+    assert.doesNotMatch(JSON.stringify((await daemonRequest(paths.socketPath, "manifest.list")).result), /session-secret/);
     const nativeCanary = "canary-not-a-real-native-secret-123456789";
     const nativeInternals = first as unknown as { publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean> };
     await nativeInternals.publishNativeActivity("supervised_handoff", `tool Authorization: Bearer ${nativeCanary}`, "working");
@@ -3560,7 +3559,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     rejectNativeActivity = true;
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/rejected-for-successor", payload: {}, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => nativeRequests.some((request) => request.body.method === "turn/rejected-for-successor"), "successor fence rejection");
-    await eventually(async () => !/agent_session_exact/.test(await readFile(paths.workerBindingsPath, "utf8")), "stale worker binding removal");
+    await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff")) === null, "stale worker binding removal");
     const requestsAfterFence = nativeRequests.length;
     for (const listener of streamListeners) listener({ workAttemptId, providerContinuationId: continuation, observedAt: new Date().toISOString(), sequence: ++sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/must-not-publish-after-fence", payload: {}, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null });
     await eventually(async () => (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.activity?.length === 9), "local post-fence stream evidence");
@@ -3609,7 +3608,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(checkpointsAfterNoop, checkpointsBeforeNoop, "an unchanged poll cursor appends no durability checkpoint");
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "supervised_handoff", desired_state: "paused" });
     await eventually(async () => !child?.pid || (() => { try { process.kill(child.pid!, 0); return false; } catch { return true; } })(), "daemon stop authority");
-    await eventually(async () => /agent_session_exact/.test(await readFile(paths.workerBindingsPath, "utf8")), "paused attempt retains exact private worker continuity");
+    await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff"))?.agent_session_id === "agent_session_exact", "paused attempt retains exact private worker continuity");
     const stoppedProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
     assert.equal(stoppedProjection.worker_binding, null, "paused terminal generation is not projected as live worker authority");
     assert.equal(stoppedProjection.last_worker_binding?.agent_session_id, "agent_session_exact", "pause preserves the non-secret exact control route");
