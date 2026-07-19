@@ -4022,8 +4022,79 @@ test("repository storage keys preserve full project identity across same-basenam
   const second = repositoryStorageKey("https://git.example.invalid/owner-b/shared-project.git");
   assert.equal(first, equivalent);
   assert.notEqual(first, second);
+  assert.notEqual(repositoryStorageKey("file:///tmp/shared-project.git"), repositoryStorageKey("file:///tmp/shared-project"));
+  assert.notEqual(repositoryStorageKey("./shared-project.git"), repositoryStorageKey("./shared-project"));
+  assert.equal(repositoryStorageKey("git@github.com:owner-a/shared-project.git"), repositoryStorageKey("git@github.com:owner-a/shared-project"));
   assert.match(first, /^shared-project-[0-9a-f]{16}$/);
   assert.match(second, /^shared-project-[0-9a-f]{16}$/);
+});
+
+test("filesystem remotes that differ by a literal .git suffix remain isolated during local revision import", async () => {
+  const env = await fixture();
+  try {
+    const remoteWithSuffix = join(env.root, "same.git");
+    const remoteWithoutSuffix = join(env.root, "same");
+    const sourceWithSuffix = join(env.root, "source-with-suffix");
+    const sourceWithoutSuffix = join(env.root, "source-without-suffix");
+    const daemonRoot = join(env.root, "daemon");
+    await execFileAsync("git", ["init", "--bare", remoteWithSuffix]);
+    await execFileAsync("git", ["init", "--bare", remoteWithoutSuffix]);
+
+    const initializeSource = async (source: string, remote: string, content: string) => {
+      await execFileAsync("git", ["init", source]);
+      await execFileAsync("git", ["-C", source, "config", "user.email", "daemon@example.invalid"]);
+      await execFileAsync("git", ["-C", source, "config", "user.name", "Daemon Test"]);
+      await writeFile(join(source, "README.md"), content);
+      await execFileAsync("git", ["-C", source, "add", "README.md"]);
+      await execFileAsync("git", ["-C", source, "commit", "-m", "initial"]);
+      await execFileAsync("git", ["-C", source, "remote", "add", "origin", remote]);
+      await execFileAsync("git", ["-C", source, "push", "origin", "HEAD:refs/heads/main"]);
+    };
+    await initializeSource(sourceWithSuffix, remoteWithSuffix, "suffix remote\n");
+    await initializeSource(sourceWithoutSuffix, remoteWithoutSuffix, "plain remote\n");
+    await writeFile(join(sourceWithoutSuffix, "README.md"), "plain remote local only\n");
+    await execFileAsync("git", ["-C", sourceWithoutSuffix, "add", "README.md"]);
+    await execFileAsync("git", ["-C", sourceWithoutSuffix, "commit", "-m", "local only"]);
+
+    const firstKey = repositoryStorageKey(remoteWithSuffix);
+    const secondKey = repositoryStorageKey(remoteWithoutSuffix);
+    assert.notEqual(firstKey, secondKey, "literal filesystem paths must not inherit hosted-remote .git equivalence");
+    const firstRevision = (await execFileAsync("git", ["-C", sourceWithSuffix, "rev-parse", "HEAD"])).stdout.trim();
+    const secondRevision = (await execFileAsync("git", ["-C", sourceWithoutSuffix, "rev-parse", "HEAD"])).stdout.trim();
+    const provisioner = new WorkspaceProvisioner(daemonRoot, createGitCommand(daemonRoot));
+    await provisioner.provision({
+      repo: firstKey,
+      workAttemptId: randomUUID(),
+      taskId: "suffix_remote",
+      remoteUrl: remoteWithSuffix,
+      revision: firstRevision,
+      sourceRepoPath: sourceWithSuffix,
+    });
+    await assert.rejects(
+      () => provisioner.provision({
+        repo: firstKey,
+        workAttemptId: randomUUID(),
+        taskId: "cross_wired_source",
+        remoteUrl: remoteWithSuffix,
+        revision: secondRevision,
+        sourceRepoPath: sourceWithoutSuffix,
+      }),
+      /Local source repository remote identity does not match/,
+    );
+    const second = await provisioner.provision({
+      repo: secondKey,
+      workAttemptId: randomUUID(),
+      taskId: "plain_remote",
+      remoteUrl: remoteWithoutSuffix,
+      revision: secondRevision,
+      sourceRepoPath: sourceWithoutSuffix,
+    });
+    assert.equal((await execFileAsync("git", ["-C", second.path, "rev-parse", "HEAD"])).stdout.trim(), secondRevision);
+    assert.notEqual(
+      join(daemonRoot, "repos", `${firstKey}.git`),
+      join(daemonRoot, "repos", `${secondKey}.git`),
+    );
+  } finally { await env.cleanup(); }
 });
 
 test("workspace provisioner refreshes an existing bare clone before resolving a new source revision", async () => {

@@ -54,7 +54,17 @@ function inside(root: string, candidate: string): boolean {
 
 export function normalizeRemote(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");
-  return trimmed.endsWith(".git") ? trimmed.slice(0, -4) : trimmed;
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed)?.[1]?.toLowerCase();
+  const networkUrl = scheme != null && scheme !== "file";
+  // Git's scp-like syntax (git@host:owner/repo) is a network identity too.
+  // Everything else is a filesystem path, where `repo.git` and `repo` may be
+  // two different repositories and must never share daemon storage.
+  const scpLike = scheme == null
+    && /^(?:[^/@:\s]+@)?[^/:\s]+:.+$/.test(trimmed)
+    && !/^[A-Za-z]:[\\/]/.test(trimmed);
+  return (networkUrl || scpLike) && trimmed.endsWith(".git")
+    ? trimmed.slice(0, -4)
+    : trimmed;
 }
 
 /** A readable, collision-safe daemon storage key derived from full remote identity. */
