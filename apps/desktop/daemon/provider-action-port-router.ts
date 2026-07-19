@@ -10,6 +10,7 @@ import type {
   ProviderActionTerminal,
   ProviderTurnControlResult,
 } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
 
 type NativeHandle = {
   workAttemptId: string;
@@ -73,7 +74,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
-    if (remembered) return publicHandle(remembered.handle);
+    if (remembered) {
+      const handle = remembered.handle;
+      if (
+        handle.providerContinuationId !== ref.providerContinuationId
+        || !sameProviderActionConnectionIdentity(handle.providerConnection, ref.providerConnection)
+      ) return null;
+      return publicHandle(handle);
+    }
     const handle = await (await this.adapter(provider)).attach(ref);
     if (!handle || isAttachTerminal(handle)) return handle;
     this.handles.set(ref.workAttemptId, { provider, handle });

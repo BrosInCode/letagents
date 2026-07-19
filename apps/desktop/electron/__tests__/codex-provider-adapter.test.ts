@@ -21,6 +21,7 @@ import {
 } from "../main/agents/codex-supervisor-bridge-context.js";
 import type {
   ProviderActivityEvent,
+  ProviderConnectionRef,
   ProviderHandle,
   ProviderSpawnRequest,
   ProviderStreamEvent,
@@ -309,6 +310,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
   assert.equal(await adapter.attach({
     workAttemptId: spawnRequest().workAttemptId,
     providerContinuationId: "thread-1",
+    providerConnection: handle.providerConnection,
   }), handle);
 
   assert.deepEqual(adapter.capabilities(), {
@@ -606,6 +608,38 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
   }), attached);
+});
+
+test("cached Codex attach requires the exact continuation and native connection identity", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const request = spawnRequest();
+  const handle = await adapter.spawn(request);
+  assert.ok(handle.providerConnection?.kind === "codex_app_server");
+  const exactRef = {
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+  };
+
+  assert.equal(await adapter.attach(exactRef), handle);
+  assert.equal(await adapter.attach({ ...exactRef, providerContinuationId: "cross-wired-thread" }), null);
+  assert.equal(await adapter.attach({ ...exactRef, providerConnection: null }), null);
+
+  const mismatchedConnections: ProviderConnectionRef[] = [
+    { ...handle.providerConnection, url: "ws://127.0.0.1:9999" },
+    { ...handle.providerConnection, url: "" },
+    { ...handle.providerConnection, pid: handle.providerConnection.pid! + 1 },
+    { ...handle.providerConnection, pid: null },
+    { ...handle.providerConnection, processIdentity: "another-process-birth" },
+    { ...handle.providerConnection, processIdentity: null },
+    { kind: "claude_cli", pid: handle.providerConnection.pid, processIdentity: handle.providerConnection.processIdentity },
+  ];
+  for (const providerConnection of mismatchedConnections) {
+    assert.equal(await adapter.attach({ ...exactRef, providerConnection }), null);
+  }
+  assert.equal(harness.launches.length, 1);
+  assert.equal(harness.clients.length, 1, "rejected cached refs never contact or launch another endpoint");
 });
 
 test("fresh adapter reattaches when only the MCP workplace status probe times out", async () => {

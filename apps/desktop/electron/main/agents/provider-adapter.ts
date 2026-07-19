@@ -133,6 +133,26 @@ export type ProviderConnectionRef =
     processIdentity?: string | null;
   };
 
+/**
+ * Compare the complete durable identity of two native provider connections.
+ * A missing connection, PID, or process-birth identity is unknown evidence and
+ * therefore never sufficient to authenticate a cached live handle.
+ */
+export function sameProviderConnectionIdentity(
+  expected: ProviderConnectionRef | null | undefined,
+  actual: ProviderConnectionRef | null | undefined,
+): boolean {
+  if (!expected || !actual || expected.kind !== actual.kind) return false;
+  if (expected.pid === null || actual.pid === null) return false;
+  if (expected.pid !== actual.pid) return false;
+  if (!expected.processIdentity || !actual.processIdentity) return false;
+  if (expected.processIdentity !== actual.processIdentity) return false;
+  if (expected.kind === "codex_app_server") {
+    return actual.kind === "codex_app_server" && Boolean(expected.url) && expected.url === actual.url;
+  }
+  return true;
+}
+
 export interface ProviderSpawnRequest {
   workAttemptId: string;
   roomId: string;
