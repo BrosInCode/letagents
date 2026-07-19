@@ -2335,14 +2335,17 @@ export class SupervisorDaemon {
   private async reconcileOnce(entryId: string, input: DaemonReconcileInput, watchdogThresholdMs: number, actor: string) {
     if (!this.providerPort) throw new Error("Provider action port is unavailable");
     await this.singleton.assertCurrent();
-    const manifest = await this.store.load();
-    const entry = manifest.entries.find((candidate) => candidate.id === entryId);
+    const entry = await this.store.getEntry(entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
 
     let reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, input.nowMs);
     if (JSON.stringify(reconciliation) !== JSON.stringify(entry.reconciliation)) {
       const persisted = { ...entry, reconciliation };
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? persisted : candidate));
+      const next = await this.store.replaceEntriesBatch(
+        this.manifestGeneration,
+        [persisted],
+        (commit) => this.fenceDaemonCommit(commit),
+      );
       this.manifestGeneration = next.generation;
     }
 

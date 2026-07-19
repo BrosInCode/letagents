@@ -270,11 +270,43 @@ test("manifest metadata schema disagreement is rejected on reopen", async () => 
   }
 });
 
+test("contradictory SQLite and metadata version pairs reject before migration", async () => {
+  for (const pair of [
+    { userVersion: 1, metadataVersion: 2, pattern: /version pair is inconsistent/ },
+    { userVersion: 2, metadataVersion: 1, pattern: /version pair is inconsistent/ },
+    { userVersion: 1, metadataVersion: 3, pattern: /metadata schema version 3/ },
+  ]) {
+    const env = await fixture();
+    const initialized = new ManifestStore(env.databasePath);
+    try {
+      await initialized.load();
+      await initialized.close();
+      const database = new DatabaseSync(env.databasePath);
+      database.exec(`PRAGMA user_version = ${pair.userVersion}`);
+      database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1").run(pair.metadataVersion);
+      database.close();
+
+      const rejected = new ManifestStore(env.databasePath);
+      await assert.rejects(() => rejected.load(), pair.pattern);
+      await rejected.close();
+
+      const inspection = new DatabaseSync(env.databasePath);
+      assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, pair.userVersion);
+      assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, pair.metadataVersion);
+      inspection.close();
+    } finally {
+      await initialized.close();
+      await env.cleanup();
+    }
+  }
+});
+
 test("v1 daemon state migrates transactionally to v2 and normalizes exit timestamps", async () => {
   const env = await fixture();
   const initial = new ManifestStore(env.databasePath);
   try {
-    await initial.write(0, [entry]);
+    const invalid = { ...entry, id: "legacy_undefined", display_name: "Legacy Undefined" };
+    await initial.write(0, [entry, invalid]);
     await initial.close();
 
     const v1 = new DatabaseSync(env.databasePath);
@@ -283,16 +315,44 @@ test("v1 daemon state migrates transactionally to v2 and normalizes exit timesta
     v1.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
     v1.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[101,202,303]", entry.id);
     v1.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
+    v1.prepare("UPDATE agent_configurations SET provider_launch_policy_present = 1, provider_launch_policy_json = NULL WHERE agent_id = ?").run(invalid.id);
+    v1.prepare("UPDATE agent_launch_intents SET source_repo_path_present = 0, source_repo_path = '/stale' WHERE agent_id = ?").run(invalid.id);
+    v1.prepare(`
+      UPDATE runtime_deployments
+      SET workspace_path_present = 0, workspace_path = '/stale',
+          work_attempt_id_present = 0, work_attempt_id = 'stale-attempt',
+          provider_ref_present = 0, workplace_liveness_present = 1,
+          workplace_liveness_state = NULL, workplace_liveness_observed_at = 'stale',
+          native_liveness_present = 1, native_liveness_state = NULL,
+          native_liveness_observed_at = 'stale', activity_present = 0
+      WHERE agent_id = ?
+    `).run(invalid.id);
+    v1.prepare("UPDATE agent_lifecycle_states SET last_error_present = 0, last_error = 'stale' WHERE agent_id = ?").run(invalid.id);
+    v1.prepare("UPDATE agent_readiness SET ready_reached_at_present = 0, ready_reached_at = 'stale' WHERE agent_id = ?").run(invalid.id);
+    v1.prepare("UPDATE turn_control_journals SET turn_control_present = 0 WHERE agent_id = ?").run(invalid.id);
+    v1.prepare("UPDATE retained_worker_bindings SET last_worker_binding_present = 0 WHERE agent_id = ?").run(invalid.id);
+    v1.prepare("UPDATE reconciliation_records SET reconciliation_present = 1, consecutive_action_failures = NULL, reconciliation_notices_present = 0 WHERE agent_id = ?").run(invalid.id);
+    v1.prepare("UPDATE reconciliation_records SET terminal_actor = NULL WHERE agent_id = ?").run(entry.id);
+    v1.prepare("UPDATE reconciliation_notices SET terminal_actor = NULL WHERE agent_id = ?").run(entry.id);
     v1.exec("UPDATE manifest_metadata SET schema_version = 1; PRAGMA user_version = 1");
     const v1ConfigurationColumns = (v1.prepare("PRAGMA table_info(agent_configurations)").all() as Array<{ name: string }>).map((column) => column.name);
     assert.equal(v1ConfigurationColumns.includes("provider_launch_policy_undefined"), false);
-    assert.equal((v1.prepare("SELECT COUNT(*) AS count FROM reconciliation_exit_timestamps").get() as { count: number }).count, 0);
+    assert.equal((v1.prepare("SELECT COUNT(*) AS count FROM reconciliation_exit_timestamps WHERE agent_id = ?").get(entry.id) as { count: number }).count, 0);
     v1.close();
 
     const migrated = new ManifestStore(env.databasePath);
     const state = await migrated.load();
     assert.equal(state.generation, 1, "migration preserves the manifest CAS generation");
     assert.deepEqual(state.entries[0]?.reconciliation?.exit_timestamps_ms, [101, 202, 303]);
+    assert.equal(Object.hasOwn(state.entries[0]!.reconciliation!, "last_terminal"), false);
+    assert.equal(Object.hasOwn(state.entries[0]!.reconciliation_notices![0]!, "terminal"), false);
+    const normalized = state.entries.find((candidate) => candidate.id === invalid.id)!;
+    for (const optional of [
+      "provider_launch_policy", "source_repo_path", "workspace_path", "work_attempt_id",
+      "provider_ref", "workplace_liveness", "native_liveness", "activity", "last_error",
+      "ready_reached_at", "turn_control", "last_worker_binding", "reconciliation",
+      "reconciliation_notices",
+    ]) assert.equal(Object.hasOwn(normalized, optional), false, `${optional} is normalized to absence`);
     await migrated.close();
 
     const inspection = new DatabaseSync(env.databasePath);
@@ -300,11 +360,65 @@ test("v1 daemon state migrates transactionally to v2 and normalizes exit timesta
     assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 2);
     assert.equal((inspection.prepare("SELECT provider_launch_policy_undefined FROM agent_configurations WHERE agent_id = ?").get(entry.id) as { provider_launch_policy_undefined: number }).provider_launch_policy_undefined, 0);
     assert.equal((inspection.prepare("SELECT provider_process_identity_present FROM runtime_deployments WHERE agent_id = ?").get(entry.id) as { provider_process_identity_present: number }).provider_process_identity_present, 0);
+    const preservedRuntime = inspection.prepare("SELECT deployment_id, run_id FROM runtime_deployments WHERE agent_id = ?").get(invalid.id) as { deployment_id: string; run_id: string };
+    assert.equal(preservedRuntime.run_id, entry.provider_ref?.execution_generation_id);
+    assert.ok(preservedRuntime.deployment_id, "migration preserves deployment identity independently from provider_ref presence");
+    for (const table of ["activity_events", "turn_control_stages", "reconciliation_exit_timestamps", "reconciliation_completed_actions", "reconciliation_notices"]) {
+      assert.equal((inspection.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE agent_id = ?`).get(invalid.id) as { count: number }).count, 0, `${table} stale children are removed`);
+    }
+    const normalizedColumns = inspection.prepare(`
+      SELECT runtime.workspace_path, runtime.work_attempt_id, runtime.provider_work_attempt_id,
+             runtime.workplace_liveness_state, runtime.native_liveness_state,
+             lifecycle.last_error, readiness.ready_reached_at,
+             turn_journal.action_id, binding.binding_agent_session_id,
+             reconciliation.consecutive_action_failures
+      FROM runtime_deployments runtime
+      JOIN agent_lifecycle_states lifecycle USING (agent_id)
+      JOIN agent_readiness readiness USING (agent_id)
+      JOIN turn_control_journals turn_journal USING (agent_id)
+      JOIN retained_worker_bindings binding USING (agent_id)
+      JOIN reconciliation_records reconciliation USING (agent_id)
+      WHERE runtime.agent_id = ?
+    `).get(invalid.id) as Record<string, unknown>;
+    assert.ok(Object.values(normalizedColumns).every((value) => value === null), "absent optional projections retain no stale payload columns");
     inspection.close();
 
     const reopened = new ManifestStore(env.databasePath);
     assert.deepEqual((await reopened.load()).entries[0]?.reconciliation?.exit_timestamps_ms, [101, 202, 303]);
     await reopened.close();
+  } finally {
+    await initial.close();
+    await env.cleanup();
+  }
+});
+
+test("v2 backfills legacy exit timestamps when normalized table exists but agent rows are absent", async () => {
+  const env = await fixture();
+  const initial = new ManifestStore(env.databasePath);
+  try {
+    await initial.write(0, [entry]);
+    await initial.close();
+    const partial = new DatabaseSync(env.databasePath);
+    partial.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
+    partial.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[111,222]", entry.id);
+    partial.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
+    assert.equal((partial.prepare("SELECT COUNT(*) AS count FROM reconciliation_exit_timestamps WHERE agent_id = ?").get(entry.id) as { count: number }).count, 0);
+    partial.close();
+
+    const repaired = new ManifestStore(env.databasePath);
+    assert.deepEqual((await repaired.load()).entries[0]?.reconciliation?.exit_timestamps_ms, [111, 222]);
+    await repaired.close();
+
+    const inspection = new DatabaseSync(env.databasePath);
+    assert.equal((inspection.prepare("SELECT exit_timestamps_json FROM reconciliation_records WHERE agent_id = ?").get(entry.id) as { exit_timestamps_json: string | null }).exit_timestamps_json, null);
+    inspection.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[333]", entry.id);
+    inspection.close();
+    const reopened = new ManifestStore(env.databasePath);
+    assert.deepEqual((await reopened.load()).entries[0]?.reconciliation?.exit_timestamps_ms, [111, 222]);
+    await reopened.close();
+    const finalInspection = new DatabaseSync(env.databasePath);
+    assert.equal((finalInspection.prepare("SELECT exit_timestamps_json FROM reconciliation_records WHERE agent_id = ?").get(entry.id) as { exit_timestamps_json: string }).exit_timestamps_json, "[333]", "newer normalized rows are not overwritten by stale legacy JSON");
+    finalInspection.close();
   } finally {
     await initial.close();
     await env.cleanup();
@@ -427,6 +541,46 @@ test("targeted activity writes leave every unrelated agent row untouched and avo
     assert.deepEqual(result.entry.activity, [nextEvent]);
     assert.deepEqual(snapshot(), before);
     assert.deepEqual(await store.getEntry(other.id), other);
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("targeted batch replacement updates multiple agents in one generation without touching unrelated rows", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const entries = Array.from({ length: 24 }, (_, index) => ({
+      ...entry,
+      id: `batch_agent_${index}`,
+      display_name: `Batch Agent ${index}`,
+    }));
+    await store.write(0, entries);
+    const database = (store as unknown as { database: DatabaseSync }).database;
+    const tables = [
+      "agent_identities", "agent_profiles", "agent_room_memberships", "agent_configurations",
+      "agent_launch_intents", "runtime_deployments", "activity_events", "agent_lifecycle_states",
+      "agent_readiness", "turn_control_journals", "turn_control_stages", "retained_worker_bindings",
+      "reconciliation_records", "reconciliation_exit_timestamps", "reconciliation_completed_actions",
+      "reconciliation_notices",
+    ];
+    const changedIds = [entries[0]!.id, entries[1]!.id];
+    const snapshot = () => Object.fromEntries(tables.map((table) => [
+      table,
+      database.prepare(`SELECT rowid, * FROM ${table} WHERE agent_id NOT IN (?, ?) ORDER BY agent_id, rowid`).all(...changedIds),
+    ]));
+    const before = snapshot();
+    const raw = store as unknown as { replaceEntries: () => never };
+    raw.replaceEntries = () => { throw new Error("full replacement must not run on the targeted batch path"); };
+
+    const result = await store.replaceEntriesBatch(1, [
+      { ...entries[0]!, reconciliation: { ...entries[0]!.reconciliation!, next_restart_at_ms: 101 } },
+      { ...entries[1]!, reconciliation: { ...entries[1]!.reconciliation!, next_restart_at_ms: 202 } },
+    ]);
+    assert.equal(result.generation, 2, "the batch increments generation once");
+    assert.deepEqual(result.entries.map((item) => item.reconciliation?.next_restart_at_ms), [101, 202]);
+    assert.deepEqual(snapshot(), before);
   } finally {
     await store.close();
     await env.cleanup();

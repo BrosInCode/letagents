@@ -138,7 +138,7 @@ function assertProjectionLinks(projection: DaemonManifestDomainProjection): void
   }
   const runtime = projection.runtime_deployment;
   const providerRunId = runtime.provider_ref?.execution_generation_id ?? null;
-  if (runtime.run_id !== providerRunId) throw new Error("Daemon runtime run id does not match its provider execution generation.");
+  if (providerRunId !== null && runtime.run_id !== providerRunId) throw new Error("Daemon runtime run id does not match its provider execution generation.");
   const expectedDeploymentId = runtime.run_id === null ? null : serializeDaemonDeploymentId(agentId, runtime.run_id);
   if (runtime.deployment_id !== expectedDeploymentId) throw new Error("Daemon runtime deployment id does not match its agent and run ids.");
 }

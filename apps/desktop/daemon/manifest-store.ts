@@ -213,14 +213,52 @@ export class ManifestStore {
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
     const normalized = normalizeManifestEntry(entry);
     const generation = await this.writeTargeted(expectedGeneration, (database) => {
-      const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
+      const row = database.prepare(`
+        SELECT identity.sort_order, runtime.deployment_id, runtime.run_id
+        FROM agent_identities identity JOIN runtime_deployments runtime USING (agent_id)
+        WHERE identity.agent_id = ?
+      `).get(normalized.id) as Row | undefined;
       if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
       run(database.prepare("DELETE FROM agent_identities WHERE agent_id = ?"), normalized.id);
       this.insertProjection(database, projectDaemonManifestEntry(normalized), Number(row.sort_order));
+      if (!normalized.provider_ref && row.run_id !== null) {
+        run(database.prepare("UPDATE runtime_deployments SET deployment_id = ?, run_id = ? WHERE agent_id = ?"), row.deployment_id, row.run_id, normalized.id);
+      }
     }, commitFence);
     const persisted = await this.getEntry(normalized.id);
     if (!persisted) throw new Error(`Daemon manifest entry disappeared after replacement: ${normalized.id}`);
     return { generation, entry: persisted };
+  }
+
+  async replaceEntriesBatch(
+    expectedGeneration: number,
+    entries: DaemonManifestEntry[],
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entries: DaemonManifestEntry[] }> {
+    const normalized = entries.map(normalizeManifestEntry);
+    if (new Set(normalized.map((entry) => entry.id)).size !== normalized.length) {
+      throw new Error("Targeted manifest batch contains duplicate agent ids.");
+    }
+    const generation = await this.writeTargeted(expectedGeneration, (database) => {
+      const findOrder = database.prepare(`
+        SELECT identity.sort_order, runtime.deployment_id, runtime.run_id
+        FROM agent_identities identity JOIN runtime_deployments runtime USING (agent_id)
+        WHERE identity.agent_id = ?
+      `);
+      const remove = database.prepare("DELETE FROM agent_identities WHERE agent_id = ?");
+      for (const entry of normalized) {
+        const row = findOrder.get(entry.id) as Row | undefined;
+        if (!row) throw new Error(`Unknown daemon manifest entry: ${entry.id}`);
+        run(remove, entry.id);
+        this.insertProjection(database, projectDaemonManifestEntry(entry), Number(row.sort_order));
+        if (!entry.provider_ref && row.run_id !== null) {
+          run(database.prepare("UPDATE runtime_deployments SET deployment_id = ?, run_id = ? WHERE agent_id = ?"), row.deployment_id, row.run_id, entry.id);
+        }
+      }
+    }, commitFence);
+    const persisted = await Promise.all(normalized.map((entry) => this.getEntry(entry.id)));
+    if (persisted.some((entry) => !entry)) throw new Error("Daemon manifest batch entry disappeared after replacement.");
+    return { generation, entries: persisted as DaemonManifestEntry[] };
   }
 
   async appendActivity(
@@ -377,6 +415,19 @@ export class ManifestStore {
 
   private createSchema(database: DatabaseSync): void {
     const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+    const metadataVersion = this.metadataSchemaVersion(database);
+    if (existingVersion === 0 && metadataVersion !== undefined) {
+      throw new Error(`Daemon state version pair is inconsistent: user_version=0, metadata schema_version=${metadataVersion}.`);
+    }
+    if (existingVersion > SCHEMA_VERSION) {
+      throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
+    }
+    if (metadataVersion !== undefined && metadataVersion > SCHEMA_VERSION) {
+      throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
+    }
+    if (existingVersion !== 0 && metadataVersion !== existingVersion) {
+      throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
+    }
     if (existingVersion === 1) {
       this.migrateV1ToV2(database);
       return;
@@ -385,9 +436,6 @@ export class ManifestStore {
       throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
     }
     if (existingVersion === SCHEMA_VERSION) {
-      const metadata = database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as Row | undefined;
-      const metadataVersion = Number(metadata?.schema_version);
-      if (metadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
       this.repairAndValidateV2Shape(database);
       return;
     }
@@ -600,9 +648,16 @@ export class ManifestStore {
     if (existingVersion === 0) database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
     if (version !== SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${version}.`);
-    const metadataVersion = Number((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as Row).schema_version);
-    if (metadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
+    const createdMetadataVersion = this.metadataSchemaVersion(database);
+    if (createdMetadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${createdMetadataVersion}.`);
     this.validateV2Shape(database);
+  }
+
+  private metadataSchemaVersion(database: DatabaseSync): number | undefined {
+    const exists = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'manifest_metadata'").get();
+    if (!exists) return undefined;
+    const row = database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as Row | undefined;
+    return row ? Number(row.schema_version) : undefined;
   }
 
   private migrateV1ToV2(database: DatabaseSync): void {
@@ -620,19 +675,13 @@ export class ManifestStore {
   }
 
   private repairAndValidateV2Shape(database: DatabaseSync): void {
-    const needsRepair = !this.tableColumns(database, "agent_configurations").has("provider_launch_policy_undefined")
-      || !this.tableColumns(database, "runtime_deployments").has("provider_process_identity_present")
-      || this.tableColumns(database, "reconciliation_exit_timestamps").size === 0;
-    if (!needsRepair) {
-      this.validateV2Shape(database);
-      return;
-    }
+    // Audit the complete v2 shape and legacy presence encodings on every open.
+    // The transaction is normally read/no-op, but also repairs partially
+    // applied v2 databases whose version markers were advanced prematurely.
     database.exec("BEGIN IMMEDIATE");
     try {
       this.applyV2Shape(database, true);
       this.validateV2Shape(database);
-      run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
-      database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       database.exec("COMMIT");
     } catch (error) {
       try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -654,17 +703,157 @@ export class ManifestStore {
       timestamp_ms INTEGER NOT NULL,
       PRIMARY KEY(agent_id, sort_order)
     ) STRICT`);
+    this.normalizeLegacyPresenceEncodings(database);
     if (backfillExitTimestamps && this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")) {
-      const rows = database.prepare("SELECT agent_id, exit_timestamps_json FROM reconciliation_records WHERE reconciliation_present = 1 AND exit_timestamps_json IS NOT NULL").all() as Row[];
-      const remove = database.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?");
+      const rows = database.prepare(`
+        SELECT records.agent_id, records.exit_timestamps_json
+        FROM reconciliation_records records
+        WHERE records.reconciliation_present = 1
+          AND records.exit_timestamps_json IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM reconciliation_exit_timestamps normalized
+            WHERE normalized.agent_id = records.agent_id
+          )
+      `).all() as Row[];
       const insert = database.prepare("INSERT INTO reconciliation_exit_timestamps(agent_id, sort_order, timestamp_ms) VALUES (?, ?, ?)");
+      const markBackfilled = database.prepare("UPDATE reconciliation_records SET exit_timestamps_json = NULL WHERE agent_id = ?");
       for (const row of rows) {
         const timestamps = parseJson<unknown[]>(row.exit_timestamps_json);
         if (!Array.isArray(timestamps) || timestamps.some((value) => !Number.isFinite(value))) throw new Error(`Invalid v1 reconciliation exit timestamps for ${String(row.agent_id)}.`);
-        run(remove, row.agent_id);
         timestamps.forEach((timestamp, index) => run(insert, row.agent_id, index, Number(timestamp)));
+        run(markBackfilled, row.agent_id);
       }
     }
+  }
+
+  /**
+   * v1 could persist an own-property whose value was `undefined` as a presence
+   * bit plus NULL columns. Normalize only encodings that cannot represent a
+   * valid nullable v2 value, and clear stale payload columns whenever a bit is
+   * absent. This prevents reads from manufacturing objects with "null" state.
+   */
+  private normalizeLegacyPresenceEncodings(database: DatabaseSync): void {
+    database.exec(`
+      UPDATE agent_configurations
+      SET provider_launch_policy_present = 0,
+          provider_launch_policy_undefined = 0,
+          provider_launch_policy_json = NULL
+      WHERE provider_launch_policy_undefined = 1
+         OR (provider_launch_policy_present = 1 AND provider_launch_policy_json IS NULL);
+      UPDATE agent_configurations
+      SET provider_launch_policy_undefined = 0, provider_launch_policy_json = NULL
+      WHERE provider_launch_policy_present = 0;
+
+      UPDATE agent_launch_intents SET source_repo_path = NULL WHERE source_repo_path_present = 0;
+
+      UPDATE runtime_deployments SET workspace_path = NULL WHERE workspace_path_present = 0;
+      UPDATE runtime_deployments SET work_attempt_id = NULL WHERE work_attempt_id_present = 0;
+      UPDATE runtime_deployments
+      SET provider_work_attempt_id = NULL, provider_continuation_id = NULL,
+          provider_connection_kind = NULL, provider_connection_url = NULL,
+          provider_connection_pid = NULL, provider_process_identity_present = 0,
+          provider_process_identity = NULL, provider_execution_generation_id = NULL
+      WHERE provider_ref_present = 0;
+      UPDATE runtime_deployments
+      SET provider_ref_present = 0, provider_work_attempt_id = NULL,
+          provider_continuation_id = NULL, provider_connection_kind = NULL,
+          provider_connection_url = NULL, provider_connection_pid = NULL,
+          provider_process_identity_present = 0, provider_process_identity = NULL,
+          provider_execution_generation_id = NULL
+      WHERE provider_ref_present = 1
+        AND (provider_work_attempt_id IS NULL OR provider_continuation_id IS NULL OR provider_execution_generation_id IS NULL)
+        AND NOT (provider_work_attempt_id IS NULL AND provider_continuation_id IS NULL
+          AND provider_execution_generation_id IS NULL AND provider_connection_kind IS NULL);
+      UPDATE runtime_deployments
+      SET provider_connection_kind = NULL, provider_connection_url = NULL,
+          provider_connection_pid = NULL, provider_process_identity_present = 0,
+          provider_process_identity = NULL
+      WHERE provider_connection_kind IS NOT NULL
+        AND (provider_connection_kind NOT IN ('codex_app_server', 'claude_cli', 'cursor_cli')
+          OR (provider_connection_kind = 'codex_app_server' AND provider_connection_url IS NULL));
+      UPDATE runtime_deployments SET provider_process_identity = NULL
+      WHERE provider_process_identity_present = 0;
+
+      UPDATE runtime_deployments
+      SET workplace_liveness_present = 0, workplace_liveness_state = NULL,
+          workplace_liveness_observed_at = NULL, workplace_liveness_detail = NULL
+      WHERE workplace_liveness_present = 1 AND workplace_liveness_state IS NULL;
+      UPDATE runtime_deployments
+      SET workplace_liveness_state = NULL, workplace_liveness_observed_at = NULL,
+          workplace_liveness_detail = NULL
+      WHERE workplace_liveness_present = 0;
+      UPDATE runtime_deployments
+      SET native_liveness_present = 0, native_liveness_state = NULL,
+          native_liveness_observed_at = NULL, native_liveness_detail = NULL
+      WHERE native_liveness_present = 1 AND native_liveness_state IS NULL;
+      UPDATE runtime_deployments
+      SET native_liveness_state = NULL, native_liveness_observed_at = NULL,
+          native_liveness_detail = NULL
+      WHERE native_liveness_present = 0;
+      DELETE FROM activity_events
+      WHERE agent_id IN (SELECT agent_id FROM runtime_deployments WHERE activity_present = 0);
+
+      UPDATE agent_lifecycle_states SET last_error = NULL WHERE last_error_present = 0;
+      UPDATE agent_readiness SET ready_reached_at = NULL WHERE ready_reached_at_present = 0;
+
+      UPDATE turn_control_journals SET turn_control_present = 0
+      WHERE turn_control_present = 1 AND action_id IS NOT NULL
+        AND (turn_work_attempt_id IS NULL OR turn_execution_generation_id IS NULL
+          OR has_correction IS NULL OR status IS NULL OR capability IS NULL
+          OR recorded_at IS NULL OR updated_at IS NULL);
+      UPDATE turn_control_journals
+      SET action_id = NULL, turn_work_attempt_id = NULL, turn_execution_generation_id = NULL,
+          has_correction = NULL, status = NULL, capability = NULL, interrupted = NULL,
+          resumed = NULL, turn_state = NULL, error = NULL, recorded_at = NULL, updated_at = NULL
+      WHERE turn_control_present = 0 OR action_id IS NULL;
+      DELETE FROM turn_control_stages
+      WHERE agent_id IN (SELECT agent_id FROM turn_control_journals WHERE turn_control_present = 0 OR action_id IS NULL);
+
+      UPDATE retained_worker_bindings SET last_worker_binding_present = 0
+      WHERE last_worker_binding_present = 1 AND binding_agent_session_id IS NOT NULL
+        AND (binding_work_attempt_id IS NULL OR binding_execution_generation_id IS NULL OR binding_updated_at IS NULL);
+      UPDATE retained_worker_bindings
+      SET binding_agent_session_id = NULL, binding_work_attempt_id = NULL,
+          binding_execution_generation_id = NULL, binding_updated_at = NULL
+      WHERE last_worker_binding_present = 0 OR binding_agent_session_id IS NULL;
+
+      UPDATE reconciliation_records
+      SET reconciliation_present = 0, consecutive_action_failures = NULL,
+          last_observed_state = NULL, next_restart_at_ms = NULL, last_action_sequence = NULL,
+          pending_action_id = NULL, pending_action_sequence = NULL, pending_action_kind = NULL,
+          pending_action_recorded_at_ms = NULL, last_terminal_present = 0,
+          terminal_ended_at = NULL, terminal_exit_code = NULL, terminal_signal = NULL,
+          terminal_stdio_archive_ref = NULL, terminal_stdio_tail = NULL,
+          terminal_cause = NULL, terminal_actor = NULL, terminal_generation = NULL,
+          terminal_provider_continuation_id = NULL
+      WHERE reconciliation_present = 0 OR consecutive_action_failures IS NULL
+         OR last_observed_state IS NULL OR last_action_sequence IS NULL;
+      UPDATE reconciliation_records
+      SET pending_action_id = NULL, pending_action_sequence = NULL, pending_action_kind = NULL,
+          pending_action_recorded_at_ms = NULL
+      WHERE pending_action_id IS NULL OR pending_action_sequence IS NULL
+         OR pending_action_kind IS NULL OR pending_action_recorded_at_ms IS NULL;
+      UPDATE reconciliation_records
+      SET last_terminal_present = 0, terminal_ended_at = NULL, terminal_exit_code = NULL,
+          terminal_signal = NULL, terminal_stdio_archive_ref = NULL, terminal_stdio_tail = NULL,
+          terminal_cause = NULL, terminal_actor = NULL, terminal_generation = NULL,
+          terminal_provider_continuation_id = NULL
+      WHERE last_terminal_present = 0 OR terminal_ended_at IS NULL OR terminal_stdio_tail IS NULL
+         OR terminal_cause IS NULL OR terminal_actor IS NULL OR terminal_generation IS NULL;
+      DELETE FROM reconciliation_exit_timestamps
+      WHERE agent_id IN (SELECT agent_id FROM reconciliation_records WHERE reconciliation_present = 0);
+      DELETE FROM reconciliation_completed_actions
+      WHERE agent_id IN (SELECT agent_id FROM reconciliation_records WHERE reconciliation_present = 0);
+      DELETE FROM reconciliation_notices
+      WHERE agent_id IN (SELECT agent_id FROM reconciliation_records WHERE reconciliation_notices_present = 0);
+      UPDATE reconciliation_notices
+      SET terminal_present = 0, terminal_ended_at = NULL, terminal_exit_code = NULL,
+          terminal_signal = NULL, terminal_stdio_archive_ref = NULL, terminal_stdio_tail = NULL,
+          terminal_cause = NULL, terminal_actor = NULL, terminal_generation = NULL,
+          terminal_provider_continuation_id = NULL
+      WHERE terminal_present = 0 OR terminal_ended_at IS NULL OR terminal_stdio_tail IS NULL
+         OR terminal_cause IS NULL OR terminal_actor IS NULL OR terminal_generation IS NULL;
+    `);
   }
 
   private tableColumns(database: DatabaseSync, table: string): Set<string> {
