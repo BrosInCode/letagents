@@ -585,6 +585,7 @@ export class SupervisorDaemon {
     this.liveDisposers.clear();
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
+    await this.store.close();
     // Existing convergence/provider callbacks are generation-fenced below.
     // Do not await them: a wedged native transport must not block an upgrade.
     this.convergenceRequests.clear();
@@ -1277,8 +1278,7 @@ export class SupervisorDaemon {
     const sanitizedEvent = sanitizeDaemonActivityEvent(event);
     return this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
-      const manifest = await this.store.load();
-      const entry = manifest.entries.find((candidate) => candidate.id === id);
+      const entry = await this.store.getEntry(id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       const lastSequence = entry.activity?.at(-1)?.sequence ?? -1;
       if (sanitizedEvent.sequence <= lastSequence) throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
@@ -1288,9 +1288,17 @@ export class SupervisorDaemon {
         native_liveness: { state: sanitizedEvent.status === "idle" ? "idle" : "active", observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary },
         activity: [...(entry.activity ?? []), sanitizedEvent].slice(-200),
       };
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
+      const next = await this.store.appendActivity(
+        this.manifestGeneration,
+        id,
+        sanitizedEvent,
+        updated.observed_state,
+        updated.native_liveness!,
+        200,
+        (commit) => this.fenceDaemonCommit(commit),
+      );
       this.manifestGeneration = next.generation;
-      return updated;
+      return next.entry;
     });
   }
 
@@ -1299,13 +1307,17 @@ export class SupervisorDaemon {
     if (!["reachable", "stale", "unknown"].includes(state)) throw new Error("Invalid workplace liveness state.");
     return this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
-      const manifest = await this.store.load();
-      const entry = manifest.entries.find((candidate) => candidate.id === id);
+      const entry = await this.store.getEntry(id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       const updated: DaemonManifestEntry = { ...entry, workplace_liveness: { state, observed_at: observedAt, detail } };
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === id ? updated : candidate));
+      const next = await this.store.updateWorkplaceLiveness(
+        this.manifestGeneration,
+        id,
+        updated.workplace_liveness!,
+        (commit) => this.fenceDaemonCommit(commit),
+      );
       this.manifestGeneration = next.generation;
-      return updated;
+      return next.entry;
     });
   }
 
@@ -1765,7 +1777,7 @@ export class SupervisorDaemon {
   ): Promise<boolean> {
     const pending = this.pendingResumeBindings.get(entryId);
     if (!pending || evidence.agentSessionId !== pending.agentSessionId) return false;
-    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
+    const entry = await this.store.getEntry(entryId);
     const handle = this.liveHandles.get(entryId);
     if (!entry || !handle
       || entry.room_id !== pending.roomId
@@ -1857,7 +1869,7 @@ export class SupervisorDaemon {
   private async handleProviderStream(entryId: string, handle: ProviderActionHandle, event: ProviderActionStreamEvent): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
     const observedLifecycle = providerStreamLifecycle(event);
-    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
+    const entry = await this.store.getEntry(entryId);
     if (!entry) return;
     const addressedWaitResult = observedLifecycle === "idle"
       && isCorrelatedNonemptyWaitResult(event, entry.activity ?? []);
@@ -2245,14 +2257,13 @@ export class SupervisorDaemon {
   private async updateManifestEntry(entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry): Promise<DaemonManifestEntry> {
     return this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
-      const manifest = await this.store.load();
-      const entry = manifest.entries.find((candidate) => candidate.id === entryId);
+      const entry = await this.store.getEntry(entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
       const updated = update(entry);
       if (updated === entry) return entry;
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
+      const next = await this.store.replaceEntry(this.manifestGeneration, updated, (commit) => this.fenceDaemonCommit(commit));
       this.manifestGeneration = next.generation;
-      return updated;
+      return next.entry;
     });
   }
 
@@ -2267,8 +2278,7 @@ export class SupervisorDaemon {
 
   private async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload): Promise<void> {
     await this.singleton.assertCurrent();
-    const manifest = await this.store.load();
-    const entry = manifest.entries.find((candidate) => candidate.id === entryId);
+    const entry = await this.store.getEntry(entryId);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
     const safeCause = redactCredentialText(cause).value;
     const safeActor = redactCredentialText(actor).value;
@@ -2305,7 +2315,7 @@ export class SupervisorDaemon {
       reconciliation: nextReconciliation,
       reconciliation_notices: notices.slice(-32),
     };
-    const next = await this.writeManifest(this.manifestGeneration, manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate));
+    const next = await this.store.replaceEntry(this.manifestGeneration, updated, (commit) => this.fenceDaemonCommit(commit));
     this.manifestGeneration = next.generation;
     await this.serializeManifestCommit(async () => {
       await this.singleton.assertCurrent();

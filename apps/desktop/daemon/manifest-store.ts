@@ -24,7 +24,7 @@ import type {
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export class ManifestConflictError extends Error {}
 
@@ -54,6 +54,10 @@ function parseJson<T>(value: unknown): T {
   return JSON.parse(String(value)) as T;
 }
 
+function normalizeManifestEntry(entry: DaemonManifestEntry): DaemonManifestEntry {
+  return JSON.parse(JSON.stringify(entry)) as DaemonManifestEntry;
+}
+
 function run(statement: StatementSync, ...values: unknown[]): void {
   statement.run(...values as never[]);
 }
@@ -74,6 +78,7 @@ export class ManifestStore {
   constructor(
     readonly path: string,
     private readonly legacyJsonPath?: string,
+    private readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
   ) {}
 
   async load(): Promise<DaemonManifest> {
@@ -149,6 +154,138 @@ export class ManifestStore {
       : { generation, entries };
   }
 
+  async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
+    const database = await this.getDatabase();
+    const row = database.prepare(`
+      SELECT
+        i.agent_id, i.created_by, i.created_at,
+        p.display_name, m.room_id,
+        c.provider, c.model, c.charter, c.permission_profile_id,
+        c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
+        l.desired_state, l.source_repo_path_present, l.source_repo_path,
+        d.deployment_id, d.run_id, d.observed_state,
+        d.workspace_path_present, d.workspace_path,
+        d.work_attempt_id_present, d.work_attempt_id,
+        d.provider_ref_present, d.provider_work_attempt_id, d.provider_continuation_id,
+        d.provider_connection_kind, d.provider_connection_url, d.provider_connection_pid,
+        d.provider_process_identity_present, d.provider_process_identity, d.provider_execution_generation_id,
+        d.workplace_liveness_present, d.workplace_liveness_state,
+        d.workplace_liveness_observed_at, d.workplace_liveness_detail,
+        d.native_liveness_present, d.native_liveness_state,
+        d.native_liveness_observed_at, d.native_liveness_detail,
+        d.activity_present,
+        s.condition, s.last_error_present, s.last_error,
+        r.ready_reached_at_present, r.ready_reached_at,
+        t.turn_control_present, t.action_id, t.turn_work_attempt_id,
+        t.turn_execution_generation_id, t.has_correction, t.status AS turn_status,
+        t.capability, t.interrupted, t.resumed, t.turn_state, t.error AS turn_error,
+        t.recorded_at, t.updated_at,
+        b.last_worker_binding_present, b.binding_agent_session_id,
+        b.binding_work_attempt_id, b.binding_execution_generation_id, b.binding_updated_at,
+        q.reconciliation_present, q.consecutive_action_failures,
+        q.last_observed_state, q.next_restart_at_ms, q.last_action_sequence,
+        q.pending_action_id, q.pending_action_sequence, q.pending_action_kind,
+        q.pending_action_recorded_at_ms, q.last_terminal_present,
+        q.terminal_ended_at, q.terminal_exit_code, q.terminal_signal,
+        q.terminal_stdio_archive_ref, q.terminal_stdio_tail, q.terminal_cause,
+        q.terminal_actor, q.terminal_generation, q.terminal_provider_continuation_id,
+        q.reconciliation_notices_present
+      FROM agent_identities i
+      JOIN agent_profiles p USING (agent_id)
+      JOIN agent_room_memberships m USING (agent_id)
+      JOIN agent_configurations c USING (agent_id)
+      JOIN agent_launch_intents l USING (agent_id)
+      JOIN runtime_deployments d USING (agent_id)
+      JOIN agent_lifecycle_states s USING (agent_id)
+      JOIN agent_readiness r USING (agent_id)
+      JOIN turn_control_journals t USING (agent_id)
+      JOIN retained_worker_bindings b USING (agent_id)
+      JOIN reconciliation_records q USING (agent_id)
+      WHERE i.agent_id = ?
+    `).get(agentId) as Row | undefined;
+    return row ? composeDaemonManifestEntry(this.projectionFromRow(database, row)) : undefined;
+  }
+
+  async replaceEntry(
+    expectedGeneration: number,
+    entry: DaemonManifestEntry,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+    const normalized = normalizeManifestEntry(entry);
+    const generation = await this.writeTargeted(expectedGeneration, (database) => {
+      const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
+      if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
+      run(database.prepare("DELETE FROM agent_identities WHERE agent_id = ?"), normalized.id);
+      this.insertProjection(database, projectDaemonManifestEntry(normalized), Number(row.sort_order));
+    }, commitFence);
+    const persisted = await this.getEntry(normalized.id);
+    if (!persisted) throw new Error(`Daemon manifest entry disappeared after replacement: ${normalized.id}`);
+    return { generation, entry: persisted };
+  }
+
+  async appendActivity(
+    expectedGeneration: number,
+    agentId: string,
+    event: DaemonActivityEvent,
+    observedState: DaemonManifestEntry["observed_state"],
+    nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]>,
+    limit = 200,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+    const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
+    const generation = await this.writeTargeted(expectedGeneration, (database) => {
+      const latest = database.prepare("SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1").get(agentId) as Row | undefined;
+      const lastSequence = latest ? Number(latest.sequence) : -1;
+      if (normalizedEvent.sequence <= lastSequence) throw new Error(`Native activity sequence ${normalizedEvent.sequence} is not newer than ${lastSequence}.`);
+      const updated = database.prepare(`
+        UPDATE runtime_deployments
+        SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
+            native_liveness_observed_at = ?, native_liveness_detail = ?, activity_present = 1
+        WHERE agent_id = ?
+      `).run(observedState, nativeLiveness.state, nativeLiveness.observed_at ?? null, nativeLiveness.detail ?? null, agentId);
+      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+      const order = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM activity_events WHERE agent_id = ?").get(agentId) as Row).next_order);
+      run(database.prepare(`
+        INSERT INTO activity_events(
+          agent_id, sort_order, observed_at, sequence, provider, kind, method, summary,
+          status, payload_json, payload_truncated, payload_redacted, durable_payload_ref
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `), agentId, order, normalizedEvent.observed_at, normalizedEvent.sequence, normalizedEvent.provider,
+      normalizedEvent.kind, normalizedEvent.method, normalizedEvent.summary, normalizedEvent.status,
+      json(normalizedEvent.payload), Number(normalizedEvent.payload_truncated), Number(normalizedEvent.payload_redacted),
+      normalizedEvent.durable_payload_ref);
+      run(database.prepare(`
+        DELETE FROM activity_events
+        WHERE agent_id = ? AND sort_order NOT IN (
+          SELECT sort_order FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?
+        )
+      `), agentId, agentId, limit);
+    }, commitFence);
+    const persisted = await this.getEntry(agentId);
+    if (!persisted) throw new Error(`Daemon manifest entry disappeared after activity append: ${agentId}`);
+    return { generation, entry: persisted };
+  }
+
+  async updateWorkplaceLiveness(
+    expectedGeneration: number,
+    agentId: string,
+    liveness: NonNullable<DaemonManifestEntry["workplace_liveness"]>,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+    const generation = await this.writeTargeted(expectedGeneration, (database) => {
+      const updated = database.prepare(`
+        UPDATE runtime_deployments
+        SET workplace_liveness_present = 1, workplace_liveness_state = ?,
+            workplace_liveness_observed_at = ?, workplace_liveness_detail = ?
+        WHERE agent_id = ?
+      `).run(liveness.state, liveness.observed_at ?? null, liveness.detail ?? null, agentId);
+      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+    }, commitFence);
+    const persisted = await this.getEntry(agentId);
+    if (!persisted) throw new Error(`Daemon manifest entry disappeared after liveness update: ${agentId}`);
+    return { generation, entry: persisted };
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     await this.writes;
@@ -166,6 +303,7 @@ export class ManifestStore {
   ): Promise<DaemonManifest> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
+      const normalizedEntries = entries.map(normalizeManifestEntry);
       const owners = legacyLaneOwners ?? this.readLegacyLaneOwners(database);
       let committed = false;
       let transactionOpen = false;
@@ -182,7 +320,7 @@ export class ManifestStore {
             const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
             throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
           }
-          this.replaceEntries(database, entries);
+          this.replaceEntries(database, normalizedEntries);
           this.replaceLegacyLaneOwners(database, owners ?? []);
           database.exec("COMMIT");
           transactionOpen = false;
@@ -191,11 +329,10 @@ export class ManifestStore {
         if (commitFence) await commitFence(commit);
         else await commit();
         if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
-        await this.secureDatabaseFiles();
 
         const manifest: DaemonManifest = owners?.length
-          ? { generation: expectedGeneration + 1, entries, legacy_lane_owners: owners }
-          : { generation: expectedGeneration + 1, entries };
+          ? { generation: expectedGeneration + 1, entries: normalizedEntries, legacy_lane_owners: owners }
+          : { generation: expectedGeneration + 1, entries: normalizedEntries };
         return manifest;
       } catch (error) {
         if (transactionOpen) {
@@ -222,10 +359,12 @@ export class ManifestStore {
       database.exec("PRAGMA busy_timeout = 5000");
       const journalMode = String((database.prepare("PRAGMA journal_mode").get() as Row).journal_mode);
       if (journalMode.toLowerCase() !== "wal") database.exec("PRAGMA journal_mode = WAL");
+      const confirmedJournalMode = String((database.prepare("PRAGMA journal_mode").get() as Row).journal_mode);
+      if (confirmedJournalMode.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmedJournalMode}.`);
       database.exec("PRAGMA foreign_keys = ON");
       database.exec("PRAGMA synchronous = FULL");
-      this.createSchema(database);
       await this.secureDatabaseFiles();
+      this.createSchema(database);
       await this.importLegacyManifest(database);
       this.database = database;
       return database;
@@ -238,6 +377,10 @@ export class ManifestStore {
 
   private createSchema(database: DatabaseSync): void {
     const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+    if (existingVersion === 1) {
+      this.migrateV1ToV2(database);
+      return;
+    }
     if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
       throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
     }
@@ -245,6 +388,7 @@ export class ManifestStore {
       const metadata = database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as Row | undefined;
       const metadataVersion = Number(metadata?.schema_version);
       if (metadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
+      this.repairAndValidateV2Shape(database);
       return;
     }
     database.exec(`
@@ -458,6 +602,91 @@ export class ManifestStore {
     if (version !== SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${version}.`);
     const metadataVersion = Number((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as Row).schema_version);
     if (metadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
+    this.validateV2Shape(database);
+  }
+
+  private migrateV1ToV2(database: DatabaseSync): void {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      this.applyV2Shape(database, true);
+      this.validateV2Shape(database);
+      run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+      database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      database.exec("COMMIT");
+    } catch (error) {
+      try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+      throw error;
+    }
+  }
+
+  private repairAndValidateV2Shape(database: DatabaseSync): void {
+    const needsRepair = !this.tableColumns(database, "agent_configurations").has("provider_launch_policy_undefined")
+      || !this.tableColumns(database, "runtime_deployments").has("provider_process_identity_present")
+      || this.tableColumns(database, "reconciliation_exit_timestamps").size === 0;
+    if (!needsRepair) {
+      this.validateV2Shape(database);
+      return;
+    }
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      this.applyV2Shape(database, true);
+      this.validateV2Shape(database);
+      run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+      database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      database.exec("COMMIT");
+    } catch (error) {
+      try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+      throw error;
+    }
+  }
+
+  private applyV2Shape(database: DatabaseSync, backfillExitTimestamps: boolean): void {
+    if (!this.tableColumns(database, "agent_configurations").has("provider_launch_policy_undefined")) {
+      database.exec("ALTER TABLE agent_configurations ADD COLUMN provider_launch_policy_undefined INTEGER NOT NULL DEFAULT 0 CHECK (provider_launch_policy_undefined IN (0, 1))");
+    }
+    if (!this.tableColumns(database, "runtime_deployments").has("provider_process_identity_present")) {
+      database.exec("ALTER TABLE runtime_deployments ADD COLUMN provider_process_identity_present INTEGER NOT NULL DEFAULT 0 CHECK (provider_process_identity_present IN (0, 1))");
+      database.exec("UPDATE runtime_deployments SET provider_process_identity_present = CASE WHEN provider_process_identity IS NULL THEN 0 ELSE 1 END");
+    }
+    database.exec(`CREATE TABLE IF NOT EXISTS reconciliation_exit_timestamps (
+      agent_id TEXT NOT NULL REFERENCES reconciliation_records(agent_id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL,
+      timestamp_ms INTEGER NOT NULL,
+      PRIMARY KEY(agent_id, sort_order)
+    ) STRICT`);
+    if (backfillExitTimestamps && this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")) {
+      const rows = database.prepare("SELECT agent_id, exit_timestamps_json FROM reconciliation_records WHERE reconciliation_present = 1 AND exit_timestamps_json IS NOT NULL").all() as Row[];
+      const remove = database.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?");
+      const insert = database.prepare("INSERT INTO reconciliation_exit_timestamps(agent_id, sort_order, timestamp_ms) VALUES (?, ?, ?)");
+      for (const row of rows) {
+        const timestamps = parseJson<unknown[]>(row.exit_timestamps_json);
+        if (!Array.isArray(timestamps) || timestamps.some((value) => !Number.isFinite(value))) throw new Error(`Invalid v1 reconciliation exit timestamps for ${String(row.agent_id)}.`);
+        run(remove, row.agent_id);
+        timestamps.forEach((timestamp, index) => run(insert, row.agent_id, index, Number(timestamp)));
+      }
+    }
+  }
+
+  private tableColumns(database: DatabaseSync, table: string): Set<string> {
+    return new Set((database.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((column) => String(column.name)));
+  }
+
+  private validateV2Shape(database: DatabaseSync): void {
+    const required: Record<string, string[]> = {
+      manifest_metadata: ["singleton", "generation", "schema_version"], migration_records: ["migration_key", "checksum", "imported_at"], migration_failures: ["migration_key", "reason", "failed_at", "quarantined_path"],
+      agent_identities: ["agent_id", "created_by", "created_at", "sort_order"], agent_profiles: ["agent_id", "display_name"], agent_room_memberships: ["agent_id", "room_id"],
+      agent_configurations: ["agent_id", "provider", "model", "charter", "permission_profile_id", "provider_launch_policy_present", "provider_launch_policy_json", "provider_launch_policy_undefined"], agent_launch_intents: ["agent_id", "desired_state", "source_repo_path_present", "source_repo_path"],
+      runtime_deployments: ["agent_id", "deployment_id", "run_id", "observed_state", "workspace_path_present", "workspace_path", "work_attempt_id_present", "work_attempt_id", "provider_ref_present", "provider_work_attempt_id", "provider_continuation_id", "provider_connection_kind", "provider_connection_url", "provider_connection_pid", "provider_process_identity", "provider_process_identity_present", "provider_execution_generation_id", "workplace_liveness_present", "workplace_liveness_state", "workplace_liveness_observed_at", "workplace_liveness_detail", "native_liveness_present", "native_liveness_state", "native_liveness_observed_at", "native_liveness_detail", "activity_present"],
+      activity_events: ["agent_id", "sort_order", "observed_at", "sequence", "provider", "kind", "method", "summary", "status", "payload_json", "payload_truncated", "payload_redacted", "durable_payload_ref"], agent_lifecycle_states: ["agent_id", "condition", "last_error_present", "last_error"], agent_readiness: ["agent_id", "ready_reached_at_present", "ready_reached_at"],
+      turn_control_journals: ["agent_id", "turn_control_present", "action_id", "turn_work_attempt_id", "turn_execution_generation_id", "has_correction", "status", "capability", "interrupted", "resumed", "turn_state", "error", "recorded_at", "updated_at"], turn_control_stages: ["agent_id", "sort_order", "stage"], retained_worker_bindings: ["agent_id", "last_worker_binding_present", "binding_agent_session_id", "binding_work_attempt_id", "binding_execution_generation_id", "binding_updated_at"],
+      reconciliation_records: ["agent_id", "reconciliation_present", "consecutive_action_failures", "last_observed_state", "next_restart_at_ms", "last_action_sequence", "pending_action_id", "pending_action_sequence", "pending_action_kind", "pending_action_recorded_at_ms", "last_terminal_present", "terminal_ended_at", "terminal_exit_code", "terminal_signal", "terminal_stdio_archive_ref", "terminal_stdio_tail", "terminal_cause", "terminal_actor", "terminal_generation", "terminal_provider_continuation_id", "reconciliation_notices_present"], reconciliation_exit_timestamps: ["agent_id", "sort_order", "timestamp_ms"], reconciliation_completed_actions: ["agent_id", "sort_order", "action_id"], reconciliation_notices: ["agent_id", "sort_order", "at", "kind", "cause", "terminal_present", "terminal_ended_at", "terminal_exit_code", "terminal_signal", "terminal_stdio_archive_ref", "terminal_stdio_tail", "terminal_cause", "terminal_actor", "terminal_generation", "terminal_provider_continuation_id"],
+      legacy_lane_owners: ["reservation_id", "room_id", "provider", "owner_pid", "owner_process_identity", "state", "session_id", "created_at", "updated_at", "sort_order"],
+    };
+    for (const [table, expected] of Object.entries(required)) {
+      const actual = this.tableColumns(database, table);
+      const missing = expected.filter((column) => !actual.has(column));
+      if (missing.length) throw new Error(`Daemon state v2 table ${table} is missing required columns: ${missing.join(", ")}.`);
+    }
   }
 
   private async importLegacyManifest(database: DatabaseSync): Promise<void> {
@@ -504,7 +733,6 @@ export class ManifestStore {
       try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
       throw error;
     }
-    await this.secureDatabaseFiles();
     await this.retainLegacyBackup(stored.checksum);
   }
 
@@ -526,7 +754,7 @@ export class ManifestStore {
 
   private replaceEntries(database: DatabaseSync, entries: DaemonManifestEntry[]): void {
     database.exec("DELETE FROM agent_identities");
-    entries.forEach((entry, index) => this.insertProjection(database, projectDaemonManifestEntry(entry), index));
+    entries.forEach((entry, index) => this.insertProjection(database, projectDaemonManifestEntry(normalizeManifestEntry(entry)), index));
   }
 
   private insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
@@ -536,7 +764,12 @@ export class ManifestStore {
     run(database.prepare("INSERT INTO agent_room_memberships VALUES (?, ?)"), identity.agent_id, membership.room_id);
     const policyPresent = Object.hasOwn(configuration, "provider_launch_policy");
     const policyUndefined = policyPresent && configuration.provider_launch_policy === undefined;
-    run(database.prepare("INSERT INTO agent_configurations VALUES (?, ?, ?, ?, ?, ?, ?, ?)"), identity.agent_id, configuration.provider, configuration.model, configuration.charter, configuration.permission_profile_id, Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
+    run(database.prepare(`
+      INSERT INTO agent_configurations(
+        agent_id, provider, model, charter, permission_profile_id,
+        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.charter, configuration.permission_profile_id, Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 
@@ -549,7 +782,18 @@ export class ManifestStore {
     const nativePresent = Object.hasOwn(runtime, "native_liveness");
     const activityPresent = Object.hasOwn(runtime, "activity");
     const processIdentityPresent = Boolean(connection && Object.hasOwn(connection, "processIdentity") && connection.processIdentity !== undefined);
-    run(database.prepare(`INSERT INTO runtime_deployments VALUES (${Array.from({ length: 26 }, () => "?").join(", ")})`),
+    run(database.prepare(`
+      INSERT INTO runtime_deployments(
+        agent_id, deployment_id, run_id, observed_state,
+        workspace_path_present, workspace_path, work_attempt_id_present, work_attempt_id,
+        provider_ref_present, provider_work_attempt_id, provider_continuation_id,
+        provider_connection_kind, provider_connection_url, provider_connection_pid,
+        provider_process_identity_present, provider_process_identity, provider_execution_generation_id,
+        workplace_liveness_present, workplace_liveness_state, workplace_liveness_observed_at, workplace_liveness_detail,
+        native_liveness_present, native_liveness_state, native_liveness_observed_at, native_liveness_detail,
+        activity_present
+      ) VALUES (${Array.from({ length: 26 }, () => "?").join(", ")})
+    `),
       identity.agent_id, runtime.deployment_id, runtime.run_id, runtime.observed_state,
       Number(workspacePresent), workspacePresent ? runtime.workspace_path ?? null : null,
       Number(attemptPresent), attemptPresent ? runtime.work_attempt_id ?? null : null,
@@ -594,7 +838,16 @@ export class ManifestStore {
     const terminalPresent = Boolean(state?.last_terminal);
     const terminal = state?.last_terminal;
     const noticesPresent = Object.hasOwn(reconciliationRecord, "reconciliation_notices");
-    run(database.prepare(`INSERT INTO reconciliation_records VALUES (${Array.from({ length: 21 }, () => "?").join(", ")})`),
+    run(database.prepare(`
+      INSERT INTO reconciliation_records(
+        agent_id, reconciliation_present, consecutive_action_failures, last_observed_state,
+        next_restart_at_ms, last_action_sequence, pending_action_id, pending_action_sequence,
+        pending_action_kind, pending_action_recorded_at_ms, last_terminal_present,
+        terminal_ended_at, terminal_exit_code, terminal_signal, terminal_stdio_archive_ref,
+        terminal_stdio_tail, terminal_cause, terminal_actor, terminal_generation,
+        terminal_provider_continuation_id, reconciliation_notices_present
+      ) VALUES (${Array.from({ length: 21 }, () => "?").join(", ")})
+    `),
       identity.agent_id, Number(reconciliationPresent), state?.consecutive_action_failures ?? null, state?.last_observed_state ?? null,
       state?.next_restart_at_ms ?? null, state?.last_action_sequence ?? null,
       state?.pending_action?.id ?? null, state?.pending_action?.sequence ?? null,
@@ -723,6 +976,46 @@ export class ManifestStore {
     owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
   }
 
+  private writeTargeted(
+    expectedGeneration: number,
+    mutation: (database: DatabaseSync) => void,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<number> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      let committed = false;
+      let transactionOpen = false;
+      try {
+        const commit = async () => {
+          if (committed) throw new Error("Manifest transaction was already committed.");
+          database.exec("BEGIN IMMEDIATE");
+          transactionOpen = true;
+          const result = database.prepare(`
+            UPDATE manifest_metadata SET generation = generation + 1
+            WHERE singleton = 1 AND generation = ?
+          `).run(expectedGeneration);
+          if (Number(result.changes) !== 1) {
+            const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
+            throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
+          }
+          mutation(database);
+          database.exec("COMMIT");
+          transactionOpen = false;
+          committed = true;
+        };
+        if (commitFence) await commitFence(commit);
+        else await commit();
+        if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
+        return expectedGeneration + 1;
+      } catch (error) {
+        if (transactionOpen) {
+          try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+        }
+        throw error;
+      }
+    });
+  }
+
   private async serialize<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.writes;
     let release!: () => void;
@@ -732,7 +1025,12 @@ export class ManifestStore {
   }
 
   private async secureDatabaseFiles(): Promise<void> {
-    for (const path of [this.path, `${this.path}-wal`, `${this.path}-shm`]) {
+    const paths = [this.path, `${this.path}-wal`, `${this.path}-shm`];
+    if (this.permissionHousekeeping) {
+      await this.permissionHousekeeping(paths);
+      return;
+    }
+    for (const path of paths) {
       await chmod(path, 0o600).catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       });
