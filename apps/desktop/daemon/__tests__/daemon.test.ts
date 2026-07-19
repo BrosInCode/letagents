@@ -1956,8 +1956,10 @@ test("version handoff releases authority without waiting for wedged callbacks an
     internals.providerCallbacks.add(never);
     internals.scheduledConvergence.set("wedged", new Promise(() => {}));
 
+    const handoff = first.waitForHandoff();
     const prepared = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
     assert.equal(prepared.ok, true);
+    await within(handoff, "handoff completion after authority cleanup", 1_000);
     second = new SupervisorDaemon(paths, "darwin");
     await within((async () => {
       while (true) {
@@ -1972,6 +1974,161 @@ test("version handoff releases authority without waiting for wedged callbacks an
   } finally {
     await second?.stop();
     provider.kill("SIGKILL");
+    await env.cleanup();
+  }
+});
+
+test("handoff observer cleanup failures still release socket, singleton, and SQLite authority", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  const first = new SupervisorDaemon(paths, "darwin");
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    (first as unknown as { liveDisposers: Map<string, Array<() => void>> }).liveDisposers
+      .set("throws", [() => { throw new Error("injected observer disposal failure"); }]);
+    const handoff = first.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    await assert.rejects(within(handoff, "failed handoff completion", 1_000), /handoff cleanup did not complete cleanly/i);
+
+    second = new SupervisorDaemon(paths, "darwin");
+    await within(second.start(), "replacement authority after failed observer cleanup", 1_000);
+    assert.equal(((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation, 2);
+  } finally {
+    await second?.stop();
+    await env.cleanup();
+  }
+});
+
+test("the daemon entrypoint exits after a completed handoff instead of retaining ref-counted handles", async () => {
+  const env = await fixture();
+  const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "daemon/main.ts")], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: env.root },
+    stdio: "ignore",
+  });
+  try {
+    const socketPath = join(env.root, ".letagents", "daemon.sock");
+    await within((async () => {
+      while (true) {
+        try {
+          const status = await daemonRequest(socketPath, "daemon.status");
+          if (status.ok) return;
+        } catch {
+          // The entrypoint is still acquiring its singleton and SQLite state.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    })(), "daemon entrypoint startup", 2_000);
+    assert.equal((await daemonRequest(socketPath, "daemon.prepare_handoff")).ok, true);
+    const exited = await within(new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    }), "daemon entrypoint exit after handoff", 2_000);
+    assert.deepEqual(exited, { code: 0, signal: null });
+  } finally {
+    child.kill("SIGKILL");
+    await env.cleanup();
+  }
+});
+
+test("SIGTERM after authority release uses default process-only termination and preserves detached providers", async () => {
+  const env = await fixture();
+  const mainPath = join(process.cwd(), "daemon/main.ts");
+  const singletonPath = join(process.cwd(), "daemon/singleton.ts");
+  const script = `
+    import { spawn } from "node:child_process";
+    const [{ SupervisorDaemon }, { defaultDaemonPaths }] = await Promise.all([
+      import(${JSON.stringify(mainPath)}),
+      import(${JSON.stringify(singletonPath)}),
+    ]);
+    const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    provider.unref();
+    const daemon = new SupervisorDaemon(defaultDaemonPaths(), "darwin");
+    await daemon.start();
+    process.send({ type: "ready", providerPid: provider.pid });
+    await daemon.waitForHandoff();
+    process.send({ type: "authority_released", providerPid: provider.pid });
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: env.root },
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  let providerPid: number | null = null;
+  const waitForMessage = (type: string) => within(new Promise<Record<string, unknown>>((resolve) => {
+    const listener = (message: unknown) => {
+      if ((message as { type?: string })?.type !== type) return;
+      child.off("message", listener);
+      resolve(message as Record<string, unknown>);
+    };
+    child.on("message", listener);
+  }), `child message ${type}`, 2_000);
+  try {
+    const ready = await waitForMessage("ready");
+    providerPid = Number(ready.providerPid);
+    const socketPath = join(env.root, ".letagents", "daemon.sock");
+    assert.equal((await daemonRequest(socketPath, "daemon.prepare_handoff")).ok, true);
+    await waitForMessage("authority_released");
+    await assert.rejects(daemonRequest(socketPath, "daemon.status"));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    child.kill("SIGTERM");
+    assert.deepEqual(await within(exited, "SIGTERM exit after authority release", 1_000), { code: null, signal: "SIGTERM" });
+    assert.doesNotThrow(() => process.kill(providerPid!, 0), "daemon SIGTERM does not initiate provider cleanup");
+  } finally {
+    child.kill("SIGKILL");
+    if (providerPid && Number.isSafeInteger(providerPid)) {
+      try { process.kill(providerPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    await env.cleanup();
+  }
+});
+
+test("prepare_handoff fences a mutation admitted before an asynchronous request barrier", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  let releaseMutation!: () => void;
+  const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+  let mutationReached!: () => void;
+  const reachedMutation = new Promise<void>((resolve) => { mutationReached = resolve; });
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, async (request) => {
+    if (request.method !== "manifest.put") return;
+    mutationReached();
+    await mutationGate;
+  });
+  try {
+    await daemon.start();
+    const lateMutation = daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...entry, id: "admitted_before_handoff" },
+    });
+    await reachedMutation;
+    const handoff = daemon.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    releaseMutation();
+    const rejected = await lateMutation;
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error ?? "", /handoff has fenced new daemon mutations/i);
+    await within(handoff, "barrier-fenced handoff", 1_000);
+
+    const reopened = new ManifestStore(paths.manifestPath);
+    try {
+      assert.equal((await reopened.load()).entries.some((candidate) => candidate.id === "admitted_before_handoff"), false);
+    } finally {
+      await reopened.close();
+    }
+  } finally {
+    releaseMutation();
     await env.cleanup();
   }
 });
@@ -2419,7 +2576,7 @@ test("distinct supervised Codex entries coexist in one room without weakening le
   }
 });
 
-test("two Codex room agents keep independent provider executions across stop, resume, and daemon restart", async () => {
+test("two Codex room agents keep independent provider executions across stop, resume, and daemon handoff", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -2612,7 +2769,9 @@ test("two Codex room agents keep independent provider executions across stop, re
     assert.equal(crossWire, null, "matching attempt and continuation cannot attach through another agent's provider connection");
     assert.equal(attachRequests.length, 0, "the production router rejects a cross-wired ref before the adapter can attach it");
 
-    await daemon.stop();
+    const handoff = daemon.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    await within(handoff, "multi-agent daemon handoff", 1_000);
     activeRouter = router();
     daemon = new SupervisorDaemon(paths, "darwin", activeRouter, true);
     await daemon.start();

@@ -10,6 +10,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+  type DaemonHandoffDiagnostic,
+  type DaemonProcessIdentity,
   SupervisorDaemonClient,
   onSupervisorActivity,
   publishSupervisorActivity,
@@ -32,6 +34,18 @@ function fakeChild(): ChildProcess {
   return child as unknown as ChildProcess;
 }
 
+function fakeDaemonProcessIdentity(
+  overrides: Partial<Omit<DaemonProcessIdentity, "expectedScriptPath">> = {},
+): Omit<DaemonProcessIdentity, "expectedScriptPath"> {
+  return {
+    pid: 77,
+    kernelStartTime: "Thu Jan  1 00:00:00 2026",
+    command: `${process.execPath} ${daemonScriptPath}`,
+    state: "live",
+    ...overrides,
+  };
+}
+
 async function startWireDaemon(
   socketPath: string,
   version: number,
@@ -39,9 +53,11 @@ async function startWireDaemon(
   onPrepare?: () => void,
   implementationVersion = SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   controlTurnDelayMs = 0,
+  unresponsiveAfterPrepare = false,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
+  let handoffPrepared = false;
   const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -49,12 +65,14 @@ async function startWireDaemon(
       buffer += chunk;
       if (!buffer.includes("\n")) return;
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as { id: string; method: string; params?: Record<string, any> };
+      if (unresponsiveAfterPrepare && handoffPrepared && (request.method === "daemon.negotiate" || request.method === "daemon.status")) return;
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
         result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
+        handoffPrepared = true;
         setTimeout(() => onPrepare?.(), 5);
       } else if (request.method === "manifest.list") {
         result = entries;
@@ -137,6 +155,64 @@ async function closeServer(server: Server | null, socketPath: string): Promise<v
   if (!server) return;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await unlink(socketPath).catch(() => undefined);
+}
+
+async function runReleasedSocketHandoffScenario(input: {
+  inspectAfterPrepare: (context: { signals: Array<"SIGTERM" | "SIGKILL">; inspection: number }) => Omit<DaemonProcessIdentity, "expectedScriptPath"> | null | undefined;
+  implementationVersion?: string;
+}) {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let prepared = false;
+  let inspection = 0;
+  const signals: Array<"SIGTERM" | "SIGKILL"> = [];
+  const diagnostics: DaemonHandoffDiagnostic[] = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    41,
+    () => {
+      void closeServer(oldServer, env.socketPath).then(() => { prepared = true; });
+    },
+    input.implementationVersion ?? "2.0.25",
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 50,
+      terminateTimeoutMs: 0,
+      killTimeoutMs: 0,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => {
+        if (!prepared) return fakeDaemonProcessIdentity();
+        inspection += 1;
+        return input.inspectAfterPrepare({ signals, inspection });
+      },
+      signalDaemon: (pid, signal) => {
+        assert.equal(pid, 77);
+        assert.ok(pid > 0, "daemon handoff signals only the positive daemon PID");
+        signals.push(signal);
+      },
+      reportHandoffDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    const status = await client.ensureRunning();
+    return { status, signals, diagnostics };
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
 }
 
 test("local supervisor activity subscribers receive only the canonical redacted event", async () => {
@@ -358,7 +434,7 @@ test("desktop development watches daemon builds and rejects a stale replacement 
   const clientSource = await readFile(daemonClientPath, "utf8");
   const healthCheck = clientSource.slice(
     clientSource.indexOf("private async waitForHealthy"),
-    clientSource.indexOf("private async waitForSocketDown"),
+    clientSource.indexOf("private captureRetiredDaemon"),
   );
   assert.match(healthCheck, /status\.implementationVersion !== SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION/);
   assert.match(healthCheck, /Rebuild the desktop daemon and try again/);
@@ -371,12 +447,18 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   let oldServer: Server | null = null;
   let replacementServer: Server | null = null;
   let spawns = 0;
-  const old = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION - 1, 7, () => { void closeServer(oldServer, env.socketPath); });
+  let retiredAlive = true;
+  const old = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION - 1, 7, () => {
+    retiredAlive = false;
+    void closeServer(oldServer, env.socketPath);
+  });
   oldServer = old.server;
   try {
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 50,
       spawnDaemon: () => {
         spawns += 1;
         void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 8).then((wire) => { replacementServer = wire.server; });
@@ -402,6 +484,7 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
   let oldServer: Server | null = null;
   let replacementServer: Server | null = null;
   let handoffPrepared = false;
+  let retiredAlive = true;
   let spawnedCwd: string | null = null;
   const stableCwd = join(env.root, "stable-daemon-cwd");
   const old = await startWireDaemon(
@@ -410,6 +493,7 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
     11,
     () => {
       handoffPrepared = true;
+      retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
     "2.0.0-stale",
@@ -420,6 +504,8 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
       socketPath: env.socketPath,
       daemonScriptPath,
       daemonWorkingDirectory: stableCwd,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 50,
       spawnDaemon: (_scriptPath, cwd) => {
         spawnedCwd = cwd;
         void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 12)
@@ -448,6 +534,7 @@ test("desktop safely terminates a wedged negotiated daemon while preserving prov
   let oldServer: Server | null = null;
   let replacementServer: Server | null = null;
   let terminatedPid: number | null = null;
+  let retiredAlive = true;
   const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   const old = await startWireDaemon(
     env.socketPath,
@@ -462,8 +549,13 @@ test("desktop safely terminates a wedged negotiated daemon while preserving prov
       socketPath: env.socketPath,
       daemonScriptPath,
       handoffTimeoutMs: 50,
+      terminateTimeoutMs: 50,
+      killTimeoutMs: 25,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
       terminateDaemon: (pid) => {
         terminatedPid = pid;
+        retiredAlive = false;
         void closeServer(oldServer, env.socketPath);
       },
       spawnDaemon: () => {
@@ -483,4 +575,197 @@ test("desktop safely terminates a wedged negotiated daemon while preserving prov
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
   }
+});
+
+test("acknowledged but unresponsive socket still enters exact-PID bounded enforcement", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let retiredAlive = true;
+  const signals: Array<"SIGTERM" | "SIGKILL"> = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    31,
+    undefined,
+    "2.0.25",
+    0,
+    true,
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 0,
+      terminateTimeoutMs: 100,
+      killTimeoutMs: 25,
+      processPollIntervalMs: 1,
+      requestTimeoutMs: 10,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      signalDaemon: (pid, signal) => {
+        assert.equal(pid, 77);
+        signals.push(signal);
+        if (signal === "SIGTERM") {
+          void closeServer(oldServer, env.socketPath).then(() => { retiredAlive = false; });
+        }
+      },
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 32)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    const status = await client.ensureRunning();
+    assert.deepEqual(signals, ["SIGTERM"], "the verified predecessor is retired even when its socket stops answering");
+    assert.equal(status.generation, 32);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("live socket plus unverifiable PID leaves the existing daemon serving", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let prepared = false;
+  let spawns = 0;
+  const signals: NodeJS.Signals[] = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    51,
+    () => { prepared = true; },
+    "2.0.25",
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 10,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => prepared ? undefined : fakeDaemonProcessIdentity(),
+      signalDaemon: (_pid, signal) => signals.push(signal),
+      spawnDaemon: () => { spawns += 1; return fakeChild(); },
+    });
+    await assert.rejects(client.ensureRunning(), /still owns its socket.*unverifiable/i);
+    assert.equal(spawns, 0, "a competing daemon is not spawned while authority is still live");
+    assert.deepEqual(signals, [], "an unverifiable PID is never signalled");
+    assert.equal(old.server.listening, true, "the existing daemon remains available after the aborted upgrade");
+  } finally {
+    await closeServer(old.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("free socket plus unverifiable PID proceeds with a loud diagnostic", async () => {
+  const result = await runReleasedSocketHandoffScenario({ inspectAfterPrepare: () => undefined });
+  assert.equal(result.status.generation, 42);
+  assert.deepEqual(result.signals, []);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "unverifiable" && entry.authorityReleased), true);
+});
+
+test("daemon signal guard refuses PID reuse before TERM", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: () => fakeDaemonProcessIdentity({ kernelStartTime: "Thu Jan  1 00:00:01 2026" }),
+  });
+  assert.deepEqual(result.signals, []);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "changed" && /PID reuse/.test(entry.detail)), true);
+});
+
+test("daemon signal guard re-verifies PID reuse immediately before KILL", async () => {
+  let postTermInspections = 0;
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: ({ signals }) => {
+      if (signals.length === 0) return fakeDaemonProcessIdentity();
+      postTermInspections += 1;
+      if (postTermInspections === 1) return fakeDaemonProcessIdentity();
+      return fakeDaemonProcessIdentity({ kernelStartTime: "Thu Jan  1 00:00:01 2026" });
+    },
+  });
+  assert.deepEqual(result.signals, ["SIGTERM"], "SIGKILL is withheld after the PID birth identity changes");
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "changed"), true);
+});
+
+test("daemon signal guard refuses a changed command", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: () => fakeDaemonProcessIdentity({ command: `${process.execPath} /tmp/not-the-daemon.js` }),
+  });
+  assert.deepEqual(result.signals, []);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "changed" && /command changed/.test(entry.detail)), true);
+});
+
+test("zombie after SIGKILL does not block replacement after authority release", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: ({ signals }) => signals.at(-1) === "SIGKILL"
+      ? fakeDaemonProcessIdentity({ state: "zombie" })
+      : fakeDaemonProcessIdentity(),
+  });
+  assert.deepEqual(result.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(result.status.generation, 42);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "zombie_after_sigkill"), true);
+});
+
+test("non-zombie SIGKILL survivor is diagnosed but cannot retain transferred authority", async () => {
+  const result = await runReleasedSocketHandoffScenario({ inspectAfterPrepare: () => fakeDaemonProcessIdentity() });
+  assert.deepEqual(result.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(result.status.generation, 42);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "non_zombie_survived_sigkill"), true);
+});
+
+test("replacement cannot report healthy without acquiring a newer singleton generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let retiredAlive = true;
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    61,
+    () => { void closeServer(oldServer, env.socketPath).then(() => { retiredAlive = false; }); },
+    "2.0.25",
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 10,
+      startTimeoutMs: 200,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 61)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    await assert.rejects(client.ensureRunning(), /did not acquire a newer singleton generation/i);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("every daemon termination signal is identity-guarded and positive-PID only", async () => {
+  const source = await readFile(daemonClientPath, "utf8");
+  const signalCalls = [...source.matchAll(/this\.signalDaemon\(([^;]+)\);/g)].map((match) => match[1]);
+  assert.deepEqual(signalCalls, ["retired.pid, signal"], "all injected daemon signalling is centralized in the guarded helper");
+  const helper = source.slice(
+    source.indexOf("private guardedSignalRetiredDaemon"),
+    source.indexOf("private async waitForRetiredProcessChange"),
+  );
+  assert.match(helper, /observeRetiredDaemon\(retired\)/);
+  assert.match(helper, /retired\.pid <= 1/);
+  assert.doesNotMatch(helper, /-retired\.pid|process\.kill\(-/);
 });
