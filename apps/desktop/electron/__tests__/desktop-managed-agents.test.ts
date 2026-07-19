@@ -2982,6 +2982,15 @@ test("Codex room activation routes only explicit addresses while retaining a sha
   assert.deepEqual(dispatchedNames(directToDawn), ["DawnRidge"]);
   assert.deepEqual(dispatchedNames(directToDawnById), ["DawnRidge"]);
   assert.deepEqual(dispatchedNames(broadcast), ["RiverField", "DawnRidge", "OakSolar"], "each worker receives one broadcast turn");
+  assert.deepEqual(dispatchedNames(messageEvent({
+    message: { ...messageEvent().message, id: "msg_punctuated_name", text: "@DawnRidge. Please investigate." },
+  })), ["DawnRidge"], "sentence punctuation is not part of a display-name mention");
+  assert.deepEqual(dispatchedNames(messageEvent({
+    message: { ...messageEvent().message, id: "msg_punctuated_session", text: "@agent_session_dawn: please investigate." },
+  })), ["DawnRidge"], "terminal punctuation is not part of a stable session mention");
+  assert.deepEqual(dispatchedNames(messageEvent({
+    message: { ...messageEvent().message, id: "msg_punctuated_everyone", text: "@everyone. Please review." },
+  })), ["RiverField", "DawnRidge", "OakSolar"], "a punctuated broadcast still reaches the room");
   assert.deepEqual(dispatchedNames(peerUntargeted), [], "peer chatter cannot create agent-to-agent ping-pong");
   assert.deepEqual(dispatchedNames(threadForDawn), ["DawnRidge"], "only existing thread participants receive continuations");
 
@@ -3105,6 +3114,29 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
     roomIdentifier: "room_1",
     task: taskSummary({ assignee: "CedarVista" }),
   }), ["agent_session_cedar"], "a unique alias-only task assignment still works");
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients([
+    aliceOak,
+    { ...bobOak, agentKey: aliceOak.agentKey },
+  ], {
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assigneeAgentKey: "local/alice/codex/oak" }),
+  }), [], "a duplicated canonical task key fails closed instead of activating both owners");
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({
+      activeLeases: [{
+        id: "conflicting_lease",
+        kind: "work",
+        holderLabel: "Oak",
+        agentKey: "local/bob/codex/oak",
+        agentSessionId: "agent_session_alice_oak",
+        status: "active",
+        updatedAt: "2026-06-14T12:10:00.000Z",
+      }],
+    }),
+  }), [], "conflicting stable lease fields cannot fan out to two workers");
 
   const reply = (sender: string) => recipients(messageEvent({
     message: {
@@ -3127,6 +3159,17 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
     },
   })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar"],
   "an ambiguous identityless author is not treated as self for every duplicate worker");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "browser_sender_agent_name_collision",
+      sender: "CedarVista",
+      source: "browser",
+      text: "@everyone please verify this.",
+    },
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar"],
+  "a human sender sharing an agent name does not suppress that agent from a broadcast");
 
   assert.deepEqual(recipients(messageEvent({
     message: {
