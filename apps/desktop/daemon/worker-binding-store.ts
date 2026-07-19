@@ -278,7 +278,7 @@ export class WorkerBindingStore {
         run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, agent_session_token, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, binding.agent_session_token, new URL(binding.api_url).origin, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       }
       run(database.prepare("INSERT INTO migration_records (migration_key, checksum, imported_at) VALUES (?, ?, ?)"), key, checksum, new Date().toISOString());
-    }); } catch (error) { await this.quarantineLegacyFailure(database, key, checksum, error); }
+    }); } catch (error) { if (error instanceof Error && error.message === "Legacy worker binding source changed during import.") throw error; await this.quarantineLegacyFailure(database, key, checksum, error); }
     // Rename only after the committed migration record. Failure is safe and
     // retryable on the next open; the record prevents a second import.
     await this.finishLegacyBackup(backup);
@@ -299,7 +299,7 @@ export class WorkerBindingStore {
     // is the source of truth. Another opener may win the rename between these
     // calls, so ENOENT/EEXIST are successful convergence, not startup errors.
     try { await stat(this.legacyJsonPath); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { await chmod(backup, 0o600).catch((chmodError: unknown) => { if ((chmodError as NodeJS.ErrnoException).code !== "ENOENT") throw chmodError; }); return; } throw error; }
-    try { await stat(backup); await chmod(backup, 0o600); return; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try { await stat(backup); await chmod(backup, 0o600); await chmod(this.legacyJsonPath, 0o600); return; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     try { await rename(this.legacyJsonPath, backup); }
     catch (error: unknown) { if (!["ENOENT", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
     await chmod(backup, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
