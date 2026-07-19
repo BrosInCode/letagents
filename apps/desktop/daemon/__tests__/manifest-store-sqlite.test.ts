@@ -134,6 +134,7 @@ test("SQLite manifest round-trips the flat wire projection from relational domai
     const undefinedPolicyEntry = { ...entry, id: "agent_2", provider_launch_policy: undefined };
     const saved = await store.write(0, [entry, undefinedPolicyEntry], [owner]);
     assert.deepEqual(await store.load(), saved);
+    assert.equal(Object.hasOwn(saved.entries[1]!, "provider_launch_policy"), false);
 
     const database = (store as unknown as { database: DatabaseSync }).database;
     assert.equal((database.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode, "wal");
@@ -237,13 +238,13 @@ test("a post-commit backup failure retries idempotently without reimporting", as
 test("future SQLite schema versions are rejected without being downgraded", async () => {
   const env = await fixture();
   const database = new DatabaseSync(env.databasePath);
-  database.exec("PRAGMA user_version = 2");
+  database.exec("PRAGMA user_version = 3");
   database.close();
   const store = new ManifestStore(env.databasePath);
   try {
-    await assert.rejects(() => store.load(), /schema version 2/);
+    await assert.rejects(() => store.load(), /schema version 3/);
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
     inspection.close();
   } finally {
     await store.close();
@@ -258,10 +259,199 @@ test("manifest metadata schema disagreement is rejected on reopen", async () => 
     await initialized.load();
     await initialized.close();
     const database = new DatabaseSync(env.databasePath);
-    database.prepare("UPDATE manifest_metadata SET schema_version = 2 WHERE singleton = 1").run();
+    database.prepare("UPDATE manifest_metadata SET schema_version = 3 WHERE singleton = 1").run();
     database.close();
     const reopened = new ManifestStore(env.databasePath);
-    await assert.rejects(() => reopened.load(), /metadata schema version 2/);
+    await assert.rejects(() => reopened.load(), /metadata schema version 3/);
+    await reopened.close();
+  } finally {
+    await initialized.close();
+    await env.cleanup();
+  }
+});
+
+test("v1 daemon state migrates transactionally to v2 and normalizes exit timestamps", async () => {
+  const env = await fixture();
+  const initial = new ManifestStore(env.databasePath);
+  try {
+    await initial.write(0, [entry]);
+    await initial.close();
+
+    const v1 = new DatabaseSync(env.databasePath);
+    v1.exec("ALTER TABLE agent_configurations DROP COLUMN provider_launch_policy_undefined");
+    v1.exec("ALTER TABLE runtime_deployments DROP COLUMN provider_process_identity_present");
+    v1.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
+    v1.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[101,202,303]", entry.id);
+    v1.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
+    v1.exec("UPDATE manifest_metadata SET schema_version = 1; PRAGMA user_version = 1");
+    const v1ConfigurationColumns = (v1.prepare("PRAGMA table_info(agent_configurations)").all() as Array<{ name: string }>).map((column) => column.name);
+    assert.equal(v1ConfigurationColumns.includes("provider_launch_policy_undefined"), false);
+    assert.equal((v1.prepare("SELECT COUNT(*) AS count FROM reconciliation_exit_timestamps").get() as { count: number }).count, 0);
+    v1.close();
+
+    const migrated = new ManifestStore(env.databasePath);
+    const state = await migrated.load();
+    assert.equal(state.generation, 1, "migration preserves the manifest CAS generation");
+    assert.deepEqual(state.entries[0]?.reconciliation?.exit_timestamps_ms, [101, 202, 303]);
+    await migrated.close();
+
+    const inspection = new DatabaseSync(env.databasePath);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
+    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 2);
+    assert.equal((inspection.prepare("SELECT provider_launch_policy_undefined FROM agent_configurations WHERE agent_id = ?").get(entry.id) as { provider_launch_policy_undefined: number }).provider_launch_policy_undefined, 0);
+    assert.equal((inspection.prepare("SELECT provider_process_identity_present FROM runtime_deployments WHERE agent_id = ?").get(entry.id) as { provider_process_identity_present: number }).provider_process_identity_present, 0);
+    inspection.close();
+
+    const reopened = new ManifestStore(env.databasePath);
+    assert.deepEqual((await reopened.load()).entries[0]?.reconciliation?.exit_timestamps_ms, [101, 202, 303]);
+    await reopened.close();
+  } finally {
+    await initial.close();
+    await env.cleanup();
+  }
+});
+
+test("partially migrated v2 state is repaired transactionally before reads", async () => {
+  const env = await fixture();
+  const initial = new ManifestStore(env.databasePath);
+  try {
+    await initial.write(0, [entry]);
+    await initial.close();
+
+    const partial = new DatabaseSync(env.databasePath);
+    partial.exec("ALTER TABLE runtime_deployments DROP COLUMN provider_process_identity_present");
+    partial.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
+    partial.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[404,505]", entry.id);
+    partial.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
+    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
+    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 2);
+    partial.close();
+
+    const repaired = new ManifestStore(env.databasePath);
+    const state = await repaired.load();
+    assert.equal(state.generation, 1);
+    assert.equal(state.entries.length, 1);
+    assert.deepEqual(state.entries[0]?.reconciliation?.exit_timestamps_ms, [404, 505]);
+    await repaired.close();
+
+    const inspection = new DatabaseSync(env.databasePath);
+    const runtimeColumns = (inspection.prepare("PRAGMA table_info(runtime_deployments)").all() as Array<{ name: string }>).map((column) => column.name);
+    assert.equal(runtimeColumns.includes("provider_process_identity_present"), true);
+    assert.equal((inspection.prepare("SELECT provider_process_identity_present FROM runtime_deployments WHERE agent_id = ?").get(entry.id) as { provider_process_identity_present: number }).provider_process_identity_present, 0);
+    assert.equal((inspection.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as { generation: number }).generation, 1);
+    inspection.close();
+  } finally {
+    await initial.close();
+    await env.cleanup();
+  }
+});
+
+test("all explicit optional undefined fields normalize to absence without fabricated state", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const minimal: DaemonManifestEntry = {
+    id: "minimal_agent",
+    room_id: "room_minimal",
+    display_name: "Minimal",
+    provider: "codex",
+    model: null,
+    charter: "Only required state.",
+    desired_state: "paused",
+    observed_state: "absent",
+    condition: "none",
+    permission_profile_id: null,
+    created_by: "user_1",
+    created_at: "2026-07-19T00:00:00.000Z",
+    last_error: undefined,
+    provider_launch_policy: undefined,
+    source_repo_path: undefined,
+    workspace_path: undefined,
+    work_attempt_id: undefined,
+    provider_ref: undefined,
+    workplace_liveness: undefined,
+    native_liveness: undefined,
+    ready_reached_at: undefined,
+    activity: undefined,
+    turn_control: undefined,
+    last_worker_binding: undefined,
+    reconciliation: undefined,
+    reconciliation_notices: undefined,
+  };
+  try {
+    const saved = await store.write(0, [minimal]);
+    const persisted = (await store.load()).entries[0]!;
+    assert.deepEqual(persisted, saved.entries[0]);
+    for (const optional of [
+      "last_error", "provider_launch_policy", "source_repo_path", "workspace_path", "work_attempt_id",
+      "provider_ref", "workplace_liveness", "native_liveness", "ready_reached_at", "activity",
+      "turn_control", "last_worker_binding", "reconciliation", "reconciliation_notices",
+    ]) assert.equal(Object.hasOwn(persisted, optional), false, `${optional} remains absent`);
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("targeted activity writes leave every unrelated agent row untouched and avoid full replacement", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const others = Array.from({ length: 23 }, (_, index) => ({
+      ...entry,
+      id: `agent_other_${index}`,
+      display_name: `Other Agent ${index}`,
+    }));
+    const other = others[0]!;
+    await store.write(0, [entry, ...others]);
+    const database = (store as unknown as { database: DatabaseSync }).database;
+    const tables = [
+      "agent_identities", "agent_profiles", "agent_room_memberships", "agent_configurations",
+      "agent_launch_intents", "runtime_deployments", "activity_events", "agent_lifecycle_states",
+      "agent_readiness", "turn_control_journals", "turn_control_stages", "retained_worker_bindings",
+      "reconciliation_records", "reconciliation_exit_timestamps", "reconciliation_completed_actions",
+      "reconciliation_notices",
+    ];
+    const snapshot = () => Object.fromEntries(tables.map((table) => [
+      table,
+      database.prepare(`SELECT rowid, * FROM ${table} WHERE agent_id <> ? ORDER BY agent_id, rowid`).all(entry.id),
+    ]));
+    const before = snapshot();
+    const raw = store as unknown as { replaceEntries: () => never };
+    raw.replaceEntries = () => { throw new Error("full replacement must not run on the activity path"); };
+
+    const nextEvent = { ...entry.activity![0]!, sequence: 5, observed_at: "2026-07-19T00:04:00.000Z", summary: "Targeted event" };
+    const result = await store.appendActivity(1, entry.id, nextEvent, "idle", {
+      state: "idle", observed_at: nextEvent.observed_at, detail: nextEvent.summary,
+    }, 1);
+    assert.equal(result.generation, 2);
+    assert.deepEqual(result.entry.activity, [nextEvent]);
+    assert.deepEqual(snapshot(), before);
+    assert.deepEqual(await store.getEntry(other.id), other);
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("permission housekeeping failure aborts initialization without changing generation", async () => {
+  const env = await fixture();
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    assert.deepEqual(await initialized.load(), { generation: 0, entries: [] });
+    await initialized.close();
+
+    const failing = new ManifestStore(env.databasePath, undefined, async () => {
+      throw new Error("injected permission failure");
+    });
+    await assert.rejects(() => failing.load(), /injected permission failure/);
+    await failing.close();
+
+    const inspection = new DatabaseSync(env.databasePath);
+    assert.equal((inspection.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as { generation: number }).generation, 0);
+    inspection.close();
+
+    const reopened = new ManifestStore(env.databasePath);
+    assert.equal((await reopened.write(0, [entry])).generation, 1);
     await reopened.close();
   } finally {
     await initialized.close();
