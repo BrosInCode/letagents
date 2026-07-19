@@ -8,12 +8,16 @@ import type {
   DesktopAppInfo,
   DesktopAuthStatus,
   DesktopFocusRoomInfo,
+  DesktopGitHubRoomEvent,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopReasoningSession,
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
   DesktopRoomMessage,
+  DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
+  DesktopTaskSummary,
   DiagnosticsSnapshot,
   RepoStatus,
   WorkerSnapshot,
@@ -230,10 +234,135 @@ describe("useDesktopAppData selected focus room snapshots", () => {
   });
 });
 
+describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
+  it("applies a task_update to the snapshot without scheduling a full refresh", () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+
+    harness.state.handleRoomStreamEvent({
+      type: "task_update",
+      roomIdentifier: "focus_a",
+      task: taskSummary("task_1"),
+    });
+
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_1"]);
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+    assert.deepEqual(harness.getSnapshotRequests, []);
+  });
+
+  it("applies a github_event to the snapshot without scheduling a full refresh", () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+
+    harness.state.handleRoomStreamEvent({
+      type: "github_event",
+      roomIdentifier: "focus_a",
+      event: githubRoomEvent("ghe_1"),
+    });
+
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.githubEvents?.events.map((event) => event.id),
+      ["ghe_1"],
+    );
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+  });
+
+  it("applies reasoning update and removal without scheduling a full refresh", () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+
+    harness.state.handleRoomStreamEvent({
+      type: "reasoning_update",
+      roomIdentifier: "focus_a",
+      session: reasoningSession("reason_1"),
+    });
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.reasoningSessions.map((session) => session.id),
+      ["reason_1"],
+    );
+
+    harness.state.handleRoomStreamEvent({
+      type: "reasoning_remove",
+      roomIdentifier: "focus_a",
+      sessionId: "reason_1",
+    });
+    assert.deepEqual(harness.selectedSnapshot.value?.reasoningSessions, []);
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+  });
+
+  it("appends an ordinary agent message without scheduling a refresh", () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
+
+    harness.state.handleRoomStreamEvent({
+      type: "message",
+      roomIdentifier: "focus_a",
+      message: agentMessage("msg_2"),
+    });
+
+    assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_1", "msg_2"]);
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+  });
+
+  it("schedules a refresh when a message references a thread root outside the loaded window", () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
+
+    harness.state.handleRoomStreamEvent({
+      type: "message",
+      roomIdentifier: "focus_a",
+      message: threadReplyMessage("msg_2", "msg_missing"),
+    });
+
+    assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_1", "msg_2"]);
+    assert.equal(harness.metadataRefreshCalls.length, 1);
+  });
+
+  it("does not schedule a refresh for a reply whose root is in the loaded window", () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Root")]);
+
+    harness.state.handleRoomStreamEvent({
+      type: "message",
+      roomIdentifier: "focus_a",
+      message: threadReplyMessage("msg_2", "msg_1", "msg_1"),
+    });
+
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+  });
+
+  it("refetches only artifacts on artifact_update instead of the whole snapshot", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    harness.nextArtifacts = [sharedArtifact("artifact:pr:1")];
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.state.handleRoomStreamEvent({
+        type: "artifact_update",
+        roomIdentifier: "focus_a",
+        artifactIdentityKey: "artifact:pr:1",
+        artifact: null,
+      });
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getArtifactsRequests, ["focus_a"]);
+    assert.deepEqual(harness.getSnapshotRequests, []);
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.roomArtifacts.map((artifact) => artifact.identityKey),
+      ["artifact:pr:1"],
+    );
+  });
+});
+
 function createHarness(): {
   accountRooms: Ref<DesktopAccountRoomEntry[]>;
   activeEntry: Ref<SidebarEntry>;
   getSnapshotRequests: Array<string | null>;
+  getArtifactsRequests: Array<string>;
+  metadataRefreshCalls: Array<number | undefined>;
+  nextArtifacts: DesktopRoomSharedArtifact[];
   listAccountRoomsCalls: Array<DesktopAccountRoomListOptions | undefined>;
   nextAccountRooms: DesktopAccountRoomEntry[];
   nextSelectedSnapshot: Promise<DesktopRoomSnapshot>;
@@ -254,6 +383,8 @@ function createHarness(): {
   const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const getSnapshotRequests: Array<string | null> = [];
+  const getArtifactsRequests: Array<string> = [];
+  const metadataRefreshCalls: Array<number | undefined> = [];
   const listAccountRoomsCalls: Array<DesktopAccountRoomListOptions | undefined> = [];
   const harness = {
     nextSelectedSnapshot: Promise.resolve(roomSnapshot("focus_a", {
@@ -261,6 +392,7 @@ function createHarness(): {
       parentRoomId: "room_parent",
     })),
     nextAccountRooms: [] as DesktopAccountRoomEntry[],
+    nextArtifacts: [] as DesktopRoomSharedArtifact[],
   };
 
   const state = useDesktopAppData({
@@ -278,7 +410,9 @@ function createHarness(): {
     repoStatus: ref<RepoStatus | null>(null),
     resolveSelectedRoomIdentifier: () => activeEntry.value.type === "room" ? activeEntry.value.roomIdentifier : null,
     rootRoomSnapshot,
-    scheduleLiveMetadataRefresh: () => undefined,
+    scheduleLiveMetadataRefresh: (delayMs?: number) => {
+      metadataRefreshCalls.push(delayMs);
+    },
     selectedMcpTargetIds: ref<DesktopMcpInstallTargetId[]>([]),
     selectedRootRoomIdentifier: ref("room_parent"),
     selectedSnapshot,
@@ -290,7 +424,15 @@ function createHarness(): {
     accountRooms,
     activeEntry,
     getSnapshotRequests,
+    getArtifactsRequests,
+    metadataRefreshCalls,
     listAccountRoomsCalls,
+    get nextArtifacts() {
+      return harness.nextArtifacts;
+    },
+    set nextArtifacts(value: DesktopRoomSharedArtifact[]) {
+      harness.nextArtifacts = value;
+    },
     get nextAccountRooms() {
       return harness.nextAccountRooms;
     },
@@ -319,6 +461,10 @@ function createHarness(): {
           ): Promise<DesktopAccountRoomEntry[]> => {
             listAccountRoomsCalls.push(options);
             return harness.nextAccountRooms;
+          },
+          getArtifacts: async (roomIdentifier: string): Promise<DesktopRoomSharedArtifact[]> => {
+            getArtifactsRequests.push(roomIdentifier);
+            return harness.nextArtifacts;
           },
         },
         repos: {
@@ -583,6 +729,82 @@ function roomMessage(id: string, text: string): DesktopRoomMessage {
 
 function messageIds(snapshot: DesktopRoomSnapshot | null): string[] {
   return snapshot?.messages.map((message) => message.id) || [];
+}
+
+function focusSnapshot(messages: DesktopRoomMessage[] = []): DesktopRoomSnapshot {
+  return roomSnapshot("focus_a", {
+    kind: "focus",
+    parentRoomId: "room_parent",
+    messages,
+  });
+}
+
+function agentMessage(id: string): DesktopRoomMessage {
+  return {
+    ...roomMessage(id, id),
+    source: "agent",
+  };
+}
+
+function threadReplyMessage(
+  id: string,
+  threadRootId: string,
+  threadReplyToId: string | null = null,
+): DesktopRoomMessage {
+  return {
+    ...roomMessage(id, id),
+    source: "agent",
+    threadRootId,
+    threadReplyToId,
+  };
+}
+
+function taskSummary(id: string): DesktopTaskSummary {
+  return { id, title: id, status: "todo" } as DesktopTaskSummary;
+}
+
+function githubRoomEvent(id: string): DesktopGitHubRoomEvent {
+  return {
+    id,
+    eventType: "pull_request",
+    action: "opened",
+    githubObjectId: null,
+    githubObjectUrl: null,
+    title: null,
+    state: null,
+    actorLogin: null,
+    metadata: {},
+    linkedTaskId: null,
+    createdAt: "2026-07-02T00:00:00.000Z",
+  };
+}
+
+function reasoningSession(id: string): DesktopReasoningSession {
+  return { id, createdAt: "2026-07-02T00:00:00.000Z", updatedAt: "2026-07-02T00:00:00.000Z" } as DesktopReasoningSession;
+}
+
+function sharedArtifact(identityKey: string): DesktopRoomSharedArtifact {
+  return {
+    roomId: "focus_a",
+    identityKey,
+    provider: "github",
+    kind: "pull_request",
+    artifactId: null,
+    artifactNumber: null,
+    title: null,
+    url: null,
+    ref: null,
+    state: null,
+    detail: null,
+    source: "github_event",
+    firstSeenAt: "2026-07-02T00:00:00.000Z",
+    updatedAt: "2026-07-02T00:00:00.000Z",
+    linkedTaskIds: [],
+  };
+}
+
+async function flushAsync(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function repoStatusFixture(): RepoStatus {

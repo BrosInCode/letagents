@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mapRoomArtifactPayload, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
+import { mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
@@ -78,6 +78,40 @@ test("mapRoomArtifactPayload hydrates desktop artifact fields and rejects incomp
   assert.deepEqual(artifact?.linkedTaskIds, ["task_1", "task_2"]);
   assert.equal(mapRoomArtifactPayload({ room_id: "room_1", provider: "git", kind: "branch" }), null);
   assert.equal(mapRoomArtifactPayload({ room_id: "room_1", identity_key: "bad", provider: "git", kind: "unknown" }), null);
+});
+
+test("mapRoomArtifacts maps and sorts a room-artifacts response (the artifacts-only refetch transform)", () => {
+  // getDesktopRoomArtifacts feeds the /artifacts (or local-store) response
+  // through mapRoomArtifacts; this asserts that transform's mapping + ordering.
+  const artifacts = mapRoomArtifacts({
+    artifacts: [
+      {
+        room_id: "room_1",
+        identity_key: "git:branch:ref:feature/old",
+        provider: "git",
+        kind: "branch",
+        ref: "feature/old",
+        first_seen_at: "2026-05-12T10:00:00.000Z",
+        updated_at: "2026-05-12T10:00:00.000Z",
+      },
+      {
+        room_id: "room_1",
+        identity_key: "git:commit:id:abc123",
+        provider: "git",
+        kind: "commit",
+        first_seen_at: "2026-05-12T11:00:00.000Z",
+        updated_at: "2026-05-12T12:00:00.000Z",
+      },
+      // Incomplete payload (no identity key) is dropped.
+      { room_id: "room_1", provider: "git", kind: "branch" },
+    ],
+  });
+
+  assert.deepEqual(artifacts.map((artifact) => artifact.identityKey), [
+    "git:commit:id:abc123",
+    "git:branch:ref:feature/old",
+  ]);
+  assert.equal(artifacts[0]?.kind, "commit");
 });
 
 test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => {

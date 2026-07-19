@@ -120,6 +120,23 @@ export function upsertSnapshotRoomArtifact(
   };
 }
 
+/**
+ * Replace the snapshot's artifacts wholesale with a freshly refetched list.
+ * Used by the artifacts-only refetch that reconciles after an `artifact_update`
+ * frame (which carries only an identity-key pointer, so it cannot be applied on
+ * its own). Keeps the same ordering as the full snapshot's artifacts.
+ */
+export function replaceSnapshotRoomArtifacts(
+  snapshot: DesktopRoomSnapshot | null,
+  artifacts: readonly DesktopRoomSharedArtifact[],
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  return {
+    ...snapshot,
+    roomArtifacts: [...artifacts].sort(compareDesktopRoomArtifacts),
+  };
+}
+
 export function mergeRoomSnapshotMessages(
   current: DesktopRoomSnapshot | null,
   incoming: DesktopRoomSnapshot
@@ -225,10 +242,30 @@ export function mergeDesktopGitHubEvents(
   return [...byId.values()].sort(compareDesktopGitHubEvents);
 }
 
-export function shouldRefreshMetadataForMessage(message: DesktopRoomMessage): boolean {
-  const source = (message.source || "").toLowerCase();
-  const sender = (message.sender || "").toLowerCase();
-  return source === "agent" || source === "browser" || source === "github" || sender === "letagents" || sender === "github";
+/**
+ * Live SSE message frames already carry the full message payload, so an
+ * appended message renders on its own — with one exception: a message that
+ * references a thread root or reply-to that is NOT in the loaded window cannot
+ * show its ancestor context. Only that case warrants a snapshot refresh (whose
+ * thread-expansion pages backfill the missing ancestors). A message's own id
+ * counts as present because it is being appended alongside this check.
+ */
+export function messageReferencesMissingThreadContext(
+  message: DesktopRoomMessage,
+  messages: readonly DesktopRoomMessage[],
+): boolean {
+  const presentIds = new Set<string>();
+  for (const existing of messages) presentIds.add(existing.id);
+  presentIds.add(message.id);
+  const references = [
+    message.threadRootId,
+    message.threadReplyToId,
+    message.replyTo?.id,
+    message.thread?.rootMessageId,
+  ];
+  return references.some(
+    (reference) => typeof reference === "string" && reference.length > 0 && !presentIds.has(reference),
+  );
 }
 
 function compareDesktopGitHubEvents(left: DesktopGitHubRoomEvent, right: DesktopGitHubRoomEvent): number {

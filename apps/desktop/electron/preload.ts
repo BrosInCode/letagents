@@ -113,6 +113,8 @@ const api: DesktopApi = {
     createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),
     getGitHubEvents: (roomIdentifier: string, query = {}) =>
       ipcRenderer.invoke("desktop:room:get-github-events", roomIdentifier, query),
+    getArtifacts: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:get-artifacts", roomIdentifier),
     getGitHubIntegrationStatus: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:get-github-integration-status", roomIdentifier),
     openGitHubInstall: (roomIdentifier: string) =>
