@@ -536,6 +536,23 @@ async function provisionedWorkspace(root: string, taskId = "task", workAttemptId
   await writeFile(join(path, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo", work_attempt_id: workAttemptId, task_id: taskId, remote_url: "https://example.invalid/repo", resolved_revision: TEST_OID, bare_path: bare }));
   return { path, id: workAttemptId, bare };
 }
+async function committedSourceRepository(root: string, name: string): Promise<string> {
+  const source = join(root, name);
+  await mkdir(source);
+  await execFileAsync("git", ["init", source]);
+  await execFileAsync("git", ["-C", source, "config", "user.email", "daemon@example.invalid"]);
+  await execFileAsync("git", ["-C", source, "config", "user.name", "Daemon Test"]);
+  await writeFile(join(source, "README.md"), `${name}\n`);
+  await execFileAsync("git", ["-C", source, "add", "README.md"]);
+  await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
+  await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
+  return source;
+}
+async function primeDaemonBareRepository(root: string, source: string): Promise<void> {
+  const repos = join(root, "repos");
+  await mkdir(repos, { recursive: true });
+  await execFileAsync("git", ["clone", "--bare", source, join(repos, `${repositoryStorageKey(source)}.git`)]);
+}
 function fakeGit(root: string): (args: string[]) => Promise<string> {
   return async (args) => {
     if (args.includes("--git-common-dir")) return join(root, "repos", "repo.git");
@@ -2392,15 +2409,17 @@ test("two Codex room agents keep independent provider executions across stop, re
     manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
-  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const sources = await Promise.all([
+    committedSourceRepository(env.root, "multi-codex-alpha-source"),
+    committedSourceRepository(env.root, "multi-codex-bravo-source"),
+  ]);
+  // Prime only the shared immutable clone. Each agent must still ask the
+  // daemon to derive and provision its own work attempt from source_repo_path.
+  await Promise.all(sources.map((source) => primeDaemonBareRepository(env.root, source)));
   const identities = [
-    { entryId: "codex_runtime_alpha", taskId: "codex_runtime_alpha" },
-    { entryId: "codex_runtime_bravo", taskId: "codex_runtime_bravo" },
+    { entryId: "codex_runtime_alpha" },
+    { entryId: "codex_runtime_bravo" },
   ] as const;
-  const attempts = await Promise.all(identities.map(async ({ taskId }) => {
-    const workspace = await provisionedWorkspace(env.root, taskId);
-    return durability.createAttempt({ taskId, leaseId: taskId, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
-  }));
 
   type RuntimeState = "starting" | "working" | "idle" | "stopping" | "stopped" | "failed";
   type Runtime = {
@@ -2414,9 +2433,10 @@ test("two Codex room agents keep independent provider executions across stop, re
     }) => void>;
   };
   const runtimes = new Map<string, Runtime>();
-  const spawnRequests: string[] = [];
-  const attachRequests: string[] = [];
-  const resumeRequests: string[] = [];
+  type ProviderIdentityTuple = [workAttemptId: string, continuation: string, url: string, pid: number, processIdentity: string];
+  const spawnRequests: Array<[entryId: string, workAttemptId: string]> = [];
+  const attachRequests: ProviderIdentityTuple[] = [];
+  const resumeRequests: Array<[entryId: string, workAttemptId: string, continuation: string]> = [];
   const stopRequests: string[] = [];
   let nextPid = 6100;
   const nativeHandle = (runtime: Runtime) => ({
@@ -2431,10 +2451,15 @@ test("two Codex room agents keep independent provider executions across stop, re
     },
     observedState: () => runtime.state,
   });
+  const connectionFor = (runtime: Runtime) => nativeHandle(runtime).providerConnection;
+  const identityTuple = (runtime: Runtime): ProviderIdentityTuple => {
+    const connection = connectionFor(runtime);
+    return [runtime.workAttemptId, runtime.continuation, connection.url, connection.pid, connection.processIdentity];
+  };
   const adapter: NativeProviderAdapter = {
     capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async (request) => {
-      spawnRequests.push(request.supervisorEntryId ?? "missing-entry");
+      spawnRequests.push([request.supervisorEntryId ?? "missing-entry", request.workAttemptId]);
       const runtime: Runtime = {
         workAttemptId: request.workAttemptId,
         pid: ++nextPid,
@@ -2446,13 +2471,29 @@ test("two Codex room agents keep independent provider executions across stop, re
       return nativeHandle(runtime);
     },
     attach: async (ref) => {
-      attachRequests.push(ref.workAttemptId);
       const runtime = runtimes.get(ref.workAttemptId);
-      if (!runtime || runtime.state === "stopped" || runtime.continuation !== ref.providerContinuationId) return null;
+      const connection = ref.providerConnection;
+      attachRequests.push([
+        ref.workAttemptId,
+        ref.providerContinuationId,
+        connection?.kind === "codex_app_server" ? connection.url : "missing-url",
+        connection?.pid ?? -1,
+        connection?.processIdentity ?? "missing-process-identity",
+      ]);
+      const expected = runtime ? connectionFor(runtime) : null;
+      if (
+        !runtime
+        || runtime.state === "stopped"
+        || runtime.continuation !== ref.providerContinuationId
+        || connection?.kind !== "codex_app_server"
+        || connection.url !== expected?.url
+        || connection.pid !== expected.pid
+        || connection.processIdentity !== expected.processIdentity
+      ) return null;
       return nativeHandle(runtime);
     },
     resume: async (ref, request) => {
-      resumeRequests.push(request.supervisorEntryId ?? "missing-entry");
+      resumeRequests.push([request.supervisorEntryId ?? "missing-entry", request.workAttemptId, ref.providerContinuationId]);
       const runtime: Runtime = {
         workAttemptId: request.workAttemptId,
         pid: ++nextPid,
@@ -2496,8 +2537,9 @@ test("two Codex room agents keep independent provider executions across stop, re
       provider: "codex",
       desired_state: "paused",
       observed_state: "paused",
-      workspace_path: attempts[index]!.workspace_path,
-      work_attempt_id: attempts[index]!.work_attempt_id,
+      source_repo_path: sources[index],
+      workspace_path: null,
+      work_attempt_id: null,
     }));
     const created = await Promise.all(entries.map((candidate) =>
       daemonRequest(paths.socketPath, "manifest.put", { entry: candidate })));
@@ -2508,19 +2550,57 @@ test("two Codex room agents keep independent provider executions across stop, re
         id: candidate.id, expected_desired_state: "paused", desired_state: "running",
       })));
     assert.ok(activated.every((result) => result.ok && (result.result as { applied: boolean }).applied));
-    await eventually(async () => {
-      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-      return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === "working");
-    }, "both Codex provider executions", 5_000);
+    try {
+      await eventually(async () => {
+        const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+        return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === "working");
+      }, "both Codex provider executions", 5_000);
+    } catch (error) {
+      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result;
+      throw new Error(`${(error as Error).message}: ${JSON.stringify(manifest)}`);
+    }
 
     const beforeRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     const alphaBefore = beforeRestart.find((candidate) => candidate.id === identities[0].entryId)!;
     const bravoBefore = beforeRestart.find((candidate) => candidate.id === identities[1].entryId)!;
-    assert.deepEqual(new Set(spawnRequests), new Set(identities.map(({ entryId }) => entryId)));
+    assert.equal(spawnRequests.length, 2);
+    assert.deepEqual(
+      [...spawnRequests].sort(([left], [right]) => left.localeCompare(right)),
+      [
+        [identities[0].entryId, alphaBefore.work_attempt_id],
+        [identities[1].entryId, bravoBefore.work_attempt_id],
+      ],
+    );
+    assert.equal(alphaBefore.source_repo_path, sources[0]);
+    assert.equal(bravoBefore.source_repo_path, sources[1]);
+    assert.ok(alphaBefore.workspace_path?.startsWith(join(env.root, "worktrees")));
+    assert.ok(bravoBefore.workspace_path?.startsWith(join(env.root, "worktrees")));
+    assert.notEqual(alphaBefore.workspace_path, bravoBefore.workspace_path);
     assert.notEqual(alphaBefore.work_attempt_id, bravoBefore.work_attempt_id);
     assert.notEqual(alphaBefore.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.notEqual(alphaBefore.provider_ref?.provider_continuation_id, bravoBefore.provider_ref?.provider_continuation_id);
     assert.notEqual(alphaBefore.provider_ref?.provider_connection?.pid, bravoBefore.provider_ref?.provider_connection?.pid);
+
+    const alphaConnection = alphaBefore.provider_ref?.provider_connection;
+    const bravoConnection = bravoBefore.provider_ref?.provider_connection;
+    assert.equal(alphaConnection?.kind, "codex_app_server");
+    assert.equal(bravoConnection?.kind, "codex_app_server");
+    const crossWire = await adapter.attach({
+      workAttemptId: alphaBefore.work_attempt_id!,
+      providerContinuationId: alphaBefore.provider_ref!.provider_continuation_id,
+      provider: "codex",
+      providerConnection: bravoConnection,
+    });
+    assert.equal(crossWire, null, "matching attempt and continuation cannot attach through another agent's provider connection");
+    assert.equal(attachRequests.length, 1);
+    assert.deepEqual(attachRequests[0], [
+      alphaBefore.work_attempt_id,
+      alphaBefore.provider_ref!.provider_continuation_id,
+      bravoConnection!.kind === "codex_app_server" ? bravoConnection!.url : "missing-url",
+      bravoConnection!.pid ?? -1,
+      bravoConnection!.processIdentity ?? "missing-process-identity",
+    ]);
+    attachRequests.length = 0;
 
     await daemon.stop();
     daemon = new SupervisorDaemon(paths, "darwin", router(), true);
@@ -2529,9 +2609,16 @@ test("two Codex room agents keep independent provider executions across stop, re
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
       return manifest.length === 2
         && manifest.every((candidate) => candidate.observed_state === "working")
-        && new Set(attachRequests).size === 2;
+        && attachRequests.length === 2;
     }, "independent Codex provider reattachment", 5_000);
-    assert.deepEqual(new Set(attachRequests), new Set(attempts.map((attempt) => attempt.work_attempt_id)));
+    assert.equal(attachRequests.length, 2);
+    assert.deepEqual(
+      [...attachRequests].sort(([left], [right]) => left.localeCompare(right)),
+      [
+        identityTuple(runtimes.get(alphaBefore.work_attempt_id!)!),
+        identityTuple(runtimes.get(bravoBefore.work_attempt_id!)!),
+      ].sort(([left], [right]) => left.localeCompare(right)),
+    );
     const afterRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     for (const prior of beforeRestart) {
       const reattached = afterRestart.find((candidate) => candidate.id === prior.id)!;
@@ -2539,6 +2626,23 @@ test("two Codex room agents keep independent provider executions across stop, re
       assert.equal(reattached.provider_ref?.execution_generation_id, prior.provider_ref?.execution_generation_id);
       assert.equal(reattached.provider_ref?.provider_continuation_id, prior.provider_ref?.provider_continuation_id);
       assert.equal(reattached.provider_ref?.provider_connection?.pid, prior.provider_ref?.provider_connection?.pid);
+    }
+    type AttemptDetail = {
+      work_attempt_id: string;
+      execution_generations: Array<{ execution_generation_id: string; terminal: unknown }>;
+    };
+    const attemptDetail = async (entryId: string) =>
+      (await daemonRequest(paths.socketPath, "attempt.read", { id: entryId })).result as AttemptDetail;
+    const alphaAfterRestartAttempt = await attemptDetail(alphaBefore.id);
+    const bravoAfterRestartAttempt = await attemptDetail(bravoBefore.id);
+    for (const [manifestEntry, detail] of [
+      [alphaBefore, alphaAfterRestartAttempt],
+      [bravoBefore, bravoAfterRestartAttempt],
+    ] as const) {
+      assert.equal(detail.work_attempt_id, manifestEntry.work_attempt_id);
+      assert.equal(detail.execution_generations.length, 1);
+      assert.equal(detail.execution_generations[0]?.execution_generation_id, manifestEntry.provider_ref?.execution_generation_id);
+      assert.equal(detail.execution_generations[0]?.terminal, null);
     }
 
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
@@ -2565,12 +2669,29 @@ test("two Codex room agents keep independent provider executions across stop, re
     const afterResume = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     const alphaAfter = afterResume.find((candidate) => candidate.id === identities[0].entryId)!;
     const bravoAfter = afterResume.find((candidate) => candidate.id === identities[1].entryId)!;
-    assert.deepEqual(resumeRequests, [identities[0].entryId]);
+    assert.equal(resumeRequests.length, 1);
+    assert.deepEqual(resumeRequests, [[
+      identities[0].entryId,
+      alphaBefore.work_attempt_id,
+      alphaBefore.provider_ref!.provider_continuation_id,
+    ]]);
     assert.equal(alphaAfter.work_attempt_id, alphaBefore.work_attempt_id);
     assert.notEqual(alphaAfter.provider_ref?.execution_generation_id, alphaBefore.provider_ref?.execution_generation_id);
     assert.notEqual(alphaAfter.provider_ref?.provider_connection?.pid, alphaBefore.provider_ref?.provider_connection?.pid);
     assert.equal(bravoAfter.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.equal(bravoAfter.provider_ref?.provider_connection?.pid, bravoBefore.provider_ref?.provider_connection?.pid);
+    const alphaAfterResumeAttempt = await attemptDetail(alphaAfter.id);
+    const bravoAfterAlphaResumeAttempt = await attemptDetail(bravoAfter.id);
+    assert.equal(alphaAfterResumeAttempt.execution_generations.length, 2);
+    assert.notEqual(alphaAfter.provider_ref?.execution_generation_id, alphaBefore.provider_ref?.execution_generation_id);
+    assert.ok(alphaAfterResumeAttempt.execution_generations.find((generation) =>
+      generation.execution_generation_id === alphaBefore.provider_ref?.execution_generation_id)?.terminal);
+    assert.equal(alphaAfterResumeAttempt.execution_generations.find((generation) =>
+      generation.execution_generation_id === alphaAfter.provider_ref?.execution_generation_id)?.terminal, null);
+    assert.deepEqual(bravoAfterAlphaResumeAttempt.execution_generations, bravoAfterRestartAttempt.execution_generations);
+    assert.equal(bravoAfterAlphaResumeAttempt.execution_generations.length, 1);
+    assert.equal(bravoAfterAlphaResumeAttempt.execution_generations[0]?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
+    assert.equal(bravoAfterAlphaResumeAttempt.execution_generations[0]?.terminal, null);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
@@ -2579,10 +2700,52 @@ test("two Codex room agents keep independent provider executions across stop, re
 
 test("two supervised Codex claims wait together behind one legacy Codex owner", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
-  const daemon = new SupervisorDaemon(paths, "darwin");
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const sources = await Promise.all([
+    committedSourceRepository(env.root, "legacy-handoff-alpha-source"),
+    committedSourceRepository(env.root, "legacy-handoff-bravo-source"),
+  ]);
+  await Promise.all(sources.map((source) => primeDaemonBareRepository(env.root, source)));
+  const spawned: Array<[entryId: string, workAttemptId: string]> = [];
+  let nextPid = 7100;
+  const adapter: NativeProviderAdapter = {
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async (request) => {
+      spawned.push([request.supervisorEntryId ?? "missing-entry", request.workAttemptId]);
+      const pid = ++nextPid;
+      return {
+        workAttemptId: request.workAttemptId,
+        pid,
+        providerContinuationId: `thread_${request.supervisorEntryId}`,
+        providerConnection: { kind: "codex_app_server", url: `ws://127.0.0.1:${pid}`, pid, processIdentity: `fake-codex:${pid}` },
+        observedState: () => "working",
+      };
+    },
+    attach: async () => null,
+    resume: async () => { throw new Error("legacy release activates fresh Codex agents"); },
+    poke: async () => {},
+    controlTurn: async () => ({ capability: "native_interrupt", interrupted: true, resumed: true, state: "working" }),
+    stop: async (handle) => ({
+      endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId,
+    }),
+    onExit: () => () => {},
+    onStream: () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ codex: async () => adapter }), true);
   const candidate = (id: string): DaemonManifestEntry => ({
-    ...entry, id, room_id: "codex_legacy_handoff", provider: "codex", desired_state: "paused", observed_state: "paused",
+    ...entry,
+    id,
+    room_id: "codex_legacy_handoff",
+    provider: "codex",
+    desired_state: "paused",
+    observed_state: "paused",
+    source_repo_path: id.endsWith("alpha") ? sources[0] : sources[1],
+    workspace_path: null,
+    work_attempt_id: null,
   });
   try {
     await daemon.start();
@@ -2606,8 +2769,20 @@ test("two supervised Codex claims wait together behind one legacy Codex owner", 
         id, expected_desired_state: "paused", desired_state: "running",
       })));
     assert.ok(activated.every((result) => result.ok && (result.result as { applied: boolean }).applied));
+    await eventually(async () => {
+      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+      return manifest.length === 2 && manifest.every((item) => item.desired_state === "running" && item.observed_state === "working");
+    }, "both Codex providers after legacy release", 5_000);
     const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    assert.equal(manifest.filter((item) => item.desired_state === "running").length, 2);
+    const alpha = manifest.find((item) => item.id === "codex_waiting_alpha")!;
+    const bravo = manifest.find((item) => item.id === "codex_waiting_bravo")!;
+    assert.equal(spawned.length, 2);
+    assert.deepEqual([...spawned].sort(([left], [right]) => left.localeCompare(right)), [
+      [alpha.id, alpha.work_attempt_id],
+      [bravo.id, bravo.work_attempt_id],
+    ]);
+    assert.notEqual(alpha.work_attempt_id, bravo.work_attempt_id);
+    assert.notEqual(alpha.provider_ref?.execution_generation_id, bravo.provider_ref?.execution_generation_id);
   } finally {
     await daemon.stop();
     await env.cleanup();
