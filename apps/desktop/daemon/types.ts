@@ -130,9 +130,10 @@ export type DaemonTurnControlEffect = {
 /**
  * Replaceable runtime placement, process, and liveness facts.
  *
- * A launched deployment receives its own `run_id` and `deployment_id`, derived
- * from the provider execution generation and stable agent id respectively. Both
- * remain null before the first provider execution exists.
+ * A launched deployment receives its own `run_id` and `deployment_id`, initially
+ * derived from the provider execution generation and stable agent id. They are
+ * durable deployment identity and survive detachment of the optional provider
+ * reference. Both remain null before the first provider execution exists.
  */
 export type DaemonRuntimeDeployment = {
   agent_id: string;

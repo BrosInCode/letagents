@@ -1438,6 +1438,9 @@ test("supervisor convergence persists the retry deadline before it can restart",
     };
     const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
+    const daemonStore = (daemon as unknown as { store: ManifestStore }).store;
+    (daemonStore as unknown as { write: () => never }).write = () => { throw new Error("reconcile must not call the full manifest write path"); };
+    (daemonStore as unknown as { replaceEntries: () => never }).replaceEntries = () => { throw new Error("reconcile must not replace all entries"); };
     const input = { workAttemptId: "attempt", reconciliationActionId: "generation-1", reconciliationActionSequence: 1, nowMs: 1_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null };
     assert.equal((await daemon.reconcile(entry.id, input, 100)).decision.action, "wait");
     assert.deepEqual(calls, []);
