@@ -41,6 +41,8 @@ const api: DesktopApi = {
     deleteAccountRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier),
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
+    getLiveMetadata: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:get-live-metadata", roomIdentifier),
     getLatestMessages: (roomIdentifiers: string[]) =>
       ipcRenderer.invoke("desktop:room:get-latest-messages", roomIdentifiers),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>

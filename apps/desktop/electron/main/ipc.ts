@@ -77,6 +77,7 @@ import type {
   DesktopFocusRoomMutationResult,
   DesktopFocusRoomSettingsPatch,
   DesktopRoomInfo,
+  DesktopRoomLiveMetadata,
   DesktopRoomMessagesPage,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
@@ -168,6 +169,7 @@ import {
   createDesktopInviteRoom,
   deleteDesktopAccountRoom,
   fetchRoomSnapshot,
+  fetchRoomLiveMetadata,
   getDesktopGitHubEvents,
   getDesktopRoomArtifacts,
   getDesktopGitHubIntegrationStatus,
@@ -376,6 +378,13 @@ export function registerDesktopIpcHandlers(
       _event,
       roomIdentifier?: string | null,
     ): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-live-metadata",
+    async (
+      _event,
+      roomIdentifier: string,
+    ): Promise<DesktopRoomLiveMetadata> => fetchRoomLiveMetadata(roomIdentifier),
   );
   targetIpcMain.handle(
     "desktop:room:get-latest-messages",

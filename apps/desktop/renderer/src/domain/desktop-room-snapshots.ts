@@ -2,6 +2,7 @@ import type {
   DesktopGitHubEventsPage,
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
+  DesktopRoomLiveMetadata,
   DesktopRoomMessage,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
@@ -186,6 +187,48 @@ export function preserveErroredSnapshotSources(
     recentActivity: errored("activityHistory") ? current.recentActivity : incoming.recentActivity,
     roomArtifacts: errored("roomArtifacts") ? current.roomArtifacts : incoming.roomArtifacts,
     boardSettings: errored("boardSettings") ? current.boardSettings : incoming.boardSettings,
+  };
+}
+
+/**
+ * Apply poll-only room metadata (focus rooms, participants, presence, recent
+ * activity, board settings) onto the current snapshot. This is what the
+ * periodic 15s tick applies: it replaces ONLY those five sections and leaves
+ * every event-fed section — messages, tasks, GitHub events, artifacts,
+ * reasoning — untouched, so live-appended data is never clobbered by a poll.
+ *
+ * A section whose fetch failed (`metadata.sourceStates[k].status === "error"`)
+ * keeps the snapshot's previously loaded data — matching
+ * `preserveErroredSnapshotSources` — so a transient outage does not blank the
+ * room; its error state is still recorded so degraded-state banners show. The
+ * sourceStates of the skipped event-fed sections are preserved verbatim.
+ */
+export function applyRoomLiveMetadata(
+  snapshot: DesktopRoomSnapshot | null,
+  metadata: DesktopRoomLiveMetadata,
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  if (!snapshotMatchesRoom(snapshot, metadata.roomIdentifier)) return snapshot;
+  const states = metadata.sourceStates;
+  const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  return {
+    ...snapshot,
+    focusRooms: errored("focusRooms") ? snapshot.focusRooms : metadata.focusRooms,
+    participants: errored("participants") ? snapshot.participants : metadata.participants,
+    participantHiddenCount: errored("participants")
+      ? snapshot.participantHiddenCount
+      : metadata.participantHiddenCount,
+    presence: errored("presence") ? snapshot.presence : metadata.presence,
+    recentActivity: errored("activityHistory") ? snapshot.recentActivity : metadata.recentActivity,
+    boardSettings: errored("boardSettings") ? snapshot.boardSettings : metadata.boardSettings,
+    sourceStates: {
+      ...snapshot.sourceStates,
+      focusRooms: states.focusRooms,
+      participants: states.participants,
+      presence: states.presence,
+      activityHistory: states.activityHistory,
+      boardSettings: states.boardSettings,
+    },
   };
 }
 

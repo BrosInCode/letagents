@@ -1,6 +1,11 @@
 import type { ComputedRef, Ref } from "vue";
 import type { DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
-import { mergeRoomSnapshotMessages, roomSnapshotsMatch } from "../domain/desktop-room-snapshots";
+import {
+  applyRoomLiveMetadata,
+  mergeRoomSnapshotMessages,
+  roomSnapshotsMatch,
+  snapshotMatchesRoom,
+} from "../domain/desktop-room-snapshots";
 import { normalizeRoomIdentifier } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index.js";
 
@@ -11,11 +16,36 @@ interface DesktopRoomLiveSyncOptions {
   workers: Ref<WorkerSnapshot[]>;
 }
 
+/**
+ * Cadence of the periodic poll-only metadata refresh. Presence/participants/
+ * board-settings freshness is not latency-critical (everything actionable is
+ * event-fed after PR #823), so a 15s tick is plenty and cuts steady-state room
+ * traffic to a handful of light requests instead of a full ~10-request snapshot
+ * rebuild every 5s.
+ */
+const PERIODIC_METADATA_REFRESH_INTERVAL_MS = 15_000;
+
 export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshTimer: number | null = null;
   let liveMetadataRefreshInterval: number | null = null;
+  let liveMetadataRefreshIntervalRoomIdentifier: string | null = null;
   let liveMetadataRefreshSequence = 0;
+  let periodicMetadataRefreshInFlight = false;
 
+  function isStaleRefresh(refreshSequence: number, roomIdentifier: string): boolean {
+    return (
+      refreshSequence !== liveMetadataRefreshSequence
+      || normalizeRoomIdentifier(options.selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)
+    );
+  }
+
+  /**
+   * FULL snapshot refetch — the consistency/backfill path. Used by the debounced
+   * one-shot (`scheduleLiveMetadataRefresh`) on SSE reconnect (`open`), rental
+   * events, manual refresh, and missing-thread backfill. Because there is no SSE
+   * replay, this stays a full rebuild so it can reconcile anything missed during
+   * an outage. NOT used by the periodic interval tick.
+   */
   async function refreshSelectedRoomSnapshotFromServer(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
     if (!roomIdentifier) return;
@@ -24,16 +54,54 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
       desktopIpc.room.getSnapshot(roomIdentifier),
       desktopIpc.workers.list().catch(() => options.workers.value),
     ]);
-    if (
-      refreshSequence !== liveMetadataRefreshSequence
-      || normalizeRoomIdentifier(options.selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)
-    ) {
-      return;
-    }
+    if (isStaleRefresh(refreshSequence, roomIdentifier)) return;
     options.workers.value = nextWorkers;
     options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot);
     if (options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, snapshot)) {
       options.rootRoomSnapshot.value = mergeRoomSnapshotMessages(options.rootRoomSnapshot.value, snapshot);
+    }
+  }
+
+  /**
+   * Periodic poll-only refresh — the interval tick. Fetches ONLY the metadata
+   * the server pushes no events for (focus rooms, participants, presence,
+   * recent activity, board settings) plus the cheap local `workers.list()`, and
+   * applies them onto the current snapshot without touching event-fed sections
+   * (messages, tasks, GitHub events, artifacts, reasoning).
+   *
+   * In-flight guard: if the previous tick is still running, skip this one so a
+   * slow poll cannot stack overlapping request bursts. The shared sequence
+   * counter still discards any stale result whose room changed mid-flight or
+   * that a later full refresh superseded.
+   */
+  async function refreshSelectedRoomLiveMetadata(): Promise<void> {
+    const roomIdentifier = options.selectedRoomIdentifier.value;
+    if (!roomIdentifier) return;
+    // Stale live bridge (preload predates this binding): skip the tick as a
+    // whole, workers.list() included — a partial tick that refreshed workers
+    // but never applied metadata would be misleading, and workers are still
+    // refreshed by every full-refresh pass (stream open, rentals, manual
+    // refresh) until the bridge is reloaded.
+    if (!desktopIpc.room.getLiveMetadata) return;
+    if (periodicMetadataRefreshInFlight) return;
+    periodicMetadataRefreshInFlight = true;
+    const refreshSequence = ++liveMetadataRefreshSequence;
+    try {
+      const [metadata, nextWorkers] = await Promise.all([
+        desktopIpc.room.getLiveMetadata?.(roomIdentifier),
+        desktopIpc.workers.list().catch(() => options.workers.value),
+      ]);
+      if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier)) return;
+      options.workers.value = nextWorkers;
+      options.selectedSnapshot.value = applyRoomLiveMetadata(options.selectedSnapshot.value, metadata);
+      if (
+        options.rootRoomSnapshot.value
+        && snapshotMatchesRoom(options.rootRoomSnapshot.value, metadata.roomIdentifier)
+      ) {
+        options.rootRoomSnapshot.value = applyRoomLiveMetadata(options.rootRoomSnapshot.value, metadata);
+      }
+    } finally {
+      periodicMetadataRefreshInFlight = false;
     }
   }
 
@@ -53,17 +121,31 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     liveMetadataRefreshTimer = null;
   }
 
-  function startLiveMetadataRefreshInterval(): void {
+  /**
+   * Start (or keep) the periodic metadata interval for a room. Idempotent: if an
+   * interval is already running for the same room it is left alone rather than
+   * cleared and recreated — the every-message stream sync no longer resets the
+   * countdown on each incoming message. A different room clears and restarts.
+   */
+  function startLiveMetadataRefreshInterval(roomIdentifier: string): void {
+    if (
+      liveMetadataRefreshInterval !== null
+      && normalizeRoomIdentifier(liveMetadataRefreshIntervalRoomIdentifier) === normalizeRoomIdentifier(roomIdentifier)
+    ) {
+      return;
+    }
     clearLiveMetadataRefreshInterval();
+    liveMetadataRefreshIntervalRoomIdentifier = roomIdentifier;
     liveMetadataRefreshInterval = window.setInterval(() => {
-      void refreshSelectedRoomSnapshotFromServer().catch(() => undefined);
-    }, 5_000);
+      void refreshSelectedRoomLiveMetadata().catch(() => undefined);
+    }, PERIODIC_METADATA_REFRESH_INTERVAL_MS);
   }
 
   function clearLiveMetadataRefreshInterval(): void {
-    if (!liveMetadataRefreshInterval) return;
+    if (liveMetadataRefreshInterval === null) return;
     window.clearInterval(liveMetadataRefreshInterval);
     liveMetadataRefreshInterval = null;
+    liveMetadataRefreshIntervalRoomIdentifier = null;
   }
 
   async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
@@ -75,7 +157,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     }
     const latestMessageId = options.selectedSnapshot.value?.messages.at(-1)?.id || null;
     await desktopIpc.room.startStream(roomIdentifier, latestMessageId);
-    startLiveMetadataRefreshInterval();
+    startLiveMetadataRefreshInterval(roomIdentifier);
   }
 
   return {
