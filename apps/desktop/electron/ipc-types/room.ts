@@ -385,6 +385,41 @@ export interface DesktopRoomSnapshot {
   sourceStates: DesktopSnapshotSourceStates;
 }
 
+/**
+ * Poll-only room metadata — the subset of a snapshot that the server pushes no
+ * events for and must therefore be re-polled on a cadence: focus rooms,
+ * participants, presence, recent activity, and board settings. Everything else
+ * a room shows (messages, tasks, GitHub events, artifacts, reasoning) is
+ * event-fed, so the periodic refresh fetches only these sections and applies
+ * them onto the current snapshot, leaving the event-fed sections untouched.
+ */
+export type DesktopRoomLiveMetadataSourceKey = Extract<
+  DesktopSnapshotSourceKey,
+  "focusRooms" | "participants" | "presence" | "activityHistory" | "boardSettings"
+>;
+
+export type DesktopRoomLiveMetadataSourceStates = Record<
+  DesktopRoomLiveMetadataSourceKey,
+  DesktopSnapshotSourceState
+>;
+
+export interface DesktopRoomLiveMetadata {
+  roomIdentifier: string | null;
+  focusRooms: DesktopFocusRoomInfo[];
+  participants: DesktopParticipantSummary[];
+  participantHiddenCount: number;
+  presence: DesktopAgentPresence[];
+  recentActivity: DesktopActivityEntry[];
+  boardSettings: DesktopBoardSettingsSummary;
+  /**
+   * Per-source load status for just the poll-only sections. A section that
+   * failed to load is marked "error" (data falling back to empty) so the
+   * renderer keeps its previously loaded data for that section instead of
+   * blanking it — matching the full snapshot's graceful degradation.
+   */
+  sourceStates: DesktopRoomLiveMetadataSourceStates;
+}
+
 export interface DesktopSendRoomMessageResult {
   message: DesktopRoomMessage;
 }

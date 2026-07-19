@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type {
+  DesktopRoomLiveMetadata,
   DesktopRoomMessage,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
 } from "../../electron/ipc-types";
 import {
+  applyRoomLiveMetadata,
   mergeRoomSnapshotMessages,
   messageReferencesMissingThreadContext,
   upsertSnapshotRoomArtifact,
@@ -136,6 +138,118 @@ describe("messageReferencesMissingThreadContext", () => {
     assert.equal(messageReferencesMissingThreadContext(message, existing), true);
   });
 });
+
+describe("applyRoomLiveMetadata", () => {
+  it("replaces only the poll-only sections and leaves event-fed data untouched", () => {
+    const current = {
+      ...roomSnapshot("cloud", "hello", "msg_1"),
+      tasks: [{ id: "task_1", title: "Keep me" }],
+      reasoningSessions: [{ id: "reason_1" }],
+      roomArtifacts: [{ identityKey: "git:branch:ref:feat" }],
+      participants: [{ participantKey: "old" }],
+    } as unknown as DesktopRoomSnapshot;
+    const metadata = liveMetadata({
+      participants: [{ participantKey: "fresh" }],
+      participantHiddenCount: 4,
+      presence: [{ actorLabel: "agent:river" }],
+      boardSettings: { managerMode: "intent_required", activeManager: null, pendingIntentCount: 2 },
+    });
+
+    const applied = applyRoomLiveMetadata(current, metadata)!;
+
+    // Poll-only sections are replaced from the metadata.
+    assert.deepEqual(applied.participants.map((p) => (p as { participantKey: string }).participantKey), ["fresh"]);
+    assert.equal(applied.participantHiddenCount, 4);
+    assert.equal(applied.presence.length, 1);
+    assert.equal(applied.boardSettings.managerMode, "intent_required");
+    // Event-fed sections are preserved verbatim (never re-downloaded on a tick).
+    assert.deepEqual(applied.messages.map((m) => m.id), ["msg_1"]);
+    assert.deepEqual(applied.tasks.map((t) => t.id), ["task_1"]);
+    assert.deepEqual(applied.reasoningSessions.map((s) => s.id), ["reason_1"]);
+    assert.deepEqual(
+      applied.roomArtifacts.map((a) => a.identityKey),
+      ["git:branch:ref:feat"],
+    );
+  });
+
+  it("preserves the sourceStates of the skipped event-fed sections", () => {
+    const current = {
+      ...roomSnapshot("cloud", "hello", "msg_1"),
+      sourceStates: {
+        ...readyStates(),
+        tasks: { status: "error", error: "tasks down" },
+        messages: { status: "error", error: "messages down" },
+      },
+    } as DesktopRoomSnapshot;
+
+    const applied = applyRoomLiveMetadata(current, liveMetadata({}))!;
+
+    // Event-fed sections keep whatever state they had — a metadata tick never
+    // fetched them, so it must not flip them to ready or error.
+    assert.equal(applied.sourceStates.tasks.status, "error");
+    assert.equal(applied.sourceStates.messages.status, "error");
+    // Poll-only sections adopt the metadata's fresh (ready) states.
+    assert.equal(applied.sourceStates.presence.status, "ready");
+    assert.equal(applied.sourceStates.participants.status, "ready");
+  });
+
+  it("keeps last-good data for a poll-only section that failed to refresh", () => {
+    const current = {
+      ...roomSnapshot("cloud", "hello", "msg_1"),
+      presence: [{ actorLabel: "agent:river" }],
+    } as unknown as DesktopRoomSnapshot;
+    const metadata = liveMetadata({
+      presence: [],
+      sourceStates: {
+        focusRooms: { status: "ready", error: null },
+        participants: { status: "ready", error: null },
+        presence: { status: "error", error: "presence down" },
+        activityHistory: { status: "ready", error: null },
+        boardSettings: { status: "ready", error: null },
+      },
+    });
+
+    const applied = applyRoomLiveMetadata(current, metadata)!;
+
+    // Failed poll-only source keeps prior data but reports the error state.
+    assert.equal(applied.presence.length, 1);
+    assert.equal(applied.sourceStates.presence.status, "error");
+  });
+
+  it("returns the snapshot unchanged when the metadata is for a different room", () => {
+    const current = roomSnapshot("cloud", "hello", "msg_1");
+    const metadata = liveMetadata({ roomIdentifier: "some/other/room" });
+
+    assert.equal(applyRoomLiveMetadata(current, metadata), current);
+  });
+
+  it("is a no-op on a null snapshot", () => {
+    assert.equal(applyRoomLiveMetadata(null, liveMetadata({})), null);
+  });
+});
+
+function liveMetadata(
+  overrides: Partial<DesktopRoomLiveMetadata>,
+): DesktopRoomLiveMetadata {
+  const ready = () => ({ status: "ready" as const, error: null });
+  return {
+    roomIdentifier: "github.com/BrosInCode/letagents",
+    focusRooms: [],
+    participants: [],
+    participantHiddenCount: 0,
+    presence: [],
+    recentActivity: [],
+    boardSettings: { managerMode: "manager_optional", activeManager: null, pendingIntentCount: 0 },
+    sourceStates: {
+      focusRooms: ready(),
+      participants: ready(),
+      presence: ready(),
+      activityHistory: ready(),
+      boardSettings: ready(),
+    },
+    ...overrides,
+  };
+}
 
 function roomSnapshot(
   storageMode: "cloud" | "local",

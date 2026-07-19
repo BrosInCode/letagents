@@ -70,6 +70,7 @@ import type {
   DesktopRoomThreadInboxPage,
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
+  DesktopRoomLiveMetadata,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
@@ -126,6 +127,11 @@ export interface DesktopApi {
     leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     deleteAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
+    /**
+     * Optional: absent on a stale live bridge (renderer updated before the
+     * preload was reloaded). Callers must skip gracefully when missing.
+     */
+    getLiveMetadata?: (roomIdentifier: string) => Promise<DesktopRoomLiveMetadata>;
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;

@@ -53,40 +53,20 @@ export async function fetchRoomSnapshotData(
     messages,
     githubEvents,
   ] = await Promise.all([
-    loadSource(
-      apiFetch<FocusRoomsResponse>(
-        `/rooms/${encodeURIComponent(apiRoomIdentifier)}/focus-rooms`,
-      ),
-      { focus_rooms: [] } as FocusRoomsResponse,
-    ),
+    loadFocusRooms(apiRoomIdentifier),
     loadSource(
       fetchAllCloudTasks(apiRoomIdentifier),
       { tasks: [] } as RoomSnapshotData["tasksData"],
     ),
-    loadSource(
-      apiFetch<ParticipantsResponse>(
-        `/rooms/${encodeURIComponent(apiRoomIdentifier)}/participants`,
-      ),
-      { participants: [], hidden_count: 0 } as ParticipantsResponse,
-    ),
-    loadSource(
-      apiFetch<PresenceResponse>(
-        `/rooms/${encodeURIComponent(apiRoomIdentifier)}/presence?limit=100&scope=snapshot`,
-      ),
-      { presence: [] } as PresenceResponse,
-    ),
+    loadParticipants(apiRoomIdentifier),
+    loadPresence(apiRoomIdentifier),
     loadSource(
       apiFetch<ReasoningResponse>(
         `/rooms/${encodeURIComponent(apiRoomIdentifier)}/reasoning-sessions`,
       ),
       { sessions: [], reasoning_sessions: [] } as ReasoningResponse,
     ),
-    loadSource(
-      apiFetch<ActivityHistoryResponse>(
-        `/rooms/${encodeURIComponent(apiRoomIdentifier)}/activity-history?page_size=50`,
-      ),
-      { entries: [] } as ActivityHistoryResponse,
-    ),
+    loadActivityHistory(apiRoomIdentifier),
     loadSource(
       storage.effectiveMode === "local"
         ? getLocalRoomArtifacts(localRoomIdentifier, { limit: 100 })
@@ -95,12 +75,7 @@ export async function fetchRoomSnapshotData(
           ),
       { artifacts: [] } as RoomSnapshotData["roomArtifactsData"],
     ),
-    loadSource(
-      apiFetch<RoomSnapshotData["boardSettingsData"]>(
-        `/rooms/${encodeURIComponent(apiRoomIdentifier)}/board-settings`,
-      ),
-      { pending_intent_count: 0 } as RoomSnapshotData["boardSettingsData"],
-    ),
+    loadBoardSettings(apiRoomIdentifier),
     loadSource(
       !options.forceCloudMessages && storage.effectiveMode === "local"
         ? getLatestLocalChatMessages(localRoomIdentifier, {
@@ -170,6 +145,57 @@ export async function loadSource<T>(
       },
     };
   }
+}
+
+/**
+ * Poll-only source loaders — the sections the server pushes no events for, so
+ * they must be re-polled on a cadence. Extracted so both the full snapshot
+ * fetch and the lighter periodic metadata fetch share the exact same request
+ * URLs, fallbacks, and `loadSource` graceful-degradation semantics.
+ */
+export function loadFocusRooms(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<FocusRoomsResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/focus-rooms`,
+    ),
+    { focus_rooms: [] } as FocusRoomsResponse,
+  );
+}
+
+export function loadParticipants(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<ParticipantsResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/participants`,
+    ),
+    { participants: [], hidden_count: 0 } as ParticipantsResponse,
+  );
+}
+
+export function loadPresence(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<PresenceResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/presence?limit=100&scope=snapshot`,
+    ),
+    { presence: [] } as PresenceResponse,
+  );
+}
+
+export function loadActivityHistory(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<ActivityHistoryResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/activity-history?page_size=50`,
+    ),
+    { entries: [] } as ActivityHistoryResponse,
+  );
+}
+
+export function loadBoardSettings(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<RoomSnapshotData["boardSettingsData"]>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/board-settings`,
+    ),
+    { pending_intent_count: 0 } as RoomSnapshotData["boardSettingsData"],
+  );
 }
 
 async function fetchAllCloudTasks(
