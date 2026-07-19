@@ -567,6 +567,7 @@ export class SupervisorDaemon {
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
     await this.store.close();
+    await this.durability.close();
   }
 
   /**
@@ -586,6 +587,7 @@ export class SupervisorDaemon {
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
     await this.store.close();
+    void this.durability.close().catch(() => undefined);
     // Existing convergence/provider callbacks are generation-fenced below.
     // Do not await them: a wedged native transport must not block an upgrade.
     this.convergenceRequests.clear();
