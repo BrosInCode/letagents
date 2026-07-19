@@ -46,10 +46,16 @@ const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
  * the entire configured poll window. Reachability must not expire before that
  * request can return and publish its next exact-binding heartbeat. */
 export function workplaceLivenessStaleAfterMs(rawPollMaxMs = process.env.LETAGENTS_POLL_MAX_MS): number {
-  const parsed = Number(rawPollMaxMs);
-  const pollMaxMs = Number.isFinite(parsed) && parsed > 0
-    ? Math.min(Math.trunc(parsed), MAX_ROOM_POLL_MAX_MS)
-    : DEFAULT_ROOM_POLL_MAX_MS;
+  // Match src/shared/poll-timeout-cap.ts exactly. The desktop daemon is a
+  // separately-built executable, so importing that source would escape its
+  // rootDir; keeping the grammar explicit here prevents a malformed operator
+  // value from making liveness expire before the real MCP/API poll cap.
+  const parsed = rawPollMaxMs == null || rawPollMaxMs === ""
+    ? Number.NaN
+    : Number.parseInt(String(rawPollMaxMs), 10);
+  const pollMaxMs = Number.isNaN(parsed) || parsed < 1_000
+    ? DEFAULT_ROOM_POLL_MAX_MS
+    : Math.min(parsed, MAX_ROOM_POLL_MAX_MS);
   return Math.max(NATIVE_LIVENESS_STALE_AFTER_MS, pollMaxMs + LIVENESS_GRACE_MS);
 }
 type DaemonTurnControlResult = ProviderTurnControlResult & {
