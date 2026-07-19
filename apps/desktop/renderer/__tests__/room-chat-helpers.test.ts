@@ -698,6 +698,32 @@ describe("room chat helpers", () => {
     assert.deepEqual(candidates, []);
   });
 
+  it("uses canonical handles for supervised names the desktop parser cannot address", () => {
+    const stable = roomMentionCandidates([participant({
+      participantKey: "agent:local/alice/codex/agent-smith",
+      kind: "agent",
+      displayName: "Agent Smith",
+      actorLabel: "Agent Smith | Alice's agent | Codex",
+      agentKey: "local/Alice/codex/agent-smith",
+      githubLogin: null,
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    })], "smith");
+    const unaddressable = roomMentionCandidates([participant({
+      participantKey: "agent:legacy-agent-smith",
+      kind: "agent",
+      displayName: "Agent Smith",
+      actorLabel: "Agent Smith | Alice's agent | Codex",
+      agentKey: null,
+      githubLogin: null,
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    })], "smith");
+
+    assert.equal(stable[0]?.insertText, "agent:local/Alice/codex/agent-smith");
+    assert.deepEqual(unaddressable, [], "the UI never inserts a label the activation parser would truncate");
+  });
+
   it("maps GitHub room messages to desktop event cards", () => {
     const event = parseGitHubEvent({
       ...roomMessage("github_1", null),

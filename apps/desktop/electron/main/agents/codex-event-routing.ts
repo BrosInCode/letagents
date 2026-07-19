@@ -29,6 +29,16 @@ export function canDeliverDesktopEventToManagedAgent(
     worker.status !== "failed";
 }
 
+export function canDeliverCodexStopControlToManagedAgent(
+  worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "canStop" | "deliveryMode" | "status">,
+): boolean {
+  return worker.deliveryMode === "desktop_events" &&
+    Boolean(worker.agentSessionId) &&
+    worker.canStop &&
+    worker.status !== "interrupted" &&
+    worker.status !== "failed";
+}
+
 export function isOwnRoomStreamEvent(
   session: DesktopCodexLiveSessionState,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
@@ -53,8 +63,8 @@ export function isOwnRoomStreamEventForManagedAgent(
     worker.agentSessionId,
     specificAgentKey(worker.agentKey),
   ].map(normalizeKey).filter(Boolean);
-  if (workerStableKeys.some((key) => messageStableKeys.includes(key))) {
-    return true;
+  if (messageStableKeys.length && workerStableKeys.length) {
+    return workerStableKeys.some((key) => messageStableKeys.includes(key));
   }
 
   const messageNames = [
@@ -91,13 +101,13 @@ export function shouldDeliverCodexRoomStreamEventToSession(
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): boolean {
   const worker = toPublicManagedAgentSession(session);
-  if (!canDeliverDesktopEventToManagedAgent(worker) || isOwnRoomStreamEventForManagedAgent(worker, event)) {
+  if (isOwnRoomStreamEventForManagedAgent(worker, event)) {
     return false;
   }
   // A locally-configured stop phrase is supervisor control, not ordinary room
   // conversation. It must remain deliverable even when unaddressed.
   if (isStopPhraseRoomStreamEvent(session, event)) {
-    return true;
+    return canDeliverCodexStopControlToManagedAgent(worker);
   }
   return shouldDeliverCodexRoomStreamEventToManagedAgent(worker, event);
 }
@@ -106,15 +116,25 @@ export function shouldDeliverCodexRoomStreamEventToManagedAgent(
   worker: DesktopManagedAgentSession,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): boolean {
-  if (!canDeliverDesktopEventToManagedAgent(worker) || isOwnRoomStreamEventForManagedAgent(worker, event)) {
-    return false;
-  }
+  return resolveCodexRoomStreamEventRecipients([worker], event).length === 1;
+}
 
-  if (event.type === "message") {
-    return codexManagedAgentMessageActivationDecision(worker, event.message) === "activate";
+/**
+ * Resolve one room event against the complete eligible Codex population.
+ * Alias uniqueness cannot be decided by an individual worker, so production
+ * dispatch must call this once for the room rather than once per session.
+ */
+export function resolveCodexRoomStreamEventRecipients(
+  workers: readonly DesktopManagedAgentSession[],
+  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+): DesktopManagedAgentSession[] {
+  const eligible = workers.filter((worker) =>
+    canDeliverDesktopEventToManagedAgent(worker) &&
+    !isOwnRoomStreamEventForManagedAgent(worker, event));
+  if (event.type === "task_update") {
+    return eligible.filter((worker) => taskTargetsManagedAgent(worker, event.task));
   }
-
-  return taskTargetsManagedAgent(worker, event.task);
+  return resolveCodexMessageRecipients(eligible, event.message);
 }
 
 export function shouldDeliverRoomStreamEventToManagedAgent(
@@ -157,31 +177,9 @@ export function codexManagedAgentMessageActivationDecision(
   worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">,
   message: DesktopRoomMessage,
 ): DesktopManagedAgentMessageActivationDecision {
-  if (normalizeKey(message.source) === "managed_agent_failure") {
-    return "silent";
-  }
-
-  const mentions = extractMentionHandles(message.text);
-  // @everyone is the sole broadcast address for Codex workers. Natural
-  // language such as "anyone" is intentionally not a fan-out signal.
-  if (mentions.some((mention) => normalizeHandle(mention) === "everyone")) {
-    return "activate";
-  }
-  if (mentions.some((mention) => managedAgentAliases(worker).has(normalizeMentionIdentityHandle(mention)))) {
-    return "activate";
-  }
-
-  // A message replying directly to this worker, or continuing a thread where
-  // it already participated, remains directed work without making a thread
-  // into a room-wide subscription.
-  if (senderMatchesManagedAgent(message.replyTo?.sender, worker)) {
-    return "activate";
-  }
-  if (isThreadReply(message) && threadParticipantsIncludeManagedAgent(message, worker)) {
-    return "activate";
-  }
-
-  return "silent";
+  return resolveCodexMessageRecipients([worker], message).length
+    ? "activate"
+    : "silent";
 }
 
 export function desktopManagedAgentMessageActivationDecision(
@@ -322,6 +320,73 @@ function managedAgentAliases(
     if (keyAlias) aliases.add(keyAlias);
     const handleAlias = normalizeHandle(value);
     if (handleAlias) aliases.add(handleAlias);
+  }
+  return aliases;
+}
+
+type CodexAddressableWorker = Pick<
+  DesktopManagedAgentSession,
+  "agentSessionId" | "agentKey" | "actorLabel" | "displayName"
+>;
+
+function resolveCodexMessageRecipients<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  message: DesktopRoomMessage,
+): T[] {
+  if (normalizeKey(message.source) === "managed_agent_failure") {
+    return [];
+  }
+
+  const mentions = extractMentionHandles(message.text);
+  if (mentions.some((mention) => normalizeHandle(mention) === "everyone")) {
+    return [...workers];
+  }
+
+  const addressed = new Set<T>();
+  let hasAgentMention = false;
+  for (const mention of mentions) {
+    if (!isLikelyAgentMentionHandle(mention)) continue;
+    hasAgentMention = true;
+    const normalizedMention = normalizeMentionIdentityHandle(mention);
+    const stableMatches = workers.filter((worker) =>
+      stableManagedAgentAliases(worker).has(normalizedMention));
+    if (stableMatches.length === 1) {
+      addressed.add(stableMatches[0]);
+      continue;
+    }
+    // Stable identifiers are expected to be unique. Fail closed if corrupted
+    // room state presents the same canonical identity more than once.
+    if (stableMatches.length > 1) continue;
+
+    const aliasMatches = workers.filter((worker) =>
+      displayManagedAgentAliases(worker).has(normalizedMention));
+    if (aliasMatches.length === 1) {
+      addressed.add(aliasMatches[0]);
+    }
+  }
+  if (hasAgentMention) {
+    return workers.filter((worker) => addressed.has(worker));
+  }
+
+  return workers.filter((worker) =>
+    senderMatchesManagedAgent(message.replyTo?.sender, worker) ||
+    (isThreadReply(message) && threadParticipantsIncludeManagedAgent(message, worker)));
+}
+
+function stableManagedAgentAliases(worker: CodexAddressableWorker): Set<string> {
+  const aliases = new Set<string>();
+  const agentSessionId = normalizeHandle(worker.agentSessionId);
+  const agentKey = normalizeHandle(specificAgentKey(worker.agentKey));
+  if (agentSessionId) aliases.add(agentSessionId);
+  if (agentKey) aliases.add(agentKey);
+  return aliases;
+}
+
+function displayManagedAgentAliases(worker: CodexAddressableWorker): Set<string> {
+  const aliases = new Set<string>();
+  for (const value of [worker.displayName, worker.actorLabel]) {
+    const alias = normalizeHandle(value);
+    if (alias) aliases.add(alias);
   }
   return aliases;
 }
