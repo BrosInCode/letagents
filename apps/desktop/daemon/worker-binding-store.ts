@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { chmod, readFile, rename, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -64,7 +65,7 @@ export class WorkerBindingStore {
     // Test/fence seam must remain outside the SQLite transaction: a stalled
     // pre-commit caller must not lock unrelated manifest work during handoff.
     await this.write(input);
-    return this.withMutation(async (database) => this.transaction(database, async () => {
+    return this.withMutation(async (database) => this.transaction(database, () => {
       const prior = this.read(database, input.entry_id);
       const sameSession = prior?.agent_session_id === input.agent_session_id;
       const now = new Date().toISOString();
@@ -97,7 +98,7 @@ export class WorkerBindingStore {
 
   async checkpointCursor(entryId: string, agentSessionId: string, executionGenerationId: string, roomCursor: string): Promise<WorkerSessionBinding> {
     for (const [field, value] of Object.entries({ entryId, agentSessionId, executionGenerationId, roomCursor })) if (!value.trim()) throw new Error(`Worker cursor checkpoint ${field} is required.`);
-    return this.withMutation(async (database) => this.transaction(database, async () => {
+    return this.withMutation(async (database) => this.transaction(database, () => {
       const prior = this.match(database, entryId, agentSessionId, executionGenerationId);
       if (prior.room_cursor === roomCursor) return prior;
       run(database.prepare("UPDATE worker_session_bindings SET room_cursor = ?, updated_at = ? WHERE entry_id = ? AND agent_session_id = ? AND execution_generation_id = ?"), roomCursor, new Date().toISOString(), entryId, agentSessionId, executionGenerationId);
@@ -108,7 +109,7 @@ export class WorkerBindingStore {
   async checkpointCursorMonotonic(entryId: string, agentSessionId: string, executionGenerationId: string, roomCursor: string): Promise<{ binding: WorkerSessionBinding; advanced: boolean }> {
     const candidate = parseRoomMessageNumber(roomCursor);
     if (candidate === null) throw new Error("Compatibility worker cursor must be a numeric room message id.");
-    return this.withMutation(async (database) => this.transaction(database, async () => {
+    return this.withMutation(async (database) => this.transaction(database, () => {
       const prior = this.match(database, entryId, agentSessionId, executionGenerationId);
       const existing = parseRoomMessageNumber(prior.room_cursor);
       if (prior.room_cursor !== null && (existing === null || candidate <= existing)) return { binding: prior, advanced: false };
@@ -139,7 +140,7 @@ export class WorkerBindingStore {
   }
 
   async unbind(entryId: string, expectedSessionId?: string, expectedExecutionGenerationId?: string): Promise<boolean> {
-    return this.withMutation(async (database) => this.transaction(database, async () => {
+    return this.withMutation(async (database) => this.transaction(database, () => {
       const current = this.read(database, entryId);
       if (!current || (expectedSessionId && current.agent_session_id !== expectedSessionId) || (expectedExecutionGenerationId && current.execution_generation_id !== expectedExecutionGenerationId)) return false;
       run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id = ?"), entryId);
@@ -148,7 +149,7 @@ export class WorkerBindingStore {
   }
 
   private async reservePublication(entryId: string, observedAtMs: number): Promise<Reservation | null> {
-    return this.withMutation(async (database) => this.transaction(database, async () => {
+    return this.withMutation(async (database) => this.transaction(database, () => {
       const prior = this.read(database, entryId); if (!prior) return null;
       const row = database.prepare("SELECT binding_epoch FROM worker_session_bindings WHERE entry_id = ?").get(entryId) as Row;
       const now = Date.now(); const candidate = Number.isFinite(observedAtMs) ? Math.min(Math.floor(observedAtMs), now) : now;
@@ -160,7 +161,7 @@ export class WorkerBindingStore {
   }
 
   private async finalizePublication(reservation: Reservation, outcome: "accepted" | "rejected" | "transport_error"): Promise<void> {
-    await this.withMutation(async (database) => this.transaction(database, async () => {
+    await this.withMutation(async (database) => this.transaction(database, () => {
       // v4's state vocabulary predates transport-error observability. Keep a
       // durable failed reservation, but only an explicit server rejection may
       // revoke authority; timeout/throw must leave it usable.
@@ -179,7 +180,7 @@ export class WorkerBindingStore {
   }
 
   private async reserveVerification(input: { entryId: string; roomId: string; workAttemptId: string; fromExecutionGenerationId: string; toExecutionGenerationId: string; agentSessionId: string }): Promise<{ kind: "idempotent"; binding: WorkerSessionBinding } | { kind: "reserved"; reservation: Reservation }> {
-    return this.withMutation(async (database) => this.transaction(database, async () => {
+    return this.withMutation(async (database) => this.transaction(database, () => {
       const prior = this.read(database, input.entryId);
       if (!prior || prior.room_id !== input.roomId || prior.work_attempt_id !== input.workAttemptId || prior.agent_session_id !== input.agentSessionId) throw new Error("Worker binding generation rollover does not match the durable worker identity.");
       if (prior.execution_generation_id === input.toExecutionGenerationId) return { kind: "idempotent", binding: prior };
@@ -193,7 +194,7 @@ export class WorkerBindingStore {
   }
 
   private async finalizeVerification(reservation: Reservation, input: { entryId: string; fromExecutionGenerationId: string; toExecutionGenerationId: string; agentSessionId: string }, accepted: boolean): Promise<{ binding: WorkerSessionBinding; advanced: boolean; accepted: boolean }> {
-    return this.withMutation(async (database) => this.transaction(database, async () => {
+    return this.withMutation(async (database) => this.transaction(database, () => {
       const current = this.read(database, input.entryId); const now = new Date().toISOString();
       if (!accepted) { run(database.prepare("UPDATE worker_generation_verifications SET state='failed', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId); return { binding: current ?? reservation.binding, advanced: false, accepted: false }; }
       const epoch = current ? Number((database.prepare("SELECT binding_epoch FROM worker_session_bindings WHERE entry_id=?").get(input.entryId) as Row).binding_epoch) : -1;
@@ -220,13 +221,13 @@ export class WorkerBindingStore {
   private read(database: DatabaseSync, entryId: string): WorkerSessionBinding | null { const row = database.prepare("SELECT * FROM worker_session_bindings WHERE entry_id=?").get(entryId) as Row | undefined; return row ? rowToBinding(row) : null; }
   private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); const url = new URL(input.api_url); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
   private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
-  private async transaction<T>(database: DatabaseSync, operation: () => Promise<T>): Promise<T> {
+  private async transaction<T>(database: DatabaseSync, operation: () => T): Promise<T> {
     let open = false; let committed = false; let result!: T;
     const commit = async () => {
       if (committed || open) throw new Error("Worker binding transaction commit was invoked more than once.");
       database.exec("BEGIN IMMEDIATE"); open = true;
       try {
-        result = await operation();
+        result = operation();
         database.exec("COMMIT"); open = false; committed = true;
       } catch (error) {
         if (open) try { database.exec("ROLLBACK"); } catch { /* no-op */ }
@@ -268,12 +269,11 @@ export class WorkerBindingStore {
     try { parsed = JSON.parse(raw) as LegacyBindings; this.validateLegacy(parsed, raw); } catch (error) {
       await this.quarantineLegacyFailure(database, key, checksum, error);
     }
-    try { await this.transaction(database, async () => {
+    try { await this.transaction(database, () => {
       if (database.prepare("SELECT 1 FROM migration_records WHERE migration_key=?").get(key)) return;
       if (database.prepare("SELECT 1 FROM migration_failures WHERE migration_key=?").get(key)) throw new Error("Legacy worker binding import is quarantined.");
-      // The migration record recheck is serialized by this SQLite writer lock.
-      // File parsing and checksum validation happen before entering it; never
-      // await filesystem work while holding a daemon-state writer lock.
+      const current = readFileSync(this.legacyJsonPath, "utf8");
+      if (createHash("sha256").update(current).digest("hex") !== checksum) throw new Error("Legacy worker binding source changed during import.");
       for (const binding of Object.values(parsed.bindings)) {
         run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, agent_session_token, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, binding.agent_session_token, new URL(binding.api_url).origin, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       }
@@ -286,7 +286,7 @@ export class WorkerBindingStore {
   private async quarantineLegacyFailure(database: DatabaseSync, key: string, checksum: string, error: unknown): Promise<never> {
     const reason = error instanceof Error ? error.message : String(error);
     const quarantine = `${this.legacyJsonPath}.corrupt.${checksum.slice(0, 16)}`;
-    await this.transaction(database, async () => {
+    await this.transaction(database, () => {
       if (!database.prepare("SELECT 1 FROM migration_failures WHERE migration_key=?").get(key)) {
         run(database.prepare("INSERT INTO migration_failures (migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)"), key, reason, new Date().toISOString(), quarantine);
       }
