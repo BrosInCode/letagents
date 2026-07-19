@@ -38,7 +38,10 @@ const TEST_PROCESS_IDENTITY = execFileSync(
 
 test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs(""), 210_000);
+  assert.equal(workplaceLivenessStaleAfterMs("999"), 210_000);
   assert.equal(workplaceLivenessStaleAfterMs("36000000"), 36_030_000);
+  assert.equal(workplaceLivenessStaleAfterMs("36000000ms"), 36_030_000);
+  assert.equal(workplaceLivenessStaleAfterMs("999999999"), 86_430_000);
   assert.equal(workplaceLivenessStaleAfterMs("invalid"), 210_000);
 });
 
