@@ -393,8 +393,19 @@ export class SupervisorDaemon {
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private handoffScheduled = false;
+  /** Resolves only once this daemon has relinquished every authority surface. */
+  private readonly handoffCompletion: Promise<void>;
+  private resolveHandoffCompletion!: () => void;
+  private rejectHandoffCompletion!: (error: unknown) => void;
 
   constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}) {
+    this.handoffCompletion = new Promise<void>((resolve, reject) => {
+      this.resolveHandoffCompletion = resolve;
+      this.rejectHandoffCompletion = reject;
+    });
+    // A library consumer may prepare a handoff without awaiting its completion.
+    // Keep the rejection observed while preserving it for waitForHandoff().
+    void this.handoffCompletion.catch(() => undefined);
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath);
     this.audit = new AuditLog(paths.auditPath);
@@ -421,7 +432,19 @@ export class SupervisorDaemon {
     );
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
       await this.singleton.assertCurrent();
+      const isLifecycleRequest = request.method === "daemon.negotiate"
+        || request.method === "daemon.status"
+        || request.method === "daemon.prepare_handoff";
+      if (this.handoffScheduled && !isLifecycleRequest) {
+        throw new Error("Supervisor handoff has fenced new daemon mutations.");
+      }
       await this.controlRequestBarrier?.(request);
+      // A request may have been admitted before prepare_handoff and paused in
+      // an injected/native barrier. Re-check after that await so it cannot
+      // perform provider effects once handoff begins.
+      if (this.handoffScheduled && !isLifecycleRequest) {
+        throw new Error("Supervisor handoff has fenced new daemon mutations.");
+      }
       if (request.method === "daemon.negotiate") return this.status();
       if (request.method === "daemon.status") return this.status();
       if (request.method === "daemon.prepare_handoff") {
@@ -599,28 +622,55 @@ export class SupervisorDaemon {
   }
 
   /**
+   * Wait for a requested version handoff to finish. This is intentionally a
+   * daemon-lifecycle promise rather than a socket response: prepare_handoff
+   * must acknowledge before it tears down the connection carrying that reply.
+   */
+  async waitForHandoff(): Promise<void> {
+    await this.handoffCompletion;
+  }
+
+  /**
    * Version handoff must release daemon authority independently of provider or
    * network callback latency. Provider work survives; only this daemon's
    * observers and control authority are detached.
    */
   private async stopForHandoff(): Promise<void> {
-    for (const cancel of this.scheduledConvergenceCancels.values()) cancel();
+    // Fence first. Any callbacks that outlive this method are prevented from
+    // committing daemon-owned state by fenceDaemonCommit().
+    const failures: unknown[] = [];
+    const captureSync = (operation: () => void): void => {
+      try { operation(); } catch (error) { failures.push(error); }
+    };
+    for (const cancel of this.scheduledConvergenceCancels.values()) captureSync(cancel);
     this.scheduledConvergenceCancels.clear();
+    for (const timer of this.recoveryTimers.values()) captureSync(() => this.clearRecoveryTimeout(timer));
+    this.recoveryTimers.clear();
     for (const scheduled of this.scheduledConvergence.values()) {
       void scheduled.then(({ dispose }) => dispose()).catch(() => undefined);
     }
     this.scheduledConvergence.clear();
-    for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
+    for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) captureSync(dispose);
     this.liveDisposers.clear();
-    await this.socket.stop();
-    await this.serializeManifestCommit(() => this.singleton.release());
-    await this.store.close();
-    await this.durability.close();
-    await this.workerBindings.close();
+    // Complete every local cleanup step even if one fails. The process-level
+    // entrypoint will report the failure and exit non-zero, but should never
+    // leave the singleton lock behind merely because (for example) socket
+    // unlinking failed after the listener had already closed.
+    const cleanup = async (operation: () => Promise<void>): Promise<void> => {
+      try { await operation(); } catch (error) { failures.push(error); }
+    };
+    await cleanup(() => this.socket.stop());
+    await cleanup(() => this.serializeManifestCommit(() => this.singleton.release()));
+    await cleanup(() => this.store.close());
+    await cleanup(() => this.durability.close());
+    await cleanup(() => this.workerBindings.close());
     // Existing convergence/provider callbacks are generation-fenced below.
     // Do not await them: a wedged native transport must not block an upgrade.
     this.convergenceRequests.clear();
     this.providerCallbacks.clear();
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Supervisor handoff cleanup did not complete cleanly.");
+    }
   }
 
   private status() {
@@ -637,7 +687,12 @@ export class SupervisorDaemon {
   private scheduleHandoff(): void {
     if (this.handoffScheduled) return;
     this.handoffScheduled = true;
-    setTimeout(() => { void this.stopForHandoff().catch(() => undefined); }, 25).unref();
+    setTimeout(() => {
+      void this.stopForHandoff().then(
+        () => this.resolveHandoffCompletion(),
+        (error) => this.rejectHandoffCompletion(error),
+      );
+    }, 25).unref();
   }
 
   private paramsRecord(value: unknown): Record<string, unknown> {
@@ -2728,5 +2783,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const { ProviderActionPortRouter } = await import("./provider-action-port-router.js");
     const daemon = new SupervisorDaemon(defaultDaemonPaths(), process.platform, new ProviderActionPortRouter(), true);
     await daemon.start();
-  })().catch((error) => { console.error(error); process.exitCode = 1; });
+    await daemon.waitForHandoff();
+    process.exit(0);
+  })().catch((error) => {
+    console.error("Supervisor daemon handoff failed:", error);
+    process.exit(1);
+  });
 }

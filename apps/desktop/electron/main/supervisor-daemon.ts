@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createConnection } from "node:net";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { access, mkdir } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 
@@ -24,10 +24,14 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.25";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.26";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
+const NATURAL_EXIT_TIMEOUT_MS = 2_000;
+const TERMINATE_EXIT_TIMEOUT_MS = 2_000;
+const KILL_EXIT_TIMEOUT_MS = 1_000;
+const PROCESS_POLL_INTERVAL_MS = 25;
 const activityEmitter = new EventEmitter();
 const activitySequences = new Map<string, number>();
 
@@ -112,6 +116,59 @@ type WireLegacyLaneOwner = {
   updated_at: string;
 };
 
+export type DaemonProcessState = "live" | "zombie";
+export type DaemonProcessIdentity = {
+  pid: number;
+  kernelStartTime: string;
+  command: string;
+  state: DaemonProcessState;
+  expectedScriptPath: string;
+};
+
+type DaemonIdentityInspection = Omit<DaemonProcessIdentity, "expectedScriptPath">;
+type RetiredDaemonObservation =
+  | { kind: "same"; identity: DaemonProcessIdentity }
+  | { kind: "absent" }
+  | { kind: "zombie" }
+  | { kind: "unverifiable" }
+  | { kind: "changed"; reason: string };
+
+export type DaemonHandoffDiagnostic = {
+  event: "supervisor_daemon_handoff";
+  outcome: string;
+  pid: number;
+  implementationVersion: string;
+  authorityReleased: boolean;
+  detail: string;
+};
+
+const PS_DAEMON_IDENTITY = /^(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+)$/;
+
+export function defaultInspectDaemonProcess(pid: number): DaemonIdentityInspection | null | undefined {
+  try {
+    const output = execFileSync(
+      "/bin/ps",
+      ["-p", String(pid), "-o", "lstart=", "-o", "state=", "-o", "command="],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    const match = output.match(PS_DAEMON_IDENTITY);
+    if (!match) return undefined;
+    return {
+      pid,
+      kernelStartTime: match[1]!.replace(/\s+/g, " "),
+      state: match[2]!.startsWith("Z") ? "zombie" : "live",
+      command: match[3]!,
+    };
+  } catch {
+    try {
+      process.kill(pid, 0);
+      return undefined;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? null : undefined;
+    }
+  }
+}
+
 export class SupervisorDaemonProtocolMismatchError extends Error {
   constructor(readonly clientVersion: number, readonly daemonVersion: number, message: string) {
     super(message);
@@ -123,8 +180,16 @@ export interface SupervisorDaemonLifecycleOptions {
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
   spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
+  /** @deprecated Prefer signalDaemon so tests can distinguish TERM from KILL. */
   terminateDaemon?: (pid: number) => void;
+  signalDaemon?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+  inspectDaemonProcess?: (pid: number) => DaemonIdentityInspection | null | undefined;
+  reportHandoffDiagnostic?: (diagnostic: DaemonHandoffDiagnostic) => void;
   handoffTimeoutMs?: number;
+  terminateTimeoutMs?: number;
+  killTimeoutMs?: number;
+  processPollIntervalMs?: number;
+  startTimeoutMs?: number;
   requestTimeoutMs?: number;
   turnControlRequestTimeoutMs?: number;
   now?: () => Date;
@@ -150,8 +215,14 @@ export class SupervisorDaemonClient {
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
   private readonly daemonWorkingDirectory: string;
-  private readonly terminateDaemon: (pid: number) => void;
-  private readonly handoffTimeoutMs: number;
+  private readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+  private readonly inspectDaemonProcess: (pid: number) => DaemonIdentityInspection | null | undefined;
+  private readonly reportHandoffDiagnostic: (diagnostic: DaemonHandoffDiagnostic) => void;
+  private readonly naturalExitTimeoutMs: number;
+  private readonly terminateTimeoutMs: number;
+  private readonly killTimeoutMs: number;
+  private readonly processPollIntervalMs: number;
+  private readonly startTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly turnControlRequestTimeoutMs: number;
   private readonly now: () => Date;
@@ -160,8 +231,22 @@ export class SupervisorDaemonClient {
     this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
-    this.terminateDaemon = options.terminateDaemon ?? ((pid) => process.kill(pid, "SIGTERM"));
-    this.handoffTimeoutMs = options.handoffTimeoutMs ?? START_TIMEOUT_MS;
+    this.signalDaemon = options.signalDaemon ?? ((pid, signal) => {
+      if (signal === "SIGTERM" && options.terminateDaemon) {
+        options.terminateDaemon(pid);
+        return;
+      }
+      process.kill(pid, signal);
+    });
+    this.inspectDaemonProcess = options.inspectDaemonProcess ?? defaultInspectDaemonProcess;
+    this.reportHandoffDiagnostic = options.reportHandoffDiagnostic ?? ((diagnostic) => {
+      console.error(JSON.stringify(diagnostic));
+    });
+    this.naturalExitTimeoutMs = options.handoffTimeoutMs ?? NATURAL_EXIT_TIMEOUT_MS;
+    this.terminateTimeoutMs = options.terminateTimeoutMs ?? TERMINATE_EXIT_TIMEOUT_MS;
+    this.killTimeoutMs = options.killTimeoutMs ?? KILL_EXIT_TIMEOUT_MS;
+    this.processPollIntervalMs = options.processPollIntervalMs ?? PROCESS_POLL_INTERVAL_MS;
+    this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
@@ -344,6 +429,7 @@ export class SupervisorDaemonClient {
   }
 
   private async ensureRunningOnce(): Promise<DesktopSupervisorDaemonStatus> {
+    let retiredGeneration: number | undefined;
     try {
       const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
       const daemonVersion = Number(negotiated.protocol_version ?? 0);
@@ -352,12 +438,10 @@ export class SupervisorDaemonClient {
         daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
       ) return mapStatus(negotiated);
+      const retired = this.captureRetiredDaemon(negotiated);
+      retiredGeneration = Number(negotiated.generation);
       await this.request("daemon.prepare_handoff", undefined, daemonVersion);
-      try {
-        await this.waitForSocketDown();
-      } catch (error) {
-        await this.terminateStalledDaemon(negotiated, daemonVersion, error);
-      }
+      await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
     }
@@ -365,11 +449,11 @@ export class SupervisorDaemonClient {
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory);
     child.once("error", () => undefined);
-    return this.waitForHealthy();
+    return this.waitForHealthy(retiredGeneration);
   }
 
-  private async waitForHealthy(): Promise<DesktopSupervisorDaemonStatus> {
-    const deadline = Date.now() + START_TIMEOUT_MS;
+  private async waitForHealthy(retiredGeneration?: number): Promise<DesktopSupervisorDaemonStatus> {
+    const deadline = Date.now() + this.startTimeoutMs;
     let lastError: unknown = null;
     while (Date.now() < deadline) {
       try {
@@ -383,6 +467,11 @@ export class SupervisorDaemonClient {
             `Replacement supervisor daemon is still ${status.implementationVersion}; expected ${SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION}. Rebuild the desktop daemon and try again.`,
           );
         }
+        if (retiredGeneration !== undefined && status.generation <= retiredGeneration) {
+          throw new Error(
+            `Replacement supervisor daemon did not acquire a newer singleton generation; received ${status.generation} after ${retiredGeneration}.`,
+          );
+        }
         return status;
       } catch (error) {
         lastError = error;
@@ -392,29 +481,185 @@ export class SupervisorDaemonClient {
     throw new Error(`Timed out waiting for the supervisor daemon: ${lastError instanceof Error ? lastError.message : "unreachable"}`);
   }
 
-  private async waitForSocketDown(): Promise<void> {
-    const deadline = Date.now() + this.handoffTimeoutMs;
-    while (Date.now() < deadline) {
-      try { await this.request("daemon.negotiate"); } catch (error) { if (isConnectionUnavailable(error)) return; throw error; }
-      await delay(25);
+  private captureRetiredDaemon(negotiated: Record<string, unknown>): DaemonProcessIdentity {
+    const pid = Number(negotiated.pid);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) {
+      throw new Error("Refusing daemon handoff because the serving daemon PID is invalid.");
     }
-    throw new Error("Existing supervisor daemon did not complete negotiated handoff; it was left running.");
+    const inspected = this.safeInspectDaemon(pid);
+    if (!inspected || inspected.state === "zombie") {
+      throw new Error("Refusing daemon handoff because the serving daemon process identity is unverifiable.");
+    }
+    if (inspected.pid !== pid) {
+      throw new Error("Refusing daemon handoff because the inspected daemon PID does not match the serving daemon.");
+    }
+    if (!this.commandPointsAtExpectedDaemon(inspected.command)) {
+      throw new Error("Refusing daemon handoff because the serving PID does not point at the expected daemon script.");
+    }
+    return { ...inspected, expectedScriptPath: this.daemonScriptPath };
   }
 
-  private async terminateStalledDaemon(
-    negotiated: Record<string, unknown>,
+  private async enforceRetiredDaemonExit(
+    retired: DaemonProcessIdentity,
     daemonVersion: number,
-    handoffError: unknown,
+    implementationVersion: string,
   ): Promise<void> {
-    const current = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, daemonVersion);
-    const pid = Number(current.pid);
-    const sameDaemon = Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid
-      && current.generation === negotiated.generation
-      && current.implementation_version === negotiated.implementation_version
-      && current.started_at === negotiated.started_at;
-    if (!sameDaemon) throw handoffError;
-    this.terminateDaemon(pid);
-    await this.waitForSocketDown();
+    let observation = await this.waitForRetiredProcessChange(retired, this.naturalExitTimeoutMs);
+    let authorityReleased = await this.isSocketReleased(daemonVersion);
+    if (observation.kind === "absent" || observation.kind === "zombie") {
+      if (!authorityReleased) throw new Error("Retired daemon process ended without releasing its control socket.");
+      if (observation.kind === "zombie") {
+        this.emitHandoffDiagnostic(retired, implementationVersion, true, "zombie_after_natural_exit", "Retired daemon is a zombie after authority release; replacement may proceed.");
+      }
+      return;
+    }
+    if (observation.kind !== "same") {
+      if (!authorityReleased) {
+        throw new Error(`Existing supervisor daemon still owns its socket and its process identity is ${observation.kind}; leaving it serving.`);
+      }
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, observation.kind, this.observationDetail(observation));
+      return;
+    }
+
+    if (implementationVersion === "2.0.25" && authorityReleased) {
+      this.emitHandoffDiagnostic(retired, implementationVersion, authorityReleased, "legacy_sigterm_expected", "Daemon 2.0.25 released authority but retains live RPC handles; SIGTERM escalation is expected.");
+    }
+    observation = this.guardedSignalRetiredDaemon(retired, "SIGTERM");
+    if (observation.kind === "same") {
+      observation = await this.waitForRetiredProcessChange(retired, this.terminateTimeoutMs);
+    }
+    authorityReleased = await this.isSocketReleased(daemonVersion);
+    if (observation.kind === "absent" || observation.kind === "zombie") {
+      if (!authorityReleased) throw new Error("Retired daemon did not release its control socket after SIGTERM.");
+      return;
+    }
+    if (observation.kind !== "same") {
+      if (!authorityReleased) {
+        throw new Error(`Existing supervisor daemon still owns its socket after SIGTERM and its process identity is ${observation.kind}; leaving it serving.`);
+      }
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, observation.kind, this.observationDetail(observation));
+      return;
+    }
+
+    observation = this.guardedSignalRetiredDaemon(retired, "SIGKILL");
+    if (observation.kind === "same") {
+      observation = await this.waitForRetiredProcessChange(retired, this.killTimeoutMs);
+    }
+    authorityReleased = await this.isSocketReleased(daemonVersion);
+    if (!authorityReleased) {
+      throw new Error("Existing supervisor daemon still owns its socket after bounded TERM/KILL enforcement; replacement was not started.");
+    }
+    if (observation.kind === "same") {
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, "non_zombie_survived_sigkill", "Retired daemon survived SIGKILL but no longer owns authority; replacement will prove singleton acquisition.");
+      return;
+    }
+    if (observation.kind === "zombie") {
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, "zombie_after_sigkill", "Retired daemon became a zombie after SIGKILL; replacement will prove singleton acquisition.");
+      return;
+    }
+    if (observation.kind !== "absent") {
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, observation.kind, this.observationDetail(observation));
+    }
+  }
+
+  private guardedSignalRetiredDaemon(
+    retired: DaemonProcessIdentity,
+    signal: "SIGTERM" | "SIGKILL",
+  ): RetiredDaemonObservation {
+    const observation = this.observeRetiredDaemon(retired);
+    if (observation.kind !== "same") return observation;
+    if (!Number.isSafeInteger(retired.pid) || retired.pid <= 1 || retired.pid === process.pid) {
+      return { kind: "changed", reason: "invalid daemon PID" };
+    }
+    // Deliberately signal the exact positive daemon PID. Provider-stop code may
+    // signal provider process groups; daemon replacement must never do so.
+    try {
+      this.signalDaemon(retired.pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+        return this.observeRetiredDaemon(retired);
+      }
+      throw error;
+    }
+    return observation;
+  }
+
+  private async waitForRetiredProcessChange(
+    retired: DaemonProcessIdentity,
+    timeoutMs: number,
+  ): Promise<RetiredDaemonObservation> {
+    const deadline = Date.now() + timeoutMs;
+    let observation = this.observeRetiredDaemon(retired);
+    while (observation.kind === "same" && Date.now() < deadline) {
+      await delay(Math.min(this.processPollIntervalMs, Math.max(0, deadline - Date.now())));
+      observation = this.observeRetiredDaemon(retired);
+    }
+    return observation;
+  }
+
+  private observeRetiredDaemon(retired: DaemonProcessIdentity): RetiredDaemonObservation {
+    const current = this.safeInspectDaemon(retired.pid);
+    if (current === null) return { kind: "absent" };
+    if (current === undefined) return { kind: "unverifiable" };
+    if (current.pid !== retired.pid) return { kind: "changed", reason: "inspected PID changed" };
+    if (current.kernelStartTime !== retired.kernelStartTime) {
+      return { kind: "changed", reason: "kernel start time changed (PID reuse)" };
+    }
+    if (current.state === "zombie") return { kind: "zombie" };
+    if (current.command !== retired.command) return { kind: "changed", reason: "full command changed" };
+    if (!this.commandPointsAtExpectedDaemon(current.command, retired.expectedScriptPath)) {
+      return { kind: "changed", reason: "command no longer points at expected daemon script" };
+    }
+    return { kind: "same", identity: retired };
+  }
+
+  private safeInspectDaemon(pid: number): DaemonIdentityInspection | null | undefined {
+    try {
+      return this.inspectDaemonProcess(pid);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private commandPointsAtExpectedDaemon(command: string, expectedScriptPath = this.daemonScriptPath): boolean {
+    return command === expectedScriptPath || command.endsWith(` ${expectedScriptPath}`);
+  }
+
+  private async isSocketReleased(daemonVersion: number): Promise<boolean> {
+    try {
+      await this.request("daemon.negotiate", undefined, daemonVersion);
+      return false;
+    } catch (error) {
+      if (isConnectionUnavailable(error)) return true;
+      // A timeout, malformed response, or daemon error still proves that the
+      // socket was connectable; it does not prove authority release. Keep the
+      // result conservative so an exact identity-guarded TERM/KILL can retire
+      // an acknowledged-but-unresponsive predecessor.
+      return false;
+    }
+  }
+
+  private observationDetail(observation: Exclude<RetiredDaemonObservation, { kind: "same" }>): string {
+    return observation.kind === "changed"
+      ? `Retired daemon identity changed: ${observation.reason}. It was not signalled.`
+      : `Retired daemon identity is ${observation.kind}. It was not signalled.`;
+  }
+
+  private emitHandoffDiagnostic(
+    retired: DaemonProcessIdentity,
+    implementationVersion: string,
+    authorityReleased: boolean,
+    outcome: string,
+    detail: string,
+  ): void {
+    this.reportHandoffDiagnostic({
+      event: "supervisor_daemon_handoff",
+      outcome,
+      pid: retired.pid,
+      implementationVersion,
+      authorityReleased,
+      detail,
+    });
   }
 
   private request<T = unknown>(
