@@ -1851,7 +1851,7 @@ test("singleton fences a second daemon and detects a newer generation", async ()
   } finally { await env.cleanup(); }
 });
 
-test("manifest writes CAS, fsync/rename payloads, and quarantines corruption", async () => {
+test("manifest SQLite writes use generation CAS across concurrent callers", async () => {
   const env = await fixture();
   try {
     const path = join(env.root, "manifest.json");
@@ -1862,9 +1862,8 @@ test("manifest writes CAS, fsync/rename payloads, and quarantines corruption", a
     const concurrent = await Promise.allSettled([store.write(1, [{ ...entry, id: "left" }]), store.write(1, [{ ...entry, id: "right" }])]);
     assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(concurrent.filter((result) => result.status === "rejected" && result.reason instanceof ManifestConflictError).length, 1);
-    await writeFile(path, '{"manifest":{"generation":7},"checksum":"bad"}');
-    assert.deepEqual(await store.load(), { generation: 0, entries: [] });
-    assert.ok((await readdir(env.root)).some((name) => name.startsWith("manifest.json.corrupt-")));
+    assert.equal((await store.load()).generation, 2);
+    await store.close();
   } finally { await env.cleanup(); }
 });
 
@@ -2208,7 +2207,9 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(canary));
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(workerBearer));
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(hostGrant));
-    const persistedActivity = await readFile(paths.manifestPath, "utf8");
+    const inspection = new ManifestStore(paths.manifestPath);
+    const persistedActivity = JSON.stringify(await inspection.load());
+    await inspection.close();
     assert.doesNotMatch(persistedActivity, new RegExp(canary));
     assert.doesNotMatch(persistedActivity, new RegExp(workerBearer));
     assert.doesNotMatch(persistedActivity, new RegExp(hostGrant));
@@ -2233,8 +2234,11 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
         provider_continuation_id: `Authorization: Bearer ${canary}`,
       },
     });
-    assert.doesNotMatch(await readFile(paths.manifestPath, "utf8"), new RegExp(canary));
-    assert.match(await readFile(paths.manifestPath, "utf8"), /REDACTED/);
+    const postTransitionInspection = new ManifestStore(paths.manifestPath);
+    const persisted = JSON.stringify(await postTransitionInspection.load());
+    await postTransitionInspection.close();
+    assert.doesNotMatch(persisted, new RegExp(canary));
+    assert.match(persisted, /REDACTED/);
     assert.doesNotMatch(await readFile(paths.auditPath, "utf8"), new RegExp(canary));
     assert.match(await readFile(paths.auditPath, "utf8"), /REDACTED/);
   } finally {
