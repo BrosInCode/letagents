@@ -31,6 +31,78 @@ test("corrupt legacy attempt state is quarantined and fails closed on every reop
   } finally { await env.cleanup(); }
 });
 
+test("a migration failure-record INSERT error leaves the corrupt source in place for a safe retry", async () => {
+  const env = await fixture();
+  try {
+    await writeFile(env.json, "{not-json");
+    const schema = new ManifestStore(env.database);
+    await schema.load();
+    await schema.close();
+    const sabotage = new DatabaseSync(env.database);
+    sabotage.exec(`CREATE TRIGGER reject_attempt_migration_failure BEFORE INSERT ON migration_failures
+      BEGIN SELECT RAISE(ABORT, 'injected migration failure insert'); END`);
+    sabotage.close();
+
+    const first = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
+    await assert.rejects(() => first.getAttempt("00000000-0000-4000-8000-000000000001"), /injected migration failure insert/);
+    await first.close();
+    assert.equal((await stat(env.json)).isFile(), true);
+    assert.equal((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")), false);
+
+    const repair = new DatabaseSync(env.database);
+    assert.equal((repair.prepare("SELECT COUNT(*) AS count FROM migration_failures").get() as { count: number }).count, 0);
+    repair.exec("DROP TRIGGER reject_attempt_migration_failure");
+    repair.close();
+    const retried = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
+    await assert.rejects(() => retried.getAttempt("00000000-0000-4000-8000-000000000001"), CorruptAttemptStoreError);
+    await retried.close();
+    assert.ok((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")));
+  } finally { await env.cleanup(); }
+});
+
+test("a quarantine rename failure remains durably blocked and retries housekeeping on reopen", async () => {
+  const env = await fixture();
+  try {
+    await writeFile(env.json, "{not-json");
+    const first = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database, {
+      before_quarantine: () => { throw new Error("injected quarantine rename failure"); },
+    });
+    await assert.rejects(() => first.getAttempt("00000000-0000-4000-8000-000000000001"), CorruptAttemptStoreError);
+    await first.close();
+    assert.equal((await stat(env.json)).isFile(), true);
+    const inspection = new DatabaseSync(env.database);
+    assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM migration_failures").get() as { count: number }).count, 1);
+    inspection.close();
+
+    const reopened = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
+    await assert.rejects(() => reopened.getAttempt("00000000-0000-4000-8000-000000000001"), /previously failed/);
+    await reopened.close();
+    await assert.rejects(() => access(env.json));
+    assert.ok((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")));
+  } finally { await env.cleanup(); }
+});
+
+test("a crash after recording migration failure reopens blocked before quarantine housekeeping", async () => {
+  const env = await fixture();
+  try {
+    await writeFile(env.json, "{not-json");
+    const first = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database, {
+      after_failure_recorded: () => { throw new Error("injected post-record crash"); },
+    });
+    await assert.rejects(() => first.getAttempt("00000000-0000-4000-8000-000000000001"), /injected post-record crash/);
+    await first.close();
+    assert.equal((await stat(env.json)).isFile(), true);
+    const inspection = new DatabaseSync(env.database);
+    assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM migration_failures").get() as { count: number }).count, 1);
+    inspection.close();
+
+    const reopened = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
+    await assert.rejects(() => reopened.getAttempt("00000000-0000-4000-8000-000000000001"), /previously failed/);
+    await reopened.close();
+    await assert.rejects(() => access(env.json));
+  } finally { await env.cleanup(); }
+});
+
 test("malformed pre-existing v3 work tables are rejected without claiming success", async () => {
   const env = await fixture();
   try {
@@ -46,8 +118,8 @@ test("malformed pre-existing v3 work tables are rejected without claiming succes
   } finally { await env.cleanup(); }
 });
 
-test("v3 validation rejects a same-name non-unique live index and non-STRICT execution table", async () => {
-  for (const corruption of ["index", "table"] as const) {
+test("v3 validation rejects same-name non-unique or expression indexes and non-STRICT execution tables", async () => {
+  for (const corruption of ["index", "expression-index", "table"] as const) {
     const env = await fixture();
     try {
       const manifest = new ManifestStore(env.database);
@@ -55,6 +127,7 @@ test("v3 validation rejects a same-name non-unique live index and non-STRICT exe
       await manifest.close();
       const database = new DatabaseSync(env.database);
       if (corruption === "index") database.exec("DROP INDEX one_live_work_attempt_execution; CREATE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL");
+      else if (corruption === "expression-index") database.exec("DROP INDEX one_live_work_attempt_execution; CREATE UNIQUE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id, lower(actor)) WHERE terminal_json IS NULL");
       else database.exec(`DROP TABLE work_attempt_executions; CREATE TABLE work_attempt_executions(
         execution_generation_id TEXT, work_attempt_id TEXT, started_at TEXT, actor TEXT, generation INTEGER, terminal_json TEXT
       ); CREATE UNIQUE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL`);

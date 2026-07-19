@@ -23,6 +23,11 @@ export type GcQuiescenceHooks = {
   before_release?: (attempt: TaskWorkAttempt, index: number) => Promise<void>;
   before_restore?: (attempt: TaskWorkAttempt, index: number) => Promise<void>;
 };
+/** Adversarial-test hooks around the durable legacy-migration failure fence. */
+export type LegacyAttemptMigrationHooks = {
+  after_failure_recorded?: () => Promise<void> | void;
+  before_quarantine?: () => Promise<void> | void;
+};
 
 function checksum(attempts: TaskWorkAttempt[]): string {
   return createHash("sha256").update(JSON.stringify(attempts)).digest("hex");
@@ -118,7 +123,7 @@ export class WorkDurabilityStore {
   private closed = false;
   private readonly databasePath: string;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks, databasePath?: string) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks, databasePath?: string, private readonly migrationHooks?: LegacyAttemptMigrationHooks) {
     this.workspaceRoot = resolve(workspaceRoot);
     this.databasePath = databasePath ?? join(dirname(path), "daemon-state.sqlite");
   }
@@ -433,7 +438,10 @@ export class WorkDurabilityStore {
   private async importLegacyAttempts(database: DatabaseSync): Promise<void> {
     const migrationKey = `attempts-json:${resolve(this.path)}`;
     const priorFailure = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key = ?").get(migrationKey) as { reason: string; quarantined_path: string } | undefined;
-    if (priorFailure) throw new CorruptAttemptStoreError(`Legacy attempt migration previously failed: ${priorFailure.reason} (${priorFailure.quarantined_path})`);
+    if (priorFailure) {
+      await this.quarantineLegacySource(priorFailure.quarantined_path);
+      throw new CorruptAttemptStoreError(`Legacy attempt migration previously failed: ${priorFailure.reason} (${priorFailure.quarantined_path})`);
+    }
     let sourcePresent = false;
     try {
       const raw = await readFile(this.path, "utf8");
@@ -467,8 +475,12 @@ export class WorkDurabilityStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       const reason = error instanceof Error ? error.message : String(error);
       const quarantinedPath = `${this.path}.corrupt.${Date.now()}.${randomUUID()}`;
-      try { await rename(this.path, quarantinedPath); } catch (renameError: unknown) { if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError; }
+      // The database row is the fail-closed authority. Persist it before any
+      // filesystem housekeeping so an INSERT failure or process crash can
+      // never turn a corrupt source into an apparently empty migration.
       database.prepare("INSERT OR IGNORE INTO migration_failures(migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)").run(migrationKey, reason, this.now(), quarantinedPath);
+      await this.migrationHooks?.after_failure_recorded?.();
+      await this.quarantineLegacySource(quarantinedPath);
       throw new CorruptAttemptStoreError(`Legacy attempt migration failed closed: ${reason}`);
     }
     if (sourcePresent) {
@@ -477,6 +489,19 @@ export class WorkDurabilityStore {
         // The SQLite transaction is already authoritative. Backup retention is
         // idempotent housekeeping and is retried on the next open.
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`Unable to retain migrated attempt JSON backup ${this.path}:`, error);
+      }
+    }
+  }
+
+  private async quarantineLegacySource(quarantinedPath: string): Promise<void> {
+    try {
+      await this.migrationHooks?.before_quarantine?.();
+      await rename(this.path, quarantinedPath);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        // A durable migration_failures row already blocks every reopen. Keep
+        // quarantine as retryable, non-authoritative housekeeping.
+        console.error(`Unable to quarantine failed attempt JSON ${this.path}:`, error);
       }
     }
   }
