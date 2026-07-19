@@ -24,6 +24,7 @@ import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdog
 import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure } from "../reconciler-state.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
+import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
 
@@ -2378,6 +2379,235 @@ test("distinct supervised Codex entries coexist in one room without weakening le
       reservation_id: "legacy_codex_roundtable", room_id: "codex_roundtable", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
     });
     assert.equal(blockedLegacy.ok, false, "any live supervised Codex entry continues to fence the legacy Electron runtime");
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("two Codex room agents keep independent provider executions across stop, resume, and daemon restart", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const identities = [
+    { entryId: "codex_runtime_alpha", taskId: "codex_runtime_alpha" },
+    { entryId: "codex_runtime_bravo", taskId: "codex_runtime_bravo" },
+  ] as const;
+  const attempts = await Promise.all(identities.map(async ({ taskId }) => {
+    const workspace = await provisionedWorkspace(env.root, taskId);
+    return durability.createAttempt({ taskId, leaseId: taskId, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  }));
+
+  type RuntimeState = "starting" | "working" | "idle" | "stopping" | "stopped" | "failed";
+  type Runtime = {
+    workAttemptId: string;
+    pid: number;
+    continuation: string;
+    state: RuntimeState;
+    exitListeners: Set<(terminal: {
+      endedAt: string; exitCode: number | null; signal: string | null;
+      terminalCause: "stopped"; providerContinuationId: string;
+    }) => void>;
+  };
+  const runtimes = new Map<string, Runtime>();
+  const spawnRequests: string[] = [];
+  const attachRequests: string[] = [];
+  const resumeRequests: string[] = [];
+  const stopRequests: string[] = [];
+  let nextPid = 6100;
+  const nativeHandle = (runtime: Runtime) => ({
+    workAttemptId: runtime.workAttemptId,
+    pid: runtime.pid,
+    providerContinuationId: runtime.continuation,
+    providerConnection: {
+      kind: "codex_app_server" as const,
+      url: `ws://127.0.0.1:${runtime.pid}`,
+      pid: runtime.pid,
+      processIdentity: `fake-codex:${runtime.pid}`,
+    },
+    observedState: () => runtime.state,
+  });
+  const adapter: NativeProviderAdapter = {
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async (request) => {
+      spawnRequests.push(request.supervisorEntryId ?? "missing-entry");
+      const runtime: Runtime = {
+        workAttemptId: request.workAttemptId,
+        pid: ++nextPid,
+        continuation: `thread_${request.supervisorEntryId}`,
+        state: "working",
+        exitListeners: new Set(),
+      };
+      runtimes.set(runtime.workAttemptId, runtime);
+      return nativeHandle(runtime);
+    },
+    attach: async (ref) => {
+      attachRequests.push(ref.workAttemptId);
+      const runtime = runtimes.get(ref.workAttemptId);
+      if (!runtime || runtime.state === "stopped" || runtime.continuation !== ref.providerContinuationId) return null;
+      return nativeHandle(runtime);
+    },
+    resume: async (ref, request) => {
+      resumeRequests.push(request.supervisorEntryId ?? "missing-entry");
+      const runtime: Runtime = {
+        workAttemptId: request.workAttemptId,
+        pid: ++nextPid,
+        continuation: ref.providerContinuationId,
+        state: "working",
+        exitListeners: new Set(),
+      };
+      runtimes.set(runtime.workAttemptId, runtime);
+      return nativeHandle(runtime);
+    },
+    poke: async () => {},
+    controlTurn: async () => ({ capability: "native_interrupt", interrupted: true, resumed: true, state: "working" }),
+    stop: async (handle) => {
+      stopRequests.push(handle.workAttemptId);
+      const runtime = runtimes.get(handle.workAttemptId)!;
+      runtime.state = "stopped";
+      const terminal = {
+        endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+        terminalCause: "stopped" as const, providerContinuationId: runtime.continuation,
+      };
+      queueMicrotask(() => {
+        for (const listener of [...runtime.exitListeners]) listener(terminal);
+      });
+      return terminal;
+    },
+    onExit: (handle, listener) => {
+      const listeners = runtimes.get(handle.workAttemptId)!.exitListeners;
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    onStream: () => () => {},
+  };
+  const router = () => new ProviderActionPortRouter({ codex: async () => adapter });
+  let daemon = new SupervisorDaemon(paths, "darwin", router(), true);
+  try {
+    await daemon.start();
+    const entries = identities.map(({ entryId }, index): DaemonManifestEntry => ({
+      ...entry,
+      id: entryId,
+      room_id: "codex_runtime_roundtable",
+      provider: "codex",
+      desired_state: "paused",
+      observed_state: "paused",
+      workspace_path: attempts[index]!.workspace_path,
+      work_attempt_id: attempts[index]!.work_attempt_id,
+    }));
+    const created = await Promise.all(entries.map((candidate) =>
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate })));
+    assert.ok(created.every((result) => result.ok));
+
+    const activated = await Promise.all(entries.map((candidate) =>
+      daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
+        id: candidate.id, expected_desired_state: "paused", desired_state: "running",
+      })));
+    assert.ok(activated.every((result) => result.ok && (result.result as { applied: boolean }).applied));
+    await eventually(async () => {
+      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+      return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === "working");
+    }, "both Codex provider executions", 5_000);
+
+    const beforeRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    const alphaBefore = beforeRestart.find((candidate) => candidate.id === identities[0].entryId)!;
+    const bravoBefore = beforeRestart.find((candidate) => candidate.id === identities[1].entryId)!;
+    assert.deepEqual(new Set(spawnRequests), new Set(identities.map(({ entryId }) => entryId)));
+    assert.notEqual(alphaBefore.work_attempt_id, bravoBefore.work_attempt_id);
+    assert.notEqual(alphaBefore.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
+    assert.notEqual(alphaBefore.provider_ref?.provider_continuation_id, bravoBefore.provider_ref?.provider_continuation_id);
+    assert.notEqual(alphaBefore.provider_ref?.provider_connection?.pid, bravoBefore.provider_ref?.provider_connection?.pid);
+
+    await daemon.stop();
+    daemon = new SupervisorDaemon(paths, "darwin", router(), true);
+    await daemon.start();
+    await eventually(async () => {
+      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+      return manifest.length === 2
+        && manifest.every((candidate) => candidate.observed_state === "working")
+        && new Set(attachRequests).size === 2;
+    }, "independent Codex provider reattachment", 5_000);
+    assert.deepEqual(new Set(attachRequests), new Set(attempts.map((attempt) => attempt.work_attempt_id)));
+    const afterRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    for (const prior of beforeRestart) {
+      const reattached = afterRestart.find((candidate) => candidate.id === prior.id)!;
+      assert.equal(reattached.work_attempt_id, prior.work_attempt_id);
+      assert.equal(reattached.provider_ref?.execution_generation_id, prior.provider_ref?.execution_generation_id);
+      assert.equal(reattached.provider_ref?.provider_continuation_id, prior.provider_ref?.provider_continuation_id);
+      assert.equal(reattached.provider_ref?.provider_connection?.pid, prior.provider_ref?.provider_connection?.pid);
+    }
+
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: identities[0].entryId, desired_state: "paused",
+    })).ok, true);
+    await eventually(async () => {
+      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+      return manifest.find((candidate) => candidate.id === identities[0].entryId)?.observed_state === "paused";
+    }, "independent Codex pause", 5_000);
+    const bravoWhileAlphaPaused = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+      .find((candidate) => candidate.id === identities[1].entryId)!;
+    assert.equal(bravoWhileAlphaPaused.observed_state, "working");
+    assert.equal(bravoWhileAlphaPaused.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
+    assert.equal(runtimes.get(bravoBefore.work_attempt_id!)?.state, "working");
+    assert.deepEqual(stopRequests, [alphaBefore.work_attempt_id]);
+
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: identities[0].entryId, desired_state: "running",
+    })).ok, true);
+    await eventually(async () => {
+      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+      return manifest.find((candidate) => candidate.id === identities[0].entryId)?.observed_state === "working";
+    }, "independent Codex resume", 5_000);
+    const afterResume = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    const alphaAfter = afterResume.find((candidate) => candidate.id === identities[0].entryId)!;
+    const bravoAfter = afterResume.find((candidate) => candidate.id === identities[1].entryId)!;
+    assert.deepEqual(resumeRequests, [identities[0].entryId]);
+    assert.equal(alphaAfter.work_attempt_id, alphaBefore.work_attempt_id);
+    assert.notEqual(alphaAfter.provider_ref?.execution_generation_id, alphaBefore.provider_ref?.execution_generation_id);
+    assert.notEqual(alphaAfter.provider_ref?.provider_connection?.pid, alphaBefore.provider_ref?.provider_connection?.pid);
+    assert.equal(bravoAfter.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
+    assert.equal(bravoAfter.provider_ref?.provider_connection?.pid, bravoBefore.provider_ref?.provider_connection?.pid);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("two supervised Codex claims wait together behind one legacy Codex owner", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const candidate = (id: string): DaemonManifestEntry => ({
+    ...entry, id, room_id: "codex_legacy_handoff", provider: "codex", desired_state: "paused", observed_state: "paused",
+  });
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
+      reservation_id: "legacy_codex_owner", room_id: "codex_legacy_handoff", provider: "codex",
+      owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+    })).ok, true);
+    const created = await Promise.all(["codex_waiting_alpha", "codex_waiting_bravo"].map((id) =>
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate(id) })));
+    assert.ok(created.every((result) => result.ok), "both paused supervised claims may be saved during legacy teardown");
+
+    const blocked = await Promise.all(["codex_waiting_alpha", "codex_waiting_bravo"].map((id) =>
+      daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
+        id, expected_desired_state: "paused", desired_state: "running",
+      })));
+    assert.ok(blocked.every((result) => !result.ok && /legacy reservation/.test(result.error ?? "")));
+    assert.equal((await daemonRequest(paths.socketPath, "lane.release_legacy", { reservation_id: "legacy_codex_owner" })).ok, true);
+
+    const activated = await Promise.all(["codex_waiting_alpha", "codex_waiting_bravo"].map((id) =>
+      daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
+        id, expected_desired_state: "paused", desired_state: "running",
+      })));
+    assert.ok(activated.every((result) => result.ok && (result.result as { applied: boolean }).applied));
+    const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.equal(manifest.filter((item) => item.desired_state === "running").length, 2);
   } finally {
     await daemon.stop();
     await env.cleanup();
