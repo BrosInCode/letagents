@@ -484,7 +484,15 @@ applyV4Shape(database: DatabaseSync): void {
 }
 
 validateV4Shape(database: DatabaseSync): void {
-  const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").trim().toLowerCase();
+  const normalizeSql = (value: string) => {
+    const stripped = value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
+    let result = ""; let quote = ""; let escaped = false;
+    for (const char of stripped) {
+      if (quote) { result += char; if (escaped) escaped = false; else if (char === "'") quote = ""; else if (char === "\\") escaped = true; }
+      else if (char === "'") { quote = char; result += char; } else result += char.toLowerCase();
+    }
+    return result.replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").trim();
+  };
   const canonicalTables: Record<string, string> = {
     worker_session_bindings: `CREATE TABLE worker_session_bindings (entry_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,work_attempt_id TEXT NOT NULL,execution_generation_id TEXT NOT NULL,agent_session_id TEXT NOT NULL,agent_session_token TEXT NOT NULL,api_url TEXT NOT NULL,room_cursor TEXT,last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0),last_observed_at_ms INTEGER NOT NULL CHECK(last_observed_at_ms >= 0),binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),updated_at TEXT NOT NULL) STRICT`,
     worker_binding_publications: `CREATE TABLE worker_binding_publications (reservation_id TEXT PRIMARY KEY,entry_id TEXT NOT NULL,binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),execution_generation_id TEXT NOT NULL,agent_session_id TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence > 0),observed_at TEXT NOT NULL,observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),state TEXT NOT NULL CHECK(state IN ('reserved','accepted','failed')),created_at TEXT NOT NULL,finalized_at TEXT,UNIQUE(entry_id,sequence)) STRICT`,
