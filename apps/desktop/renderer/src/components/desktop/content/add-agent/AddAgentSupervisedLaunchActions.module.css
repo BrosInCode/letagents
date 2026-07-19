@@ -1,0 +1,51 @@
+.actions {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.065);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 850;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+@media (max-width: 680px) {
+  .actions {
+    grid-column: 1;
+    grid-row: auto;
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button { transition: none; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .button:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.18);
+    color: var(--text);
+  }
+
+  .danger:hover:not(:disabled) {
+    border-color: rgba(248, 113, 113, 0.32);
+    background: rgba(248, 113, 113, 0.12);
+    color: #fca5a5;
+  }
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}

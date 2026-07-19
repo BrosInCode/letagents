@@ -32,6 +32,10 @@ const launchActionsSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.ts",
   import.meta.url,
 )), "utf8");
+const launchActionStyles = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.module.css",
+  import.meta.url,
+)), "utf8");
 const actionBarSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentActionBar.vue",
   import.meta.url,
@@ -188,6 +192,16 @@ test("a ready Codex launch can start another without stopping the completed agen
   assert.doesNotMatch(releaseBody, /stop\(/);
   assert.match(controllerSource, /suggestSupervisedCodexCodename\(existingDisplayNames, snapshot\.creationRequestId\)/);
   assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName,/);
+});
+
+test("the supervised action island owns complete responsive interaction styles", () => {
+  assert.match(launchActionsSource, /import styles from "\.\/AddAgentSupervisedLaunchActions\.module\.css"/);
+  assert.match(launchActionsSource, /class: \[styles\.button, styles\.danger\]/);
+  assert.match(launchActionStyles, /\.button\s*\{[\s\S]*?min-height: 34px/);
+  assert.match(launchActionStyles, /\.button:hover:not\(:disabled\)/);
+  assert.match(launchActionStyles, /\.button:disabled/);
+  assert.match(launchActionStyles, /prefers-reduced-motion: reduce/);
+  assert.match(launchActionStyles, /@media \(max-width: 680px\)[\s\S]*?\.actions/);
 });
 
 test("legacy start feedback is assigned only after the modal request guard", () => {

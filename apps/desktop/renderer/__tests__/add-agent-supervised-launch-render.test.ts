@@ -15,12 +15,14 @@ import {
 } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
-import { AddAgentSupervisedLaunchActions } from "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions";
 
 let vite: ViteDevServer;
 let AddAgentSupervisedLaunch: Component;
 let AddAgentActionBar: Component;
+let AddAgentSupervisedLaunchActions: Component;
 let managedAgentSessionsKey: InjectionKey<unknown>;
+let actionStyleNames: Record<string, string>;
+let compiledActionCss: string;
 
 before(async () => {
   vite = await createServer({
@@ -37,6 +39,21 @@ before(async () => {
   AddAgentActionBar = (
     await vite.ssrLoadModule(
       "/renderer/src/components/desktop/content/add-agent/AddAgentActionBar.vue",
+    )
+  ).default;
+  AddAgentSupervisedLaunchActions = (
+    await vite.ssrLoadModule(
+      "/renderer/src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.ts",
+    )
+  ).AddAgentSupervisedLaunchActions;
+  actionStyleNames = (
+    await vite.ssrLoadModule(
+      "/renderer/src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.module.css",
+    )
+  ).default;
+  compiledActionCss = (
+    await vite.ssrLoadModule(
+      "/renderer/src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.module.css?inline",
     )
   ).default;
   managedAgentSessionsKey = (
@@ -220,6 +237,14 @@ test("mounted ready Codex button dispatches dismiss and restores Start without s
   app.mount(root);
   const button = findByTestId(root, "desktop-add-agent-add-another-codex");
   assert.ok(button, "the mounted eligible branch must contain Add another");
+  const actionContainer = button.parent;
+  assert.ok(actionContainer);
+  assert.equal(actionContainer.props.class, actionStyleNames.actions);
+  assert.ok(String(button.props.class).includes(actionStyleNames.button));
+  assert.match(compiledActionCss, new RegExp(`\\.${actionStyleNames.button.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\s*\\{`));
+  assert.match(compiledActionCss, /:hover:not\(:disabled\)/);
+  assert.match(compiledActionCss, /\.\S+:disabled/);
+  assert.match(compiledActionCss, /prefers-reduced-motion: reduce/);
   const click = button.props.onClick;
   assert.equal(typeof click, "function");
   (click as () => void)();

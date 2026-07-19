@@ -1,5 +1,6 @@
 import { defineComponent, h, type PropType } from "vue";
 import type { LaunchJourneyView } from "../../../../domain/launch-journey";
+import styles from "./AddAgentSupervisedLaunchActions.module.css";
 
 /**
  * The launch-card action island is a render component so its mutually
@@ -33,18 +34,18 @@ export const AddAgentSupervisedLaunchActions = defineComponent({
     dismiss: () => true,
   },
   setup(props, { emit }) {
-    return () => h("div", { class: "desktop-add-agent-managed-session-actions" }, [
+    return () => h("div", { class: styles.actions }, [
       props.canAddAnotherCodexAgent
         ? h("button", {
             type: "button",
-            class: "desktop-add-agent-managed-session-secondary",
+            class: styles.button,
             "data-testid": "desktop-add-agent-add-another-codex",
             onClick: () => emit("add-another"),
           }, "Add another Codex agent")
         : props.hasStopAction
           ? h("button", {
               type: "button",
-              class: "desktop-add-agent-managed-session-danger",
+              class: [styles.button, styles.danger],
               "data-testid": "desktop-add-agent-stop-supervised-runtime",
               disabled: props.stopping,
               onClick: () => emit("stop"),
@@ -58,7 +59,7 @@ export const AddAgentSupervisedLaunchActions = defineComponent({
           : props.progress.failed || props.progress.stopped
             ? h("button", {
                 type: "button",
-                class: "desktop-add-agent-managed-session-secondary",
+                class: styles.button,
                 "data-testid": "desktop-add-agent-dismiss-launch",
                 onClick: () => emit("dismiss"),
               }, "Dismiss")
