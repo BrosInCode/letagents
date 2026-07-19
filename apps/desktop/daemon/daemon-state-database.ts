@@ -880,19 +880,38 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-  const database = new DatabaseSync(path);
-  try {
-    database.exec("PRAGMA busy_timeout = 5000");
-    const mode = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
-    if (mode.toLowerCase() !== "wal") database.exec("PRAGMA journal_mode = WAL");
-    const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
-    if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
-    database.exec("PRAGMA foreign_keys = ON");
-    database.exec("PRAGMA synchronous = FULL");
-    for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await chmod(candidate, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
-    await initializeSchema(database);
-    return database;
-  } catch (error) { database.close(); throw error; }
+  // Fresh sibling daemons can race at the one-time WAL conversion or schema
+  // DDL before busy_timeout is fully effective. Close each failed handle and
+  // back off outside SQLite; never turn an unrelated initialization error into
+  // a retry loop.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    let database: DatabaseSync | null = null;
+    try {
+      database = new DatabaseSync(path);
+      database.exec("PRAGMA busy_timeout = 5000");
+      const mode = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
+      if (mode.toLowerCase() !== "wal") database.exec("PRAGMA journal_mode = WAL");
+      const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
+      if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
+      database.exec("PRAGMA foreign_keys = ON");
+      database.exec("PRAGMA synchronous = FULL");
+      for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await chmod(candidate, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+      await initializeSchema(database);
+      return database;
+    } catch (error) {
+      try { database?.close(); } catch { /* preserve the triggering error */ }
+      if (attempt === 7 || !isSqliteBusyOrLocked(error)) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+  throw new Error("Daemon state initialization retry loop exited unexpectedly.");
+}
+
+function isSqliteBusyOrLocked(error: unknown): boolean {
+  const candidate = error as NodeJS.ErrnoException;
+  const code = String(candidate?.code ?? "").toUpperCase();
+  const message = String(candidate?.message ?? error).toUpperCase();
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || /SQLITE_(BUSY|LOCKED)|DATABASE IS (BUSY|LOCKED)/.test(message);
 }
 
 /** Initialise or upgrade the complete daemon-state schema without retaining a connection. */
