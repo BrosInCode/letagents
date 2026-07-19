@@ -8,10 +8,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { DatabaseSync } from "node:sqlite";
 
 import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
-import { ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
+import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent } from "../main.js";
 import { assertMacOS } from "../platform.js";
@@ -89,7 +90,7 @@ test("desired-state compare-and-set cannot resurrect a concurrently stopped laun
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
     socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
     attemptsRoot: join(env.root, "attempt-data"),
@@ -812,7 +813,7 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const workspace = await provisionedWorkspace(env.root, "serialized_direct_convergence");
@@ -862,7 +863,7 @@ test("an unattached live durable generation blocks a duplicate provider start", 
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const workspace = await provisionedWorkspace(env.root, "unattached_live_generation");
@@ -911,7 +912,7 @@ test("a failed provider launch terminalizes its generation and releases the shar
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const workspace = await provisionedWorkspace(env.root, "failed_launch_cleanup");
@@ -961,7 +962,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
     socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
     attemptsRoot: join(env.root, "attempt-data"),
@@ -1099,7 +1100,7 @@ test("direct terminal recovery increases delay and quarantines before a sixth ge
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const workspace = await provisionedWorkspace(env.root, "bounded_terminal_loop");
@@ -1158,7 +1159,7 @@ test("a terminal handle discovered during daemon reattach is fenced and resumes 
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const workspace = await provisionedWorkspace(env.root, "reattached_terminal");
@@ -1228,7 +1229,7 @@ test("direct provider convergence quarantines persisted crash loops without anot
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   let spawnCount = 0;
   const port: ProviderActionPort = {
@@ -2413,7 +2414,7 @@ test("two Codex room agents keep independent provider executions across stop, re
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const sources = await Promise.all([
@@ -2703,7 +2704,7 @@ test("two supervised Codex claims wait together behind one legacy Codex owner", 
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const sources = await Promise.all([
@@ -2822,7 +2823,7 @@ test("a concurrent Claude Code creation race mints one provider generation", asy
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
   const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
@@ -2977,7 +2978,7 @@ test("public-socket barrier races observe exactly one real mixed-engine product-
     const paths = {
       lockPath: join(env.root, "daemon.lock"),
       socketPath: join(env.root, "daemon.sock"),
-      manifestPath: join(env.root, "manifest.json"),
+      manifestPath: join(env.root, "daemon-state.sqlite"),
       auditPath: join(env.root, "audit.jsonl"),
       attemptsPath: join(env.root, "attempts.json"),
       attemptsRoot: join(env.root, "attempt-data"),
@@ -3152,7 +3153,7 @@ test("restart fences a title-mutated orphan, durably closes its generation, and 
   await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     workerBindingsPath: join(env.root, "worker-bindings.json"),
   };
@@ -3313,7 +3314,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
 
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     workerBindingsPath: join(env.root, "worker-bindings.json"),
   };
@@ -3879,12 +3880,20 @@ test("work attempts survive generations and lease rebinds while terminal payload
     const workspace = await provisionedWorkspace(env.root);
     const attempt = await store.createAttempt({ taskId: "task", leaseId: "lease-1", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
     await store.checkpoint(attempt.work_attempt_id, { room_cursor: "msg_12", provider_continuation_id: "provider-1" });
+    const historyGuard = new DatabaseSync(join(env.root, "daemon-state.sqlite"));
+    historyGuard.exec(`
+      CREATE TRIGGER forbid_checkpoint_rewrite BEFORE DELETE ON work_attempt_checkpoints BEGIN SELECT RAISE(ABORT, 'checkpoint history rewritten'); END;
+      CREATE TRIGGER forbid_epoch_rewrite BEFORE DELETE ON work_attempt_lease_epochs BEGIN SELECT RAISE(ABORT, 'epoch history rewritten'); END;
+      CREATE TRIGGER forbid_execution_rewrite BEFORE DELETE ON work_attempt_executions BEGIN SELECT RAISE(ABORT, 'execution history rewritten'); END;
+    `);
+    historyGuard.close();
     const execution = await store.startGeneration(attempt.work_attempt_id, "daemon", 1);
     const terminal = { ended_at: "2026-01-01T00:00:09.000Z", exit_code: 137, signal: "SIGKILL", stdio_archive_ref: "stdio.log.1.archive", stdio_tail: "last line", terminal_cause: "crash", actor: "daemon", generation: 1, provider_continuation_id: "provider-1" };
     const storedTerminal = await store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, { ...terminal, stdio_tail: "x".repeat(20) }, 8);
     assert.equal(storedTerminal.terminal?.stdio_tail, "x".repeat(8));
     await assert.rejects(() => store.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, terminal), ImmutableExecutionError);
     await store.rebindAttempt(attempt.work_attempt_id, "lease-2", 2);
+    await store.checkpoint(attempt.work_attempt_id, { room_cursor: "msg_13", provider_continuation_id: "provider-2" });
     const resumed = await store.startGeneration(attempt.work_attempt_id, "daemon", 2);
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).workspace_path, workspace.path);
     assert.equal((await store.getAttempt(attempt.work_attempt_id)).epoch_history.length, 2);
@@ -3894,8 +3903,31 @@ test("work attempts survive generations and lease rebinds while terminal payload
     assert.doesNotMatch(JSON.stringify(resumedTerminal.terminal), new RegExp(terminalCanary));
     assert.doesNotMatch(JSON.stringify(await store.getAttempt(attempt.work_attempt_id)), new RegExp(terminalCanary));
     assert.match(JSON.stringify(resumedTerminal.terminal), /REDACTED/);
+    const releaseHistoryGuard = new DatabaseSync(join(env.root, "daemon-state.sqlite"));
+    releaseHistoryGuard.exec("DROP TRIGGER forbid_checkpoint_rewrite; DROP TRIGGER forbid_epoch_rewrite; DROP TRIGGER forbid_execution_rewrite");
+    releaseHistoryGuard.close();
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "reviewed", postmortemDiff: "diff --git a/a b/a" });
     await assert.rejects(() => store.rebindAttempt(attempt.work_attempt_id, "lease-3", 3), ImmutableExecutionError);
+  } finally { await env.cleanup(); }
+});
+
+test("independent SQLite connections cannot start two live generations for one attempt", async () => {
+  const env = await fixture();
+  try {
+    const path = join(env.root, "attempts.json");
+    const root = join(env.root, "attempt-data");
+    const workspace = await provisionedWorkspace(env.root);
+    const first = new WorkDurabilityStore(path, root, undefined, join(env.root, "worktrees"), undefined, undefined, undefined, { supervisor_id: "race-a", supervisor_generation: 1 });
+    const second = new WorkDurabilityStore(path, root, undefined, join(env.root, "worktrees"), undefined, undefined, undefined, { supervisor_id: "race-b", supervisor_generation: 1 });
+    const attempt = await first.createAttempt({ taskId: "task", leaseId: "race", leaseEpoch: 1, workspacePath: workspace.path, workAttemptId: workspace.id });
+    const results = await Promise.allSettled([
+      first.startGeneration(attempt.work_attempt_id, "daemon", 1),
+      second.startGeneration(attempt.work_attempt_id, "daemon", 1),
+    ]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal((await first.getAttempt(attempt.work_attempt_id)).execution_generations.filter((item) => item.terminal === null).length, 1);
+    await first.close();
+    await second.close();
   } finally { await env.cleanup(); }
 });
 
@@ -4139,7 +4171,7 @@ test("durability store validates destructive identities, serializes GC, and quar
     await store.concludeAttempt(protectedAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
     await writeFile(path, "{\"version\":2,\"attempts\":[],\"checksum\":\"tampered\"}");
     const recovered = new WorkDurabilityStore(path, join(env.root, "attempt-data"), () => "2026-01-01T00:00:01.000Z", join(env.root, "worktrees"));
-    assert.deepEqual(await recovered.garbageCollect(0), []);
+    await assert.rejects(() => recovered.garbageCollect(0), CorruptAttemptStoreError);
     assert.equal((await stat(protectedWorkspace.path)).isDirectory(), true);
     assert.ok((await readdir(env.root)).some((name) => name.startsWith("attempts.json.corrupt.")));
 

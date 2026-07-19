@@ -303,6 +303,7 @@ createSchema(database: DatabaseSync): void {
     if (createdMetadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${createdMetadataVersion}.`);
     this.validateV2Shape(database);
     this.applyV3Shape(database);
+    this.validateV3Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -323,6 +324,8 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.applyV2Shape(database, true);
     this.validateV2Shape(database);
     this.applyV3Shape(database);
+    this.validateV3Shape(database);
+    this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -341,6 +344,8 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.applyV2Shape(database, true);
     this.validateV2Shape(database);
     this.applyV3Shape(database);
+    this.validateV3Shape(database);
+    this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -356,6 +361,7 @@ repairAndValidateV3Shape(database: DatabaseSync): void {
     this.applyV2Shape(database, true);
     this.validateV2Shape(database);
     this.applyV3Shape(database);
+    this.validateV3Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -392,6 +398,22 @@ applyV3Shape(database: DatabaseSync): void {
     CREATE UNIQUE INDEX IF NOT EXISTS one_live_work_attempt_execution
       ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL;
   `);
+}
+
+validateV3Shape(database: DatabaseSync): void {
+  const required: Record<string, string[]> = {
+    work_attempts: ["work_attempt_id", "task_id", "lease_id", "current_lease_epoch", "workspace_path", "workspace_repo", "workspace_remote_url", "workspace_resolved_revision", "workspace_bare_path", "state", "created_at", "concluded_at", "conclusion_cause", "postmortem_diff"],
+    work_attempt_lease_epochs: ["work_attempt_id", "sort_order", "lease_id", "epoch", "recorded_at"],
+    work_attempt_checkpoints: ["work_attempt_id", "sort_order", "at", "room_cursor", "provider_continuation_id"],
+    work_attempt_executions: ["execution_generation_id", "work_attempt_id", "started_at", "actor", "generation", "terminal_json"],
+  };
+  for (const [table, expected] of Object.entries(required)) {
+    const actual = this.tableColumns(database, table);
+    const missing = expected.filter((column) => !actual.has(column));
+    if (missing.length) throw new Error(`Daemon state v3 table ${table} is missing required columns: ${missing.join(", ")}.`);
+  }
+  const index = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'one_live_work_attempt_execution'").get() as Row | undefined;
+  if (!index || !/WHERE\s+terminal_json\s+IS\s+NULL/i.test(String(index.sql))) throw new Error("Daemon state v3 live execution uniqueness index is missing or malformed.");
 }
 
 applyV2Shape(database: DatabaseSync, backfillExitTimestamps: boolean): void {

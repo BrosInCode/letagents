@@ -386,6 +386,10 @@ export class SupervisorDaemon {
       `${root}/worktrees`,
       undefined,
       gitCommand,
+      undefined,
+      undefined,
+      undefined,
+      paths.manifestPath,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
     this.workerBindings = new WorkerBindingStore(
