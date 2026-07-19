@@ -15,7 +15,14 @@
       <SupervisedLaunchProgress :progress="progress" @recover="controller.launch.handleRecover($event)" />
       <div class="desktop-add-agent-managed-session-actions">
         <button
-          v-if="hasConflict"
+          v-if="canAddAnotherCodexAgent"
+          type="button"
+          class="desktop-add-agent-managed-session-secondary"
+          data-testid="desktop-add-agent-add-another-codex"
+          @click="controller.launch.dismissReadyCodexLaunchForAnother"
+        >Add another Codex agent</button>
+        <button
+          v-else-if="hasStopAction"
           type="button"
           class="desktop-add-agent-managed-session-danger"
           data-testid="desktop-add-agent-stop-supervised-runtime"
@@ -29,13 +36,6 @@
           data-testid="desktop-add-agent-dismiss-launch"
           @click="controller.launch.dismiss"
         >Dismiss</button>
-        <button
-          v-else-if="canAddAnotherCodexAgent"
-          type="button"
-          class="desktop-add-agent-managed-session-secondary"
-          data-testid="desktop-add-agent-add-another-codex"
-          @click="controller.launch.dismissReadyCodexLaunchForAnother"
-        >Add another Codex agent</button>
       </div>
     </article>
   </section>
@@ -61,12 +61,13 @@ const props = defineProps<{
   controller: AddAgentSupervisedUi;
 }>();
 const progress = computed(() => props.controller.launch.view.value);
-const hasConflict = computed(() => Boolean(props.controller.launch.conflict.value));
 const stopping = computed(() => Boolean(props.controller.launch.stoppingEntryId.value));
 const canAddAnotherCodexAgent = computed(() => {
   const entry = props.controller.launch.conflict.value;
   return entry?.provider === "codex" && Boolean(progress.value?.ready);
 });
+const hasStopAction = computed(() => Boolean(props.controller.launch.conflict.value)
+  && !canAddAnotherCodexAgent.value);
 const recoveryCandidate = computed(() => props.controller.launch.recoveryCandidate.value);
 const recoverableProviderName = computed(() => props.controller.recoverableProviderName.value);
 const recoveryAnnouncement = computed(() => recoveryCandidate.value && recoverableProviderName.value

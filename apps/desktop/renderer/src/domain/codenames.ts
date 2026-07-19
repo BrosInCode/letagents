@@ -32,8 +32,8 @@ const CANDIDATES = CODENAME_PREFIXES.flatMap((prefix) =>
 
 /**
  * Selects a deterministic name from the names that already exist in the
- * room. Starts are serialized in this modal, so a second request observes the
- * first persisted name and gets the next unused candidate.
+ * room. The full request id suffix makes the persisted label globally
+ * distinguishable even when two desktop windows read the same stale room list.
  */
 export function suggestSupervisedCodexCodename(
   existingNames: Iterable<string | null | undefined>,
@@ -47,12 +47,13 @@ export function suggestSupervisedCodexCodename(
   const startIndex = hashSeed(creationRequestId) % CANDIDATES.length;
   for (let offset = 0; offset < CANDIDATES.length; offset += 1) {
     const candidate = CANDIDATES[(startIndex + offset) % CANDIDATES.length]!;
-    if (!usedNames.has(normalizeName(candidate))) return candidate;
+    if (!usedNames.has(normalizeName(candidate))) {
+      return `${candidate} · ${creationRequestId}`;
+    }
   }
 
   // The expanded name is still deterministic and intentionally carries only
   // a short, human-readable slice of the request id. It is a display label,
   // never an identity key.
-  const compactRequestId = creationRequestId.replace(/[^a-z0-9]/gi, "").slice(0, 8) || "new";
-  return `LumenForge${compactRequestId}`;
+  return `LumenForge · ${creationRequestId}`;
 }
