@@ -535,10 +535,10 @@ validateV4Shape(database: DatabaseSync): void {
     if (info.length !== requirement.columns.length || info.some((row, index) => Number(row.cid) < 0 || row.name !== requirement.columns[index] || Number(row.desc) !== (descendingLast && index === requirement.columns.length - 1 ? 1 : 0) || String(row.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v4 index ${name} has invalid terms.`);
   }
   for (const table of ["worker_binding_publications", "worker_generation_verifications"]) {
-    const uniqueSequence = (database.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string; unique: number; origin: string }>).some((row) => {
-      if (Number(row.unique) !== 1 || String(row.origin) !== "u") return false;
-      const terms = (database.prepare(`PRAGMA index_xinfo(${row.name})`).all() as Array<{ key: number; name: string | null }>).filter((term) => Number(term.key) === 1).map((term) => term.name);
-      return terms.join(",") === "entry_id,sequence";
+    const uniqueSequence = (database.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string; unique: number; origin: string; partial: number }>).some((row) => {
+      if (Number(row.unique) !== 1 || String(row.origin) !== "u" || Number(row.partial) !== 0) return false;
+      const terms = (database.prepare(`PRAGMA index_xinfo(${row.name})`).all() as Array<{ key: number; cid: number; name: string | null; desc: number; coll: string }>).filter((term) => Number(term.key) === 1);
+      return terms.length === 2 && terms[0]?.cid >= 0 && terms[1]?.cid >= 0 && terms[0]?.name === "entry_id" && terms[1]?.name === "sequence" && Number(terms[0]?.desc) === 0 && Number(terms[1]?.desc) === 0 && String(terms[0]?.coll).toUpperCase() === "BINARY" && String(terms[1]?.coll).toUpperCase() === "BINARY";
     });
     if (!uniqueSequence) throw new Error(`Daemon state v4 table ${table} is missing UNIQUE(entry_id, sequence).`);
   }

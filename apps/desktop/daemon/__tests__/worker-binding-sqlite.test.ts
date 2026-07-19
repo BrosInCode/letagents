@@ -44,6 +44,20 @@ test("a paused commit fence holds no SQLite writer lock for an independent store
   } finally { await env.cleanup(); }
 });
 
+test("simultaneously released fenced stores and a raw writer do not deadlock", async () => {
+  const env = await fixture(); try {
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fence = async (commit: () => Promise<void>) => { await gate; await commit(); };
+    const a = new WorkerBindingStore(join(env.root, "a.json"), fence, env.database);
+    const b = new WorkerBindingStore(join(env.root, "b.json"), fence, env.database);
+    const one = a.bind(input("agent_a")); const two = b.bind(input("agent_b"));
+    await new Promise((resolve) => setTimeout(resolve, 0)); release();
+    await Promise.all([one, two]);
+    const raw = new DatabaseSync(env.database); raw.prepare("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run("raw", "agent_a", 1, "run", "session", 999999, "2026-01-01T00:00:00.000Z", 1, "accepted", "2026-01-01T00:00:00.000Z", null); raw.close();
+    await a.close(); await b.close();
+  } finally { await env.cleanup(); }
+});
+
 test("timeout and thrown transport retain the still-current credential", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.bind(input());
@@ -86,6 +100,18 @@ test("escaped duplicate legacy keys are quarantined before JSON collapse", async
   } finally { await env.cleanup(); }
 });
 
+test("legacy source substitution during a paused fence cannot import A and back up B", async () => {
+  const env = await fixture(); try {
+    await writeFile(env.legacy, JSON.stringify({ version: 1, bindings: { agent_a: { ...input("agent_a"), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } }));
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; }); let reached!: () => void; const reachedFence = new Promise<void>((resolve) => { reached = resolve; });
+    const store = new WorkerBindingStore(env.legacy, async (commit) => { reached(); await gate; await commit(); }, env.database);
+    const pending = store.list(); await reachedFence;
+    await writeFile(env.legacy, JSON.stringify({ version: 1, bindings: { agent_b: { ...input("agent_b"), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } })); release();
+    await assert.rejects(() => pending, /source changed/); await store.close();
+    const db = new DatabaseSync(env.database); assert.equal((db.prepare("SELECT COUNT(*) AS count FROM worker_session_bindings").get() as { count: number }).count, 0); db.close();
+  } finally { await env.cleanup(); }
+});
+
 test("v4 validator rejects malformed private columns and quarantine housekeeping retries", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.list(); await store.close();
@@ -115,5 +141,13 @@ test("v4 validator rejects WITHOUT ROWID private tables", async () => {
         updated_at TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;`); db.close();
     await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /rowid/);
+  } finally { await env.cleanup(); }
+});
+
+test("v4 validator rejects generated columns and NOCASE/DESC unique terms", async () => {
+  const env = await fixture(); try {
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.list(); await store.close();
+    const db = new DatabaseSync(env.database); db.exec("ALTER TABLE worker_session_bindings ADD COLUMN generated TEXT GENERATED ALWAYS AS ('x') VIRTUAL"); db.close();
+    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /invalid columns/);
   } finally { await env.cleanup(); }
 });
