@@ -16,6 +16,15 @@ import { useSupervisedLaunchEventStream } from "./useSupervisedLaunchEventStream
 import { useSupervisedRuntimePolling } from "./useSupervisedRuntimePolling";
 import { useSupervisedLaunchRecovery } from "./useSupervisedLaunchRecovery";
 
+export function canAddAnotherCodexAgent(input: {
+  providerId: DesktopAgentProviderId | null;
+  entry: DesktopSupervisorManifestEntry | null;
+}): boolean {
+  return input.providerId === "codex"
+    && input.entry?.provider === "codex"
+    && supervisedLaunchProgress(input.entry).ready;
+}
+
 export function useSupervisedAgentLaunch(options: {
   open: MaybeRefOrGetter<boolean>;
   roomIdentifier: MaybeRefOrGetter<string>;
@@ -255,6 +264,19 @@ export function useSupervisedAgentLaunch(options: {
     clearActiveLaunch();
   }
 
+  /**
+   * Releases only this modal's completed-launch attachment. The durable agent
+   * remains running; `stop` is deliberately not involved. Non-Codex providers
+   * retain their existing singleton lane behaviour.
+   */
+  function dismissReadyCodexLaunchForAnother(): void {
+    if (!canAddAnotherCodexAgent({
+      providerId: toValue(options.providerId),
+      entry: conflict.value,
+    })) return;
+    dismiss();
+  }
+
   function resetActiveLaunch(preserveRecoveryCandidate = true): void {
     const activeEntry = conflict.value;
     recovery.cancelExplicitRecovery();
@@ -347,6 +369,7 @@ export function useSupervisedAgentLaunch(options: {
     offerAmbiguousCreationCandidate,
     stop,
     dismiss,
+    dismissReadyCodexLaunchForAnother,
     resetActiveLaunch,
     handleRecover,
     cleanup,
