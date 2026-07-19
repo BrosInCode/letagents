@@ -36,6 +36,7 @@ const {
   desktopManagedAgentMessageActivationDecision,
   isOwnRoomStreamEvent,
   isStopPhraseRoomStreamEvent,
+  resolveCodexRoomStreamEventRecipients,
   shouldDeliverCodexRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToSession,
@@ -2922,8 +2923,7 @@ test("Codex room activation routes only explicit addresses while retaining a sha
   });
   const workers = [river, dawn, oak];
   const dispatchedNames = (event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>) =>
-    workers
-      .filter((worker) => shouldDeliverCodexRoomStreamEventToManagedAgent(worker, event))
+    resolveCodexRoomStreamEventRecipients(workers, event)
       .map((worker) => worker.displayName);
 
   const untaggedHuman = messageEvent({
@@ -3009,6 +3009,126 @@ test("Codex room activation routes only explicit addresses while retaining a sha
   });
   assert.equal(shouldDeliverCodexRoomStreamEventToManagedAgent(dawn, ownBroadcast), false, "a worker never reactivates itself");
   assert.equal(codexManagedAgentMessageActivationDecision(dawn, directToDawn.message), "activate");
+});
+
+test("Codex room activation fails closed for duplicate names and accepts a canonical target", () => {
+  const aliceOak = publicManagedAgentSession({
+    id: "local_alice_oak",
+    agentSessionId: "agent_session_alice_oak",
+    actorLabel: "Oak | Alice's agent | Codex",
+    agentKey: "local/alice/codex/oak",
+    displayName: "Oak",
+  });
+  const bobOak = publicManagedAgentSession({
+    id: "local_bob_oak",
+    agentSessionId: "agent_session_bob_oak",
+    actorLabel: "Oak | Bob's agent | Codex",
+    agentKey: "local/bob/codex/oak",
+    displayName: "Oak",
+  });
+  const workers = [aliceOak, bobOak];
+  const targets = (text: string) => resolveCodexRoomStreamEventRecipients(workers, messageEvent({
+    message: { ...messageEvent().message, id: `msg_${text}`, text },
+  })).map((worker) => worker.agentSessionId);
+
+  assert.deepEqual(targets("@Oak please review"), [], "a duplicate display alias cannot fan out");
+  assert.deepEqual(
+    targets("@agent:local/alice/codex/oak please review"),
+    ["agent_session_alice_oak"],
+    "the canonical key resolves exactly one duplicate-name worker",
+  );
+  const aliceBroadcast = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_alice_broadcast",
+      sender: "Oak",
+      actorLabel: "Oak | Alice's agent | Codex",
+      source: "agent",
+      text: "@everyone I finished my pass",
+      agentIdentity: {
+        name: "Oak",
+        displayName: "Oak",
+        ownerLabel: "Alice",
+        ownerAttribution: "Alice's agent",
+        ideLabel: "Codex",
+        actorLabel: "Oak | Alice's agent | Codex",
+        agentKey: "local/alice/codex/oak",
+        agentSessionId: "agent_session_alice_oak",
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients(workers, aliceBroadcast).map((worker) => worker.agentSessionId),
+    ["agent_session_bob_oak"],
+    "a stable author identity excludes only self even when display names collide",
+  );
+});
+
+test("Codex stop control reaches a blocked bound worker but excludes unsafe recipients", () => {
+  resetState({
+    agent_sessions: {
+      worker_blocked_stop: managedWorkerSession({
+        session_id: "worker_blocked_stop",
+        room_id: "room_stop_control",
+        runtime: "codex:LOCAL_CODEX_ROOM_blocked_stop",
+        actor_label: "BlockedCedar",
+        agent_key: "local/blocked/cedar",
+        display_name: "BlockedCedar",
+      }),
+      worker_interrupted_stop: managedWorkerSession({
+        session_id: "worker_interrupted_stop",
+        room_id: "room_stop_control",
+        runtime: "codex:LOCAL_CODEX_ROOM_interrupted_stop",
+      }),
+      worker_failed_stop: managedWorkerSession({
+        session_id: "worker_failed_stop",
+        room_id: "room_stop_control",
+        runtime: "codex:LOCAL_CODEX_ROOM_failed_stop",
+      }),
+    },
+  });
+  for (const [sessionId, token, status, agentSessionId] of [
+    ["blocked_stop", "LOCAL_CODEX_ROOM_blocked_stop", "blocked", "worker_blocked_stop"],
+    ["interrupted_stop", "LOCAL_CODEX_ROOM_interrupted_stop", "interrupted", "worker_interrupted_stop"],
+    ["failed_stop", "LOCAL_CODEX_ROOM_failed_stop", "failed", "worker_failed_stop"],
+    ["unbound_stop", "LOCAL_CODEX_ROOM_unbound_stop", "blocked", null],
+  ] as const) {
+    saveCodexLiveSession(liveSession({
+      session_id: sessionId,
+      room_id: "room_stop_control",
+      room_identifier: "room_stop_control",
+      token,
+      agent_session_id: agentSessionId,
+      stop_phrase: "/stop-codex-room",
+      status,
+    }));
+  }
+  const stopEvent = messageEvent({
+    roomIdentifier: "room_stop_control",
+    message: {
+      ...messageEvent().message,
+      id: "msg_stop_blocked",
+      text: "/stop-codex-room",
+    },
+  });
+
+  assert.deepEqual(
+    listDeliverableCodexSessionsForRoomStreamEvent(stopEvent).map((session) => session.session_id),
+    ["blocked_stop"],
+  );
+  assert.deepEqual(
+    listDeliverableCodexSessionsForRoomStreamEvent({
+      ...stopEvent,
+      message: {
+        ...stopEvent.message,
+        id: "msg_stop_self",
+        sender: "BlockedCedar",
+        source: "agent",
+      },
+    }),
+    [],
+    "self-authored stop text is not reflected back into the same worker",
+  );
 });
 
 test("Codex activation does not filter earlier untagged room context", async () => {
