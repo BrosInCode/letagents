@@ -29,6 +29,21 @@ test("slow native publication does not block another binding checkpoint or publi
   } finally { await env.cleanup(); }
 });
 
+test("a paused commit fence holds no SQLite writer lock for an independent store", async () => {
+  const env = await fixture(); try {
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fenced = new WorkerBindingStore(env.legacy, async (commit) => { await gate; await commit(); }, env.database);
+    const independent = new WorkerBindingStore(join(env.root, "other.json"), undefined, env.database);
+    const pending = fenced.bind(input("agent_a"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const raced = await Promise.race([
+      independent.bind(input("agent_b")).then(() => "completed"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 150)),
+    ]);
+    assert.equal(raced, "completed"); release(); await pending; await fenced.close(); await independent.close();
+  } finally { await env.cleanup(); }
+});
+
 test("timeout and thrown transport retain the still-current credential", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.bind(input());
