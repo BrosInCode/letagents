@@ -504,7 +504,7 @@ validateV4Shape(database: DatabaseSync): void {
       }
     }
     const tableRow = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === table && row.type === "table");
-    if (!tableRow || Number(tableRow.strict) !== 1) throw new Error(`Daemon state v4 table ${table} must be STRICT.`);
+    if (!tableRow || Number(tableRow.strict) !== 1 || Number(tableRow.wr) !== 0) throw new Error(`Daemon state v4 table ${table} must be STRICT rowid tables.`);
   }
   const indexNames = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Row[]).map((row) => String(row.name)));
   for (const index of ["worker_session_binding_authority", "worker_binding_publications_current", "worker_generation_verifications_current"]) {
@@ -542,7 +542,7 @@ validateV4Shape(database: DatabaseSync): void {
     });
     if (!uniqueSequence) throw new Error(`Daemon state v4 table ${table} is missing UNIQUE(entry_id, sequence).`);
   }
-  const schemaSql = new Map((database.prepare("SELECT name, sql FROM sqlite_master WHERE type='table'").all() as Row[]).map((row) => [String(row.name), String(row.sql).replace(/\s+/g, " ").toLowerCase()]));
+  const schemaSql = new Map((database.prepare("SELECT name, sql FROM sqlite_master WHERE type='table'").all() as Row[]).map((row) => [String(row.name), String(row.sql).replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\s+/g, " ").toLowerCase()]));
   const checks: Record<string, string[]> = {
     worker_session_bindings: ["check (last_sequence >= 0)", "check (last_observed_at_ms >= 0)", "check (binding_epoch >= 1)"],
     worker_binding_publications: ["check (sequence > 0)", "check (observed_at_ms >= 0)", "check (state in ('reserved', 'accepted', 'failed'))"],

@@ -101,3 +101,19 @@ test("v4 validator rejects malformed private columns and quarantine housekeeping
     await assert.rejects(() => readFile(bad, "utf8"), { code: "ENOENT" });
   } finally { await env.cleanup(); }
 });
+
+test("v4 validator rejects WITHOUT ROWID private tables", async () => {
+  const env = await fixture(); try {
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.list(); await store.close();
+    const db = new DatabaseSync(env.database);
+    db.exec(`DROP TABLE worker_session_bindings;
+      CREATE TABLE worker_session_bindings (
+        entry_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, work_attempt_id TEXT NOT NULL,
+        execution_generation_id TEXT NOT NULL, agent_session_id TEXT NOT NULL, agent_session_token TEXT NOT NULL,
+        api_url TEXT NOT NULL, room_cursor TEXT, last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+        last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0), binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+        updated_at TEXT NOT NULL
+      ) STRICT, WITHOUT ROWID;`); db.close();
+    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /rowid/);
+  } finally { await env.cleanup(); }
+});
