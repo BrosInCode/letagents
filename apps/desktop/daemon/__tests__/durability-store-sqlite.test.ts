@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { access, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -40,8 +41,50 @@ test("malformed pre-existing v3 work tables are rejected without claiming succes
     database.exec("DROP TABLE work_attempts; CREATE TABLE work_attempts(foo TEXT) STRICT");
     database.close();
     const store = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
-    await assert.rejects(() => store.getAttempt("00000000-0000-4000-8000-000000000001"), /v3 table work_attempts is missing required columns/);
+    await assert.rejects(() => store.getAttempt("00000000-0000-4000-8000-000000000001"), /v3 table work_attempts/);
     await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("v3 validation rejects a same-name non-unique live index and non-STRICT execution table", async () => {
+  for (const corruption of ["index", "table"] as const) {
+    const env = await fixture();
+    try {
+      const manifest = new ManifestStore(env.database);
+      await manifest.load();
+      await manifest.close();
+      const database = new DatabaseSync(env.database);
+      if (corruption === "index") database.exec("DROP INDEX one_live_work_attempt_execution; CREATE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL");
+      else database.exec(`DROP TABLE work_attempt_executions; CREATE TABLE work_attempt_executions(
+        execution_generation_id TEXT, work_attempt_id TEXT, started_at TEXT, actor TEXT, generation INTEGER, terminal_json TEXT
+      ); CREATE UNIQUE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL`);
+      database.close();
+      const store = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
+      await assert.rejects(() => store.getAttempt("00000000-0000-4000-8000-000000000001"), /v3/);
+      await store.close();
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("post-commit backup EISDIR is retried without poisoning a valid import", async () => {
+  const env = await fixture();
+  try {
+    const checksum = createHash("sha256").update("[]").digest("hex");
+    await writeFile(env.json, JSON.stringify({ version: 2, attempts: [], checksum }));
+    await mkdir(`${env.json}.migrated-backup`);
+    const first = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
+    await assert.rejects(() => first.getAttempt("00000000-0000-4000-8000-000000000001"), AttemptNotFoundError);
+    await first.close();
+    const inspection = new DatabaseSync(env.database);
+    assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM migration_records").get() as { count: number }).count, 1);
+    assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM migration_failures").get() as { count: number }).count, 0);
+    inspection.close();
+    await rm(`${env.json}.migrated-backup`, { recursive: true });
+    const reopened = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
+    await assert.rejects(() => reopened.getAttempt("00000000-0000-4000-8000-000000000001"), AttemptNotFoundError);
+    await reopened.close();
+    await assert.rejects(() => access(env.json));
+    assert.equal((await stat(`${env.json}.migrated-backup`)).isFile(), true);
   } finally { await env.cleanup(); }
 });
 

@@ -401,19 +401,75 @@ applyV3Shape(database: DatabaseSync): void {
 }
 
 validateV3Shape(database: DatabaseSync): void {
-  const required: Record<string, string[]> = {
-    work_attempts: ["work_attempt_id", "task_id", "lease_id", "current_lease_epoch", "workspace_path", "workspace_repo", "workspace_remote_url", "workspace_resolved_revision", "workspace_bare_path", "state", "created_at", "concluded_at", "conclusion_cause", "postmortem_diff"],
-    work_attempt_lease_epochs: ["work_attempt_id", "sort_order", "lease_id", "epoch", "recorded_at"],
-    work_attempt_checkpoints: ["work_attempt_id", "sort_order", "at", "room_cursor", "provider_continuation_id"],
-    work_attempt_executions: ["execution_generation_id", "work_attempt_id", "started_at", "actor", "generation", "terminal_json"],
+  type Column = { name: string; type: "TEXT" | "INTEGER"; notnull: 0 | 1; pk: number };
+  const required: Record<string, Column[]> = {
+    work_attempts: [
+      { name: "work_attempt_id", type: "TEXT", notnull: 1, pk: 1 }, { name: "task_id", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "lease_id", type: "TEXT", notnull: 1, pk: 0 }, { name: "current_lease_epoch", type: "INTEGER", notnull: 1, pk: 0 },
+      { name: "workspace_path", type: "TEXT", notnull: 1, pk: 0 }, { name: "workspace_repo", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "workspace_remote_url", type: "TEXT", notnull: 1, pk: 0 }, { name: "workspace_resolved_revision", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "workspace_bare_path", type: "TEXT", notnull: 1, pk: 0 }, { name: "state", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "created_at", type: "TEXT", notnull: 1, pk: 0 }, { name: "concluded_at", type: "TEXT", notnull: 0, pk: 0 },
+      { name: "conclusion_cause", type: "TEXT", notnull: 0, pk: 0 }, { name: "postmortem_diff", type: "TEXT", notnull: 0, pk: 0 },
+    ],
+    work_attempt_lease_epochs: [
+      { name: "work_attempt_id", type: "TEXT", notnull: 1, pk: 1 }, { name: "sort_order", type: "INTEGER", notnull: 1, pk: 2 },
+      { name: "lease_id", type: "TEXT", notnull: 1, pk: 0 }, { name: "epoch", type: "INTEGER", notnull: 1, pk: 0 }, { name: "recorded_at", type: "TEXT", notnull: 1, pk: 0 },
+    ],
+    work_attempt_checkpoints: [
+      { name: "work_attempt_id", type: "TEXT", notnull: 1, pk: 1 }, { name: "sort_order", type: "INTEGER", notnull: 1, pk: 2 },
+      { name: "at", type: "TEXT", notnull: 1, pk: 0 }, { name: "room_cursor", type: "TEXT", notnull: 0, pk: 0 }, { name: "provider_continuation_id", type: "TEXT", notnull: 0, pk: 0 },
+    ],
+    work_attempt_executions: [
+      { name: "execution_generation_id", type: "TEXT", notnull: 1, pk: 1 }, { name: "work_attempt_id", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "started_at", type: "TEXT", notnull: 1, pk: 0 }, { name: "actor", type: "TEXT", notnull: 1, pk: 0 },
+      { name: "generation", type: "INTEGER", notnull: 1, pk: 0 }, { name: "terminal_json", type: "TEXT", notnull: 0, pk: 0 },
+    ],
   };
   for (const [table, expected] of Object.entries(required)) {
-    const actual = this.tableColumns(database, table);
-    const missing = expected.filter((column) => !actual.has(column));
-    if (missing.length) throw new Error(`Daemon state v3 table ${table} is missing required columns: ${missing.join(", ")}.`);
+    const tableRow = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === table && row.type === "table");
+    if (!tableRow || Number(tableRow.strict) !== 1 || Number(tableRow.wr) !== 0) throw new Error(`Daemon state v3 table ${table} must be a STRICT rowid table.`);
+    const actual = database.prepare(`PRAGMA table_xinfo(${table})`).all() as Row[];
+    const valid = actual.length === expected.length && expected.every((column, index) => {
+      const found = actual[index];
+      return found?.name === column.name && String(found.type).toUpperCase() === column.type
+        && Number(found.notnull) === column.notnull && Number(found.pk) === column.pk && Number(found.hidden) === 0;
+    });
+    if (!valid) throw new Error(`Daemon state v3 table ${table} has an invalid column, type, nullability, or primary-key shape.`);
   }
-  const index = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'one_live_work_attempt_execution'").get() as Row | undefined;
-  if (!index || !/WHERE\s+terminal_json\s+IS\s+NULL/i.test(String(index.sql))) throw new Error("Daemon state v3 live execution uniqueness index is missing or malformed.");
+  for (const table of ["work_attempt_lease_epochs", "work_attempt_checkpoints", "work_attempt_executions"]) {
+    const foreignKeys = database.prepare(`PRAGMA foreign_key_list(${table})`).all() as Row[];
+    if (foreignKeys.length !== 1 || foreignKeys[0]?.table !== "work_attempts" || foreignKeys[0]?.from !== "work_attempt_id"
+      || foreignKeys[0]?.to !== "work_attempt_id" || String(foreignKeys[0]?.on_delete).toUpperCase() !== "CASCADE") {
+      throw new Error(`Daemon state v3 table ${table} has an invalid work-attempt foreign key.`);
+    }
+  }
+  if (!this.hasUniqueIndex(database, "work_attempts", ["workspace_path"], false)
+    || !this.hasUniqueIndex(database, "work_attempt_executions", ["work_attempt_id", "generation"], false)) {
+    throw new Error("Daemon state v3 required workspace or generation uniqueness constraint is missing.");
+  }
+  const named = (database.prepare("PRAGMA index_list(work_attempt_executions)").all() as Row[])
+    .find((row) => row.name === "one_live_work_attempt_execution");
+  const sql = database.prepare("SELECT tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name = 'one_live_work_attempt_execution'").get() as Row | undefined;
+  const normalizedSql = String(sql?.sql ?? "").replace(/[\s"`\[\]]+/g, " ").trim().toLowerCase();
+  if (!named || Number(named.unique) !== 1 || Number(named.partial) !== 1 || sql?.tbl_name !== "work_attempt_executions"
+    || !this.hasUniqueIndex(database, "work_attempt_executions", ["work_attempt_id"], true, "one_live_work_attempt_execution")
+    || !normalizedSql.endsWith("where terminal_json is null")) {
+    throw new Error("Daemon state v3 live execution uniqueness index is missing or malformed.");
+  }
+}
+
+hasUniqueIndex(database: DatabaseSync, table: string, columns: string[], partial: boolean, exactName?: string): boolean {
+  const indexes = database.prepare(`PRAGMA index_list(${table})`).all() as Row[];
+  return indexes.some((index) => {
+    if (exactName !== undefined && index.name !== exactName) return false;
+    if (Number(index.unique) !== 1 || Boolean(Number(index.partial)) !== partial) return false;
+    const escaped = String(index.name).replace(/"/g, '""');
+    const keys = (database.prepare(`PRAGMA index_xinfo("${escaped}")`).all() as Row[])
+      .filter((row) => Number(row.key) === 1 && Number(row.cid) >= 0)
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno)).map((row) => String(row.name));
+    return keys.length === columns.length && keys.every((column, position) => column === columns[position]);
+  });
 }
 
 applyV2Shape(database: DatabaseSync, backfillExitTimestamps: boolean): void {
