@@ -2225,7 +2225,7 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
   }
 });
 
-test("concurrent supervised creation ids on one lane yield one durable owner", async () => {
+test("concurrent Claude Code creation ids on one lane yield one durable owner", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   let daemon = new SupervisorDaemon(paths, "darwin");
@@ -2235,7 +2235,7 @@ test("concurrent supervised creation ids on one lane yield one durable owner", a
       ...entry,
       id,
       room_id: "focus_37",
-      provider: "codex",
+      provider: "claude-code",
       desired_state: "paused",
       observed_state: "paused",
     });
@@ -2271,7 +2271,7 @@ test("concurrent supervised creation ids on one lane yield one durable owner", a
     assert.equal(manifest.filter((candidate) => candidate.id === winner).length, 1, "daemon restart preserves exactly one durable request owner");
     assert.equal(manifest.find((candidate) => candidate.id === winner)?.desired_state, "running");
     const blockedLegacy = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_blocked_by_any_supervised", room_id: "focus_37", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+      reservation_id: "legacy_blocked_by_any_supervised", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
     });
     assert.equal(blockedLegacy.ok, false, "any active supervised agent keeps the legacy provider engine fenced out");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
@@ -2299,13 +2299,13 @@ test("concurrent supervised creation ids on one lane yield one durable owner", a
     assert.equal(blockedPredecessorRestart.ok, false, "a stopped predecessor cannot reactivate after a successor claims the lane");
     assert.match(blockedPredecessorRestart.error ?? "", /already owned by supervised entry/);
     assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
     })).ok, false, "the successor supervised owner fences legacy starts");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: loser, desired_state: "stopped",
     })).ok, true);
     assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
     })).ok, false, "legacy remains fenced until the supervised provider is observably stopped");
     await daemon.stop();
     const stoppedLoser = await new ManifestStore(paths.manifestPath).load();
@@ -2315,7 +2315,7 @@ test("concurrent supervised creation ids on one lane yield one durable owner", a
     daemon = new SupervisorDaemon(paths, "darwin");
     await daemon.start();
     assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
     })).ok, true, "legacy migration is available only after every supervised owner stops");
     assert.equal((await daemonRequest(paths.socketPath, "lane.release_legacy", {
       reservation_id: "legacy_after_all_supervised_stop",
@@ -2326,14 +2326,72 @@ test("concurrent supervised creation ids on one lane yield one durable owner", a
   }
 });
 
-test("daemon restart quarantines duplicate supervised lane owners from older manifests", async () => {
+test("distinct supervised Codex entries coexist in one room without weakening legacy fencing", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  let daemon = new SupervisorDaemon(paths, "darwin");
+  const candidate = (id: string): DaemonManifestEntry => ({
+    ...entry,
+    id,
+    room_id: "codex_roundtable",
+    provider: "codex",
+    desired_state: "paused",
+    observed_state: "paused",
+  });
+  try {
+    await daemon.start();
+    const [firstCreate, secondCreate] = await Promise.all([
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("codex_alpha") }),
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("codex_bravo") }),
+    ]);
+    assert.equal(firstCreate.ok, true);
+    assert.equal(secondCreate.ok, true);
+    assert.equal(((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[]).length, 2);
+
+    const firstResume = await daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
+      id: "codex_alpha", expected_desired_state: "paused", desired_state: "running",
+    });
+    assert.equal((firstResume.result as { applied: boolean }).applied, true);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "codex_bravo", desired_state: "running",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "codex_alpha", desired_state: "paused",
+    })).ok, true);
+    const resumedAgain = await daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
+      id: "codex_alpha", expected_desired_state: "paused", desired_state: "running",
+    });
+    assert.equal((resumedAgain.result as { applied: boolean }).applied, true);
+
+    const retried = await daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("codex_alpha") });
+    assert.equal(retried.ok, true);
+    assert.equal((retried.result as DaemonManifestEntry).desired_state, "running", "same entry retries remain idempotent and never rewind its lifecycle");
+
+    await daemon.stop();
+    daemon = new SupervisorDaemon(paths, "darwin");
+    await daemon.start();
+    const afterRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.equal(afterRestart.filter((item) => item.room_id === "codex_roundtable" && item.provider === "codex").length, 2);
+    assert.ok(afterRestart.every((item) => item.desired_state === "running"), "restart preserves multiple Codex owners instead of quarantining them");
+
+    const blockedLegacy = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
+      reservation_id: "legacy_codex_roundtable", room_id: "codex_roundtable", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
+    });
+    assert.equal(blockedLegacy.ok, false, "any live supervised Codex entry continues to fence the legacy Electron runtime");
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("daemon restart quarantines duplicate Claude Code lane owners from older manifests", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const duplicate = (id: string): DaemonManifestEntry => ({
     ...entry,
     id,
     room_id: "room_upgrade_duplicate",
-    provider: "codex",
+    provider: "claude-code",
     desired_state: "running",
     observed_state: "working",
   });
@@ -2354,7 +2412,7 @@ test("daemon restart quarantines duplicate supervised lane owners from older man
   }
 });
 
-test("a concurrent supervised creation race mints one provider generation", async () => {
+test("a concurrent Claude Code creation race mints one provider generation", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -2391,7 +2449,7 @@ test("a concurrent supervised creation race mints one provider generation", asyn
     ...entry,
     id: creationIds[index]!,
     room_id: "room_generation_race",
-    provider: "codex",
+    provider: "claude-code",
     desired_state: "paused",
     observed_state: "paused",
     workspace_path: attempts[index]!.workspace_path,

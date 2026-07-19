@@ -629,11 +629,33 @@ export class SupervisorDaemon {
     return !(entry.desired_state === "stopped" && entry.observed_state === "stopped");
   }
 
+  /**
+   * Codex runs have independently addressable app-server threads and work
+   * attempts, so more than one supervised Codex agent may participate in a
+   * room. Other providers retain the conservative one-supervised-owner lane
+   * until their runtimes can prove the same isolation.
+   *
+   * This only relaxes supervised-vs-supervised admission. A live supervised
+   * Codex entry still fences an Electron-owned legacy Codex runtime below.
+   */
+  private competingSupervisedLaneOwner(
+    entries: readonly DaemonManifestEntry[],
+    entry: DaemonManifestEntry,
+  ): DaemonManifestEntry | undefined {
+    if (entry.provider === "codex") return undefined;
+    return entries.find((candidate) =>
+      candidate.id !== entry.id
+      && candidate.room_id === entry.room_id
+      && candidate.provider === entry.provider
+      && this.isSupervisedLaneOwner(candidate));
+  }
+
   private async quarantineDuplicateSupervisedLaneOwners(): Promise<void> {
     await this.serializeManifestMutation(async () => {
       const manifest = await this.store.load();
       const ownersByLane = new Map<string, DaemonManifestEntry[]>();
       for (const entry of manifest.entries) {
+        if (entry.provider === "codex") continue;
         if (!this.isSupervisedLaneOwner(entry)) continue;
         const key = `${entry.room_id}\u0000${entry.provider}`;
         const owners = ownersByLane.get(key) ?? [];
@@ -687,11 +709,7 @@ export class SupervisorDaemon {
         return existing;
       }
       if (entry.desired_state !== "stopped") {
-        const supervisedOwner = manifest.entries.find((candidate) =>
-          candidate.id !== entry.id
-          && candidate.room_id === entry.room_id
-          && candidate.provider === entry.provider
-          && this.isSupervisedLaneOwner(candidate));
+        const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
         if (supervisedOwner) {
           throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
         }
@@ -729,11 +747,7 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       if (desiredState !== "stopped") {
-        const supervisedOwner = manifest.entries.find((candidate) =>
-          candidate.id !== entry.id
-          && candidate.room_id === entry.room_id
-          && candidate.provider === entry.provider
-          && this.isSupervisedLaneOwner(candidate));
+        const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
         if (supervisedOwner) {
           throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
         }
@@ -769,11 +783,7 @@ export class SupervisorDaemon {
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
       if (entry.desired_state !== expectedDesiredState) return { applied: false, entry };
       if (desiredState !== "stopped") {
-        const supervisedOwner = manifest.entries.find((candidate) =>
-          candidate.id !== entry.id
-          && candidate.room_id === entry.room_id
-          && candidate.provider === entry.provider
-          && this.isSupervisedLaneOwner(candidate));
+        const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
         if (supervisedOwner) {
           throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
         }
