@@ -221,14 +221,29 @@ export class WorkerBindingStore {
   private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); const url = new URL(input.api_url); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
   private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
   private async transaction<T>(database: DatabaseSync, operation: () => Promise<T>): Promise<T> {
-    database.exec("BEGIN IMMEDIATE"); let open = true; let committed = false;
+    let open = false; let committed = false; let result!: T;
+    const commit = async () => {
+      if (committed || open) throw new Error("Worker binding transaction commit was invoked more than once.");
+      database.exec("BEGIN IMMEDIATE"); open = true;
+      try {
+        result = await operation();
+        database.exec("COMMIT"); open = false; committed = true;
+      } catch (error) {
+        if (open) try { database.exec("ROLLBACK"); } catch { /* no-op */ }
+        open = false; throw error;
+      }
+    };
     try {
-      const result = await operation();
-      const commit = async () => { if (committed || !open) throw new Error("Worker binding transaction commit was invoked more than once."); database.exec("COMMIT"); open = false; committed = true; };
       if (this.commitFence) await this.commitFence(commit); else await commit();
       if (!committed) throw new Error("Worker binding commit fence returned without committing.");
       return result;
-    } catch (error) { if (open) try { database.exec("ROLLBACK"); } catch { /* no-op */ } throw error; }
+    } catch (error) {
+      // A fence may accidentally call its supplied commit then throw/retry.
+      // Once SQLite has committed, never report a durable success as failure.
+      if (committed) return result;
+      if (open) try { database.exec("ROLLBACK"); } catch { /* no-op */ }
+      throw error;
+    }
   }
   private async getDatabase(): Promise<DatabaseSync> { if (this.closed) throw new Error("WorkerBindingStore is closed."); if (this.database) return this.database; if (!this.initializing) this.initializing = this.initialize(); return this.initializing; }
   private async initialize(): Promise<DatabaseSync> { let database: DatabaseSync | null = null; try { database = await openDaemonStateDatabase(this.databasePath, (opened) => new DaemonStateSchema().createSchema(opened)); await this.importLegacy(database); this.database = database; return database; } catch (error) { database?.close(); this.initializing = null; throw error; } }
@@ -243,7 +258,8 @@ export class WorkerBindingStore {
       // housekeeping left behind by a crash/permission error before failing
       // closed again.
       const quarantine = String(failed.quarantined_path);
-      try { await rename(this.legacyJsonPath, quarantine); await chmod(quarantine, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      try { await rename(this.legacyJsonPath, quarantine); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      await chmod(quarantine, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
       throw new Error(`Legacy worker binding import was previously quarantined: ${String(failed.reason)} (${quarantine}).`);
     }
     let raw: string;
@@ -255,11 +271,9 @@ export class WorkerBindingStore {
     try { await this.transaction(database, async () => {
       if (database.prepare("SELECT 1 FROM migration_records WHERE migration_key=?").get(key)) return;
       if (database.prepare("SELECT 1 FROM migration_failures WHERE migration_key=?").get(key)) throw new Error("Legacy worker binding import is quarantined.");
-      // Re-read after BEGIN IMMEDIATE: a competing process may have imported
-      // and renamed the source between our preflight parse and reservation.
-      let current: string;
-      try { current = await readFile(this.legacyJsonPath, "utf8"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-      if (createHash("sha256").update(current).digest("hex") !== checksum) throw new Error("Legacy worker binding source changed during import.");
+      // The migration record recheck is serialized by this SQLite writer lock.
+      // File parsing and checksum validation happen before entering it; never
+      // await filesystem work while holding a daemon-state writer lock.
       for (const binding of Object.values(parsed.bindings)) {
         run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, agent_session_token, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, binding.agent_session_token, new URL(binding.api_url).origin, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       }
@@ -284,10 +298,11 @@ export class WorkerBindingStore {
     // Backup housekeeping is non-authoritative: the committed migration record
     // is the source of truth. Another opener may win the rename between these
     // calls, so ENOENT/EEXIST are successful convergence, not startup errors.
-    try { await stat(this.legacyJsonPath); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    try { await stat(backup); return; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    try { await rename(this.legacyJsonPath, backup); await chmod(backup, 0o600); }
+    try { await stat(this.legacyJsonPath); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { await chmod(backup, 0o600).catch((chmodError: unknown) => { if ((chmodError as NodeJS.ErrnoException).code !== "ENOENT") throw chmodError; }); return; } throw error; }
+    try { await stat(backup); await chmod(backup, 0o600); return; } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try { await rename(this.legacyJsonPath, backup); }
     catch (error: unknown) { if (!["ENOENT", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+    await chmod(backup, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
   private validateLegacy(value: LegacyBindings, raw: string): void { assertNoDuplicateJsonKeys(raw); if (!value || value.version !== 1 || !value.bindings || Array.isArray(value.bindings)) throw new Error("invalid v1 envelope"); const seen = new Set<string>(); for (const [key, binding] of Object.entries(value.bindings)) { if (key !== binding.entry_id || seen.has(key)) throw new Error("duplicate or mismatched entry id"); seen.add(key); this.validate(binding); if (!Number.isSafeInteger(binding.last_sequence) || binding.last_sequence < 0 || !Number.isSafeInteger(binding.last_observed_at_ms) || binding.last_observed_at_ms < 0 || !Number.isFinite(Date.parse(binding.updated_at)) || (binding.room_cursor !== null && typeof binding.room_cursor !== "string")) throw new Error(`invalid legacy binding ${key}`); } }
 }
