@@ -21,7 +21,7 @@
     "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon",
     "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
-    "test:electron": "node --import tsx --test electron/__tests__/*.test.ts",
+    "test:electron": "node --import tsx --test --experimental-test-module-mocks electron/__tests__/*.test.ts",
     "test:daemon": "node --import tsx --test daemon/__tests__/*.test.ts",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
