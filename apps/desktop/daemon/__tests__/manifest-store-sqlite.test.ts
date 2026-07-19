@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 
@@ -127,6 +128,11 @@ function storedManifest(manifest: DaemonManifest): string {
   return `${JSON.stringify({ manifest, checksum })}\n`;
 }
 
+function withRuntimeIdentity(item: DaemonManifestEntry): DaemonManifestEntry {
+  const runId = item.provider_ref?.execution_generation_id;
+  return runId ? { ...item, run_id: runId, deployment_id: serializeDaemonDeploymentId(item.id, runId) } : item;
+}
+
 test("SQLite manifest round-trips the flat wire projection from relational domain tables", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
@@ -187,15 +193,16 @@ test("SQLite manifest generation CAS serializes independent connections without 
 test("legacy JSON imports once after checksum validation and is retained as a backup", async () => {
   const env = await fixture();
   const manifest: DaemonManifest = { generation: 41, entries: [entry], legacy_lane_owners: [owner] };
+  const imported = { ...manifest, entries: manifest.entries.map(withRuntimeIdentity) };
   await writeFile(env.legacyPath, storedManifest(manifest), { mode: 0o600 });
   const store = new ManifestStore(env.databasePath, env.legacyPath);
   try {
-    assert.deepEqual(await store.load(), manifest);
+    assert.deepEqual(await store.load(), imported);
     await assert.rejects(() => readFile(env.legacyPath), { code: "ENOENT" });
     assert.equal(await readFile(`${env.legacyPath}.migrated-backup`, "utf8"), storedManifest(manifest));
     await store.close();
     const reopened = new ManifestStore(env.databasePath, env.legacyPath);
-    assert.deepEqual(await reopened.load(), manifest);
+    assert.deepEqual(await reopened.load(), imported);
     await reopened.close();
   } finally {
     await store.close();
@@ -221,13 +228,14 @@ test("invalid legacy checksums quarantine the source and durably block empty sta
 test("a post-commit backup failure retries idempotently without reimporting", async () => {
   const env = await fixture();
   const manifest: DaemonManifest = { generation: 7, entries: [entry] };
+  const imported = { ...manifest, entries: manifest.entries.map(withRuntimeIdentity) };
   await writeFile(env.legacyPath, storedManifest(manifest));
   await mkdir(`${env.legacyPath}.migrated-backup`);
   const store = new ManifestStore(env.databasePath, env.legacyPath);
   try {
     await assert.rejects(() => store.load());
     await rm(`${env.legacyPath}.migrated-backup`, { recursive: true });
-    assert.deepEqual(await store.load(), manifest);
+    assert.deepEqual(await store.load(), imported);
     assert.equal(await readFile(`${env.legacyPath}.migrated-backup`, "utf8"), storedManifest(manifest));
   } finally {
     await store.close();
@@ -516,7 +524,7 @@ test("targeted activity writes leave every unrelated agent row untouched and avo
       display_name: `Other Agent ${index}`,
     }));
     const other = others[0]!;
-    await store.write(0, [entry, ...others]);
+    const created = await store.write(0, [entry, ...others]);
     const database = (store as unknown as { database: DatabaseSync }).database;
     const tables = [
       "agent_identities", "agent_profiles", "agent_room_memberships", "agent_configurations",
@@ -540,7 +548,7 @@ test("targeted activity writes leave every unrelated agent row untouched and avo
     assert.equal(result.generation, 2);
     assert.deepEqual(result.entry.activity, [nextEvent]);
     assert.deepEqual(snapshot(), before);
-    assert.deepEqual(await store.getEntry(other.id), other);
+    assert.deepEqual(await store.getEntry(other.id), created.entries.find((candidate) => candidate.id === other.id));
   } finally {
     await store.close();
     await env.cleanup();
@@ -609,6 +617,120 @@ test("permission housekeeping failure aborts initialization without changing gen
     await reopened.close();
   } finally {
     await initialized.close();
+    await env.cleanup();
+  }
+});
+
+test("fresh schema creation rolls back every DDL statement when initialization fails", async () => {
+  const env = await fixture();
+  const failing = new ManifestStore(env.databasePath, undefined, undefined, () => {
+    throw new Error("injected schema initialization failure");
+  });
+  try {
+    await assert.rejects(() => failing.load(), /injected schema initialization failure/);
+    await failing.close();
+    const inspection = new DatabaseSync(env.databasePath);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 0);
+    assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'manifest_metadata'").get() as { count: number }).count, 0);
+    inspection.close();
+
+    const recovered = new ManifestStore(env.databasePath);
+    assert.deepEqual(await recovered.load(), { generation: 0, entries: [] });
+    await recovered.close();
+  } finally {
+    await failing.close();
+    await env.cleanup();
+  }
+});
+
+test("targeted writes return their committed projection without any post-commit getEntry", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const initial = await store.write(0, [entry]);
+    const raw = store as unknown as { getEntry: () => never };
+    raw.getEntry = () => { throw new Error("injected post-commit read failure"); };
+
+    const replaced = await store.replaceEntry(1, { ...initial.entries[0]!, observed_state: "idle" });
+    assert.equal(replaced.generation, 2);
+    assert.equal(replaced.entry.observed_state, "idle");
+    const event = { ...entry.activity![0]!, sequence: 5, observed_at: "2026-07-19T01:00:00.000Z" };
+    const appended = await store.appendActivity(2, entry.id, event, "working", { state: "active", observed_at: event.observed_at, detail: "working" });
+    assert.equal(appended.generation, 3);
+    assert.equal(appended.entry.activity?.at(-1)?.sequence, 5);
+    const live = await store.updateWorkplaceLiveness(3, entry.id, { state: "reachable", observed_at: event.observed_at, detail: "online" });
+    assert.equal(live.generation, 4);
+    const batched = await store.replaceEntriesBatch(4, [{ ...live.entry, condition: "none" }]);
+    assert.equal(batched.generation, 5);
+    assert.equal(batched.entries[0]?.condition, "none");
+    assert.equal((await store.load()).generation, 5);
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("targeted projection failure occurs before commit and rolls back generation", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const before = await store.write(0, [entry]);
+    const raw = store as unknown as {
+      readEntryFromDatabase: (database: DatabaseSync, agentId: string) => DaemonManifestEntry | undefined;
+    };
+    const original = raw.readEntryFromDatabase.bind(store);
+    raw.readEntryFromDatabase = () => { throw new Error("injected projection failure"); };
+    await assert.rejects(
+      () => store.updateWorkplaceLiveness(1, entry.id, { state: "stale", observed_at: null, detail: "stale" }),
+      /injected projection failure/,
+    );
+    raw.readEntryFromDatabase = original;
+    assert.deepEqual(await store.load(), before);
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("detached deployment identity survives lane-owner full writes and restart", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const neverLaunched: DaemonManifestEntry = {
+      ...entry,
+      id: "never_launched",
+      display_name: "Never Launched",
+      provider_ref: undefined,
+      work_attempt_id: undefined,
+    };
+    const created = await store.write(0, [entry, neverLaunched]);
+    const launched = created.entries[0]!;
+    assert.equal(launched.run_id, entry.provider_ref?.execution_generation_id);
+    assert.ok(launched.deployment_id);
+    assert.equal(Object.hasOwn(created.entries[1]!, "run_id"), false);
+
+    const detached = await store.replaceEntry(1, { ...launched, provider_ref: undefined });
+    assert.equal(Object.hasOwn(detached.entry, "provider_ref"), false);
+    assert.equal(detached.entry.run_id, launched.run_id);
+    assert.equal(detached.entry.deployment_id, launched.deployment_id);
+
+    const beforeLaneChange = await store.load();
+    await store.write(2, beforeLaneChange.entries, [owner]);
+    await store.close();
+
+    const reopened = new ManifestStore(env.databasePath);
+    const durable = await reopened.load();
+    assert.equal(durable.entries[0]?.run_id, launched.run_id);
+    assert.equal(durable.entries[0]?.deployment_id, launched.deployment_id);
+    assert.equal(Object.hasOwn(durable.entries[0]!, "provider_ref"), false);
+    assert.equal(Object.hasOwn(durable.entries[1]!, "run_id"), false);
+    const database = (reopened as unknown as { database: DatabaseSync }).database;
+    const unlaunchedRuntime = database.prepare("SELECT run_id, deployment_id FROM runtime_deployments WHERE agent_id = ?").get(neverLaunched.id) as { run_id: null; deployment_id: null };
+    assert.equal(unlaunchedRuntime.run_id, null);
+    assert.equal(unlaunchedRuntime.deployment_id, null);
+    await reopened.close();
+  } finally {
+    await store.close();
     await env.cleanup();
   }
 });
