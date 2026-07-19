@@ -482,6 +482,7 @@ import {
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
 import { formatShortDateTime } from "../../../domain/time";
+import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
 import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
@@ -546,6 +547,7 @@ const loadingChangeSummaryIds = ref<Record<string, boolean>>({});
 const expandedChangeSummaryIds = ref<Record<string, boolean>>({});
 const resolvingPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let refreshTimer: number | null = null;
+let periodicRefreshInFlight = false;
 let modalStateVersion = 0;
 let previousFocusElement: HTMLElement | null = null;
 
@@ -676,7 +678,15 @@ onBeforeUnmount(() => {
 function startRefreshTimer(): void {
   stopRefreshTimer();
   refreshTimer = window.setInterval(() => {
-    void loadManagedSessions({ quiet: true, refreshSessions: false });
+    // Skip while hidden (a background modal need not poll the supervisor) and
+    // skip if the previous tick has not settled — `loadManagedSessions` has no
+    // in-flight guard of its own, so a slow supervisor call would otherwise
+    // stack overlapping requests every 4s.
+    if (shouldSkipPollTick({ hidden: document.hidden, inFlight: periodicRefreshInFlight })) return;
+    periodicRefreshInFlight = true;
+    void loadManagedSessions({ quiet: true, refreshSessions: false }).finally(() => {
+      periodicRefreshInFlight = false;
+    });
   }, 4_000);
 }
 
@@ -685,6 +695,7 @@ function stopRefreshTimer(): void {
     window.clearInterval(refreshTimer);
     refreshTimer = null;
   }
+  periodicRefreshInFlight = false;
 }
 
 function clearTransientState(): void {

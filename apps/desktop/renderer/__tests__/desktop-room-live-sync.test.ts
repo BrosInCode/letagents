@@ -55,6 +55,49 @@ describe("useDesktopRoomLiveSync periodic metadata tick", () => {
     assert.deepEqual(harness.getLiveMetadataRequests, [ROOM, ROOM]);
   });
 
+  it("skips the tick entirely while the document is hidden", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    harness.documentHidden = true;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.runInterval();
+    });
+
+    // Hidden window: no metadata IPC, no workers refresh, snapshot untouched.
+    assert.deepEqual(harness.getLiveMetadataRequests, []);
+    assert.equal(harness.workersListCalls, 0);
+    assert.deepEqual(harness.selectedSnapshot.value?.participants, []);
+  });
+
+  it("catches up with a poll-only metadata refresh when called on foreground return", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = snapshotWithEventData();
+    harness.documentHidden = true;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      // Hidden ticks are no-ops…
+      await harness.runInterval();
+      assert.deepEqual(harness.getLiveMetadataRequests, []);
+      // …then the window returns to the foreground and App.vue calls the
+      // exposed refresh directly for an immediate metadata-only catch-up.
+      harness.documentHidden = false;
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+      await harness.settle();
+    });
+
+    assert.deepEqual(harness.getLiveMetadataRequests, [ROOM]);
+    assert.deepEqual(harness.getSnapshotRequests, []);
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.participants.map((p) => (p as { participantKey: string }).participantKey),
+      ["fresh"],
+    );
+    // Event-fed sections are still left untouched by the catch-up.
+    assert.deepEqual(harness.selectedSnapshot.value?.messages.map((m) => m.id), ["msg_1"]);
+  });
+
   it("does not recreate the interval when synced again for the same room", async () => {
     const harness = createHarness();
 
@@ -246,6 +289,7 @@ function createHarness() {
   let clearIntervalCalls = 0;
   let intervalCallback: (() => void) | null = null;
   let timeoutCallback: (() => void) | null = null;
+  let documentHidden = false;
 
   const state = {
     nextMetadata: Promise.resolve(liveMetadata()) as Promise<DesktopRoomLiveMetadata>,
@@ -259,6 +303,13 @@ function createHarness() {
   });
 
   const windowBridge = {
+    // The composable reads visibility through `window.document?.hidden` so the
+    // existing window-swap harness can drive it without an ambient jsdom.
+    document: {
+      get hidden(): boolean {
+        return documentHidden;
+      },
+    },
     letagentsDesktop: {
       room: {
         getSnapshot: async (roomIdentifier: string | null): Promise<DesktopRoomSnapshot> => {
@@ -322,6 +373,9 @@ function createHarness() {
     },
     set nextMetadata(value: Promise<DesktopRoomLiveMetadata>) {
       state.nextMetadata = value;
+    },
+    set documentHidden(value: boolean) {
+      documentHidden = value;
     },
     /** Fire the captured interval callback and await its async body to settle. */
     runInterval: async () => {

@@ -322,6 +322,7 @@ import {
   withUpsertedManagedAgentSession,
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
@@ -814,11 +815,13 @@ onBeforeUnmount(() => {
     inboxUndoTimer = null;
   }
   stopManagedAgentSessionsRefreshTimer();
+  document.removeEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate?.();
   unsubscribeManagedAgentSessionUpdate = null;
 });
 
 onMounted(() => {
+  document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
     if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
       return;
@@ -1612,8 +1615,17 @@ function restartManagedAgentSessionsRefreshTimer(): void {
   stopManagedAgentSessionsRefreshTimer();
   if (!props.room.identifier || (!desktopIpc.workers?.listManagedAgentSessions && !desktopIpc.supervisor?.listAgents)) return;
   managedAgentSessionsRefreshTimer = window.setInterval(() => {
+    // Skip the tick while the window is hidden — a background room has no reason
+    // to poll supervisor/session state. `handleManagedAgentSessionsVisibilityChange`
+    // kicks one immediate refresh on foreground return.
+    if (shouldSkipPollTick({ hidden: document.hidden })) return;
     void refreshManagedAgentSessions();
   }, 2_000);
+}
+
+function handleManagedAgentSessionsVisibilityChange(): void {
+  if (document.hidden) return;
+  void refreshManagedAgentSessions();
 }
 
 function stopManagedAgentSessionsRefreshTimer(): void {

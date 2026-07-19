@@ -7,6 +7,7 @@ import {
   snapshotMatchesRoom,
 } from "../domain/desktop-room-snapshots";
 import { normalizeRoomIdentifier } from "../domain/sidebar-rooms";
+import { shouldSkipPollTick } from "../domain/visibility-polling";
 import { desktopIpc } from "../ipc/index.js";
 
 interface DesktopRoomLiveSyncOptions {
@@ -73,10 +74,19 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
    * slow poll cannot stack overlapping request bursts. The shared sequence
    * counter still discards any stale result whose room changed mid-flight or
    * that a later full refresh superseded.
+   *
+   * Visibility guard: skip the tick entirely while the window is hidden — the
+   * interval keeps ticking (Chromium throttles it to ~1s) but a background
+   * window has no reason to fan out metadata IPC. SSE keeps running while
+   * hidden, so event-fed sections stay current; App.vue calls this directly on
+   * foreground return for an immediate poll-only catch-up. This same guard is
+   * why the exposed function is safe to call on visibilitychange: by then the
+   * document is visible so the tick proceeds normally.
    */
   async function refreshSelectedRoomLiveMetadata(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
     if (!roomIdentifier) return;
+    if (shouldSkipPollTick({ hidden: Boolean(window.document?.hidden) })) return;
     // Stale live bridge (preload predates this binding): skip the tick as a
     // whole, workers.list() included — a partial tick that refreshed workers
     // but never applied metadata would be misleading, and workers are still
@@ -163,6 +173,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   return {
     clearLiveMetadataRefreshInterval,
     clearLiveMetadataRefreshTimer,
+    refreshSelectedRoomLiveMetadata,
     scheduleLiveMetadataRefresh,
     syncSelectedRoomStream,
   };

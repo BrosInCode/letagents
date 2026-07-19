@@ -369,6 +369,21 @@
   animation: app-agent-orb-ink-spark 3.8s ease-in-out infinite;
 }
 
+/*
+ * Battery: the launcher orb's three decorative ink animations run `infinite`
+ * through the feGaussianBlur + feDisplacementMap glass filter, so every frame
+ * forces a full GPU filter re-evaluation even while the app sits idle. Pause
+ * them whenever the window is hidden or blurred (App.vue toggles
+ * `data-app-idle` on the document root). Scoped to the launcher ink animations
+ * only — the state-gated running/success animations and the reduced-motion
+ * block below are untouched.
+ */
+:root[data-app-idle] .app-agent-orb--launcher .app-agent-orb-lens::before,
+:root[data-app-idle] .app-agent-orb--launcher .app-agent-orb-lens::after,
+:root[data-app-idle] .app-agent-orb--launcher .app-agent-orb-sheen::after {
+  animation-play-state: paused;
+}
+
 .app-agent-orb--launcher:hover {
   transform: translateY(-2px) scale(1.025);
 }
