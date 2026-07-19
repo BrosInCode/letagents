@@ -357,7 +357,7 @@ function resolveCodexMessageRecipients<T extends CodexAddressableWorker>(
   }
 
   const mentions = extractMentionHandles(message.text);
-  if (mentions.some((mention) => normalizeHandle(mention) === "everyone")) {
+  if (mentions.some((mention) => normalizeMentionHandle(mention) === "everyone")) {
     return [...workers];
   }
 
@@ -422,8 +422,8 @@ function resolveCodexTaskRecipients<T extends CodexAddressableWorker>(
       .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey)]),
   ].map(normalizeHandle).filter(Boolean);
   if (stableTargets.length) {
-    return workers.filter((worker) =>
-      stableTargets.some((target) => stableManagedAgentAliases(worker).has(target)));
+    const owner = resolveConvergentStableWorker(workers, stableTargets);
+    return owner ? [owner] : [];
   }
 
   const aliasTargets = [
@@ -483,18 +483,11 @@ function resolveMessageAuthorWorkers<T extends CodexAddressableWorker>(
     specificAgentKey(message.agentIdentity?.agentKey),
   ].map(normalizeHandle).filter(Boolean);
   if (stableIds.length) {
-    const matches = stableIds.map((identity) => workers.filter((worker) =>
-      stableManagedAgentAliases(worker).has(identity)));
-    // Structured fields should describe one worker. If a malformed event says
-    // session A but key B, it is not safe to call both workers "self" and
-    // suppress an @everyone broadcast for the room.
-    const [first, ...rest] = matches;
-    if (!first || first.length !== 1 || rest.some((entry) =>
-      entry.length !== 1 || !sameManagedAgentIdentity(entry[0], first[0]))) {
-      return [];
-    }
-    return first;
+    const author = resolveConvergentStableWorker(workers, stableIds);
+    return author ? [author] : [];
   }
+
+  if (normalizeKey(message.source) !== "agent") return [];
 
   // Keep only unique name resolutions. An identityless "Oak" from a room
   // containing two Oakes is not self-output for either worker, especially for
@@ -506,6 +499,20 @@ function resolveMessageAuthorWorkers<T extends CodexAddressableWorker>(
     message.sender,
   ]);
   return candidates.length === 1 ? candidates : [];
+}
+
+function resolveConvergentStableWorker<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  stableIds: readonly string[],
+): T | null {
+  const matches = stableIds.map((identity) => workers.filter((worker) =>
+    stableManagedAgentAliases(worker).has(identity)));
+  const [first, ...rest] = matches;
+  if (!first || first.length !== 1 || rest.some((entry) =>
+    entry.length !== 1 || !sameManagedAgentIdentity(entry[0], first[0]))) {
+    return null;
+  }
+  return first[0];
 }
 
 function sameManagedAgentIdentity(
@@ -539,7 +546,7 @@ function extractMentionHandles(text: string | null | undefined): string[] {
 }
 
 function isBroadcastHandle(handle: string): boolean {
-  const normalized = normalizeHandle(handle);
+  const normalized = normalizeMentionHandle(handle);
   return normalized === "agents" || normalized === "everyone" || normalized === "room";
 }
 
@@ -563,6 +570,14 @@ function normalizeHandle(value: string | null | undefined): string {
 }
 
 function normalizeMentionIdentityHandle(value: string | null | undefined): string {
-  const normalized = normalizeHandle(value);
+  const normalized = normalizeMentionHandle(value);
   return normalized.startsWith("agent:") ? normalized.slice("agent:".length) : normalized;
+}
+
+function normalizeMentionHandle(value: string | null | undefined): string {
+  // The tokenizer intentionally accepts dots and colons inside handles. Trim
+  // them only when they are sentence punctuation at the end of the mention:
+  // `@DawnRidge.`, `@agent_session_dawn:`, and `@agent:key.` all retain their
+  // meaningful internal punctuation while resolving normally.
+  return normalizeHandle(value).replace(/[.,!?;:]+$/g, "");
 }
