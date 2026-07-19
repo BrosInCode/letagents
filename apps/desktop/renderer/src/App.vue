@@ -351,6 +351,7 @@ import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domai
 import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
+  deriveSidebarLatestMessages,
   hasUnreadRoomActivity,
   markRoomRead,
   readStoredRoomMessageIds,
@@ -776,18 +777,36 @@ function handleWindowFocus(): void {
 
 async function refreshSidebarLatestMessages(): Promise<void> {
   const roomIdentifiers = sidebarRoomIdentifiers();
-  if (!roomIdentifiers.length || !desktopIpc.room.getLatestMessages) {
+  if (!roomIdentifiers.length) {
     sidebarLatestMessages.value = {};
     return;
   }
 
-  const latestMessages = await desktopIpc.room.getLatestMessages(roomIdentifiers).catch(() => []);
-  const nextLatestMessages: Record<string, DesktopRoomLatestMessage> = {};
-  for (const latestMessage of latestMessages) {
-    const key = roomReadKey(latestMessage.roomIdentifier);
-    if (!key) continue;
-    nextLatestMessages[key] = latestMessage;
+  // The `/account/rooms` payload (already refreshed before this call) carries
+  // `latestMessageId` / `latestMessageAt` for every cloud room and focus room,
+  // so we derive sidebar latest-message state from it instead of fanning out one
+  // `/rooms/:id/messages` request per sidebar room. Local-storage entries are
+  // delegated to the fallback lookup: they appear in the payload with null
+  // latest fields because their latest message lives in the local DB (that
+  // fallback is a local read, not HTTP). Rooms absent from the payload fall
+  // back the same way.
+  const { latestMessages, uncoveredRoomIdentifiers } = deriveSidebarLatestMessages({
+    accountRooms: accountRooms.value,
+    sidebarRoomIdentifiers: roomIdentifiers,
+  });
+  const nextLatestMessages: Record<string, DesktopRoomLatestMessage> = { ...latestMessages };
+
+  if (uncoveredRoomIdentifiers.length && desktopIpc.room.getLatestMessages) {
+    const fallbackMessages = await desktopIpc.room
+      .getLatestMessages(uncoveredRoomIdentifiers)
+      .catch(() => []);
+    for (const latestMessage of fallbackMessages) {
+      const key = roomReadKey(latestMessage.roomIdentifier);
+      if (!key) continue;
+      nextLatestMessages[key] = latestMessage;
+    }
   }
+
   sidebarLatestMessages.value = nextLatestMessages;
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();

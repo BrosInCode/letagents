@@ -4,6 +4,7 @@ import { computed, ref, type Ref } from "vue";
 
 import type {
   DesktopAccountRoomEntry,
+  DesktopAccountRoomListOptions,
   DesktopAppInfo,
   DesktopAuthStatus,
   DesktopFocusRoomInfo,
@@ -230,11 +231,15 @@ describe("useDesktopAppData selected focus room snapshots", () => {
 });
 
 function createHarness(): {
+  accountRooms: Ref<DesktopAccountRoomEntry[]>;
   activeEntry: Ref<SidebarEntry>;
   getSnapshotRequests: Array<string | null>;
+  listAccountRoomsCalls: Array<DesktopAccountRoomListOptions | undefined>;
+  nextAccountRooms: DesktopAccountRoomEntry[];
   nextSelectedSnapshot: Promise<DesktopRoomSnapshot>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
+  settingsAccountRooms: Ref<DesktopAccountRoomEntry[]>;
   state: ReturnType<typeof useDesktopAppData>;
   windowBridge: object;
 } {
@@ -246,16 +251,20 @@ function createHarness(): {
   }));
   const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
   const activeEntry = ref<SidebarEntry>(focusEntry("focus_a", "Focus A"));
+  const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
+  const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const getSnapshotRequests: Array<string | null> = [];
+  const listAccountRoomsCalls: Array<DesktopAccountRoomListOptions | undefined> = [];
   const harness = {
     nextSelectedSnapshot: Promise.resolve(roomSnapshot("focus_a", {
       kind: "focus",
       parentRoomId: "room_parent",
     })),
+    nextAccountRooms: [] as DesktopAccountRoomEntry[],
   };
 
   const state = useDesktopAppData({
-    accountRooms: ref<DesktopAccountRoomEntry[]>([]),
+    accountRooms,
     activeEntry,
     appInfo: ref<DesktopAppInfo | null>(null),
     authStatus: ref<DesktopAuthStatus | null>(null),
@@ -273,13 +282,21 @@ function createHarness(): {
     selectedMcpTargetIds: ref<DesktopMcpInstallTargetId[]>([]),
     selectedRootRoomIdentifier: ref("room_parent"),
     selectedSnapshot,
-    settingsAccountRooms: ref<DesktopAccountRoomEntry[]>([]),
+    settingsAccountRooms,
     workers: ref<WorkerSnapshot[]>([]),
   });
 
   return {
+    accountRooms,
     activeEntry,
     getSnapshotRequests,
+    listAccountRoomsCalls,
+    get nextAccountRooms() {
+      return harness.nextAccountRooms;
+    },
+    set nextAccountRooms(value: DesktopAccountRoomEntry[]) {
+      harness.nextAccountRooms = value;
+    },
     get nextSelectedSnapshot() {
       return harness.nextSelectedSnapshot;
     },
@@ -288,6 +305,7 @@ function createHarness(): {
     },
     rootRoomSnapshot,
     selectedSnapshot,
+    settingsAccountRooms,
     state,
     windowBridge: {
       letagentsDesktop: {
@@ -295,6 +313,12 @@ function createHarness(): {
           getSnapshot: async (roomIdentifier: string | null): Promise<DesktopRoomSnapshot> => {
             getSnapshotRequests.push(roomIdentifier);
             return harness.nextSelectedSnapshot;
+          },
+          listAccountRooms: async (
+            options?: DesktopAccountRoomListOptions,
+          ): Promise<DesktopAccountRoomEntry[]> => {
+            listAccountRoomsCalls.push(options);
+            return harness.nextAccountRooms;
           },
         },
         repos: {
@@ -324,6 +348,62 @@ async function withDesktopBridge<T>(
       delete (globalThis as { window?: unknown }).window;
     }
   }
+}
+
+describe("useDesktopAppData refreshAccountRooms", () => {
+  it("issues a single include-archived fetch and splits archived from visible rooms", async () => {
+    const harness = createHarness();
+    harness.nextAccountRooms = [
+      accountRoomEntry("room_visible", { archived: false }),
+      accountRoomEntry("room_archived", { archived: true }),
+    ];
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshAccountRooms();
+    });
+
+    assert.deepEqual(harness.listAccountRoomsCalls, [
+      { includeArchived: true, limit: 100 },
+    ]);
+    assert.deepEqual(
+      harness.accountRooms.value.map((room) => room.roomIdentifier),
+      ["room_visible"],
+    );
+    assert.deepEqual(
+      harness.settingsAccountRooms.value.map((room) => room.roomIdentifier),
+      ["room_visible", "room_archived"],
+    );
+  });
+});
+
+function accountRoomEntry(
+  roomIdentifier: string,
+  overrides: Partial<DesktopAccountRoomEntry> = {},
+): DesktopAccountRoomEntry {
+  return {
+    roomIdentifier,
+    displayName: roomIdentifier,
+    name: roomIdentifier,
+    kind: "main",
+    parentRoomId: null,
+    focusKey: null,
+    sourceTaskId: null,
+    focusStatus: null,
+    role: "participant",
+    source: null,
+    pinned: false,
+    archived: false,
+    canLeave: true,
+    canDelete: false,
+    deleteReason: null,
+    firstOpenedAt: null,
+    lastOpenedAt: null,
+    latestMessageId: null,
+    latestMessageAt: null,
+    gitRoom: null,
+    focusRooms: [],
+    ...overrides,
+  };
 }
 
 function deferred<T>(): {

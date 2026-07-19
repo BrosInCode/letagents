@@ -106,7 +106,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextDiagnostics,
         nextAuthStatus,
         nextMcpInstallState,
-        nextAccountRooms,
         nextSettingsAccountRooms,
       ] = await Promise.all([
         desktopIpc.app.getInfo(),
@@ -118,9 +117,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         desktopIpc.diagnostics.getSnapshot(),
         desktopIpc.auth.getStatus(),
         desktopIpc.setup.getMcpInstallState(),
-        desktopIpc.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
+        // Single `include_archived=true` fetch; the non-archived subset below
+        // feeds the sidebar and the full list feeds Settings.
         desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
       ]);
+      const nextAccountRooms = (nextSettingsAccountRooms || []).filter((room) => !room.archived);
       const nextRootRoomSnapshot = await recoverRootRoomSnapshot(
         requestedRootRoomIdentifier,
         loadedRootRoomContext.snapshot,
@@ -145,8 +146,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       options.diagnostics.value = nextDiagnostics;
       options.authStatus.value = nextAuthStatus;
       options.mcpInstallState.value = nextMcpInstallState;
-      options.accountRooms.value = nextAccountRooms || [];
-      options.settingsAccountRooms.value = nextSettingsAccountRooms || nextAccountRooms || [];
+      options.accountRooms.value = nextAccountRooms;
+      options.settingsAccountRooms.value = nextSettingsAccountRooms || [];
       options.selectedMcpTargetIds.value = options.selectedMcpTargetIds.value.length
         ? options.selectedMcpTargetIds.value
         : defaultMcpTargetSelection(nextMcpInstallState);
@@ -213,12 +214,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   async function refreshAccountRooms(): Promise<void> {
-    const [nextAccountRooms, nextSettingsAccountRooms] = await Promise.all([
-      desktopIpc.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
-      desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
-    ]);
-    options.accountRooms.value = nextAccountRooms || [];
-    options.settingsAccountRooms.value = nextSettingsAccountRooms || nextAccountRooms || [];
+    // A single `include_archived=true` fetch covers both consumers: the sidebar
+    // uses the non-archived subset while Settings needs the full list. This
+    // replaces the previous pair of `/account/rooms` requests per refresh tick.
+    const allAccountRooms =
+      (await desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => [])) || [];
+    options.settingsAccountRooms.value = allAccountRooms;
+    options.accountRooms.value = allAccountRooms.filter((room) => !room.archived);
   }
 
   function selectedRootPath(): string | null {
