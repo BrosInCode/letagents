@@ -277,19 +277,32 @@ export class WorkerBindingStore {
       // housekeeping left behind by a crash/permission error before failing
       // closed again.
       const quarantine = String(failed.quarantined_path);
-      const claimed = await this.captureAndRemoveLegacySource();
-      if (claimed) await this.moveClaimedToQuarantine(claimed, quarantine);
-      await chmod(quarantine, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+      await this.reconcileFailedEvidence(quarantine);
       throw new Error(`Legacy worker binding import was previously quarantined: ${String(failed.reason)} (${quarantine}).`);
     }
-    let claimed = await this.captureAndRemoveLegacySource();
+    const initialState = await this.legacySourceState();
+    let claimed: string | null = null;
+    if (initialState.claims.length > 0) {
+      // Never prefer a fresh public replacement over pre-existing claimed
+      // evidence. A+public-B or multiple claims is ambiguous without a durable
+      // verdict, so preserve every byte and fail closed.
+      if (initialState.publicPresent || initialState.claims.length !== 1) {
+        throw new Error(`Legacy worker binding migration has ambiguous source evidence (${initialState.claims.length} claim(s), public source ${initialState.publicPresent ? "present" : "absent"}).`);
+      }
+      const concurrent = await this.waitForConcurrentClaim(database, key);
+      if (concurrent.kind === "committed") { await this.finishLegacyBackup(backup, concurrent.checksum); return; }
+      if (concurrent.kind === "failed") { await this.reconcileFailedEvidence(concurrent.quarantine); throw new Error(`Legacy worker binding import was previously quarantined: ${concurrent.reason} (${concurrent.quarantine}).`); }
+      claimed = await this.adoptOrphanClaim();
+    } else {
+      claimed = await this.captureAndRemoveLegacySource();
+    }
     if (!claimed) {
       // A sibling opener may have atomically claimed the source immediately
       // before us. Do not expose an empty binding set while it is making the
       // record authoritative; wait only when a live claim is observable.
       const concurrent = await this.waitForConcurrentClaim(database, key);
       if (concurrent.kind === "committed") { await this.finishLegacyBackup(backup, concurrent.checksum); return; }
-      if (concurrent.kind === "failed") throw new Error(`Legacy worker binding import was previously quarantined: ${concurrent.reason} (${concurrent.quarantine}).`);
+      if (concurrent.kind === "failed") { await this.reconcileFailedEvidence(concurrent.quarantine); throw new Error(`Legacy worker binding import was previously quarantined: ${concurrent.reason} (${concurrent.quarantine}).`); }
       if (concurrent.kind === "absent") return;
       claimed = await this.adoptOrphanClaim();
     }
@@ -353,7 +366,7 @@ export class WorkerBindingStore {
       }
     });
     const claimed = claimedPath ?? await this.captureAndRemoveLegacySource();
-    if (claimed) await this.moveClaimedToQuarantine(claimed, quarantine);
+    if (claimed) await this.moveClaimedToQuarantine(claimed, quarantine, checksum.slice(0, 16));
     throw new Error(`Legacy worker binding import refused: ${reason}`);
   }
   private async finishLegacyBackup(backup: string, expectedChecksum: string): Promise<void> {
@@ -362,33 +375,26 @@ export class WorkerBindingStore {
       // This is only legacy-v4 recovery. Claim first even here: a missing
       // backup must never be rebuilt from a public pathname that can turn A
       // into B between inspection and retirement.
-      const claimed = await this.captureAndRemoveLegacySource();
-      if (!claimed) throw new Error(`Legacy worker binding migration integrity error: migration record ${expectedChecksum} has no recoverable backup.`);
-      const raw = await this.readOwnerOnly(claimed);
-      if (raw === undefined) throw new Error(`Legacy worker binding migration integrity error: migration record ${expectedChecksum} has no recoverable backup.`);
-      if (checksumOf(raw) !== expectedChecksum) {
-        await this.moveToUnexpectedQuarantine(claimed, checksumOf(raw));
-        throw new Error("Legacy worker binding migration integrity error: legacy source does not match the committed migration record.");
+      const evidence = await this.collectClaimedEvidence(true);
+      let recovered: string | undefined;
+      for (const path of evidence) {
+        const raw = await this.readOwnerOnly(path);
+        if (raw === undefined) continue;
+        if (checksumOf(raw) === expectedChecksum && recovered === undefined) recovered = raw;
       }
-      await this.createBackupExclusively(backup, raw, expectedChecksum);
-      await unlink(claimed).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
-      await this.syncDirectory(dirname(claimed));
+      if (recovered === undefined) {
+        await this.retireCommittedEvidence(evidence, expectedChecksum);
+        throw new Error(`Legacy worker binding migration integrity error: migration record ${expectedChecksum} has no recoverable backup.`);
+      }
+      await this.createBackupExclusively(backup, recovered, expectedChecksum);
+      const unexpected = await this.retireCommittedEvidence(evidence, expectedChecksum);
+      if (unexpected.length) throw new Error(`Legacy worker binding migration integrity error: unexpected legacy evidence was quarantined at ${unexpected.join(", ")}.`);
     }
 
-    // Once the exact backup exists, the old path is merely an untrusted
-    // leftover. Capture it atomically into a private holding name, then either
-    // discard the known snapshot or preserve unexpected bytes as evidence.
-    const retired = await this.captureAndRemoveLegacySource();
-    if (!retired) return;
-    const raw = await readFile(retired, "utf8");
-    await chmod(retired, 0o600);
-    const checksum = checksumOf(raw);
-    if (checksum === expectedChecksum) {
-      await unlink(retired).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
-      return;
-    }
-    const quarantine = await this.moveToUnexpectedQuarantine(retired, checksum);
-    throw new Error(`Legacy worker binding migration integrity error: unexpected legacy source was quarantined at ${quarantine}.`);
+    // A post-record crash may leave one or more unique claim paths. Retire
+    // exact duplicates and preserve every differing claim/public replacement.
+    const unexpected = await this.retireCommittedEvidence(await this.collectClaimedEvidence(true), expectedChecksum);
+    if (unexpected.length) throw new Error(`Legacy worker binding migration integrity error: unexpected legacy evidence was quarantined at ${unexpected.join(", ")}.`);
   }
 
   /** Returns false only when backup is genuinely absent. A wrong backup is
@@ -460,7 +466,15 @@ export class WorkerBindingStore {
     return holding;
   }
 
-  private async moveClaimedToQuarantine(claimed: string, quarantine: string): Promise<void> {
+  private async moveClaimedToQuarantine(claimed: string, quarantine: string, expectedChecksumPrefix?: string): Promise<void> {
+    if (expectedChecksumPrefix) {
+      const raw = await this.readOwnerOnly(claimed);
+      if (raw === undefined) return;
+      if (!checksumOf(raw).startsWith(expectedChecksumPrefix)) {
+        await this.moveToUnexpectedQuarantine(claimed, checksumOf(raw));
+        return;
+      }
+    }
     try {
       await link(claimed, quarantine);
       await chmod(quarantine, 0o600);
@@ -469,8 +483,62 @@ export class WorkerBindingStore {
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       await chmod(quarantine, 0o600);
-      await unlink(claimed).catch((unlinkError: unknown) => { if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError; });
+      const claimedRaw = await this.readOwnerOnly(claimed);
+      const quarantineRaw = await this.readOwnerOnly(quarantine);
+      if (claimedRaw === undefined) return;
+      if (quarantineRaw === claimedRaw) {
+        await unlink(claimed).catch((unlinkError: unknown) => { if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError; });
+        await this.syncDirectory(dirname(claimed));
+        return;
+      }
+      await this.moveToUnexpectedQuarantine(claimed, checksumOf(claimedRaw));
     }
+  }
+
+  private async reconcileFailedEvidence(quarantine: string): Promise<void> {
+    const evidence = await this.collectClaimedEvidence(true);
+    const expectedPrefix = /\.corrupt\.([0-9a-f]{16})$/.exec(quarantine)?.[1];
+    for (const claimed of evidence) await this.moveClaimedToQuarantine(claimed, quarantine, expectedPrefix);
+    await chmod(quarantine, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+  }
+
+  private async collectClaimedEvidence(includePublic: boolean): Promise<string[]> {
+    const state = await this.legacySourceState();
+    const evidence = [...state.claims];
+    if (includePublic && state.publicPresent) {
+      const claimed = await this.captureAndRemoveLegacySource();
+      if (claimed) evidence.push(claimed);
+    }
+    return evidence;
+  }
+
+  private async retireCommittedEvidence(evidence: string[], expectedChecksum: string): Promise<string[]> {
+    const unexpected: string[] = [];
+    for (const path of evidence) {
+      const raw = await this.readOwnerOnly(path);
+      if (raw === undefined) continue;
+      if (checksumOf(raw) === expectedChecksum) {
+        await unlink(path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+        await this.syncDirectory(dirname(path));
+      } else {
+        unexpected.push(await this.moveToUnexpectedQuarantine(path, checksumOf(raw)));
+      }
+    }
+    return unexpected;
+  }
+
+  private async legacySourceState(): Promise<{ publicPresent: boolean; claims: string[] }> {
+    const directory = dirname(this.legacyJsonPath);
+    const sourceName = basename(this.legacyJsonPath);
+    const prefix = `${sourceName}.claimed.`;
+    const names = await readdir(directory).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [] as string[];
+      throw error;
+    });
+    return {
+      publicPresent: names.includes(sourceName),
+      claims: names.filter((name) => name.startsWith(prefix)).sort().map((name) => `${directory}/${name}`),
+    };
   }
 
   private async restoreClaimForRetry(claimed: string): Promise<void> {
@@ -538,10 +606,9 @@ export class WorkerBindingStore {
     return { kind: "orphan" };
   }
   private async adoptOrphanClaim(): Promise<string> {
-    const prefix = `${basename(this.legacyJsonPath)}.claimed.`;
-    const claims = (await readdir(dirname(this.legacyJsonPath))).filter((name) => name.startsWith(prefix));
-    if (claims.length !== 1) throw new Error(`Legacy worker binding migration has ${claims.length} orphan claims; refusing ambiguous recovery.`);
-    const claimed = `${dirname(this.legacyJsonPath)}/${claims[0]!}`;
+    const state = await this.legacySourceState();
+    if (state.publicPresent || state.claims.length !== 1) throw new Error(`Legacy worker binding migration has ambiguous orphan evidence (${state.claims.length} claim(s), public source ${state.publicPresent ? "present" : "absent"}).`);
+    const claimed = state.claims[0]!;
     const adopted = `${this.legacyJsonPath}.claimed.recovered.${randomUUID()}`;
     try { await rename(claimed, adopted); }
     catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("Legacy worker binding orphan claim disappeared during recovery."); throw error; }
