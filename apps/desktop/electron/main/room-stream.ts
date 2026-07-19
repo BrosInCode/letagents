@@ -39,7 +39,24 @@ let activeRoomStream: {
   localRoomIdentifier: string | null;
   managedMessageDeliveryTracker: ManagedMessageDeliveryTracker;
   stopped: boolean;
+  // Cloud rooms deliver live messages over SSE. The HTTP long-poll is a
+  // *fallback* transport that only runs while SSE is disconnected; `pollActive`
+  // is the single flag that keeps that loop alive and lets the SSE-open path
+  // retire it. See `openDesktopRoomStream` for the full lifecycle.
+  pollActive: boolean;
+  // One-shot timer that re-runs a failed SSE-open catch-up while SSE is healthy
+  // but the fallback poll is still up, so a single failed catch-up cannot pin
+  // the duplicated-transport state for the rest of the room session.
+  catchUpRetryTimer: NodeJS.Timeout | null;
 } | null = null;
+
+// Retry cadence for a failed SSE-open catch-up (see `openDesktopRoomStream`).
+// Read once at module evaluation, like `apiUrl`; the env override exists so
+// tests can exercise the retry path without waiting out the real cadence.
+const catchUpRetryDelayMs =
+  Number(process.env.LETAGENTS_ROOM_STREAM_CATCHUP_RETRY_MS) > 0
+    ? Number(process.env.LETAGENTS_ROOM_STREAM_CATCHUP_RETRY_MS)
+    : 20_000;
 
 export function getActiveRoomIdentifier(): string | null {
   return activeRoomStream?.roomIdentifier ?? null;
@@ -342,10 +359,59 @@ function handleRoomStreamFrame(
   }
 }
 
+// Perform a single `GET /messages/poll` request and emit whatever messages it
+// returns, advancing the cursor. Shared by the fallback long-poll loop
+// (`timeoutMs = 25_000`, one request per iteration) and the SSE-open catch-up
+// (`timeoutMs = 0`, a single non-blocking gap-fill). Cursor advancement and the
+// dedupe/delivery decision are identical in both callers so the two transports
+// stay interchangeable and never diverge on what "delivered" means.
+async function fetchRoomMessagePollPage(
+  stream: NonNullable<typeof activeRoomStream>,
+  after: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  const storedAuth = await readStoredAuth();
+  const requestHeaders = new Headers({
+    Accept: "application/json",
+    "X-LetAgents-Desktop-Client": "1",
+  });
+  if (storedAuth.token) {
+    requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
+  }
+  const response = await fetch(
+    `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?limit=${roomMessageHistoryPageSize}&timeout=${timeoutMs}&after=${encodeURIComponent(after)}`,
+    { headers: requestHeaders, signal },
+  );
+  if (!response.ok) {
+    throw new Error(`Room poll failed with HTTP ${response.status}.`);
+  }
+  const page = (await response.json()) as {
+    room_id?: string;
+    messages?: Parameters<typeof mapRoomMessagePayload>[0][];
+  };
+  if (!isCurrentRoomStream(stream)) return;
+  for (const rawMessage of page.messages || []) {
+    if (!isCurrentRoomStream(stream)) return;
+    if (typeof rawMessage.id === "string") {
+      stream.lastMessageId = rawMessage.id;
+    }
+    const roomIdentifier = page.room_id || stream.roomIdentifier;
+    emitRoomStreamEvent({
+      type: "message",
+      roomIdentifier,
+      message: mapRoomMessagePayload(rawMessage),
+    }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id) });
+  }
+}
+
+// Fallback transport: a 25s server-held long-poll re-issued forever, but ONLY
+// while `pollActive` is set (i.e. while SSE is disconnected). SSE recovery
+// clears `pollActive` and aborts the in-flight request via `stopFallbackPoll`.
 async function pollDesktopRoomMessages(
   stream: NonNullable<typeof activeRoomStream>,
 ): Promise<void> {
-  while (isCurrentRoomStream(stream)) {
+  while (isCurrentRoomStream(stream) && stream.pollActive) {
     const after = stream.lastMessageId;
     if (!after) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -355,40 +421,13 @@ async function pollDesktopRoomMessages(
     const pollAbortController = new AbortController();
     stream.pollAbortController = pollAbortController;
     try {
-      const storedAuth = await readStoredAuth();
-      const requestHeaders = new Headers({
-        Accept: "application/json",
-        "X-LetAgents-Desktop-Client": "1",
-      });
-      if (storedAuth.token) {
-        requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
-      }
-      const response = await fetch(
-        `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?limit=${roomMessageHistoryPageSize}&timeout=25000&after=${encodeURIComponent(after)}`,
-        { headers: requestHeaders, signal: pollAbortController.signal },
-      );
-      if (!response.ok) {
-        throw new Error(`Room poll failed with HTTP ${response.status}.`);
-      }
-      const page = (await response.json()) as {
-        room_id?: string;
-        messages?: Parameters<typeof mapRoomMessagePayload>[0][];
-      };
-      if (!isCurrentRoomStream(stream)) return;
-      for (const rawMessage of page.messages || []) {
-        if (!isCurrentRoomStream(stream)) return;
-        if (typeof rawMessage.id === "string") {
-          stream.lastMessageId = rawMessage.id;
-        }
-        const roomIdentifier = page.room_id || stream.roomIdentifier;
-        emitRoomStreamEvent({
-          type: "message",
-          roomIdentifier,
-          message: mapRoomMessagePayload(rawMessage),
-        }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id) });
-      }
+      await fetchRoomMessagePollPage(stream, after, 25_000, pollAbortController.signal);
     } catch (error) {
-      if (!isCurrentRoomStream(stream) || pollAbortController.signal.aborted)
+      if (
+        !isCurrentRoomStream(stream) ||
+        !stream.pollActive ||
+        pollAbortController.signal.aborted
+      )
         return;
       emitRoomStreamEvent({
         type: "error",
@@ -403,6 +442,78 @@ async function pollDesktopRoomMessages(
       }
     }
   }
+}
+
+// Bring the fallback long-poll up (idempotent). Called when SSE fails to
+// connect or drops, so live messages keep flowing via `after={lastMessageId}`
+// while the SSE reader reconnects on its existing backoff.
+function startFallbackPoll(
+  stream: NonNullable<typeof activeRoomStream>,
+): void {
+  if (stream.pollActive || !isCurrentRoomStream(stream)) return;
+  stream.pollActive = true;
+  void pollDesktopRoomMessages(stream);
+}
+
+// Retire the fallback long-poll and abort any in-flight request. Called once
+// the SSE catch-up has closed the gap, so the room holds a single transport.
+function stopFallbackPoll(
+  stream: NonNullable<typeof activeRoomStream>,
+): void {
+  stream.pollActive = false;
+  stream.pollAbortController?.abort();
+  stream.pollAbortController = null;
+}
+
+// One non-blocking gap-fill fetch run the instant SSE (re)connects. The server
+// keeps no SSE replay, so a fresh/reconnected SSE reader only sees events from
+// now on; this closes the gap between the last delivered message and stream
+// start using the same `after={lastMessageId}` cursor the fallback poll uses.
+async function catchUpAfterSseOpen(
+  stream: NonNullable<typeof activeRoomStream>,
+): Promise<void> {
+  const after = stream.lastMessageId;
+  if (!after) return; // No cursor yet: nothing before stream start to backfill.
+  await fetchRoomMessagePollPage(stream, after, 0, stream.abortController.signal);
+}
+
+function clearCatchUpRetry(
+  stream: NonNullable<typeof activeRoomStream>,
+): void {
+  if (stream.catchUpRetryTimer) {
+    clearTimeout(stream.catchUpRetryTimer);
+    stream.catchUpRetryTimer = null;
+  }
+}
+
+// A catch-up failed while SSE (re)connected fine, so the fallback poll was left
+// up as the gap-filler. Without a retry, that degraded duplicated-transport
+// state would persist until the next SSE drop — which may never come. Retry on
+// a bounded cadence until one catch-up succeeds and the poll is retired. The
+// timer is cleared whenever its SSE connection dies (the reconnect path runs
+// its own catch-up) and on stopDesktopRoomStream; the guards below make a stale
+// firing a no-op even if clearing raced the timer.
+function scheduleCatchUpRetry(
+  stream: NonNullable<typeof activeRoomStream>,
+): void {
+  if (stream.catchUpRetryTimer || !isCurrentRoomStream(stream)) return;
+  stream.catchUpRetryTimer = setTimeout(() => {
+    stream.catchUpRetryTimer = null;
+    void (async () => {
+      if (!isCurrentRoomStream(stream) || !stream.pollActive) return;
+      try {
+        await catchUpAfterSseOpen(stream);
+        if (!isCurrentRoomStream(stream)) return;
+        stopFallbackPoll(stream);
+      } catch {
+        if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
+          return;
+        if (stream.pollActive) {
+          scheduleCatchUpRetry(stream);
+        }
+      }
+    })();
+  }, catchUpRetryDelayMs);
 }
 
 async function pollLocalDesktopRoomMessages(
@@ -502,6 +613,40 @@ async function openDesktopRoomStream(
       roomIdentifier: stream.roomIdentifier,
     });
 
+    // --- SSE just (re)connected: close the gap, then retire the fallback. ---
+    // Ordering is what keeps this lossless and (near) duplicate-free across the
+    // hand-off from the fallback long-poll back to SSE:
+    //   1. We have NOT started reading `response.body` yet, so no SSE `message`
+    //      frame can be emitted during the catch-up — the socket just buffers.
+    //   2. The catch-up fetches `after={lastMessageId}`, so it delivers exactly
+    //      the messages the server holds beyond our cursor (the SSE-replay gap),
+    //      advancing `lastMessageId` as it goes.
+    //   3. Only after the catch-up succeeds do we stop the fallback poll. A
+    //      fallback request may still be in flight; aborting it here cannot drop
+    //      anything, because whatever it would have returned is at/after our
+    //      cursor and was either just delivered by the catch-up or will arrive
+    //      on the SSE reader we start next. Any id delivered by both channels in
+    //      the overlap window is collapsed by the existing by-id dedupe
+    //      (managedMessageDeliveryTracker for agents; message id downstream in
+    //      the renderer), so overlap is at worst a redundant emit, never a loss.
+    //   4. If the catch-up itself fails, we deliberately leave the fallback poll
+    //      running as the gap-filler and still start the SSE reader; a bounded
+    //      retry (scheduleCatchUpRetry) keeps re-running the catch-up until one
+    //      succeeds and retires the poll — otherwise a single failed catch-up
+    //      would pin the duplicated-transport state until the next SSE drop.
+    try {
+      await catchUpAfterSseOpen(stream);
+      if (!isCurrentRoomStream(stream)) return;
+      stopFallbackPoll(stream);
+    } catch {
+      if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
+        return;
+      // Keep the fallback poll alive; the SSE reader still runs below.
+      if (stream.pollActive) {
+        scheduleCatchUpRetry(stream);
+      }
+    }
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -526,6 +671,13 @@ async function openDesktopRoomStream(
   }
 
   if (isCurrentRoomStream(stream)) {
+    // SSE is down (connect failed or the read loop dropped). Any pending
+    // catch-up retry belonged to the connection that just died; drop it — the
+    // reconnect below runs its own catch-up on open. Then bring up the fallback
+    // long-poll so messages keep flowing via `after={lastMessageId}` while the
+    // SSE reader reconnects on its existing exponential backoff.
+    clearCatchUpRetry(stream);
+    startFallbackPoll(stream);
     const retryMs = Math.min(stream.retryMs, 30_000);
     stream.retryMs = Math.min(stream.retryMs * 2, 30_000);
     stream.reconnectTimer = setTimeout(() => {
@@ -565,6 +717,8 @@ export async function startDesktopRoomStream(
     localRoomIdentifier: null,
     managedMessageDeliveryTracker: createManagedMessageDeliveryTracker(),
     stopped: false,
+    pollActive: false,
+    catchUpRetryTimer: null,
   };
   if (isDesktopSmokeCheck()) {
     emitRoomStreamEvent({
@@ -585,8 +739,10 @@ export async function startDesktopRoomStream(
     );
     return;
   }
+  // Cloud rooms start with SSE only. The long-poll is now a fallback that
+  // `openDesktopRoomStream` brings up if/when SSE drops, and retires again on
+  // reconnect — instead of running a second permanent transport per room.
   void openDesktopRoomStream(activeRoomStream);
-  void pollDesktopRoomMessages(activeRoomStream);
 }
 
 export async function stopDesktopRoomStream(
@@ -600,10 +756,12 @@ export async function stopDesktopRoomStream(
     return;
 
   activeRoomStream.stopped = true;
+  activeRoomStream.pollActive = false;
   activeRoomStream.abortController.abort();
   activeRoomStream.pollAbortController?.abort();
   if (activeRoomStream.reconnectTimer) {
     clearTimeout(activeRoomStream.reconnectTimer);
   }
+  clearCatchUpRetry(activeRoomStream);
   activeRoomStream = null;
 }
