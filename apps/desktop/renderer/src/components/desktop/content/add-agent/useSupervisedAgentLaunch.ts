@@ -60,6 +60,10 @@ export function useSupervisedAgentLaunch(options: {
   const stoppingEntryId = ref<string | null>(null);
   const creationRequestId = ref<string | null>(null);
   const signInCommandCopiedForEntryId = ref<string | null>(null);
+  const canAddAnotherCodexAgentState = computed(() => canAddAnotherCodexAgent({
+    providerId: toValue(options.providerId),
+    entry: conflict.value,
+  }));
 
   const view = computed(() =>
     launchStarted.value || conflict.value
@@ -270,10 +274,7 @@ export function useSupervisedAgentLaunch(options: {
    * retain their existing singleton lane behaviour.
    */
   function dismissReadyCodexLaunchForAnother(): void {
-    if (!canAddAnotherCodexAgent({
-      providerId: toValue(options.providerId),
-      entry: conflict.value,
-    })) return;
+    if (!canAddAnotherCodexAgentState.value) return;
     dismiss();
   }
 
@@ -359,6 +360,7 @@ export function useSupervisedAgentLaunch(options: {
     conflictLookupTone,
     stoppingEntryId,
     creationRequestId,
+    canAddAnotherCodexAgent: canAddAnotherCodexAgentState,
     view,
     begin,
     complete,

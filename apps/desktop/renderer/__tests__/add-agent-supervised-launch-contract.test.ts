@@ -28,6 +28,10 @@ const launchComponentSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunch.vue",
   import.meta.url,
 )), "utf8");
+const launchActionsSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.ts",
+  import.meta.url,
+)), "utf8");
 const actionBarSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentActionBar.vue",
   import.meta.url,
@@ -171,9 +175,10 @@ test("an active supervised launch owns the action bar instead of stale preflight
 });
 
 test("a ready Codex launch can start another without stopping the completed agent", () => {
-  assert.match(launchComponentSource, /data-testid="desktop-add-agent-add-another-codex"/);
-  assert.match(launchComponentSource, /Add another Codex agent/);
-  assert.match(launchComponentSource, /entry\?\.provider === "codex" && Boolean\(progress\.value\?\.ready\)/);
+  assert.match(launchActionsSource, /"data-testid": "desktop-add-agent-add-another-codex"/);
+  assert.match(launchActionsSource, /Add another Codex agent/);
+  assert.match(launchComponentSource, /props\.controller\.launch\.canAddAnotherCodexAgent\.value/);
+  assert.match(launchComponentSource, /@add-another="controller\.launch\.dismissReadyCodexLaunchForAnother"/);
   assert.match(launchSource, /function dismissReadyCodexLaunchForAnother\(\): void/);
   const releaseBody = launchSource.slice(
     launchSource.indexOf("function dismissReadyCodexLaunchForAnother"),
