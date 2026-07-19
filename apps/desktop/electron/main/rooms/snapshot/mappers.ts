@@ -291,7 +291,7 @@ function mapMessages(data: MessagesResponse): DesktopRoomMessage[] {
     .map(mapRoomMessagePayload);
 }
 
-function mapRoomArtifacts(
+export function mapRoomArtifacts(
   data: RoomSnapshotData["roomArtifactsData"],
 ): DesktopRoomSharedArtifact[] {
   return (data.artifacts || [])

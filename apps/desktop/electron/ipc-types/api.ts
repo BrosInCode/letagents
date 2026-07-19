@@ -70,6 +70,7 @@ import type {
   DesktopRoomThreadInboxPage,
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
+  DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
   DesktopSendRoomMessageResult,
@@ -220,6 +221,7 @@ export interface DesktopApi {
       roomIdentifier: string,
       query?: DesktopGitHubEventsQuery,
     ) => Promise<DesktopGitHubEventsPage>;
+    getArtifacts?: (roomIdentifier: string) => Promise<DesktopRoomSharedArtifact[]>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
     openGitHubInstall: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationActionResult>;
   };

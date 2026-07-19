@@ -1,4 +1,5 @@
 export * from "./rooms/account-rooms.js";
+export * from "./rooms/artifacts/fetch.js";
 export * from "./rooms/diagnostics.js";
 export * from "./rooms/events.js";
 export * from "./rooms/focus-rooms.js";

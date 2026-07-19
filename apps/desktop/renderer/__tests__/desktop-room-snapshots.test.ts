@@ -8,6 +8,7 @@ import type {
 } from "../../electron/ipc-types";
 import {
   mergeRoomSnapshotMessages,
+  messageReferencesMissingThreadContext,
   upsertSnapshotRoomArtifact,
 } from "../src/domain/desktop-room-snapshots";
 
@@ -98,6 +99,41 @@ describe("desktop room snapshot merging", () => {
       "git:commit:id:abc123",
     ]);
     assert.equal(withUpdated?.roomArtifacts[0]?.state, "updated");
+  });
+});
+
+describe("messageReferencesMissingThreadContext", () => {
+  const existing = [roomMessage("msg_1", "Root")];
+
+  it("returns false for a top-level message that only references itself", () => {
+    const message = roomMessage("msg_2", "Top level");
+    assert.equal(messageReferencesMissingThreadContext(message, existing), false);
+  });
+
+  it("returns false when the root and reply-to are in the loaded window", () => {
+    const message: DesktopRoomMessage = {
+      ...roomMessage("msg_2", "Reply"),
+      threadRootId: "msg_1",
+      threadReplyToId: "msg_1",
+    };
+    assert.equal(messageReferencesMissingThreadContext(message, existing), false);
+  });
+
+  it("returns true when the thread root is outside the loaded window", () => {
+    const message: DesktopRoomMessage = {
+      ...roomMessage("msg_2", "Reply to old root"),
+      threadRootId: "msg_missing",
+    };
+    assert.equal(messageReferencesMissingThreadContext(message, existing), true);
+  });
+
+  it("returns true when the reply-to is outside the loaded window", () => {
+    const message: DesktopRoomMessage = {
+      ...roomMessage("msg_2", "Reply to old message"),
+      threadRootId: "msg_2",
+      threadReplyToId: "msg_missing",
+    };
+    assert.equal(messageReferencesMissingThreadContext(message, existing), true);
   });
 });
 
