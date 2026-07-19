@@ -145,9 +145,12 @@ export class WorkDurabilityStore {
     this.assertAttemptId(workAttemptId);
     const identity = await this.verifyProvisionedMarker(input.workspacePath, workAttemptId, input.taskId);
     await this.assertExactWorkspaceLayout(input.workspacePath, identity.repo, workAttemptId);
-    const attempt = await this.mutate((stored) => {
-      if (stored.attempts.some((candidate) => candidate.work_attempt_id === workAttemptId)) throw new ImmutableExecutionError("Work attempt ID already exists.");
-      if (stored.attempts.some((candidate) => resolve(candidate.workspace_path) === resolve(input.workspacePath))) throw new ImmutableExecutionError("Workspace path is already bound to a work attempt.");
+    const attempt = await this.exclusive(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+      if (database.prepare("SELECT 1 FROM work_attempts WHERE work_attempt_id = ?").get(workAttemptId)) throw new ImmutableExecutionError("Work attempt ID already exists.");
+      if (database.prepare("SELECT 1 FROM work_attempts WHERE workspace_path = ?").get(resolve(input.workspacePath))) throw new ImmutableExecutionError("Workspace path is already bound to a work attempt.");
       const createdAt = this.now();
       const attempt: TaskWorkAttempt = {
         work_attempt_id: workAttemptId, task_id: input.taskId, lease_id: input.leaseId, current_lease_epoch: input.leaseEpoch,
@@ -156,8 +159,10 @@ export class WorkDurabilityStore {
         state: "active", created_at: createdAt, concluded_at: null, conclusion_cause: null, postmortem_diff: null,
         checkpoints: [], execution_generations: [],
       };
-      stored.attempts.push(attempt);
+      this.persistAttempt(database, attempt);
+      database.exec("COMMIT");
       return attempt;
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
     });
     return attempt;
   }
@@ -165,15 +170,13 @@ export class WorkDurabilityStore {
   async getAttempt(workAttemptId: string): Promise<TaskWorkAttempt> {
     this.assertAttemptId(workAttemptId);
     const database = await this.getDatabase();
-    await this.importLegacyAttempts(database);
     const attempt = this.readAttempt(database, workAttemptId);
     if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
     return attempt;
   }
 
   async rebindAttempt(workAttemptId: string, leaseId: string, leaseEpoch: number): Promise<TaskWorkAttempt> {
-    const rebound = await this.mutate((stored) => {
-      const attempt = this.required(stored, workAttemptId);
+    const rebound = await this.mutateAttempt(workAttemptId, (attempt) => {
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot be rebound.");
       if (!Number.isInteger(leaseEpoch) || leaseEpoch <= attempt.current_lease_epoch) throw new ImmutableExecutionError("Lease epochs must advance monotonically.");
       attempt.lease_id = leaseId;
@@ -187,8 +190,7 @@ export class WorkDurabilityStore {
   }
 
   async checkpoint(workAttemptId: string, checkpoint: Omit<WorkAttemptCheckpoint, "at"> & { at?: string }): Promise<TaskWorkAttempt> {
-    return this.mutate((stored) => {
-      const attempt = this.required(stored, workAttemptId);
+    return this.mutateAttempt(workAttemptId, (attempt) => {
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot be checkpointed.");
       attempt.checkpoints.push({ at: checkpoint.at ?? this.now(), room_cursor: checkpoint.room_cursor, provider_continuation_id: checkpoint.provider_continuation_id });
       return attempt;
@@ -198,8 +200,7 @@ export class WorkDurabilityStore {
   async startGeneration(workAttemptId: string, actor: string, generation: number): Promise<ExecutionGeneration> {
     const attempt = await this.getAttempt(workAttemptId);
     await this.ensureExecutionFence(attempt);
-    try { return await this.mutate((stored) => {
-      const attempt = this.required(stored, workAttemptId);
+    try { return await this.mutateAttempt(workAttemptId, (attempt) => {
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot start a generation.");
       if (!actor.trim() || !Number.isInteger(generation) || generation < 1) throw new ImmutableExecutionError("Generation actor and number are required.");
       if (attempt.execution_generations.some((item) => item.terminal === null)) throw new ImmutableExecutionError("Only one execution generation may be live.");
@@ -228,8 +229,8 @@ export class WorkDurabilityStore {
   async recordTerminal(workAttemptId: string, executionGenerationId: string, terminal: ExecutionTerminalPayload, maxStdioTailBytes = 64 * 1024): Promise<ExecutionGeneration> {
     if (!isTerminal(terminal)) throw new ImmutableExecutionError("Terminal payload has an invalid runtime schema.");
     if (!Number.isInteger(maxStdioTailBytes) || maxStdioTailBytes < 0) throw new ImmutableExecutionError("Terminal stdio limit must be a non-negative integer.");
-    return this.mutate((stored) => {
-      const execution = this.required(stored, workAttemptId).execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
+    return this.mutateAttempt(workAttemptId, (attempt) => {
+      const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
       if (!execution) throw new AttemptNotFoundError(`Unknown execution generation: ${executionGenerationId}`);
       if (execution.terminal) throw new ImmutableExecutionError("Execution terminal payloads are append-only and immutable.");
       if (terminal.generation !== execution.generation || terminal.actor !== execution.actor) throw new ImmutableExecutionError("Terminal identity must match its execution record.");
@@ -301,8 +302,7 @@ export class WorkDurabilityStore {
       // was configured. In production the daemon capture below is authoritative.
       const postmortemDiff = this.git ? await this.capturePostmortemDiff(workAttemptId, input.maxPostmortemBytes) : input.postmortemDiff;
       if (postmortemDiff === undefined) throw new ImmutableExecutionError("Daemon Git postmortem capture is required for conclusion.");
-      return await this.mutate((stored) => {
-      const attempt = this.required(stored, workAttemptId);
+      return await this.mutateAttempt(workAttemptId, (attempt) => {
       if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("Work attempts can conclude only once.");
       if (!input.cause.trim()) throw new ImmutableExecutionError("Work attempts require an explicit conclusion cause.");
       if (attempt.execution_generations.some((generation) => generation.terminal === null)) throw new ImmutableExecutionError("Concluding an attempt requires terminal attestation for every execution generation.");
@@ -316,8 +316,7 @@ export class WorkDurabilityStore {
   }
 
   async markState(workAttemptId: string, state: Extract<WorkAttemptState, "ambiguous" | "coordination_blocked" | "quarantined" | "unreviewed">): Promise<TaskWorkAttempt> {
-    return this.mutate((stored) => {
-      const attempt = this.required(stored, workAttemptId);
+    return this.mutateAttempt(workAttemptId, (attempt) => {
       if (attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("GC reservation prevents state changes; retry after recovery.");
       attempt.state = state;
       return attempt;
@@ -374,7 +373,6 @@ export class WorkDurabilityStore {
 
   private async load(): Promise<StoredAttempts> {
     const database = await this.getDatabase();
-    await this.importLegacyAttempts(database);
     return this.loadFromDatabase(database);
   }
 
@@ -462,7 +460,6 @@ export class WorkDurabilityStore {
   private async mutate<T>(operation: (stored: StoredAttempts) => T): Promise<T> {
     return this.exclusive(async () => {
       const database = await this.getDatabase();
-      await this.importLegacyAttempts(database);
       database.exec("BEGIN IMMEDIATE");
       try {
         const stored = this.loadFromDatabase(database);
@@ -471,6 +468,22 @@ export class WorkDurabilityStore {
         for (const attempt of stored.attempts) {
           if (before.get(attempt.work_attempt_id) !== JSON.stringify(attempt)) this.persistAttempt(database, attempt);
         }
+        database.exec("COMMIT");
+        return result;
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+    });
+  }
+
+  /** Hot-path mutation: one attempt and its children, never a database-wide scan. */
+  private async mutateAttempt<T>(workAttemptId: string, operation: (attempt: TaskWorkAttempt) => T): Promise<T> {
+    return this.exclusive(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const attempt = this.readAttempt(database, workAttemptId);
+        if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
+        const result = operation(attempt);
+        this.persistAttempt(database, attempt);
         database.exec("COMMIT");
         return result;
       } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
@@ -529,8 +542,7 @@ export class WorkDurabilityStore {
   }
 
   private async finishGarbageCollection(workAttemptId: string): Promise<void> {
-    await this.mutate((stored) => {
-      const current = this.required(stored, workAttemptId);
+    await this.mutateAttempt(workAttemptId, (current) => {
       if (current.state === "garbage_collected") return current; // a crashed/restarted collector already completed it
       if (current.state !== "gc_pending") throw new ImmutableExecutionError("GC reservation was lost.");
       current.state = "garbage_collected";
@@ -724,13 +736,13 @@ export class WorkDurabilityStore {
   }
 
   private async initializeDatabase(): Promise<DatabaseSync> {
-    // ManifestStore is the sole schema-version owner for daemon-state.sqlite.
-    // It serializes v1→v2→v3 upgrades before this independent connection opens.
+    // The neutral state-schema owner serializes all daemon-state upgrades.
     await ensureDaemonStateDatabase(this.databasePath);
     let database: DatabaseSync | null = null;
     try {
       database = await openDaemonStateDatabase(this.databasePath, () => {});
       this.database = database;
+      await this.importLegacyAttempts(database);
       return database;
     } catch (error) { database?.close(); this.initializing = null; throw error; }
   }
