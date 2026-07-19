@@ -490,7 +490,7 @@ validateV4Shape(database: DatabaseSync): void {
     worker_generation_verifications: ["reservation_id", "entry_id", "binding_epoch", "from_execution_generation_id", "to_execution_generation_id", "agent_session_id", "sequence", "observed_at", "observed_at_ms", "state", "created_at", "finalized_at"],
   };
   for (const [table, expected] of Object.entries(required)) {
-    const columns = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; type: string; notnull: number; pk: number }>;
+    const columns = database.prepare(`PRAGMA table_xinfo(${table})`).all() as Array<{ name: string; type: string; notnull: number; pk: number; hidden: number }>;
     const actual = new Set(columns.map((column) => column.name));
     const missing = expected.filter((column) => !actual.has(column));
     const extra = columns.map((column) => column.name).filter((column) => !expected.includes(column));
@@ -499,7 +499,7 @@ validateV4Shape(database: DatabaseSync): void {
       const isPrimary = column.name === (table === "worker_session_bindings" ? "entry_id" : "reservation_id");
       const expectedType = ["last_sequence", "last_observed_at_ms", "binding_epoch", "sequence", "observed_at_ms"].includes(column.name) ? "INTEGER" : "TEXT";
       const nullable = column.name === "room_cursor" || column.name === "finalized_at";
-      if (column.type !== expectedType || Number(column.notnull) !== (nullable ? 0 : 1) || Number(column.pk) !== (isPrimary ? 1 : 0)) {
+      if (Number(column.hidden) !== 0 || column.type !== expectedType || Number(column.notnull) !== (nullable ? 0 : 1) || Number(column.pk) !== (isPrimary ? 1 : 0)) {
         throw new Error(`Daemon state v4 table ${table} has invalid definition for ${column.name}.`);
       }
     }
@@ -542,13 +542,22 @@ validateV4Shape(database: DatabaseSync): void {
     });
     if (!uniqueSequence) throw new Error(`Daemon state v4 table ${table} is missing UNIQUE(entry_id, sequence).`);
   }
-  const schemaSql = new Map((database.prepare("SELECT name, sql FROM sqlite_master WHERE type='table'").all() as Row[]).map((row) => [String(row.name), String(row.sql).replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\s+/g, " ").toLowerCase()]));
-  const checks: Record<string, string[]> = {
-    worker_session_bindings: ["check (last_sequence >= 0)", "check (last_observed_at_ms >= 0)", "check (binding_epoch >= 1)"],
-    worker_binding_publications: ["check (sequence > 0)", "check (observed_at_ms >= 0)", "check (state in ('reserved', 'accepted', 'failed'))"],
-    worker_generation_verifications: ["check (sequence > 0)", "check (observed_at_ms >= 0)", "check (state in ('reserved', 'accepted', 'failed', 'lost_race'))"],
+  const rejectsCheck = (sql: string, ...values: unknown[]) => {
+    database.exec("SAVEPOINT worker_v4_check_probe");
+    try {
+      try { database.prepare(sql).run(...values as never[]); }
+      catch (error: unknown) { if (!/CHECK constraint failed/i.test(String(error))) throw error; return; }
+      throw new Error("required CHECK accepted an invalid value");
+    } finally { database.exec("ROLLBACK TO worker_v4_check_probe"); database.exec("RELEASE worker_v4_check_probe"); }
   };
-  for (const [table, fragments] of Object.entries(checks)) if (fragments.some((fragment) => !schemaSql.get(table)?.includes(fragment))) throw new Error(`Daemon state v4 table ${table} is missing required CHECK constraints.`);
+  const binding = ["probe", "room", "attempt", "run", "session", "token", "https://example.test", null, 1, 1, 1, "2026-01-01T00:00:00.000Z"];
+  rejectsCheck("INSERT INTO worker_session_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...binding.slice(0, 8), -1, 1, 1, binding[11]);
+  rejectsCheck("INSERT INTO worker_session_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...binding.slice(0, 8), 1, -1, 1, binding[11]);
+  rejectsCheck("INSERT INTO worker_session_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...binding.slice(0, 8), 1, 1, 0, binding[11]);
+  const publication = ["probe", "agent", 1, "run", "session", 1, "2026-01-01T00:00:00.000Z", 1, "reserved", "2026-01-01T00:00:00.000Z", null];
+  for (const invalid of [[-1, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"]]) rejectsCheck("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...publication.slice(0, 5), invalid[0], publication[6], invalid[1], invalid[2], publication[9], null);
+  const verification = ["probe", "agent", 1, "from", "to", "session", 1, "2026-01-01T00:00:00.000Z", 1, "reserved", "2026-01-01T00:00:00.000Z", null];
+  for (const invalid of [[-1, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"]]) rejectsCheck("INSERT INTO worker_generation_verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...verification.slice(0, 6), invalid[0], verification[7], invalid[1], invalid[2], verification[10], null);
 }
 
 applyV3Shape(database: DatabaseSync): void {
