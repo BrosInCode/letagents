@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,6 +55,23 @@ test("simultaneously released fenced stores and a raw writer do not deadlock", a
     await new Promise((resolve) => setTimeout(resolve, 0)); release();
     await Promise.all([one, two]);
     const raw = new DatabaseSync(env.database); raw.prepare("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run("raw", "agent_a", 1, "run", "session", 999999, "2026-01-01T00:00:00.000Z", 1, "accepted", "2026-01-01T00:00:00.000Z", null); raw.close();
+    await a.close(); await b.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a child-process raw SQLite writer overlaps fenced binding commits", async () => {
+  const env = await fixture(); try {
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fence = async (commit: () => Promise<void>) => { await gate; await commit(); };
+    const a = new WorkerBindingStore(join(env.root, "a.json"), fence, env.database);
+    const b = new WorkerBindingStore(join(env.root, "b.json"), fence, env.database);
+    // Initialize schema before launching the independent SQLite process.
+    const seed = new WorkerBindingStore(join(env.root, "seed.json"), undefined, env.database); await seed.list(); await seed.close();
+    const one = a.bind(input("agent_a")); const two = b.bind(input("agent_b"));
+    const child = spawn(process.execPath, ["-e", `const {DatabaseSync}=require('node:sqlite'); const db=new DatabaseSync(process.argv[1]); db.exec('PRAGMA busy_timeout=5000'); db.prepare("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run('child','agent_raw',1,'run','session',900001,'2026-01-01T00:00:00.000Z',1,'accepted','2026-01-01T00:00:00.000Z',null); db.close();`, env.database], { stdio: "pipe" });
+    const exited = new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child SQLite writer exited ${code}`))));
+    release(); await Promise.all([one, two, exited]);
+    const check = new DatabaseSync(env.database); assert.equal((check.prepare("SELECT COUNT(*) AS count FROM worker_binding_publications WHERE reservation_id='child'").get() as { count: number }).count, 1); check.close();
     await a.close(); await b.close();
   } finally { await env.cleanup(); }
 });
