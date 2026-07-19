@@ -29,6 +29,13 @@
           data-testid="desktop-add-agent-dismiss-launch"
           @click="controller.launch.dismiss"
         >Dismiss</button>
+        <button
+          v-else-if="canAddAnotherCodexAgent"
+          type="button"
+          class="desktop-add-agent-managed-session-secondary"
+          data-testid="desktop-add-agent-add-another-codex"
+          @click="controller.launch.dismissReadyCodexLaunchForAnother"
+        >Add another Codex agent</button>
       </div>
     </article>
   </section>
@@ -56,6 +63,10 @@ const props = defineProps<{
 const progress = computed(() => props.controller.launch.view.value);
 const hasConflict = computed(() => Boolean(props.controller.launch.conflict.value));
 const stopping = computed(() => Boolean(props.controller.launch.stoppingEntryId.value));
+const canAddAnotherCodexAgent = computed(() => {
+  const entry = props.controller.launch.conflict.value;
+  return entry?.provider === "codex" && Boolean(progress.value?.ready);
+});
 const recoveryCandidate = computed(() => props.controller.launch.recoveryCandidate.value);
 const recoverableProviderName = computed(() => props.controller.recoverableProviderName.value);
 const recoveryAnnouncement = computed(() => recoveryCandidate.value && recoverableProviderName.value

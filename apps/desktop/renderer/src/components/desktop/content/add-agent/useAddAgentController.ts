@@ -17,6 +17,7 @@ import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
 import { contextualAddAgentError } from "./add-agent-errors";
+import { suggestSupervisedCodexCodename } from "../../../../domain/codenames";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -262,6 +263,8 @@ async function startManagedAgent(): Promise<void> {
   const requestVersion = setup.currentVersion();
   const requestRoomIdentifier = props.roomIdentifier;
   const requestLaunchMode = launchMode.value;
+  const requestProviderId = selectedProviderId.value;
+  const requestProviderName = selectedProvider.value?.name ?? "Agent";
   let supervisedCreationRequestId: string | null = null;
   startingAgent.value = true;
   startOperationInFlight = true;
@@ -290,11 +293,30 @@ async function startManagedAgent(): Promise<void> {
       // activate). Subscribe first so no early fact is missed.
       const creationRequestId = supervisedLaunch.begin();
       supervisedCreationRequestId = creationRequestId;
+      // A name is presentation, never identity. Read the room's current
+      // display labels before the durable claim so a second Codex launch gets
+      // a distinct friendly name rather than another generic provider label.
+      let existingDisplayNames: string[] = [];
+      try {
+        existingDisplayNames = (await desktopIpc.supervisor.listAgents(props.roomIdentifier))
+          .map((entry) => entry.displayName);
+      } catch {
+        // A recovery scan can legitimately be unavailable while create still
+        // succeeds. The stable request id still gives this attempt a
+        // deterministic name; the daemon remains the identity authority.
+      }
+      if (!setupActions.isCurrentRequest(requestVersion)) {
+        supervisedLaunch.dismiss();
+        return;
+      }
+      const displayName = requestProviderId === "codex"
+        ? suggestSupervisedCodexCodename(existingDisplayNames, creationRequestId)
+        : `${requestProviderName} supervised agent`;
       const entry = await desktopIpc.supervisor.createAgent({
         creationRequestId,
-        providerId: selectedProviderId.value,
+        providerId: requestProviderId,
         roomIdentifier: props.roomIdentifier,
-        displayName: `${selectedProvider.value?.name ?? "Agent"} supervised agent`,
+        displayName,
         repoRootPath: props.repoRootPath,
         charter: supervisedCharter.value.trim(),
         permissionProfileId: selectedPermissionProfile.value?.id ?? null,

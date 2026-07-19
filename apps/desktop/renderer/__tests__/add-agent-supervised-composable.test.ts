@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { nextTick, ref } from "vue";
 import type { DesktopLaunchEvent, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
-import { useSupervisedAgentLaunch } from "../src/components/desktop/content/add-agent/useSupervisedAgentLaunch";
+import {
+  canAddAnotherCodexAgent,
+  useSupervisedAgentLaunch,
+} from "../src/components/desktop/content/add-agent/useSupervisedAgentLaunch";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -1917,4 +1920,69 @@ test("recovered launches never fall back to another provider's authentication co
 
   assert.equal(copiedCommand, null);
   assert.equal(retries, 1);
+});
+
+test("a ready Codex card can be released for another request without stopping its durable agent", () => {
+  const requestIds = ["codex-request-one", "codex-request-two"];
+  let stopCalls = 0;
+  Object.assign(globalThis, {
+    window: {
+      crypto: { randomUUID: () => requestIds.shift()! },
+      sessionStorage: memorySessionStorage(),
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: {
+        supervisor: {
+          onLaunchEvent: () => () => undefined,
+          getLaunchEvents: async () => [],
+          setDesiredState: async () => { stopCalls += 1; },
+        },
+      },
+    },
+  });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomLabel: () => "Room one",
+    providerId: () => "codex",
+    authCommand: () => null,
+    authCommandForProvider: () => null,
+    currentVersion: () => 0,
+    isCurrentRequest: () => true,
+    onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined,
+    onRetry: () => undefined,
+    onMessage: () => undefined,
+  });
+  assert.equal(launch.begin(), "codex-request-one");
+  launch.complete(entry({
+    provider: "codex",
+    observedState: "working",
+    workspacePath: "/tmp/worktree",
+    providerPid: 42,
+    agentSessionId: "agent-1",
+    agentSessionBindingState: "active",
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+  }));
+
+  assert.equal(launch.view.value?.ready, true);
+  launch.dismissReadyCodexLaunchForAnother();
+  assert.equal(launch.view.value, null);
+  assert.equal(stopCalls, 0, "Add another only clears local attachment state");
+  assert.equal(launch.begin(), "codex-request-two");
+  launch.cleanup();
+});
+
+test("only a ready Codex entry can offer Add another", () => {
+  const ready = entry({
+    observedState: "working",
+    workspacePath: "/tmp/worktree",
+    providerPid: 42,
+    agentSessionId: "agent-1",
+    agentSessionBindingState: "active",
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+  });
+  assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: ready }), true);
+  assert.equal(canAddAnotherCodexAgent({ providerId: "claude-code", entry: { ...ready, provider: "claude-code" } }), false);
+  assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: entry() }), false);
 });

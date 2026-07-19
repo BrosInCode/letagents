@@ -169,6 +169,21 @@ test("an active supervised launch owns the action bar instead of stale preflight
   assert.match(actionBarSource, /providerLabel\} setup is in progress/);
 });
 
+test("a ready Codex launch can start another without stopping the completed agent", () => {
+  assert.match(launchComponentSource, /data-testid="desktop-add-agent-add-another-codex"/);
+  assert.match(launchComponentSource, /Add another Codex agent/);
+  assert.match(launchComponentSource, /entry\?\.provider === "codex" && Boolean\(progress\.value\?\.ready\)/);
+  assert.match(launchSource, /function dismissReadyCodexLaunchForAnother\(\): void/);
+  const releaseBody = launchSource.slice(
+    launchSource.indexOf("function dismissReadyCodexLaunchForAnother"),
+    launchSource.indexOf("function resetActiveLaunch"),
+  );
+  assert.match(releaseBody, /dismiss\(\);/);
+  assert.doesNotMatch(releaseBody, /stop\(/);
+  assert.match(controllerSource, /suggestSupervisedCodexCodename\(existingDisplayNames, creationRequestId\)/);
+  assert.match(controllerSource, /providerId: requestProviderId,[\s\S]*?displayName,/);
+});
+
 test("legacy start feedback is assigned only after the modal request guard", () => {
   assert.match(controllerSource, /const startMessage = await managedLaunch\.start\([\s\S]*?if \(!setupActions\.isCurrentRequest\(requestVersion\)\) return;[\s\S]*?setSetupMessage\(startMessage\);/);
   assert.match(controllerSource, /const requestLaunchMode = launchMode\.value;/);
