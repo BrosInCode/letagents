@@ -458,20 +458,43 @@ function resolveUniqueAliasRecipients<T extends CodexAddressableWorker>(
 ): T[] {
   const recipients = new Set<T>();
   for (const alias of aliases) {
-    for (const candidate of identityParts(alias)) {
-      const stableMatches = workers.filter((worker) =>
-        stableManagedAgentAliases(worker).has(normalizeHandle(candidate)));
-      if (stableMatches.length === 1) {
-        recipients.add(stableMatches[0]);
-        continue;
-      }
-      if (stableMatches.length > 1) continue;
-      const displayMatches = workers.filter((worker) =>
-        displayManagedAgentAliases(worker).has(normalizeHandle(candidate)));
-      if (displayMatches.length === 1) recipients.add(displayMatches[0]);
+    const fullAlias = String(alias || "").trim();
+    if (!fullAlias) continue;
+
+    const fullMatch = resolveExactAliasWorker(workers, fullAlias);
+    if (fullMatch.kind === "unique") {
+      recipients.add(fullMatch.worker);
+      continue;
     }
+    // A full alias that is itself ambiguous is not made safer by splitting it.
+    if (fullMatch.kind === "ambiguous" || !fullAlias.includes("|")) continue;
+
+    const fallback = new Set<T>();
+    let ambiguous = false;
+    for (const candidate of identityParts(fullAlias)) {
+      const match = resolveExactAliasWorker(workers, candidate);
+      if (match.kind === "ambiguous") {
+        ambiguous = true;
+        break;
+      }
+      if (match.kind === "unique") fallback.add(match.worker);
+    }
+    if (!ambiguous && fallback.size === 1) recipients.add([...fallback][0]!);
   }
   return workers.filter((worker) => recipients.has(worker));
+}
+
+function resolveExactAliasWorker<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  alias: string,
+): { kind: "none" } | { kind: "ambiguous" } | { kind: "unique"; worker: T } {
+  const normalized = normalizeHandle(alias);
+  const stableMatches = workers.filter((worker) => stableManagedAgentAliases(worker).has(normalized));
+  if (stableMatches.length === 1) return { kind: "unique", worker: stableMatches[0]! };
+  if (stableMatches.length > 1) return { kind: "ambiguous" };
+  const displayMatches = workers.filter((worker) => displayManagedAgentAliases(worker).has(normalized));
+  if (displayMatches.length === 1) return { kind: "unique", worker: displayMatches[0]! };
+  return displayMatches.length > 1 ? { kind: "ambiguous" } : { kind: "none" };
 }
 
 function resolveMessageAuthorWorkers<T extends CodexAddressableWorker>(

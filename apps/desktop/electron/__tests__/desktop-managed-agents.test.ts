@@ -3095,7 +3095,14 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
     agentKey: "local/cedar",
     displayName: "CedarVista",
   });
-  const workers = [aliceOak, bobOak, cedar];
+  const codexNamed = publicManagedAgentSession({
+    id: "local_codex_named",
+    agentSessionId: "agent_session_codex_named",
+    actorLabel: "Codex",
+    agentKey: "local/codex-named",
+    displayName: "Codex",
+  });
+  const workers = [aliceOak, bobOak, cedar, codexNamed];
   const recipients = (event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>) =>
     resolveCodexRoomStreamEventRecipients(workers, event).map((worker) => worker.agentSessionId);
 
@@ -3147,7 +3154,31 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
     },
   }));
   assert.deepEqual(reply("Oak"), [], "a duplicate reply alias cannot wake both workers");
-  assert.deepEqual(reply("Oak | Alice's agent | Codex"), ["agent_session_alice_oak"], "a unique room-wide sender alias wakes its owner");
+  assert.deepEqual(reply("Oak | Alice's agent | Codex"), ["agent_session_alice_oak"], "a full actor label wins over a colliding label segment");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "composite_thread_participant",
+      text: "continuing the thread",
+      threadRootId: "thread_root",
+      threadReplyToId: "prior_reply",
+      thread: {
+        rootMessageId: "thread_root",
+        replyCount: 1,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [{
+          sender: "Oak | Alice's agent | Codex",
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "prior_reply",
+        }],
+        lastReadMessageId: null,
+      },
+    },
+  })), ["agent_session_alice_oak"], "a composite thread participant cannot activate a worker named after one label segment");
 
   assert.deepEqual(recipients(messageEvent({
     message: {
@@ -3157,7 +3188,7 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
       source: "agent",
       text: "@everyone please verify this.",
     },
-  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar"],
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar", "agent_session_codex_named"],
   "an ambiguous identityless author is not treated as self for every duplicate worker");
 
   assert.deepEqual(recipients(messageEvent({
@@ -3168,7 +3199,7 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
       source: "browser",
       text: "@everyone please verify this.",
     },
-  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar"],
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar", "agent_session_codex_named"],
   "a human sender sharing an agent name does not suppress that agent from a broadcast");
 
   assert.deepEqual(recipients(messageEvent({
@@ -3189,7 +3220,7 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
         agentSessionId: "agent_session_bob_oak",
       },
     },
-  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar"],
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar", "agent_session_codex_named"],
   "conflicting stable author fields fail closed instead of suppressing two workers");
 });
 
