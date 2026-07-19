@@ -434,8 +434,10 @@ export class WorkDurabilityStore {
     const migrationKey = `attempts-json:${resolve(this.path)}`;
     const priorFailure = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key = ?").get(migrationKey) as { reason: string; quarantined_path: string } | undefined;
     if (priorFailure) throw new CorruptAttemptStoreError(`Legacy attempt migration previously failed: ${priorFailure.reason} (${priorFailure.quarantined_path})`);
+    let sourcePresent = false;
     try {
       const raw = await readFile(this.path, "utf8");
+      sourcePresent = true;
       const parsed: unknown = JSON.parse(raw);
       let attempts: TaskWorkAttempt[];
       let sourceChecksum: string;
@@ -461,7 +463,6 @@ export class WorkDurabilityStore {
       } else if (String(existing.checksum) !== sourceChecksum) {
         throw new CorruptAttemptStoreError("Legacy attempts source changed after it was migrated.");
       }
-      try { await rename(this.path, `${this.path}.migrated-backup`); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       const reason = error instanceof Error ? error.message : String(error);
@@ -469,6 +470,14 @@ export class WorkDurabilityStore {
       try { await rename(this.path, quarantinedPath); } catch (renameError: unknown) { if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError; }
       database.prepare("INSERT OR IGNORE INTO migration_failures(migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)").run(migrationKey, reason, this.now(), quarantinedPath);
       throw new CorruptAttemptStoreError(`Legacy attempt migration failed closed: ${reason}`);
+    }
+    if (sourcePresent) {
+      try { await rename(this.path, `${this.path}.migrated-backup`); }
+      catch (error: unknown) {
+        // The SQLite transaction is already authoritative. Backup retention is
+        // idempotent housekeeping and is retried on the next open.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`Unable to retain migrated attempt JSON backup ${this.path}:`, error);
+      }
     }
   }
 
