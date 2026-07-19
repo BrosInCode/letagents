@@ -2876,11 +2876,10 @@ test("a concurrent Claude Code creation race mints one provider generation", asy
     })).ok, true);
     await eventually(async () => spawnCount === 1, "single winning supervised generation");
 
-    const durable = JSON.parse(await readFile(paths.attemptsPath, "utf8")) as {
-      attempts: Array<{ execution_generations: Array<{ terminal: unknown }> }>;
-    };
-    assert.equal(durable.attempts.flatMap((attempt) => attempt.execution_generations).length, 1);
-    assert.equal(durable.attempts.flatMap((attempt) => attempt.execution_generations).filter((generation) => generation.terminal === null).length, 1);
+    const durable = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+    const persisted = await durable.getAttempt(owners[0]!.work_attempt_id!);
+    assert.equal(persisted.execution_generations.length, 1);
+    assert.equal(persisted.execution_generations.filter((generation) => generation.terminal === null).length, 1);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
@@ -3893,7 +3892,7 @@ test("work attempts survive generations and lease rebinds while terminal payload
     const terminalCanary = "canary-not-a-real-terminal-secret-123456789";
     const resumedTerminal = await store.recordTerminal(attempt.work_attempt_id, resumed.execution_generation_id, { ended_at: "2026-01-01T00:00:10.000Z", exit_code: 0, signal: null, stdio_archive_ref: `LETAGENTS_TOKEN=${terminalCanary}`, stdio_tail: `Authorization: Bearer ${terminalCanary}`, terminal_cause: `OPENAI_API_KEY=${terminalCanary}`, actor: "daemon", generation: 2, provider_continuation_id: null });
     assert.doesNotMatch(JSON.stringify(resumedTerminal.terminal), new RegExp(terminalCanary));
-    assert.doesNotMatch(await readFile(store.path, "utf8"), new RegExp(terminalCanary));
+    assert.doesNotMatch(JSON.stringify(await store.getAttempt(attempt.work_attempt_id)), new RegExp(terminalCanary));
     assert.match(JSON.stringify(resumedTerminal.terminal), /REDACTED/);
     await store.concludeAttempt(attempt.work_attempt_id, { state: "cleanly_concluded", cause: "reviewed", postmortemDiff: "diff --git a/a b/a" });
     await assert.rejects(() => store.rebindAttempt(attempt.work_attempt_id, "lease-3", 3), ImmutableExecutionError);
@@ -4148,8 +4147,7 @@ test("durability store validates destructive identities, serializes GC, and quar
     const legacyStore = new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:02.000Z", join(env.root, "worktrees"), undefined, undefined, undefined, TEST_SUPERVISOR);
     const legacyAttempt = await legacyStore.createAttempt({ taskId: "task", leaseId: "lease-3", leaseEpoch: 3, workspacePath: legacyWorkspace.path, workAttemptId: legacyWorkspace.id });
     await legacyStore.concludeAttempt(legacyAttempt.work_attempt_id, { state: "cleanly_concluded", cause: "done", postmortemDiff: "diff" });
-    const legacy = JSON.parse(await readFile(join(env.root, "legacy-attempts.json"), "utf8"));
-    await writeFile(join(env.root, "legacy-attempts.json"), JSON.stringify({ version: 1, attempts: legacy.attempts }));
+    await writeFile(join(env.root, "legacy-attempts.json"), JSON.stringify({ version: 1, attempts: [await legacyStore.getAttempt(legacyAttempt.work_attempt_id)] }));
     assert.equal((await (new WorkDurabilityStore(join(env.root, "legacy-attempts.json"), join(env.root, "attempt-data"), () => "2026-01-01T00:00:03.000Z", join(env.root, "worktrees"))).getAttempt(legacyAttempt.work_attempt_id)).state, "unreviewed");
   } finally { await env.cleanup(); }
 });
