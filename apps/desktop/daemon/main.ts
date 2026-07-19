@@ -20,7 +20,7 @@ import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 
-type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
+type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
 type PendingResumeBinding = {
   roomId: string;
@@ -374,7 +374,7 @@ export class SupervisorDaemon {
 
   constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}) {
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
-    this.store = new ManifestStore(paths.manifestPath);
+    this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath);
     this.audit = new AuditLog(paths.auditPath);
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
     const gitCommand = createGitCommand(root);
@@ -566,6 +566,7 @@ export class SupervisorDaemon {
     await Promise.all([...this.providerCallbacks]);
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
+    await this.store.close();
   }
 
   /**
