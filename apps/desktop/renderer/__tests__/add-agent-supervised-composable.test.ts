@@ -6,6 +6,7 @@ import {
   canAddAnotherCodexAgent,
   useSupervisedAgentLaunch,
 } from "../src/components/desktop/content/add-agent/useSupervisedAgentLaunch";
+import { createSupervisedAgentFromSnapshot } from "../src/components/desktop/content/add-agent/useAddAgentController";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -1985,4 +1986,56 @@ test("only a ready Codex entry can offer Add another", () => {
   assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: ready }), true);
   assert.equal(canAddAnotherCodexAgent({ providerId: "claude-code", entry: { ...ready, provider: "claude-code" } }), false);
   assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: entry() }), false);
+});
+
+test("a deferred name lookup persists the complete Start-click snapshot", async () => {
+  const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
+  let createdInput: Record<string, unknown> | null = null;
+  const client = {
+    listAgents: () => nameLookup.promise,
+    createAgent: async (input: Record<string, unknown>) => {
+      createdInput = input;
+      return entry({
+        id: "supervised_snapshot",
+        displayName: String(input.displayName),
+        provider: String(input.providerId),
+      });
+    },
+  };
+  const form = {
+    providerId: "codex",
+    providerName: "Codex",
+    roomIdentifier: "room-before",
+    repoRootPath: "/repo-before",
+    charter: "Investigate the failure.",
+    permissionProfileId: "read-only",
+    launchPolicy: { profile: "read-only" },
+    model: "gpt-5.6",
+  };
+  const request = createSupervisedAgentFromSnapshot(client as never, {
+    creationRequestId: "request-snapshot",
+    ...form,
+  });
+
+  // These represent editable controls changing while listAgents is pending.
+  form.providerId = "claude-code";
+  form.providerName = "Claude Code";
+  form.roomIdentifier = "room-after";
+  form.repoRootPath = "/repo-after";
+  form.charter = "Do something else.";
+  form.permissionProfileId = "full-access";
+  form.launchPolicy = { profile: "full-access" };
+  form.model = "other-model";
+  nameLookup.resolve([]);
+  await request;
+
+  assert.equal(createdInput?.creationRequestId, "request-snapshot");
+  assert.equal(createdInput?.providerId, "codex");
+  assert.equal(createdInput?.roomIdentifier, "room-before");
+  assert.match(String(createdInput?.displayName), / · request-snapshot$/);
+  assert.equal(createdInput?.repoRootPath, "/repo-before");
+  assert.equal(createdInput?.charter, "Investigate the failure.");
+  assert.equal(createdInput?.permissionProfileId, "read-only");
+  assert.deepEqual(createdInput?.launchPolicy, { profile: "read-only" });
+  assert.equal(createdInput?.model, "gpt-5.6");
 });

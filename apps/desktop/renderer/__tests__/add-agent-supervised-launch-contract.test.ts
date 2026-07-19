@@ -75,7 +75,8 @@ test("Add Agent modal shows the launch card the instant Start is clicked, backed
   // the launch-event subscription attaches before the awaited create call.
   const startBody = controllerSource.slice(controllerSource.indexOf("const creationRequestId = supervisedLaunch.begin();"));
   assert.match(launchSource, /launchStarted\.value = true;/);
-  assert.match(startBody, /supervisedLaunch\.begin\(\)[\s\S]*await desktopIpc\.supervisor\.createAgent\(/);
+  assert.match(startBody, /supervisedLaunch\.begin\(\)[\s\S]*await createSupervisedAgentFromSnapshot\(/);
+  assert.match(controllerSource, /createSupervisedAgentFromSnapshot\([\s\S]*?desktopIpc\.supervisor,[\s\S]*?creationSnapshot/);
   assert.match(launchEventStreamSource, /desktopIpc\.supervisor\.onLaunchEvent/);
   assert.match(launchEventStreamSource, /desktopIpc\.supervisor\.getLaunchEvents/);
 });
@@ -180,8 +181,8 @@ test("a ready Codex launch can start another without stopping the completed agen
   );
   assert.match(releaseBody, /dismiss\(\);/);
   assert.doesNotMatch(releaseBody, /stop\(/);
-  assert.match(controllerSource, /suggestSupervisedCodexCodename\(existingDisplayNames, creationRequestId\)/);
-  assert.match(controllerSource, /providerId: requestProviderId,[\s\S]*?displayName,/);
+  assert.match(controllerSource, /suggestSupervisedCodexCodename\(existingDisplayNames, snapshot\.creationRequestId\)/);
+  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName,/);
 });
 
 test("legacy start feedback is assigned only after the modal request guard", () => {
