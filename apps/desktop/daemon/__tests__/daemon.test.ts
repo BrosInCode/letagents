@@ -4074,6 +4074,30 @@ test("workspace provisioner refreshes an existing bare clone before resolving a 
       secondRevision,
     );
 
+    await writeFile(join(source, "README.md"), "local only\n");
+    await execFileAsync("git", ["-C", source, "add", "README.md"]);
+    await execFileAsync("git", ["-C", source, "commit", "-m", "local only"]);
+    const localOnlyRevision = (await execFileAsync("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+    await assert.rejects(
+      () => execFileAsync("git", ["--git-dir", remote, "cat-file", "-e", `${localOnlyRevision}^{commit}`]),
+      "the remote must not contain the unpushed source commit",
+    );
+    const localAttemptId = randomUUID();
+    const localOnly = await provisioner.provision({
+      repo: "repo",
+      workAttemptId: localAttemptId,
+      taskId: "task_local_only",
+      remoteUrl: remote,
+      revision: localOnlyRevision,
+      sourceRepoPath: source,
+    });
+    assert.equal((await execFileAsync("git", ["-C", localOnly.path, "rev-parse", "HEAD"])).stdout.trim(), localOnlyRevision);
+    assert.equal(
+      (await execFileAsync("git", ["--git-dir", join(daemonRoot, "repos", "repo.git"), "rev-parse", `refs/letagents/sources/${localAttemptId}^{commit}`])).stdout.trim(),
+      localOnlyRevision,
+      "the daemon retains the exact local commit under an attempt-scoped private ref",
+    );
+
     await execFileAsync("git", ["-C", source, "checkout", "--detach", secondRevision]);
     await writeFile(join(source, "README.md"), "tag only\n");
     await execFileAsync("git", ["-C", source, "add", "README.md"]);

@@ -1673,7 +1673,14 @@ export class SupervisorDaemon {
     const revision = String(await this.gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])).trim();
     const repo = repositoryStorageKey(remote);
     const workAttemptId = randomUUID();
-    const provisioned = await this.provisioner.provision({ repo, workAttemptId, taskId: entry.id, remoteUrl: remote, revision });
+    const provisioned = await this.provisioner.provision({
+      repo,
+      workAttemptId,
+      taskId: entry.id,
+      remoteUrl: remote,
+      revision,
+      sourceRepoPath: sourcePath,
+    });
     const attempt = await this.durability.createAttempt({ taskId: entry.id, leaseId: entry.id, leaseEpoch: 0, workspacePath: provisioned.path, workAttemptId });
     return this.updateManifestEntry(entry.id, (current) => ({ ...current, source_repo_path: sourcePath, workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id }));
   }
@@ -2662,7 +2669,13 @@ export class SupervisorDaemon {
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) return;
       const condition = entry.condition === "quarantined" ? "quarantined" : "coordination_blocked";
-      await this.transitionOnce(entryId, entry.observed_state, condition, `convergence scheduler failure: ${message}`, actor, undefined, "coordination_escalation");
+      // Before a work attempt exists there is no provider execution to
+      // recover or reconnect. Preserve that distinction in durable state so
+      // the desktop can offer an honest provisioning retry.
+      const observedState = !entry.work_attempt_id && !entry.provider_ref
+        ? "failed"
+        : entry.observed_state;
+      await this.transitionOnce(entryId, observedState, condition, `convergence scheduler failure: ${message}`, actor, undefined, "coordination_escalation");
     }));
   }
 }
