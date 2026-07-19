@@ -1,11 +1,13 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { appendFile, link, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { appendFile, chmod, link, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
 import { acquireWorkspaceFence, WorkspaceFenceError, type WorkspaceFenceHandle } from "./workspace-fence.js";
+import { ensureDaemonStateDatabase, openDaemonStateDatabase } from "./daemon-state-database.js";
 
 const STORE_VERSION = 2;
 type StoredAttempts = { version: typeof STORE_VERSION; attempts: TaskWorkAttempt[]; checksum: string };
@@ -110,9 +112,23 @@ export class WorkDurabilityStore {
   // rebind / successor-generation handoff.  The on-disk PID record lets a new
   // daemon recover after a crash without treating a live predecessor as stale.
   private readonly executionFences = new Map<string, WorkspaceFenceHandle>();
+  private database: DatabaseSync | null = null;
+  private initializing: Promise<DatabaseSync> | null = null;
+  private closed = false;
+  private readonly databasePath: string;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks, databasePath?: string) {
     this.workspaceRoot = resolve(workspaceRoot);
+    this.databasePath = databasePath ?? join(dirname(path), "daemon-state.sqlite");
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.writes;
+    await this.initializing?.catch(() => undefined);
+    this.database?.close();
+    this.database = null;
+    this.initializing = null;
   }
 
   /** Bind the store to the P1a fence after the singleton generation is acquired. */
@@ -148,7 +164,9 @@ export class WorkDurabilityStore {
 
   async getAttempt(workAttemptId: string): Promise<TaskWorkAttempt> {
     this.assertAttemptId(workAttemptId);
-    const attempt = (await this.load()).attempts.find((candidate) => candidate.work_attempt_id === workAttemptId);
+    const database = await this.getDatabase();
+    await this.importLegacyAttempts(database);
+    const attempt = this.readAttempt(database, workAttemptId);
     if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
     return attempt;
   }
@@ -249,8 +267,7 @@ export class WorkDurabilityStore {
   async appendStdio(workAttemptId: string, line: string, maxBytes = 1024 * 1024): Promise<string> {
     this.assertAttemptId(workAttemptId);
     return this.exclusive(async () => {
-      const stored = await this.load();
-      this.required(stored, workAttemptId);
+      await this.getAttempt(workAttemptId);
       line = redactCredentialText(line, Number.MAX_SAFE_INTEGER).value;
       const root = await this.managedRealDirectory(this.attemptsRoot, true);
       const directory = join(root, workAttemptId);
@@ -356,28 +373,71 @@ export class WorkDurabilityStore {
   }
 
   private async load(): Promise<StoredAttempts> {
+    const database = await this.getDatabase();
+    await this.importLegacyAttempts(database);
+    return this.loadFromDatabase(database);
+  }
+
+  private loadFromDatabase(database: DatabaseSync): StoredAttempts {
+    const attempts = (database.prepare("SELECT * FROM work_attempts ORDER BY created_at, work_attempt_id").all() as Record<string, unknown>[]).map((row): TaskWorkAttempt => {
+      const workAttemptId = String(row.work_attempt_id);
+      const epoch_history = (database.prepare("SELECT lease_id, epoch, recorded_at FROM work_attempt_lease_epochs WHERE work_attempt_id = ? ORDER BY sort_order").all(workAttemptId) as Record<string, unknown>[])
+        .map((epoch) => ({ lease_id: String(epoch.lease_id), epoch: Number(epoch.epoch), recorded_at: String(epoch.recorded_at) }));
+      const checkpoints = (database.prepare("SELECT at, room_cursor, provider_continuation_id FROM work_attempt_checkpoints WHERE work_attempt_id = ? ORDER BY sort_order").all(workAttemptId) as Record<string, unknown>[])
+        .map((checkpoint) => ({ at: String(checkpoint.at), room_cursor: checkpoint.room_cursor === null ? null : String(checkpoint.room_cursor), provider_continuation_id: checkpoint.provider_continuation_id === null ? null : String(checkpoint.provider_continuation_id) }));
+      const execution_generations = (database.prepare("SELECT * FROM work_attempt_executions WHERE work_attempt_id = ? ORDER BY generation").all(workAttemptId) as Record<string, unknown>[])
+        .map((execution): ExecutionGeneration => ({ execution_generation_id: String(execution.execution_generation_id), work_attempt_id: workAttemptId, started_at: String(execution.started_at), actor: String(execution.actor), generation: Number(execution.generation), terminal: execution.terminal_json === null ? null : JSON.parse(String(execution.terminal_json)) as ExecutionTerminalPayload }));
+      return {
+        work_attempt_id: workAttemptId, task_id: String(row.task_id), lease_id: String(row.lease_id), current_lease_epoch: Number(row.current_lease_epoch),
+        epoch_history, workspace_path: String(row.workspace_path),
+        workspace_identity: { repo: String(row.workspace_repo), remote_url: String(row.workspace_remote_url), resolved_revision: String(row.workspace_resolved_revision), bare_path: String(row.workspace_bare_path) },
+        state: String(row.state) as WorkAttemptState, created_at: String(row.created_at), concluded_at: row.concluded_at === null ? null : String(row.concluded_at),
+        conclusion_cause: row.conclusion_cause === null ? null : String(row.conclusion_cause), postmortem_diff: row.postmortem_diff === null ? null : String(row.postmortem_diff), checkpoints, execution_generations,
+      };
+    });
+    const stored = { version: STORE_VERSION, attempts, checksum: checksum(attempts) } as StoredAttempts;
+    if (!attempts.every(isAttempt)) throw new CorruptAttemptStoreError("SQLite work attempt state has an invalid schema.");
+    return stored;
+  }
+
+  private async importLegacyAttempts(database: DatabaseSync): Promise<void> {
     try {
       const raw = await readFile(this.path, "utf8");
       const parsed: unknown = JSON.parse(raw);
+      let attempts: TaskWorkAttempt[];
+      let sourceChecksum: string;
       if (this.validLegacy(parsed)) {
         // A v1 file predates integrity protection. Preserve live/recoverable
         // attempts, but never inherit a legacy clean conclusion as GC authority.
-        const migrated: StoredAttempts = {
-          version: STORE_VERSION,
-          attempts: parsed.attempts.map((attempt) => (attempt.state === "cleanly_concluded" || attempt.state === "abandoned" ? { ...attempt, state: "unreviewed" } : attempt)),
-          checksum: "",
-        };
-        migrated.checksum = checksum(migrated.attempts);
-        await this.write(migrated);
-        return migrated;
+        attempts = parsed.attempts.map((attempt) => (attempt.state === "cleanly_concluded" || attempt.state === "abandoned" ? { ...attempt, state: "unreviewed" } : attempt));
+        sourceChecksum = checksum(parsed.attempts);
+      } else if (this.valid(parsed)) {
+        attempts = parsed.attempts;
+        sourceChecksum = parsed.checksum;
+      } else {
+        throw new CorruptAttemptStoreError("Attempt store has an invalid schema or integrity checksum.");
       }
-      if (!this.valid(parsed)) throw new CorruptAttemptStoreError("Attempt store has an invalid schema or integrity checksum.");
-      return parsed;
+      const migrationKey = `attempts-json:${resolve(this.path)}`;
+      const existing = database.prepare("SELECT checksum FROM migration_records WHERE migration_key = ?").get(migrationKey) as { checksum?: unknown } | undefined;
+      if (!existing) {
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          for (const attempt of attempts) this.persistAttempt(database, attempt, true);
+          database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)").run(migrationKey, sourceChecksum, this.now());
+          database.exec("COMMIT");
+        } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+      } else if (String(existing.checksum) !== sourceChecksum) {
+        throw new CorruptAttemptStoreError("Legacy attempts source changed after it was migrated.");
+      }
+      try { await rename(this.path, `${this.path}.migrated-backup`); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return this.empty();
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       if (error instanceof CorruptAttemptStoreError || error instanceof SyntaxError) {
-        await this.quarantine();
-        return this.empty();
+        const migrationKey = `attempts-json:${resolve(this.path)}`;
+        const quarantinedPath = `${this.path}.corrupt.${Date.now()}.${randomUUID()}`;
+        try { await rename(this.path, quarantinedPath); } catch (renameError: unknown) { if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError; }
+        database.prepare("INSERT OR IGNORE INTO migration_failures(migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)").run(migrationKey, error.message, this.now(), quarantinedPath);
+        return;
       }
       throw error;
     }
@@ -399,24 +459,21 @@ export class WorkDurabilityStore {
       && Array.isArray((value as Partial<LegacyStoredAttempts>).attempts) && (value as LegacyStoredAttempts).attempts.every(isAttempt);
   }
 
-  private empty(): StoredAttempts { return { version: STORE_VERSION, attempts: [], checksum: checksum([]) }; }
-
-  private async quarantine(): Promise<void> {
-    try {
-      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-      await rename(this.path, `${this.path}.corrupt.${Date.now()}.${randomUUID()}`);
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`Unable to quarantine corrupt attempt store ${this.path}:`, error);
-    }
-  }
-
   private async mutate<T>(operation: (stored: StoredAttempts) => T): Promise<T> {
     return this.exclusive(async () => {
-      const stored = await this.load();
-      const result = operation(stored);
-      stored.checksum = checksum(stored.attempts);
-      await this.write(stored);
-      return result;
+      const database = await this.getDatabase();
+      await this.importLegacyAttempts(database);
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const stored = this.loadFromDatabase(database);
+        const before = new Map(stored.attempts.map((attempt) => [attempt.work_attempt_id, JSON.stringify(attempt)]));
+        const result = operation(stored);
+        for (const attempt of stored.attempts) {
+          if (before.get(attempt.work_attempt_id) !== JSON.stringify(attempt)) this.persistAttempt(database, attempt);
+        }
+        database.exec("COMMIT");
+        return result;
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
     });
   }
 
@@ -659,13 +716,75 @@ export class WorkDurabilityStore {
     throw new ImmutableExecutionError("Could not reserve a unique stdio archive name.");
   }
 
+  private async getDatabase(): Promise<DatabaseSync> {
+    if (this.closed) throw new Error("WorkDurabilityStore is closed.");
+    if (this.database) return this.database;
+    if (!this.initializing) this.initializing = this.initializeDatabase();
+    return this.initializing;
+  }
+
+  private async initializeDatabase(): Promise<DatabaseSync> {
+    // ManifestStore is the sole schema-version owner for daemon-state.sqlite.
+    // It serializes v1→v2→v3 upgrades before this independent connection opens.
+    await ensureDaemonStateDatabase(this.databasePath);
+    let database: DatabaseSync | null = null;
+    try {
+      database = await openDaemonStateDatabase(this.databasePath, () => {});
+      this.database = database;
+      return database;
+    } catch (error) { database?.close(); this.initializing = null; throw error; }
+  }
+
+  private readAttempt(database: DatabaseSync, id: string): TaskWorkAttempt | undefined {
+    const row = database.prepare("SELECT * FROM work_attempts WHERE work_attempt_id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    const workAttemptId = String(row.work_attempt_id);
+    const epoch_history = (database.prepare("SELECT lease_id, epoch, recorded_at FROM work_attempt_lease_epochs WHERE work_attempt_id = ? ORDER BY sort_order").all(workAttemptId) as Record<string, unknown>[])
+      .map((epoch) => ({ lease_id: String(epoch.lease_id), epoch: Number(epoch.epoch), recorded_at: String(epoch.recorded_at) }));
+    const checkpoints = (database.prepare("SELECT at, room_cursor, provider_continuation_id FROM work_attempt_checkpoints WHERE work_attempt_id = ? ORDER BY sort_order").all(workAttemptId) as Record<string, unknown>[])
+      .map((checkpoint) => ({ at: String(checkpoint.at), room_cursor: checkpoint.room_cursor === null ? null : String(checkpoint.room_cursor), provider_continuation_id: checkpoint.provider_continuation_id === null ? null : String(checkpoint.provider_continuation_id) }));
+    const execution_generations = (database.prepare("SELECT * FROM work_attempt_executions WHERE work_attempt_id = ? ORDER BY generation").all(workAttemptId) as Record<string, unknown>[])
+      .map((execution): ExecutionGeneration => ({ execution_generation_id: String(execution.execution_generation_id), work_attempt_id: workAttemptId, started_at: String(execution.started_at), actor: String(execution.actor), generation: Number(execution.generation), terminal: execution.terminal_json === null ? null : JSON.parse(String(execution.terminal_json)) as ExecutionTerminalPayload }));
+    return { work_attempt_id: workAttemptId, task_id: String(row.task_id), lease_id: String(row.lease_id), current_lease_epoch: Number(row.current_lease_epoch), epoch_history,
+      workspace_path: String(row.workspace_path), workspace_identity: { repo: String(row.workspace_repo), remote_url: String(row.workspace_remote_url), resolved_revision: String(row.workspace_resolved_revision), bare_path: String(row.workspace_bare_path) },
+      state: String(row.state) as WorkAttemptState, created_at: String(row.created_at), concluded_at: row.concluded_at === null ? null : String(row.concluded_at), conclusion_cause: row.conclusion_cause === null ? null : String(row.conclusion_cause), postmortem_diff: row.postmortem_diff === null ? null : String(row.postmortem_diff), checkpoints, execution_generations };
+  }
+
+  private persistAttempt(database: DatabaseSync, attempt: TaskWorkAttempt, importOnly = false): void {
+    if (!isAttempt(attempt)) throw new CorruptAttemptStoreError("Refusing to persist an invalid work attempt.");
+    const exists = database.prepare("SELECT 1 FROM work_attempts WHERE work_attempt_id = ?").get(attempt.work_attempt_id);
+    if (importOnly && exists) throw new ImmutableExecutionError(`Duplicate legacy work attempt: ${attempt.work_attempt_id}`);
+    if (importOnly) {
+      const workspace = database.prepare("SELECT work_attempt_id FROM work_attempts WHERE workspace_path = ?").get(resolve(attempt.workspace_path)) as { work_attempt_id?: unknown } | undefined;
+      if (workspace) throw new ImmutableExecutionError(`Duplicate legacy workspace: ${attempt.workspace_path}`);
+    }
+    database.prepare(`INSERT INTO work_attempts(
+      work_attempt_id, task_id, lease_id, current_lease_epoch, workspace_path,
+      workspace_repo, workspace_remote_url, workspace_resolved_revision, workspace_bare_path,
+      state, created_at, concluded_at, conclusion_cause, postmortem_diff
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(work_attempt_id) DO UPDATE SET task_id=excluded.task_id, lease_id=excluded.lease_id,
+      current_lease_epoch=excluded.current_lease_epoch, workspace_path=excluded.workspace_path,
+      workspace_repo=excluded.workspace_repo, workspace_remote_url=excluded.workspace_remote_url,
+      workspace_resolved_revision=excluded.workspace_resolved_revision, workspace_bare_path=excluded.workspace_bare_path,
+      state=excluded.state, created_at=excluded.created_at, concluded_at=excluded.concluded_at,
+      conclusion_cause=excluded.conclusion_cause, postmortem_diff=excluded.postmortem_diff
+    `).run(attempt.work_attempt_id, attempt.task_id, attempt.lease_id, attempt.current_lease_epoch, resolve(attempt.workspace_path), attempt.workspace_identity.repo, attempt.workspace_identity.remote_url, attempt.workspace_identity.resolved_revision, attempt.workspace_identity.bare_path, attempt.state, attempt.created_at, attempt.concluded_at, attempt.conclusion_cause, attempt.postmortem_diff);
+    database.prepare("DELETE FROM work_attempt_lease_epochs WHERE work_attempt_id = ?").run(attempt.work_attempt_id);
+    database.prepare("DELETE FROM work_attempt_checkpoints WHERE work_attempt_id = ?").run(attempt.work_attempt_id);
+    database.prepare("DELETE FROM work_attempt_executions WHERE work_attempt_id = ?").run(attempt.work_attempt_id);
+    const epoch = database.prepare("INSERT INTO work_attempt_lease_epochs VALUES (?, ?, ?, ?, ?)");
+    attempt.epoch_history.forEach((item, index) => epoch.run(attempt.work_attempt_id, index, item.lease_id, item.epoch, item.recorded_at));
+    const checkpoint = database.prepare("INSERT INTO work_attempt_checkpoints VALUES (?, ?, ?, ?, ?)");
+    attempt.checkpoints.forEach((item, index) => checkpoint.run(attempt.work_attempt_id, index, item.at, item.room_cursor, item.provider_continuation_id));
+    const execution = database.prepare("INSERT INTO work_attempt_executions VALUES (?, ?, ?, ?, ?, ?)");
+    attempt.execution_generations.forEach((item) => execution.run(item.execution_generation_id, attempt.work_attempt_id, item.started_at, item.actor, item.generation, item.terminal === null ? null : JSON.stringify(item.terminal)));
+  }
+
   private async write(stored: StoredAttempts): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
-    const handle = await open(temporary, "wx", 0o600);
-    try { await handle.writeFile(`${JSON.stringify(stored)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
-    await rename(temporary, this.path);
-    const directory = await open(dirname(this.path), "r");
-    try { await directory.sync(); } finally { await directory.close(); }
+    const database = await this.getDatabase();
+    database.exec("BEGIN IMMEDIATE");
+    try { for (const attempt of stored.attempts) this.persistAttempt(database, attempt); database.exec("COMMIT"); }
+    catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
   }
 }
