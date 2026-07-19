@@ -116,7 +116,7 @@ test("v4 validator rejects malformed private columns and quarantine housekeeping
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.list(); await store.close();
     const db = new DatabaseSync(env.database); db.exec("ALTER TABLE worker_session_bindings ADD COLUMN intruder TEXT"); db.close();
-    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /invalid columns/);
+    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /invalid columns|canonical definition/);
     // Separate failure fixture verifies a persisted quarantine is retried on reopen.
     const bad = join(env.root, "bad.json"); await writeFile(bad, "{bad");
     const badStore = new WorkerBindingStore(bad, undefined, join(env.root, "bad.sqlite"));
@@ -140,7 +140,7 @@ test("v4 validator rejects WITHOUT ROWID private tables", async () => {
         last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0), binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
         updated_at TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;`); db.close();
-    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /rowid/);
+    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /rowid|canonical definition/);
   } finally { await env.cleanup(); }
 });
 
@@ -148,6 +148,6 @@ test("v4 validator rejects generated columns and NOCASE/DESC unique terms", asyn
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.list(); await store.close();
     const db = new DatabaseSync(env.database); db.exec("ALTER TABLE worker_session_bindings ADD COLUMN generated TEXT GENERATED ALWAYS AS ('x') VIRTUAL"); db.close();
-    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /invalid columns/);
+    await assert.rejects(() => new WorkerBindingStore(env.legacy, undefined, env.database).list(), /invalid columns|canonical definition/);
   } finally { await env.cleanup(); }
 });
