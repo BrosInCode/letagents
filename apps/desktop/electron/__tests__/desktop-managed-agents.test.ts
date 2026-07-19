@@ -3064,6 +3064,92 @@ test("Codex room activation fails closed for duplicate names and accepts a canon
   );
 });
 
+test("Codex task, reply, and identityless author routing resolve aliases across the room", () => {
+  const aliceOak = publicManagedAgentSession({
+    id: "local_alice_oak",
+    agentSessionId: "agent_session_alice_oak",
+    actorLabel: "Oak | Alice's agent | Codex",
+    agentKey: "local/alice/codex/oak",
+    displayName: "Oak",
+  });
+  const bobOak = publicManagedAgentSession({
+    id: "local_bob_oak",
+    agentSessionId: "agent_session_bob_oak",
+    actorLabel: "Oak | Bob's agent | Codex",
+    agentKey: "local/bob/codex/oak",
+    displayName: "Oak",
+  });
+  const cedar = publicManagedAgentSession({
+    id: "local_cedar",
+    agentSessionId: "agent_session_cedar",
+    actorLabel: "CedarVista",
+    agentKey: "local/cedar",
+    displayName: "CedarVista",
+  });
+  const workers = [aliceOak, bobOak, cedar];
+  const recipients = (event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>) =>
+    resolveCodexRoomStreamEventRecipients(workers, event).map((worker) => worker.agentSessionId);
+
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assigneeAgentKey: "local/alice/codex/oak", assignee: "Oak" }),
+  }), ["agent_session_alice_oak"], "stable task identity wins over a duplicate display label");
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assignee: "Oak" }),
+  }), [], "an alias-only task assignment must be unique");
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assignee: "CedarVista" }),
+  }), ["agent_session_cedar"], "a unique alias-only task assignment still works");
+
+  const reply = (sender: string) => recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: `reply_${sender}`,
+      text: "follow-up",
+      replyTo: { id: "prior", sender, text: "prior", source: "agent", timestamp: "2026-06-14T12:00:00.000Z" },
+    },
+  }));
+  assert.deepEqual(reply("Oak"), [], "a duplicate reply alias cannot wake both workers");
+  assert.deepEqual(reply("Oak | Alice's agent | Codex"), ["agent_session_alice_oak"], "a unique room-wide sender alias wakes its owner");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "identityless_duplicate_author_broadcast",
+      sender: "Oak",
+      source: "agent",
+      text: "@everyone please verify this.",
+    },
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar"],
+  "an ambiguous identityless author is not treated as self for every duplicate worker");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "conflicting_structured_author_broadcast",
+      sender: "Oak",
+      source: "agent",
+      text: "@everyone please verify this.",
+      agentIdentity: {
+        name: "Oak",
+        displayName: "Oak",
+        ownerLabel: "Alice",
+        ownerAttribution: "Alice's agent",
+        ideLabel: "Codex",
+        actorLabel: "Oak",
+        agentKey: "local/alice/codex/oak",
+        agentSessionId: "agent_session_bob_oak",
+      },
+    },
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar"],
+  "conflicting stable author fields fail closed instead of suppressing two workers");
+});
+
 test("Codex stop control reaches a blocked bound worker but excludes unsafe recipients", () => {
   resetState({
     agent_sessions: {

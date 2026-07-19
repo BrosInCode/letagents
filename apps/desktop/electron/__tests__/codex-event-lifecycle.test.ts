@@ -621,6 +621,49 @@ test("codex stop-phrase message ends the session after the turn", async () => {
   }
 });
 
+test("blocked Codex stop phrase tears down immediately instead of queuing stale work", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_blocked_stop_phrase";
+  const seeded = await seedDeliverableSession({
+    roomIdentifier,
+    sessionId: "codex_blocked_stop_phrase",
+    workerSessionId: "agent_session_blocked_stop_phrase",
+    stopPhrase: "/stop-codex-room",
+  });
+  const staleEvent = messageEvent(roomIdentifier, { id: "msg_stale", text: "retry this after recovery" });
+  saveCodexLiveSession({
+    ...seeded,
+    status: "blocked",
+    active_work: { kind: "message", event_id: staleEvent.message.id, started_at: seeded.updated_at, summary: "Blocked" },
+    pending_event: staleEvent,
+    queued_events: [staleEvent],
+    failure: {
+      code: "configuration_error",
+      message: "Needs attention",
+      retryable: false,
+      eventId: staleEvent.message.id,
+      occurredAt: seeded.updated_at,
+    },
+  });
+
+  dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+    id: "msg_blocked_stop_phrase",
+    text: "/stop-codex-room",
+  }));
+
+  const stopped = await waitFor(() => {
+    const current = getStoredCodexLiveSession(seeded.session_id);
+    return current?.status === "interrupted" ? current : null;
+  }, "blocked Codex session interrupted by stop phrase");
+
+  assert.equal(stopped.pending_event ?? null, null);
+  assert.deepEqual(stopped.queued_events ?? [], []);
+  assert.equal(stopped.failure ?? null, null);
+  assert.equal(stopped.active_work ?? null, null);
+  assert.ok(getStoredAgentSession(seeded.agent_session_id ?? null)?.ended_at,
+    "an exact stop must disconnect the blocked worker, not only queue its event");
+});
+
 test("codex stop-phrase message still ends the session when its turn is interrupted", async () => {
   resetState();
   const roomIdentifier = "local_room_codex_interrupted_stop_phrase";
