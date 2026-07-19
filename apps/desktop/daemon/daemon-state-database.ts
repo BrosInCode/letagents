@@ -466,9 +466,9 @@ hasUniqueIndex(database: DatabaseSync, table: string, columns: string[], partial
     if (Number(index.unique) !== 1 || Boolean(Number(index.partial)) !== partial) return false;
     const escaped = String(index.name).replace(/"/g, '""');
     const keys = (database.prepare(`PRAGMA index_xinfo("${escaped}")`).all() as Row[])
-      .filter((row) => Number(row.key) === 1 && Number(row.cid) >= 0)
-      .sort((left, right) => Number(left.seqno) - Number(right.seqno)).map((row) => String(row.name));
-    return keys.length === columns.length && keys.every((column, position) => column === columns[position]);
+      .filter((row) => Number(row.key) === 1)
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno));
+    return keys.length === columns.length && keys.every((row, position) => Number(row.cid) >= 0 && String(row.name) === columns[position]);
   });
 }
 
