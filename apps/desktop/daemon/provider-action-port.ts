@@ -21,6 +21,27 @@ export type ProviderActionConnectionRef =
   | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
   | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
   | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null };
+
+/**
+ * Compare the complete durable identity of two native provider connections.
+ * A missing connection, PID, or process-birth identity is unknown evidence and
+ * therefore never sufficient to authenticate a cached live handle.
+ */
+export function sameProviderActionConnectionIdentity(
+  expected: ProviderActionConnectionRef | null | undefined,
+  actual: ProviderActionConnectionRef | null | undefined,
+): boolean {
+  if (!expected || !actual || expected.kind !== actual.kind) return false;
+  if (expected.pid === null || actual.pid === null) return false;
+  if (expected.pid !== actual.pid) return false;
+  if (!expected.processIdentity || !actual.processIdentity) return false;
+  if (expected.processIdentity !== actual.processIdentity) return false;
+  if (expected.kind === "codex_app_server") {
+    return actual.kind === "codex_app_server" && Boolean(expected.url) && expected.url === actual.url;
+  }
+  return true;
+}
+
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; provider?: string; providerConnection?: ProviderActionConnectionRef | null };
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; provider?: string; agentDisplayName?: string; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null }; devMcpServerEntryPath?: string };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };

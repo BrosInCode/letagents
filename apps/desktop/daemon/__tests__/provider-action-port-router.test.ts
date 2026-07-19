@@ -12,6 +12,7 @@ import {
   type NativeProviderAdapter,
 } from "../provider-action-port-router.js";
 import type {
+  ProviderActionConnectionRef,
   ProviderActionRef,
   ProviderActionSpawn,
   ProviderActionTerminal,
@@ -51,6 +52,7 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
 
 function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): NativeProviderAdapter {
   const handles = new Map<string, ReturnType<typeof nativeHandle>>();
+  let nextPid = provider === "codex" ? 100 : 200;
   return {
     capabilities: () => ({
       resume: true,
@@ -62,7 +64,7 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
     }),
     async spawn(input: ProviderActionSpawn) {
       calls.push(`${provider}:spawn:${input.workAttemptId}`);
-      const handle = nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`);
+      const handle = nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`, ++nextPid);
       handles.set(input.workAttemptId, handle);
       return handle;
     },
@@ -72,7 +74,7 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
     },
     async resume(ref: ProviderActionRef, input: ProviderActionSpawn) {
       calls.push(`${provider}:resume:${ref.workAttemptId}`);
-      const handle = nativeHandle(provider, input.workAttemptId, ref.providerContinuationId);
+      const handle = nativeHandle(provider, input.workAttemptId, ref.providerContinuationId, ++nextPid);
       handles.set(input.workAttemptId, handle);
       return handle;
     },
@@ -91,14 +93,19 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
   };
 }
 
-function nativeHandle(provider: "codex" | "claude-code", workAttemptId: string, providerContinuationId: string) {
+function nativeHandle(
+  provider: "codex" | "claude-code",
+  workAttemptId: string,
+  providerContinuationId: string,
+  pid = provider === "codex" ? 101 : 202,
+) {
   return {
     workAttemptId,
-    pid: provider === "codex" ? 101 : 202,
+    pid,
     providerContinuationId,
     providerConnection: provider === "codex"
-      ? { kind: "codex_app_server" as const, url: "ws://127.0.0.1:1", pid: 101 }
-      : { kind: "claude_cli" as const, pid: 202 },
+      ? { kind: "codex_app_server" as const, url: `ws://127.0.0.1:${pid}`, pid, processIdentity: `codex:${pid}` }
+      : { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
     observedState: () => "working" as const,
   };
 }
@@ -180,6 +187,49 @@ test("provider router selects the native adapter by manifest provider and fences
     agentDisplayName: "Durable Cursor Agent",
   });
   assert.equal(cursor.providerContinuationId, "continuation:cursor-attempt");
+});
+
+test("provider router only returns a cached handle for an exact durable connection identity", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("codex", calls);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const alpha = await router.spawn({
+    provider: "codex", workAttemptId: "alpha-attempt", roomId: "room", cwd: "/tmp/alpha", launchPolicy: {},
+  });
+  const bravo = await router.spawn({
+    provider: "codex", workAttemptId: "bravo-attempt", roomId: "room", cwd: "/tmp/bravo", launchPolicy: {},
+  });
+  const alphaRef: ProviderActionRef = {
+    workAttemptId: alpha.workAttemptId,
+    provider: "codex",
+    providerContinuationId: alpha.providerContinuationId!,
+    providerConnection: alpha.providerConnection,
+  };
+
+  assert.deepEqual(await router.attach(alphaRef), alpha);
+  assert.equal(await router.attach({ ...alphaRef, providerContinuationId: bravo.providerContinuationId! }), null);
+  assert.equal(await router.attach({ ...alphaRef, providerConnection: bravo.providerConnection }), null);
+  assert.equal(await router.attach({ ...alphaRef, providerConnection: null }), null);
+  assert.ok(alpha.providerConnection?.kind === "codex_app_server");
+  const mismatchedConnections: ProviderActionConnectionRef[] = [
+    { ...alpha.providerConnection, url: "ws://127.0.0.1:9999" },
+    { ...alpha.providerConnection, url: "" },
+    { ...alpha.providerConnection, pid: alpha.providerConnection.pid! + 1 },
+    { ...alpha.providerConnection, pid: null },
+    { ...alpha.providerConnection, processIdentity: "another-process-birth" },
+    { ...alpha.providerConnection, processIdentity: null },
+  ];
+  for (const providerConnection of mismatchedConnections) {
+    assert.equal(await router.attach({ ...alphaRef, providerConnection }), null);
+  }
+  await assert.rejects(router.attach({
+    ...alphaRef,
+    providerConnection: { kind: "claude_cli", pid: alpha.providerConnection.pid, processIdentity: alpha.providerConnection.processIdentity },
+  }), /Conflicting provider identities/);
+  assert.deepEqual(calls, [
+    "codex:spawn:alpha-attempt",
+    "codex:spawn:bravo-attempt",
+  ], "connection mismatches are rejected by the router instead of delegated to an adapter");
 });
 
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {

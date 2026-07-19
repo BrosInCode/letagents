@@ -26,6 +26,7 @@ import {
 } from "./codex-start-prompt.js";
 import {
   synthesizeTerminalPayload,
+  sameProviderConnectionIdentity,
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
@@ -278,7 +279,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly handles = new Map<string, CodexProviderHandle>();
-  private readonly pendingAttaches = new Map<string, Promise<CodexProviderHandle | ProviderAttachTerminal | null>>();
+  private readonly pendingAttaches = new Map<string, {
+    ref: ProviderContinuationRef;
+    promise: Promise<CodexProviderHandle | ProviderAttachTerminal | null>;
+  }>();
   private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
   // P0 proved app-server thread/resume on the supported Codex runtime. Start
   // optimistic so a fresh reconciler can select resume, then durably downgrade
@@ -307,7 +311,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (
       !handle ||
       handle.terminal ||
-      handle.providerContinuationId !== ref.providerContinuationId
+      handle.providerContinuationId !== ref.providerContinuationId ||
+      !sameProviderConnectionIdentity(handle.providerConnection, ref.providerConnection)
     ) {
       if (handle) return null;
     } else {
@@ -318,13 +323,19 @@ export class CodexProviderAdapter implements ProviderAdapter {
       return null;
     }
     const pending = this.pendingAttaches.get(ref.workAttemptId);
-    if (pending) return pending;
+    if (pending) {
+      if (
+        pending.ref.providerContinuationId !== ref.providerContinuationId
+        || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
+      ) return null;
+      return pending.promise;
+    }
     const attaching = this.attachRunning(ref, connection).finally(() => {
-      if (this.pendingAttaches.get(ref.workAttemptId) === attaching) {
+      if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
         this.pendingAttaches.delete(ref.workAttemptId);
       }
     });
-    this.pendingAttaches.set(ref.workAttemptId, attaching);
+    this.pendingAttaches.set(ref.workAttemptId, { ref, promise: attaching });
     return attaching;
   }
 

@@ -2527,7 +2527,8 @@ test("two Codex room agents keep independent provider executions across stop, re
     onStream: () => () => {},
   };
   const router = () => new ProviderActionPortRouter({ codex: async () => adapter });
-  let daemon = new SupervisorDaemon(paths, "darwin", router(), true);
+  let activeRouter = router();
+  let daemon = new SupervisorDaemon(paths, "darwin", activeRouter, true);
   try {
     await daemon.start();
     const entries = identities.map(({ entryId }, index): DaemonManifestEntry => ({
@@ -2585,25 +2586,18 @@ test("two Codex room agents keep independent provider executions across stop, re
     const bravoConnection = bravoBefore.provider_ref?.provider_connection;
     assert.equal(alphaConnection?.kind, "codex_app_server");
     assert.equal(bravoConnection?.kind, "codex_app_server");
-    const crossWire = await adapter.attach({
+    const crossWire = await activeRouter.attach({
       workAttemptId: alphaBefore.work_attempt_id!,
       providerContinuationId: alphaBefore.provider_ref!.provider_continuation_id,
       provider: "codex",
       providerConnection: bravoConnection,
     });
     assert.equal(crossWire, null, "matching attempt and continuation cannot attach through another agent's provider connection");
-    assert.equal(attachRequests.length, 1);
-    assert.deepEqual(attachRequests[0], [
-      alphaBefore.work_attempt_id,
-      alphaBefore.provider_ref!.provider_continuation_id,
-      bravoConnection!.kind === "codex_app_server" ? bravoConnection!.url : "missing-url",
-      bravoConnection!.pid ?? -1,
-      bravoConnection!.processIdentity ?? "missing-process-identity",
-    ]);
-    attachRequests.length = 0;
+    assert.equal(attachRequests.length, 0, "the production router rejects a cross-wired ref before the adapter can attach it");
 
     await daemon.stop();
-    daemon = new SupervisorDaemon(paths, "darwin", router(), true);
+    activeRouter = router();
+    daemon = new SupervisorDaemon(paths, "darwin", activeRouter, true);
     await daemon.start();
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
