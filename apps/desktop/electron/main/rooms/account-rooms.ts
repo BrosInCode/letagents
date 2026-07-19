@@ -200,15 +200,12 @@ async function fetchDesktopAccountRooms(input: {
     )
     .map(mapDesktopAccountRoomEntry)
     .filter((room) => Boolean(room.roomIdentifier));
+  // The server is authoritative for cloud rooms' pinned/archived flags, so we
+  // display cloud entries verbatim (no local-store overlay). Only rooms with no
+  // server copy — local-only rooms not present in the cloud list — are appended
+  // from the local store.
   const localRooms = await listLocalRoomEntries({ linkedIdentity: "cloud" });
-  const localRoomsByIdentifier = new Map(localRooms.map((room) => [room.roomIdentifier, room]));
-  const visibleCloudRooms = cloudRooms.map((room) => {
-    const localRoom = localRoomsByIdentifier.get(room.roomIdentifier);
-    return localRoom
-      ? { ...room, pinned: localRoom.pinned, archived: localRoom.archived }
-      : room;
-  });
-  const seen = new Set(visibleCloudRooms.map((room) => room.roomIdentifier));
+  const seen = new Set(cloudRooms.map((room) => room.roomIdentifier));
   const visibleLocalRooms: DesktopAccountRoomEntry[] = [];
   for (const room of localRooms) {
     if (seen.has(room.roomIdentifier)) continue;
@@ -217,7 +214,7 @@ async function fetchDesktopAccountRooms(input: {
   }
   return [
     ...visibleLocalRooms,
-    ...visibleCloudRooms,
+    ...cloudRooms,
   ];
 }
 
@@ -229,25 +226,14 @@ export async function listDesktopAccountRooms(
   }
 
   const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
-  const visibleCloudRooms = await fetchDesktopAccountRooms({
+  // A single fetch honoring the requested include_archived. The former
+  // fetch-twice-and-splice-archived dance only existed to reconcile the local
+  // overlay; with the server authoritative for cloud rooms there is nothing to
+  // reconcile.
+  const cloudRooms = await fetchDesktopAccountRooms({
     includeArchived: options.includeArchived === true,
     limit,
   });
-  const cloudRooms = options.includeArchived
-    ? visibleCloudRooms
-    : [
-        ...visibleCloudRooms,
-        ...(await fetchDesktopAccountRooms({
-          includeArchived: true,
-          limit,
-        })).filter(
-          (room) =>
-            room.archived &&
-            !visibleCloudRooms.some(
-              (visibleRoom) => visibleRoom.roomIdentifier === room.roomIdentifier,
-            ),
-        ),
-      ];
   const localRooms = await listLocalRoomEntries({
     includeArchived: options.includeArchived,
     linkedIdentity: "cloud",
@@ -288,34 +274,53 @@ export async function updateDesktopAccountRoom(
       ...(updates.archived !== undefined ? { archived: updates.archived } : {}),
     };
   }
-  if (exactLocalRoom) {
+  // Pure local-only room (a local record with no cloud link): there is no
+  // server copy, so the local store is the single source of truth.
+  if (exactLocalRoom && !exactLocalRoom.cloudRoomIdentifier) {
     const localResult = await updateLocalRoom();
-    if (localResult) return localResult;
+    return (
+      localResult ?? {
+        roomIdentifier: exactLocalRoom.roomIdentifier,
+        ...(updates.pinned !== undefined ? { pinned: updates.pinned } : {}),
+        ...(updates.archived !== undefined ? { archived: updates.archived } : {}),
+      }
+    );
   }
 
-  try {
-    const response = await apiFetch<Record<string, unknown>>(
-      `/account/rooms/${encodeURIComponent(roomIdentifier)}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updates),
-      },
-    );
+  // Cloud room or cloud-linked local room: the server is authoritative. PATCH
+  // is the real write and its failure propagates — no silent local-only
+  // fallback that would let the two copies drift. A linked room may be
+  // addressed by its LOCAL id; the server only knows the cloud id, so resolve
+  // through the link before PATCHing.
+  const cloudRoomIdentifier =
+    linkedLocalRoom?.cloudRoomIdentifier || roomIdentifier;
+  const response = await apiFetch<Record<string, unknown>>(
+    `/account/rooms/${encodeURIComponent(cloudRoomIdentifier)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    },
+  );
+  // Mirror the server's flags into the linked local record AFTER a successful
+  // PATCH. This is not a second source of truth: when signed out/offline the
+  // cloud fetch returns nothing and linked rooms surface purely from
+  // listLocalRoomEntries, so the mirror keeps that offline list showing the
+  // last-known server flags instead of stale ones. Online, the merge always
+  // prefers the cloud entry, so the mirror is never consulted.
+  if (linkedLocalRoom) {
     if (updates.archived !== undefined) {
-      await setAccountLocalRoomArchived(roomIdentifier, updates.archived, linkedLocalRoom);
+      await setAccountLocalRoomArchived(
+        linkedLocalRoom.roomIdentifier,
+        updates.archived,
+        linkedLocalRoom,
+      );
     }
     if (updates.pinned !== undefined) {
-      await setLocalRoomPinned(roomIdentifier, updates.pinned);
+      await setLocalRoomPinned(linkedLocalRoom.roomIdentifier, updates.pinned);
     }
-    return mapDesktopAccountRoomActionResult(response);
-  } catch (error) {
-    if (error instanceof DesktopApiError && error.status === 404) {
-      const localResult = await updateLocalRoom();
-      if (localResult) return localResult;
-    }
-    throw error;
   }
+  return mapDesktopAccountRoomActionResult(response);
 }
 
 export async function leaveDesktopAccountRoom(
