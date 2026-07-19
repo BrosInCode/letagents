@@ -3221,8 +3221,8 @@ test("restart fences a title-mutated orphan, durably closes its generation, and 
     resume: async (ref) => {
       assert.equal(fencedBeforeTerminalEvidence, true);
       assert.equal(ref.providerContinuationId, continuation);
-      const persisted = JSON.parse(await readFile(paths.attemptsPath, "utf8")) as { attempts: Array<{ execution_generations: Array<{ terminal: unknown }> }> };
-      assert.notEqual(persisted.attempts[0]!.execution_generations[0]!.terminal, null, "old generation is durable terminal before successor launch");
+      const persisted = await new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees")).getAttempt(ref.workAttemptId);
+      assert.notEqual(persisted.execution_generations[0]!.terminal, null, "old generation is durable terminal before successor launch");
       resumeCount += 1;
       await launch(false);
       return publicHandle();
