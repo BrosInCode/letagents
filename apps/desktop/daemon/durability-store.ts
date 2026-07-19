@@ -25,6 +25,7 @@ export type GcQuiescenceHooks = {
 };
 /** Adversarial-test hooks around the durable legacy-migration failure fence. */
 export type LegacyAttemptMigrationHooks = {
+  after_source_read?: () => Promise<void> | void;
   after_failure_recorded?: () => Promise<void> | void;
   before_quarantine?: () => Promise<void> | void;
 };
@@ -437,53 +438,79 @@ export class WorkDurabilityStore {
 
   private async importLegacyAttempts(database: DatabaseSync): Promise<void> {
     const migrationKey = `attempts-json:${resolve(this.path)}`;
-    const priorFailure = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key = ?").get(migrationKey) as { reason: string; quarantined_path: string } | undefined;
-    if (priorFailure) {
-      await this.quarantineLegacySource(priorFailure.quarantined_path);
-      throw new CorruptAttemptStoreError(`Legacy attempt migration previously failed: ${priorFailure.reason} (${priorFailure.quarantined_path})`);
-    }
-    let sourcePresent = false;
+    type LegacySource = { kind: "missing" } | { kind: "invalid"; reason: string } | { kind: "valid"; attempts: TaskWorkAttempt[]; checksum: string };
+    let source: LegacySource;
     try {
       const raw = await readFile(this.path, "utf8");
-      sourcePresent = true;
       const parsed: unknown = JSON.parse(raw);
-      let attempts: TaskWorkAttempt[];
-      let sourceChecksum: string;
       if (this.validLegacy(parsed)) {
         // A v1 file predates integrity protection. Preserve live/recoverable
         // attempts, but never inherit a legacy clean conclusion as GC authority.
-        attempts = parsed.attempts.map((attempt) => (attempt.state === "cleanly_concluded" || attempt.state === "abandoned" ? { ...attempt, state: "unreviewed" } : attempt));
-        sourceChecksum = checksum(parsed.attempts);
+        source = {
+          kind: "valid",
+          attempts: parsed.attempts.map((attempt) => (attempt.state === "cleanly_concluded" || attempt.state === "abandoned" ? { ...attempt, state: "unreviewed" } : attempt)),
+          checksum: checksum(parsed.attempts),
+        };
       } else if (this.valid(parsed)) {
-        attempts = parsed.attempts;
-        sourceChecksum = parsed.checksum;
+        source = { kind: "valid", attempts: parsed.attempts, checksum: parsed.checksum };
       } else {
-        throw new CorruptAttemptStoreError("Attempt store has an invalid schema or integrity checksum.");
-      }
-      const existing = database.prepare("SELECT checksum FROM migration_records WHERE migration_key = ?").get(migrationKey) as { checksum?: unknown } | undefined;
-      if (!existing) {
-        database.exec("BEGIN IMMEDIATE");
-        try {
-          for (const attempt of attempts) this.persistAttempt(database, attempt, true);
-          database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)").run(migrationKey, sourceChecksum, this.now());
-          database.exec("COMMIT");
-        } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
-      } else if (String(existing.checksum) !== sourceChecksum) {
-        throw new CorruptAttemptStoreError("Legacy attempts source changed after it was migrated.");
+        source = { kind: "invalid", reason: "Attempt store has an invalid schema or integrity checksum." };
       }
     } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      const reason = error instanceof Error ? error.message : String(error);
-      const quarantinedPath = `${this.path}.corrupt.${Date.now()}.${randomUUID()}`;
-      // The database row is the fail-closed authority. Persist it before any
-      // filesystem housekeeping so an INSERT failure or process crash can
-      // never turn a corrupt source into an apparently empty migration.
-      database.prepare("INSERT OR IGNORE INTO migration_failures(migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)").run(migrationKey, reason, this.now(), quarantinedPath);
-      await this.migrationHooks?.after_failure_recorded?.();
-      await this.quarantineLegacySource(quarantinedPath);
-      throw new CorruptAttemptStoreError(`Legacy attempt migration failed closed: ${reason}`);
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") source = { kind: "missing" };
+      else source = { kind: "invalid", reason: error instanceof Error ? error.message : String(error) };
     }
-    if (sourcePresent) {
+
+    await this.migrationHooks?.after_source_read?.();
+    type MigrationOutcome = { kind: "success" } | { kind: "previous_failure"; reason: string; quarantinedPath: string } | { kind: "new_failure"; reason: string; quarantinedPath: string };
+    let outcome: MigrationOutcome = { kind: "success" };
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      // Both decisions are authoritative only while holding the writer lock.
+      // A concurrent winner may have committed between our source read and
+      // this point, in which case a matching checksum is an idempotent no-op.
+      const priorFailure = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key = ?").get(migrationKey) as { reason: string; quarantined_path: string } | undefined;
+      if (priorFailure) {
+        outcome = { kind: "previous_failure", reason: priorFailure.reason, quarantinedPath: priorFailure.quarantined_path };
+      } else {
+        const existing = database.prepare("SELECT checksum FROM migration_records WHERE migration_key = ?").get(migrationKey) as { checksum?: unknown } | undefined;
+        let failureReason: string | undefined;
+        if (source.kind === "invalid") failureReason = source.reason;
+        else if (existing && source.kind === "valid" && String(existing.checksum) !== source.checksum) failureReason = "Legacy attempts source changed after it was migrated.";
+        else if (!existing && source.kind === "valid") {
+          database.exec("SAVEPOINT legacy_attempt_import");
+          try {
+            for (const attempt of source.attempts) this.persistAttempt(database, attempt, true);
+            database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)").run(migrationKey, source.checksum, this.now());
+            database.exec("RELEASE legacy_attempt_import");
+          } catch (error: unknown) {
+            database.exec("ROLLBACK TO legacy_attempt_import");
+            database.exec("RELEASE legacy_attempt_import");
+            failureReason = error instanceof Error ? error.message : String(error);
+          }
+        }
+        if (failureReason) {
+          const quarantinedPath = `${this.path}.corrupt.${Date.now()}.${randomUUID()}`;
+          database.prepare("INSERT INTO migration_failures(migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)").run(migrationKey, failureReason, this.now(), quarantinedPath);
+          outcome = { kind: "new_failure", reason: failureReason, quarantinedPath };
+        }
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      try { database.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+
+    if (outcome.kind !== "success") {
+      if (outcome.kind === "new_failure") await this.migrationHooks?.after_failure_recorded?.();
+      await this.quarantineLegacySource(outcome.quarantinedPath);
+      if (outcome.kind === "previous_failure") {
+        throw new CorruptAttemptStoreError(`Legacy attempt migration previously failed: ${outcome.reason} (${outcome.quarantinedPath})`);
+      }
+      throw new CorruptAttemptStoreError(`Legacy attempt migration failed closed: ${outcome.reason}`);
+    }
+
+    if (source.kind === "valid") {
       try { await rename(this.path, `${this.path}.migrated-backup`); }
       catch (error: unknown) {
         // The SQLite transaction is already authoritative. Backup retention is
