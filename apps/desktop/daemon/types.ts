@@ -59,37 +59,84 @@ export type DaemonWorkerBindingProjection = {
   updated_at: string;
 };
 
-export type DaemonManifestEntry = {
+/**
+ * The durable, addressable agent identity represented by a manifest entry.
+ *
+ * This intentionally contains no process, host, PID, connection, or liveness
+ * fields. A provider execution may be replaced without replacing this agent.
+ */
+export type DaemonAgentDefinition = {
   id: string;
   room_id: string;
   display_name: string;
+  created_by: string;
+  created_at: string;
+};
+
+/**
+ * Durable launch intent and user-selected configuration for an agent.
+ *
+ * This is distinct from an observed deployment: desired state is a request to
+ * run, while observed state and all process evidence remain runtime facts.
+ */
+export type DaemonAgentConfiguration = {
   provider: string;
   model: string | null;
   charter: string;
   desired_state: DesiredState;
+  permission_profile_id: string | null;
+  /** Provider-native policy selected in Add Agent; passed through unchanged. */
+  provider_launch_policy?: unknown;
+  /** Read-only source checkout used only to resolve remote + revision. */
+  source_repo_path?: string | null;
+};
+
+/** Process evidence owned by one replaceable provider deployment. */
+export type DaemonProviderConnection =
+  | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
+  | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
+  | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null };
+
+export type DaemonProviderRuntimeReference = {
+  work_attempt_id: string;
+  provider_continuation_id: string;
+  provider_connection: DaemonProviderConnection | null;
+  execution_generation_id: string;
+};
+
+/** Durable human turn-control effect journal attached to the current deployment. */
+export type DaemonTurnControlEffect = {
+  action_id: string;
+  work_attempt_id: string;
+  execution_generation_id: string;
+  has_correction: boolean;
+  status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
+  capability: "native_interrupt" | "restart_resume" | "unsupported";
+  interrupted: boolean | null;
+  resumed: boolean | null;
+  state: "idle" | "working" | null;
+  stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
+  error: string | null;
+  recorded_at: string;
+  updated_at: string;
+};
+
+/**
+ * Ephemeral placement and observed runtime facts for an agent.
+ *
+ * `id` is a compatibility-preserving reference to `DaemonAgentDefinition.id`;
+ * it is not a deployment identity. A new deployment can therefore replace all
+ * remaining fields while continuing to serve the same durable agent.
+ */
+export type DaemonRuntimeDeployment = {
+  id: DaemonAgentDefinition["id"];
   observed_state: ObservedState;
   condition: PolicyCondition;
   /** Latest actionable lifecycle failure, retained for Inspector/conflict UX. */
   last_error?: string | null;
-  permission_profile_id: string | null;
-  /** Provider-native policy selected in Add Agent; passed through unchanged. */
-  provider_launch_policy?: unknown;
-  created_by: string;
-  created_at: string;
-  /** Read-only source checkout used only to resolve remote + revision. */
-  source_repo_path?: string | null;
   workspace_path?: string | null;
   work_attempt_id?: string | null;
-  provider_ref?: {
-    work_attempt_id: string;
-    provider_continuation_id: string;
-    provider_connection:
-      | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
-      | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
-      | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
-      | null;
-    execution_generation_id: string;
-  } | null;
+  provider_ref?: DaemonProviderRuntimeReference | null;
   workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
   /**
@@ -104,26 +151,20 @@ export type DaemonManifestEntry = {
    * Durable human turn-control effect journal. `accepted` is written before
    * provider dispatch; after a daemon restart it is never blindly replayed.
    */
-  turn_control?: {
-    action_id: string;
-    work_attempt_id: string;
-    execution_generation_id: string;
-    has_correction: boolean;
-    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
-    capability: "native_interrupt" | "restart_resume" | "unsupported";
-    interrupted: boolean | null;
-    resumed: boolean | null;
-    state: "idle" | "working" | null;
-    stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
-    error: string | null;
-    recorded_at: string;
-    updated_at: string;
-  } | null;
+  turn_control?: DaemonTurnControlEffect | null;
   /** Last verified exact room identity; retained when live credentials unbind. */
   last_worker_binding?: DaemonWorkerBindingProjection | null;
   reconciliation?: ReconciliationState;
   reconciliation_notices?: ReconciliationNotice[];
 };
+
+/**
+ * Backward-compatible wire contract for the current flat manifest format.
+ *
+ * New code can depend on the narrower durable or runtime contracts above;
+ * existing manifest readers and writers keep the exact same JSON shape.
+ */
+export type DaemonManifestEntry = DaemonAgentDefinition & DaemonAgentConfiguration & DaemonRuntimeDeployment;
 
 export type DaemonManifestEntryView = DaemonManifestEntry & {
   worker_binding?: DaemonWorkerBindingProjection | null;
