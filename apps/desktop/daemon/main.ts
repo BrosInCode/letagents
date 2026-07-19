@@ -36,6 +36,22 @@ type RecoveryClock = {
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
 };
+
+const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
+const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
+const LIVENESS_GRACE_MS = 30_000;
+const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
+
+/** Room waits are normally long polls, so a healthy worker can be silent for
+ * the entire configured poll window. Reachability must not expire before that
+ * request can return and publish its next exact-binding heartbeat. */
+export function workplaceLivenessStaleAfterMs(rawPollMaxMs = process.env.LETAGENTS_POLL_MAX_MS): number {
+  const parsed = Number(rawPollMaxMs);
+  const pollMaxMs = Number.isFinite(parsed) && parsed > 0
+    ? Math.min(Math.trunc(parsed), MAX_ROOM_POLL_MAX_MS)
+    : DEFAULT_ROOM_POLL_MAX_MS;
+  return Math.max(NATIVE_LIVENESS_STALE_AFTER_MS, pollMaxMs + LIVENESS_GRACE_MS);
+}
 type DaemonTurnControlResult = ProviderTurnControlResult & {
   entryId: string;
   workAttemptId: string;
@@ -1340,8 +1356,11 @@ export class SupervisorDaemon {
     projectedBinding?: WorkerSessionBinding | null,
   ): Promise<DaemonManifestEntryView> {
     const now = this.nowMs();
-    const staleAfterMs = 90_000;
-    const derive = <T extends string>(axis: { state: T; observed_at: string | null; detail: string | null } | undefined, staleStates: string[]) => {
+    const derive = <T extends string>(
+      axis: { state: T; observed_at: string | null; detail: string | null } | undefined,
+      staleStates: string[],
+      staleAfterMs: number,
+    ) => {
       if (!axis?.observed_at || !staleStates.includes(axis.state)) return axis;
       const observed = Date.parse(axis.observed_at);
       return Number.isFinite(observed) && now - observed > staleAfterMs
@@ -1357,10 +1376,28 @@ export class SupervisorDaemon {
       binding.work_attempt_id === entry.work_attempt_id &&
       binding.execution_generation_id === entry.provider_ref?.execution_generation_id,
     );
+    // The binding store is advanced by accepted, exact wait publications. It
+    // is the live workplace clock; the manifest timestamp only records the
+    // original bind and deliberately is not rewritten for every long poll.
+    const workplaceLiveness = bindingMatchesCurrentGeneration && binding
+      ? {
+          state: "reachable" as const,
+          observed_at: binding.updated_at,
+          detail: entry.workplace_liveness?.detail ?? "supervised worker session bound",
+        }
+      : entry.workplace_liveness;
     return {
       ...entry,
-      workplace_liveness: derive(entry.workplace_liveness, ["reachable"]) as DaemonManifestEntry["workplace_liveness"],
-      native_liveness: derive(entry.native_liveness, ["active", "idle"]) as DaemonManifestEntry["native_liveness"],
+      workplace_liveness: derive(
+        workplaceLiveness,
+        ["reachable"],
+        workplaceLivenessStaleAfterMs(),
+      ) as DaemonManifestEntry["workplace_liveness"],
+      native_liveness: derive(
+        entry.native_liveness,
+        ["active", "idle"],
+        NATIVE_LIVENESS_STALE_AFTER_MS,
+      ) as DaemonManifestEntry["native_liveness"],
       worker_binding: bindingMatchesCurrentGeneration && binding ? {
         agent_session_id: binding.agent_session_id,
         work_attempt_id: binding.work_attempt_id,
