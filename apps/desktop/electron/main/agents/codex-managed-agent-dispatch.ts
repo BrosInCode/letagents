@@ -1,8 +1,9 @@
 import type { DesktopRoomStreamEvent } from "../../ipc-types.js";
 import {
+  canDeliverCodexStopControlToManagedAgent,
+  isOwnRoomStreamEventForManagedAgentAmongWorkers,
   isStopPhraseRoomStreamEvent,
   resolveCodexRoomStreamEventRecipients,
-  shouldDeliverCodexRoomStreamEventToSession,
   shouldDeliverRoomStreamEventToSession,
 } from "./codex-event-routing.js";
 import {
@@ -24,8 +25,9 @@ export function listDeliverableCodexSessionsForRoomStreamEvent(
   const sessions = listDesktopManagedCodexLiveSessions(event.roomIdentifier)
     .map((session) => bindCodexLiveSessionToWorker(session));
   const codexSessions = sessions.filter((session) => session.provider_id !== "open-model");
+  const publicCodexSessions = codexSessions.map(toPublicManagedAgentSession);
   const resolvedCodexIds = new Set(resolveCodexRoomStreamEventRecipients(
-    codexSessions.map(toPublicManagedAgentSession),
+    publicCodexSessions,
     event,
   ).map((session) => session.id));
 
@@ -35,6 +37,11 @@ export function listDeliverableCodexSessionsForRoomStreamEvent(
     }
     return resolvedCodexIds.has(session.session_id) ||
       (isStopPhraseRoomStreamEvent(session, event) &&
-        shouldDeliverCodexRoomStreamEventToSession(session, event));
+        canDeliverCodexStopControlToManagedAgent(toPublicManagedAgentSession(session)) &&
+        !isOwnRoomStreamEventForManagedAgentAmongWorkers(
+          toPublicManagedAgentSession(session),
+          publicCodexSessions,
+          event,
+        ));
   });
 }

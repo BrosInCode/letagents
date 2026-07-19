@@ -80,6 +80,23 @@ export function isOwnRoomStreamEventForManagedAgent(
   return Boolean(messageNames.length && workerNames.some((key) => messageNames.includes(key)));
 }
 
+/**
+ * The single-worker helper above is useful at older call sites, but it cannot
+ * safely decide a display-name match when a room has two workers named Oak.
+ * Production Codex routing therefore resolves authorship against the room
+ * population: stable identities are exact; a name is self only when it has
+ * one possible owner.
+ */
+export function isOwnRoomStreamEventForManagedAgentAmongWorkers(
+  worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">,
+  workers: readonly Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">[],
+  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+): boolean {
+  if (event.type !== "message") return false;
+  return resolveMessageAuthorWorkers(workers, event.message).some((candidate) =>
+    sameManagedAgentIdentity(candidate, worker));
+}
+
 export function shouldDeliverRoomStreamEventToSession(
   session: DesktopCodexLiveSessionState,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
@@ -128,11 +145,13 @@ export function resolveCodexRoomStreamEventRecipients(
   workers: readonly DesktopManagedAgentSession[],
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): DesktopManagedAgentSession[] {
-  const eligible = workers.filter((worker) =>
-    canDeliverDesktopEventToManagedAgent(worker) &&
-    !isOwnRoomStreamEventForManagedAgent(worker, event));
+  const deliverable = workers.filter(canDeliverDesktopEventToManagedAgent);
+  const ownWorkers = event.type === "message"
+    ? new Set(resolveMessageAuthorWorkers(deliverable, event.message))
+    : new Set<DesktopManagedAgentSession>();
+  const eligible = deliverable.filter((worker) => !ownWorkers.has(worker));
   if (event.type === "task_update") {
-    return eligible.filter((worker) => taskTargetsManagedAgent(worker, event.task));
+    return resolveCodexTaskRecipients(eligible, event.task);
   }
   return resolveCodexMessageRecipients(eligible, event.message);
 }
@@ -368,9 +387,7 @@ function resolveCodexMessageRecipients<T extends CodexAddressableWorker>(
     return workers.filter((worker) => addressed.has(worker));
   }
 
-  return workers.filter((worker) =>
-    senderMatchesManagedAgent(message.replyTo?.sender, worker) ||
-    (isThreadReply(message) && threadParticipantsIncludeManagedAgent(message, worker)));
+  return resolveThreadAndReplyRecipients(workers, message);
 }
 
 function stableManagedAgentAliases(worker: CodexAddressableWorker): Set<string> {
@@ -391,25 +408,125 @@ function displayManagedAgentAliases(worker: CodexAddressableWorker): Set<string>
   return aliases;
 }
 
-function taskTargetsManagedAgent(
-  worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">,
+function resolveCodexTaskRecipients<T extends CodexAddressableWorker>(
+  workers: readonly T[],
   task: Extract<DesktopRoomStreamEvent, { type: "task_update" }>['task'],
-): boolean {
-  const workerKeys = [
-    worker.agentSessionId,
-    specificAgentKey(worker.agentKey),
-    worker.actorLabel,
-    worker.displayName,
-  ].map(normalizeKey).filter(Boolean);
-  const taskTargetKeys = [
+): T[] {
+  // A durable assignment or lease identity is authoritative. In particular,
+  // a human-facing assignee label must never widen an exact assignment to a
+  // second worker which happens to share a display name.
+  const stableTargets = [
     specificAgentKey(task.assigneeAgentKey),
+    ...task.activeLeases
+      .filter((lease) => lease.status === "active")
+      .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey)]),
+  ].map(normalizeHandle).filter(Boolean);
+  if (stableTargets.length) {
+    return workers.filter((worker) =>
+      stableTargets.some((target) => stableManagedAgentAliases(worker).has(target)));
+  }
+
+  const aliasTargets = [
     task.assignee,
     ...task.activeLeases
       .filter((lease) => lease.status === "active")
-      .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey), lease.holderLabel]),
-  ].map(normalizeKey).filter(Boolean);
+      .map((lease) => lease.holderLabel),
+  ];
+  return resolveUniqueAliasRecipients(workers, aliasTargets);
+}
 
-  return taskTargetKeys.length > 0 && workerKeys.some((key) => taskTargetKeys.includes(key));
+function resolveThreadAndReplyRecipients<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  message: DesktopRoomMessage,
+): T[] {
+  const senders = [
+    message.replyTo?.sender,
+    ...(isThreadReply(message)
+      ? [
+        message.thread?.latestReply?.sender,
+        ...(message.thread?.participants ?? []).map((participant) => participant.sender),
+      ]
+      : []),
+  ];
+  return resolveUniqueAliasRecipients(workers, senders);
+}
+
+/** Resolve aliases globally. A duplicate display alias is deliberately a no-op. */
+function resolveUniqueAliasRecipients<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  aliases: readonly (string | null | undefined)[],
+): T[] {
+  const recipients = new Set<T>();
+  for (const alias of aliases) {
+    for (const candidate of identityParts(alias)) {
+      const stableMatches = workers.filter((worker) =>
+        stableManagedAgentAliases(worker).has(normalizeHandle(candidate)));
+      if (stableMatches.length === 1) {
+        recipients.add(stableMatches[0]);
+        continue;
+      }
+      if (stableMatches.length > 1) continue;
+      const displayMatches = workers.filter((worker) =>
+        displayManagedAgentAliases(worker).has(normalizeHandle(candidate)));
+      if (displayMatches.length === 1) recipients.add(displayMatches[0]);
+    }
+  }
+  return workers.filter((worker) => recipients.has(worker));
+}
+
+function resolveMessageAuthorWorkers<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  message: DesktopRoomMessage,
+): T[] {
+  const stableIds = [
+    message.agentIdentity?.agentSessionId,
+    specificAgentKey(message.agentIdentity?.agentKey),
+  ].map(normalizeHandle).filter(Boolean);
+  if (stableIds.length) {
+    const matches = stableIds.map((identity) => workers.filter((worker) =>
+      stableManagedAgentAliases(worker).has(identity)));
+    // Structured fields should describe one worker. If a malformed event says
+    // session A but key B, it is not safe to call both workers "self" and
+    // suppress an @everyone broadcast for the room.
+    const [first, ...rest] = matches;
+    if (!first || first.length !== 1 || rest.some((entry) =>
+      entry.length !== 1 || !sameManagedAgentIdentity(entry[0], first[0]))) {
+      return [];
+    }
+    return first;
+  }
+
+  // Keep only unique name resolutions. An identityless "Oak" from a room
+  // containing two Oakes is not self-output for either worker, especially for
+  // broadcasts: both must still receive @everyone.
+  const candidates = resolveUniqueAliasRecipients(workers, [
+    message.actorLabel,
+    message.agentIdentity?.actorLabel,
+    message.agentIdentity?.displayName,
+    message.sender,
+  ]);
+  return candidates.length === 1 ? candidates : [];
+}
+
+function sameManagedAgentIdentity(
+  left: CodexAddressableWorker,
+  right: CodexAddressableWorker,
+): boolean {
+  const leftSession = normalizeHandle(left.agentSessionId);
+  const rightSession = normalizeHandle(right.agentSessionId);
+  if (leftSession && rightSession) return leftSession === rightSession;
+  const leftKey = normalizeHandle(specificAgentKey(left.agentKey));
+  const rightKey = normalizeHandle(specificAgentKey(right.agentKey));
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function identityParts(value: string | null | undefined): string[] {
+  const raw = String(value || "").trim();
+  return [raw, ...raw
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean)]
+    .filter((part, index, values) => Boolean(part) && values.indexOf(part) === index);
 }
 
 function extractMentionHandles(text: string | null | undefined): string[] {
