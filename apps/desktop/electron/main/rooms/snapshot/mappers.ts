@@ -56,7 +56,7 @@ function mapGitHubEvents(
   return data ? mapGitHubEventsPayload(data.room_id || "", data) : null;
 }
 
-function mapFocusRooms(data: FocusRoomsResponse): DesktopFocusRoomInfo[] {
+export function mapFocusRooms(data: FocusRoomsResponse): DesktopFocusRoomInfo[] {
   return (data.focus_rooms || []).map(mapDesktopFocusRoomPayload);
 }
 
@@ -163,7 +163,7 @@ function mapTasks(
   return (data.tasks || []).map(mapDesktopTaskSummaryPayload);
 }
 
-function mapParticipants(data: ParticipantsResponse): DesktopParticipantSummary[] {
+export function mapParticipants(data: ParticipantsResponse): DesktopParticipantSummary[] {
   return (data.participants || []).map((participant) => ({
     participantKey: participant.participant_key,
     kind: participant.kind,
@@ -182,7 +182,7 @@ function mapParticipants(data: ParticipantsResponse): DesktopParticipantSummary[
   }));
 }
 
-function mapPresence(data: PresenceResponse): DesktopAgentPresence[] {
+export function mapPresence(data: PresenceResponse): DesktopAgentPresence[] {
   return (data.presence || []).map((entry) => ({
     roomId: entry.room_id,
     actorLabel: entry.actor_label,
@@ -236,7 +236,7 @@ function mapReasoningSessions(data: ReasoningResponse): DesktopReasoningSession[
     });
 }
 
-function mapRecentActivity(data: ActivityHistoryResponse): DesktopActivityEntry[] {
+export function mapRecentActivity(data: ActivityHistoryResponse): DesktopActivityEntry[] {
   return (data.entries || []).map((entry) => ({
     id: entry.id,
     room: entry.room
@@ -363,7 +363,7 @@ function normalizeArtifactSource(value: unknown): DesktopRoomSharedArtifact["sou
     : "manual";
 }
 
-function mapBoardSettings(
+export function mapBoardSettings(
   data: RoomSnapshotData["boardSettingsData"],
 ): DesktopBoardSettingsSummary {
   const activeManager = data.active_manager;
