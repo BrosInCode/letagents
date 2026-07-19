@@ -555,9 +555,9 @@ validateV4Shape(database: DatabaseSync): void {
   rejectsCheck("INSERT INTO worker_session_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...binding.slice(0, 8), 1, -1, 1, binding[11]);
   rejectsCheck("INSERT INTO worker_session_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...binding.slice(0, 8), 1, 1, 0, binding[11]);
   const publication = ["probe", "agent", 1, "run", "session", 1, "2026-01-01T00:00:00.000Z", 1, "reserved", "2026-01-01T00:00:00.000Z", null];
-  for (const invalid of [[-1, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"]]) rejectsCheck("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...publication.slice(0, 5), invalid[0], publication[6], invalid[1], invalid[2], publication[9], null);
+  for (const invalid of [[-1, 1, "reserved"], [0, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"], [1, 1, "working"], [1, 1, ""]]) rejectsCheck("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...publication.slice(0, 5), invalid[0], publication[6], invalid[1], invalid[2], publication[9], null);
   const verification = ["probe", "agent", 1, "from", "to", "session", 1, "2026-01-01T00:00:00.000Z", 1, "reserved", "2026-01-01T00:00:00.000Z", null];
-  for (const invalid of [[-1, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"]]) rejectsCheck("INSERT INTO worker_generation_verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...verification.slice(0, 6), invalid[0], verification[7], invalid[1], invalid[2], verification[10], null);
+  for (const invalid of [[-1, 1, "reserved"], [0, 1, "reserved"], [1, -1, "reserved"], [1, 1, "bogus"], [1, 1, "working"], [1, 1, ""]]) rejectsCheck("INSERT INTO worker_generation_verifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ...verification.slice(0, 6), invalid[0], verification[7], invalid[1], invalid[2], verification[10], null);
 }
 
 applyV3Shape(database: DatabaseSync): void {
