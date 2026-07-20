@@ -107,6 +107,16 @@ test("delivery timeline records causal phases durably across a daemon restart", 
   } finally { await env.cleanup(); }
 });
 
+test("causal event journal is idempotent when an ingress replay shares a constant clock", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-20T12:00:00.000Z");
+    await store.ingestPoll({ agent_id: "replay", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    await store.ingestPoll({ agent_id: "replay", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    assert.deepEqual((await store.receipts("replay"))[0]!.timeline.map((event) => event.phase), ["received", "queued"]);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("ingress cannot silently change an agent room and a non-head cannot block", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);

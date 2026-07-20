@@ -237,11 +237,10 @@ export class SupervisedAgentInboxStore {
     // fact. The idempotency key remains independent so replay cannot append a
     // duplicate phase, even when timestamps are identical.
     run(database.prepare(`INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
-      SELECT ?,COALESCE(MAX(event_sequence),0)+1,?,?,?,?
-      FROM supervised_agent_inbox_events
-      WHERE inbox_item_id=? AND NOT EXISTS (
+      SELECT ?,COALESCE((SELECT MAX(event_sequence) FROM supervised_agent_inbox_events WHERE inbox_item_id=?),0)+1,?,?,?,?
+      WHERE NOT EXISTS (
         SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key=?
-      )`), inboxItemId, idempotencyKey, phase, observedAt, detail, inboxItemId, inboxItemId, idempotencyKey);
+      )`), inboxItemId, inboxItemId, idempotencyKey, phase, observedAt, detail, inboxItemId, idempotencyKey);
   }
   private events(database: DatabaseSync, inboxItemId: string): SupervisedInboxEvent[] {
     return (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence").all(inboxItemId) as Row[]).map((row) => ({
