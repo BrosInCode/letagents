@@ -2279,25 +2279,29 @@ export class SupervisorDaemon {
 
   /** Main-process-only handoff path. Tokens live only in WorkerBindingStore memory. */
   private async installWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; daemon_generation: number }): Promise<{ status: "installed" | "stale" }> {
-    if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
-    return { status: await this.workerBindings.installCredential(input) ? "installed" : "stale" };
+    return this.serializeEntryTick(input.entry_id, async () => {
+      if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
+      return { status: await this.workerBindings.installCredential(input) ? "installed" : "stale" };
+    });
   }
 
   private async borrowWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number }): Promise<{ status: "available"; credential: string } | { status: "deferred" | "stale" }> {
-    if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
-    const credential = await this.workerBindings.credentialFor(input);
-    return credential ? { status: "available", credential } : { status: "deferred" };
+    return this.serializeEntryTick(input.entry_id, async () => {
+      if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
+      const credential = await this.workerBindings.credentialFor(input);
+      return credential ? { status: "available", credential } : { status: "deferred" };
+    });
   }
 
   /** All four durable identities fence a credential from a retired daemon/turn. */
   private async isExactCredentialRoute(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number }): Promise<boolean> {
     if (!Number.isSafeInteger(input.daemon_generation) || input.daemon_generation !== this.singleton.currentGeneration) return false;
     const entry = await this.store.getEntry(input.entry_id);
-    // During resume the manifest already names the successor while the only
-    // credential-bearing binding intentionally remains on its predecessor
-    // until exact native proof. The binding generation is the authority fence
-    // for this handoff window; room/work-attempt still bind it to this entry.
-    if (!entry || entry.room_id !== input.room_id || entry.work_attempt_id !== input.work_attempt_id) return false;
+    if (!entry || entry.room_id !== input.room_id || entry.work_attempt_id !== input.work_attempt_id
+      || entry.provider_ref?.execution_generation_id !== input.execution_generation_id) return false;
+    const attempt = await this.durability.getAttempt(input.work_attempt_id);
+    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
+    if (!execution || execution.terminal) return false;
     const binding = await this.workerBindings.get(input.entry_id);
     return Boolean(binding && binding.room_id === input.room_id && binding.work_attempt_id === input.work_attempt_id
       && binding.execution_generation_id === input.execution_generation_id && binding.agent_session_id === input.agent_session_id);
