@@ -107,7 +107,7 @@
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
       :delivery-recovery-available="deliveryRetryAvailable"
-      :delivery-retry-busy="deliveryRetryingSourceMessageId !== null"
+      :delivery-retry-key="deliveryRetryingKey"
       :revealed-message-id="revealedMessageId"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
@@ -409,8 +409,6 @@ const props = defineProps<{
   durableProjectRootPath?: string | null;
   homePath?: string | null;
   workers: WorkerSnapshot[];
-  /** Wave 2 replaces this capability seam with the daemon retry control. */
-  roomAgentDeliveryRecoveryAvailable?: boolean;
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
 }>();
@@ -446,8 +444,9 @@ const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
-const deliveryRetryingSourceMessageId = ref<string | null>(null);
-const deliveryRetryAvailable = computed(() => typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
+const deliveryRetryingKey = ref<string | null>(null);
+const deliveryRetryNegotiated = ref(false);
+const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
 const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
 const inboxLoading = ref(false);
 const inboxLoadingOlder = ref(false);
@@ -848,6 +847,9 @@ onBeforeUnmount(() => {
 });
 
 onMounted(() => {
+  void desktopIpc.supervisor?.getStatus().then((status) => {
+    deliveryRetryNegotiated.value = status.capabilities.roomDeliveryRetry;
+  }).catch(() => { deliveryRetryNegotiated.value = false; });
   document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
     if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
@@ -1528,13 +1530,14 @@ function openAddAgentModal(): void {
 }
 
 async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): Promise<void> {
-  if (!deliveryRetryAvailable.value || deliveryRetryingSourceMessageId.value) return;
+  const retryKey = `${agentId}\u0000${sourceMessageId}`;
+  if (!deliveryRetryAvailable.value || deliveryRetryingKey.value === retryKey) return;
   const entry = supervisorEntries.value.find((candidate) => candidate.id === agentId);
   if (!entry?.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
     pushActionToast("This delivery binding changed. Refresh the room before retrying.", "error", 6_000);
     return;
   }
-  deliveryRetryingSourceMessageId.value = sourceMessageId;
+  deliveryRetryingKey.value = retryKey;
   try {
     await desktopIpc.supervisor!.retryRoomDelivery({
       entryId: entry.id,
@@ -1545,11 +1548,17 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
       agentSessionId: entry.agentSessionId,
     });
     await refreshManagedAgentSessions();
-    pushActionToast("Delivery retry started.", "success", 4_000);
+    const refreshed = supervisorEntries.value.find((candidate) => candidate.id === agentId);
+    const receipt = refreshed?.deliveryReceipts?.find((candidate) => candidate.sourceMessageId === sourceMessageId);
+    pushActionToast(
+      receipt?.state === "blocked" ? "Delivery still needs attention." : "Delivery retry completed.",
+      receipt?.state === "blocked" ? "error" : "success",
+      5_000,
+    );
   } catch (error) {
     pushActionToast(error instanceof Error ? error.message : "Could not retry room delivery.", "error", 7_000);
   } finally {
-    deliveryRetryingSourceMessageId.value = null;
+    deliveryRetryingKey.value = null;
   }
 }
 

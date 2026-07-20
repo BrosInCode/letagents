@@ -757,10 +757,15 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
     implementationVersion: String(value.implementation_version ?? "unknown"),
+    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry") },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
   };
+}
+
+function booleanField(value: unknown, key: string): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Reflect.get(value, key) === true;
 }
 
 function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {

@@ -134,11 +134,11 @@
           <template v-if="receipt.state === 'blocked'">
             <button
               type="button"
-              :disabled="!deliveryRecoveryAvailable || deliveryRetryBusy"
-              :aria-label="deliveryRecoveryAvailable && !deliveryRetryBusy ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId)"
+              :aria-label="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
               :title="deliveryRecoveryAvailable ? 'Retry delivery' : 'Retry will be available when delivery recovery is connected'"
-              @click="deliveryRecoveryAvailable && !deliveryRetryBusy && $emit('retry-delivery', receipt.agentId, message.id)"
-            >{{ deliveryRetryBusy ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+              @click="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) && $emit('retry-delivery', receipt.agentId, message.id)"
+            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
             <small v-if="!deliveryRecoveryAvailable">Retry will be available when delivery recovery is connected.</small>
           </template>
         </li>
@@ -272,12 +272,16 @@ const props = withDefaults(defineProps<{
   testId?: string;
   deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
-  deliveryRetryBusy?: boolean;
+  deliveryRetryKey?: string | null;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
   deliveryRecoveryAvailable: false,
 });
+
+function retryingReceipt(agentId: string): boolean {
+  return props.deliveryRetryKey === `${agentId}\u0000${props.message.id}`;
+}
 
 const emit = defineEmits<{
   "quote-reply": [messageId: string];

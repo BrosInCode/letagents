@@ -461,7 +461,10 @@ export class SupervisorDaemon {
       (commit) => this.fenceDaemonCommit(commit),
       paths.manifestPath,
     );
-    this.supervisedInbox = new SupervisedAgentInboxStore(paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`);
+    // The worker-binding path is a legacy JSON import source. Keep the inbox
+    // journal in its own SQLite file so merely reading a manifest can never
+    // attempt to parse a worker-binding database as JSON on the next restart.
+    this.supervisedInbox = new SupervisedAgentInboxStore(`${paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`}.inbox.sqlite`);
     this.supervisedDelivery = providerPort
       ? new SupervisedAgentDelivery(this.supervisedInbox, providerPort, supervisedDeliveryHttp, (authority) => this.isExactSupervisedDeliveryAuthority(authority))
       : null;
@@ -865,6 +868,7 @@ export class SupervisorDaemon {
       healthy: true,
       protocol_version: DAEMON_PROTOCOL_VERSION,
       implementation_version: DAEMON_IMPLEMENTATION_VERSION,
+      capabilities: { room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn) },
       generation: this.singleton.currentGeneration,
       pid: process.pid,
       started_at: this.startedAt,
@@ -1661,7 +1665,14 @@ export class SupervisorDaemon {
         : nonfinal.length
           ? { state: "queued" as const, pending_count: nonfinal.length, blocked_by_message_id: null, detail: "Room delivery is queued." }
           : { state: "empty" as const, pending_count: 0, blocked_by_message_id: null, detail: null };
-    const turn = projectDeliveryTurn(head);
+    const liveHandle = this.liveHandles.get(entry.id);
+    const hasLiveDeliveryOwner = Boolean(
+      hasCurrentBinding && credential && liveHandle
+      && liveHandle.workAttemptId === entry.work_attempt_id
+      && liveHandle.providerContinuationId === entry.provider_ref?.provider_continuation_id
+      && entry.provider_ref?.execution_generation_id === binding?.execution_generation_id,
+    );
+    const turn = projectDeliveryTurn(head, hasLiveDeliveryOwner);
     return {
       ...entry,
       workplace_liveness: derive(
@@ -3064,8 +3075,20 @@ function projectDeliveryReceipts(receipts: readonly SupervisedInboxReceiptWithTi
   }));
 }
 
-function projectDeliveryTurn(head: SupervisedInboxReceiptWithTimeline | null): NonNullable<DaemonManifestEntryView["room_agent_state"]>["turn"] {
+function projectDeliveryTurn(head: SupervisedInboxReceiptWithTimeline | null, hasLiveDeliveryOwner: boolean): NonNullable<DaemonManifestEntryView["room_agent_state"]>["turn"] {
   if (!head) return { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null };
+  // A persisted dispatch marker is recovery evidence, not proof that this
+  // daemon is currently running the provider turn. Never call it responding
+  // until an exact live handle, current binding, and memory credential exist.
+  if (!hasLiveDeliveryOwner) {
+    return {
+      state: head.state === "blocked" ? "failed" : "idle",
+      inbox_item_id: head.inbox_item_id,
+      source_message_id: head.source_message_id,
+      provider_turn_id: head.provider_turn_id,
+      detail: head.last_error ?? "No current delivery operation is running.",
+    };
+  }
   const state = head.state === "dispatching" ? "dispatching"
     : head.state === "awaiting_result" ? "responding"
       : head.state === "publishing" ? "publishing"
