@@ -61,18 +61,21 @@ describe("durable room delivery UI contracts", () => {
     assert.deepEqual(roomMessageRevealDestination("unloaded", [], []), { kind: "history" });
   });
 
-  it("retains a cross-thread target through bounded backfill before panel highlight", async () => {
-    const [chat, panel] = await Promise.all([
+  it("hands a known cross-thread target to the mounted panel without a refresh RPC, and toasts absent failures", async () => {
+    const [chat, shell, panel, messages] = await Promise.all([
       source("src/components/desktop/content/RoomChatView.vue"),
+      source("src/components/desktop/content/DesktopRoomShell.vue"),
       source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),
+      source("src/components/desktop/content/room-shell/useDesktopRoomMessages.ts"),
     ]);
-    assert.match(chat, /pendingThreadRevealId\.value = messageId/);
-    assert.match(chat, /await revealPendingThreadMessage\(threadRootId\)/);
-    assert.match(chat, /for \(let page = 0; page <= 5; page \+= 1\)/);
-    assert.match(chat, /threadRevealTargetId\.value = targetId/);
-    assert.match(chat, /emit\("message-reveal-unavailable", targetId\)/);
+    assert.match(chat, /threadRevealTargetId\.value = messageId/);
+    assert.match(chat, /openThread\(destination\.threadRootId, false\)/);
+    assert.doesNotMatch(chat, /pendingThreadRevealId/);
     assert.match(panel, /revealMessageId/);
     assert.match(panel, /jumpToThreadMessageReference\(messageId\)/);
+    assert.match(messages, /async function revealMessage/);
+    assert.match(messages, /maxExplicitMessageRevealPages/);
+    assert.match(shell, /emit\("message-reveal-unavailable", messageId\)/);
   });
 
   it("carries grouped receipts, disabled retry capability, and reveal events across chat surfaces", async () => {

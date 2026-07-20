@@ -288,7 +288,6 @@ const taskReferenceIds = computed<ReadonlySet<string>>(() =>
 );
 const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
-const pendingThreadRevealId = ref<string | null>(null);
 const threadRevealTargetId = ref<string | null>(null);
 const replyTarget = ref<RoomReplyTarget | null>(null);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
@@ -392,7 +391,7 @@ const { openAgentModal } = useAgentReasoningLauncher({
   openAgentDetail: (target) => emit("open-agent-detail", target),
 });
 
-function openThread(messageId: string): void {
+function openThread(messageId: string, refresh = true): void {
   if (document.activeElement instanceof HTMLElement) {
     threadReturnFocusElement.value = document.activeElement;
   }
@@ -402,7 +401,7 @@ function openThread(messageId: string): void {
   }
   forgetOpenedThreadSummary(messageId);
   activeThreadParentId.value = messageId;
-  void loadThread(messageId);
+  if (refresh) void loadThread(messageId);
 }
 
 function quoteReply(messageId: string): void {
@@ -443,7 +442,6 @@ function clearReplyTarget(): void {
 function closeThread(): void {
   messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
   activeThreadParentId.value = null;
-  pendingThreadRevealId.value = null;
   threadRevealTargetId.value = null;
   clearThreadAttachmentDrafts();
   void nextTick(() => {
@@ -555,29 +553,10 @@ async function loadThread(threadRootId: string): Promise<void> {
     fetchedThreadRoot.value = applyThreadSummaryOverride(page.root);
     fetchedThreadReplies.value = page.replies;
     fetchedThreadHasOlder.value = page.hasOlder;
-    await revealPendingThreadMessage(threadRootId);
     const lastMessageId = page.replies.at(-1)?.id || page.root.id;
     await markThreadRead(threadRootId, lastMessageId, roomIdentifier, messageNamespace);
   } catch {
     // Keep the already loaded room messages usable if the thread endpoint is unavailable.
-  }
-}
-
-async function revealPendingThreadMessage(threadRootId: string): Promise<void> {
-  const targetId = pendingThreadRevealId.value;
-  if (!targetId || activeThreadParentId.value !== threadRootId) return;
-  for (let page = 0; page <= 5; page += 1) {
-    if (fetchedThreadRoot.value?.id === targetId || fetchedThreadReplies.value.some((reply) => reply.id === targetId)) {
-      pendingThreadRevealId.value = null;
-      threadRevealTargetId.value = targetId;
-      return;
-    }
-    if (!activeThreadHasOlder.value) break;
-    await loadOlderThreadReplies();
-  }
-  if (pendingThreadRevealId.value === targetId) {
-    pendingThreadRevealId.value = null;
-    emit("message-reveal-unavailable", targetId);
   }
 }
 
@@ -700,9 +679,10 @@ function jumpToMessage(messageId: string): void {
     threadMessagesWithThreadOverrides.value,
   );
   if (destination.kind === "thread") {
-    pendingThreadRevealId.value = messageId;
-    threadRevealTargetId.value = null;
-    openThread(destination.threadRootId);
+    // The source graph already contains this exact reply. Render it directly;
+    // a refresh RPC must not be allowed to turn a known link into a no-op.
+    threadRevealTargetId.value = messageId;
+    openThread(destination.threadRootId, false);
     return;
   }
   if (destination.kind === "history") {
