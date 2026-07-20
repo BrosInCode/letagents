@@ -24,8 +24,9 @@ const provider = (runRoomTurn: NonNullable<ProviderActionPort["runRoomTurn"]>) =
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
@@ -595,6 +596,48 @@ test("handoff retires an unresolved provider turn without stopping it, and late 
     await reopened.close();
   } finally {
     late?.resolve({ turnId: "cleanup", outcome: "reply", text: "cleanup" });
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a late provider rejection after handoff is observed and cannot commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-late-rejection-"));
+  let store: SupervisedAgentInboxStore | null = null;
+  let delivery: SupervisedAgentDelivery | null = null;
+  let late: ReturnType<typeof deferred<{ turnId: string; outcome: "reply"; text: string }>> | null = null;
+  const unhandled: unknown[] = [];
+  const observeUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", observeUnhandled);
+  try {
+    store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const entered = deferred<void>(); late = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+    let published = 0;
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.markDispatched?.(); entered.resolve(); return late!.promise;
+    }), {
+      poll: async () => ({}), publish: async () => { published += 1; },
+    }, currentAuthority);
+    await delivery.pump(agent); await ingest(store);
+    const pump = delivery.pump(agent); await entered.promise;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        delivery.fenceAndDrain(),
+        new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("handoff did not retire the provider await within one second")), 1_000); }),
+      ]);
+    } finally { if (timeout) clearTimeout(timeout); }
+    late.reject(new Error("late provider failure"));
+    await pump;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, [], "the detached provider rejection is already observed");
+    assert.equal(published, 0, "a late rejection cannot publish");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", "a late rejection cannot mutate the ambiguous receipt");
+  } finally {
+    // Resolve if an assertion failed before the provider attached its observer.
+    late?.resolve({ turnId: "cleanup", outcome: "reply", text: "cleanup" });
+    process.off("unhandledRejection", observeUnhandled);
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
