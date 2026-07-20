@@ -430,6 +430,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex returned an unknown latest-turn state; refusing ambiguous turn control.");
     }
     if (active) {
+      await options.checkpointTurnStarted?.(turnId!);
       await options.markDispatched?.();
       const dispatchRead = await handle.client.request<ThreadReadResult>("thread/read", {
         threadId: handle.providerContinuationId,
@@ -467,6 +468,75 @@ export class CodexProviderAdapter implements ProviderAdapter {
       resumed: Boolean(text),
       state: text ? "working" : "idle",
     };
+  }
+
+  async inspectTurn(providerHandle: ProviderHandle, turnId: string): Promise<"active" | "terminal" | "unknown"> {
+    const handle = this.requireHandle(providerHandle);
+    const exactTurnId = turnId.trim();
+    if (!exactTurnId) return "unknown";
+    const read = await handle.client.request<ThreadReadResult>("thread/read", {
+      threadId: handle.providerContinuationId,
+      includeTurns: true,
+    });
+    if (read.thread?.id !== handle.providerContinuationId) return "unknown";
+    const turn = read.thread?.turns?.find((candidate) => candidate.id === exactTurnId);
+    const status = typeof turn?.status === "string" ? turn.status : turn?.status?.status;
+    if (!turn || !status) return "unknown";
+    if (isActiveCodexTurnStatus(status)) return "active";
+    return /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(status)) ? "terminal" : "unknown";
+  }
+
+  /**
+   * Stops the one legacy polling turn selected by durable identity.  First
+   * invocation discovers the latest active turn once; every replay with a
+   * target id is exact and must never redirect to a newer turn.
+   */
+  async controlExactTurn(
+    providerHandle: ProviderHandle,
+    options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> },
+  ): Promise<{ outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null }> {
+    const handle = this.requireHandle(providerHandle);
+    const expected = options.targetTurnId?.trim() || null;
+    const read = await handle.client.request<ThreadReadResult>("thread/read", {
+      threadId: handle.providerContinuationId,
+      includeTurns: true,
+    });
+    if (read.thread?.id !== handle.providerContinuationId) {
+      throw new ProviderTurnControlError("Codex exact turn control resolved a different continuation thread.", "uncertain");
+    }
+    const turn = expected
+      ? read.thread?.turns?.find((candidate) => candidate.id === expected)
+      : read.thread?.turns?.at(-1);
+    if (!turn) {
+      if (!expected) return { outcome: "no_active", targetTurnId: null };
+      throw new ProviderTurnControlError("Codex exact turn control cannot find the persisted target turn.", "uncertain");
+    }
+    const turnId = turn.id?.trim();
+    const status = typeof turn.status === "string" ? turn.status : turn.status?.status;
+    if (!turnId || !status) throw new ProviderTurnControlError("Codex exact turn control found an unknown target state.", "uncertain");
+    if (/^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(status))) {
+      return { outcome: "terminal", targetTurnId: turnId };
+    }
+    if (!isActiveCodexTurnStatus(status)) throw new ProviderTurnControlError("Codex exact turn control found an unknown target state.", "uncertain");
+    await options.checkpointTargetTurn(turnId);
+    // This is deliberately the final callback boundary before native I/O.
+    await options.markDispatched();
+    const dispatchRead = await handle.client.request<ThreadReadResult>("thread/read", {
+      threadId: handle.providerContinuationId,
+      includeTurns: true,
+    });
+    const dispatchTurn = dispatchRead.thread?.turns?.find((candidate) => candidate.id === turnId);
+    const dispatchStatus = typeof dispatchTurn?.status === "string" ? dispatchTurn.status : dispatchTurn?.status?.status;
+    if (!dispatchTurn || /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(dispatchStatus ?? ""))) {
+      return { outcome: "terminal", targetTurnId: turnId };
+    }
+    if (!isActiveCodexTurnStatus(dispatchStatus)) {
+      throw new ProviderTurnControlError("Codex exact turn control found an unknown target state after dispatch.", "uncertain");
+    }
+    await handle.client.request("turn/interrupt", { threadId: handle.providerContinuationId, turnId });
+    await this.waitForTurnBoundary(handle, turnId);
+    handle.state = "idle";
+    return { outcome: "interrupt_dispatched", targetTurnId: turnId };
   }
 
   /** Execute one durable inbox item on this exact app-server/thread only. */
@@ -633,6 +703,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
           LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+          ...(req.deliveryMode === "daemon_inbox" ? { LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1" } : {}),
         },
       } : {}),
     });
@@ -730,11 +801,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
         await this.emitTranscriptTail(handle);
       }
 
+      // Daemon-inbox Codex starts only an idle app-server/thread.  The daemon
+      // begins the first native turn after its durable inbox claim exists.
+      if (req.deliveryMode === "daemon_inbox") {
+        handle.state = "idle";
+        return handle;
+      }
+
       const prompt = buildCodexStartPrompt({
         roomIdentifier: req.roomId,
         joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
         cwd: req.cwd,
-        deliveryMode: "mcp_polling",
+        deliveryMode: req.deliveryMode ?? "mcp_polling",
         stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
         token: makeCodexStopToken(),
         suggestedDisplayName: req.agentDisplayName.trim(),

@@ -147,6 +147,7 @@ createSchema(database: DatabaseSync): void {
       model TEXT,
       charter TEXT NOT NULL,
       permission_profile_id TEXT,
+      delivery_mode TEXT NOT NULL DEFAULT 'mcp_polling' CHECK (delivery_mode IN ('mcp_polling','desktop_events','daemon_inbox')),
       provider_launch_policy_present INTEGER NOT NULL CHECK (provider_launch_policy_present IN (0, 1)),
       provider_launch_policy_undefined INTEGER NOT NULL CHECK (provider_launch_policy_undefined IN (0, 1)),
       provider_launch_policy_json TEXT
@@ -222,6 +223,7 @@ createSchema(database: DatabaseSync): void {
       action_id TEXT,
       turn_work_attempt_id TEXT,
       turn_execution_generation_id TEXT,
+      provider_turn_id TEXT,
       has_correction INTEGER,
       status TEXT,
       capability TEXT,
@@ -320,6 +322,8 @@ createSchema(database: DatabaseSync): void {
     const createdMetadataVersion = this.metadataSchemaVersion(database);
     if (createdMetadataVersion !== SCHEMA_VERSION) throw new Error(`Unsupported daemon manifest metadata schema version ${createdMetadataVersion}.`);
     this.validateV2Shape(database);
+    this.applyBoundedDeliveryV6Shape(database);
+    this.validateBoundedDeliveryV6Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
@@ -499,6 +503,8 @@ migrateV5ToV6(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
+    this.applyBoundedDeliveryV6Shape(database);
+    this.validateBoundedDeliveryV6Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -530,6 +536,8 @@ private migrateWorkerShapeToV6(database: DatabaseSync): boolean {
   this.validateV5Shape(database);
   this.applyV6Shape(database);
   this.validateV6Shape(database);
+  this.applyBoundedDeliveryV6Shape(database);
+  this.validateBoundedDeliveryV6Shape(database);
   return requiresScrub;
 }
 
@@ -539,12 +547,15 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
   }
   const needsLegacyPresenceRepair = this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")
     && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
+  const needsBoundedDeliveryRepair = !this.tableColumns(database, "agent_configurations").has("delivery_mode")
+    || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id");
   try {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     this.validateV6Shape(database);
+    this.validateBoundedDeliveryV6Shape(database);
     this.finishPendingV6SecretScrub(database);
-    if (!needsLegacyPresenceRepair) return;
+    if (!needsLegacyPresenceRepair && !needsBoundedDeliveryRepair) return;
   } catch (error) {
     // A pending scrub is safety-critical. Do not convert a failed VACUUM or
     // checkpoint into an unrelated shape-repair attempt that could claim the
@@ -561,10 +572,31 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV6Shape(database);
     this.validateV6Shape(database);
+    this.applyBoundedDeliveryV6Shape(database);
+    this.validateBoundedDeliveryV6Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
+  }
+}
+
+private applyBoundedDeliveryV6Shape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "agent_configurations").has("delivery_mode")) {
+    database.exec("ALTER TABLE agent_configurations ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'mcp_polling' CHECK (delivery_mode IN ('mcp_polling','desktop_events','daemon_inbox'))");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("provider_turn_id")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN provider_turn_id TEXT");
+  }
+}
+
+private validateBoundedDeliveryV6Shape(database: DatabaseSync): void {
+  const columns = this.tableColumns(database, "agent_configurations");
+  if (!columns.has("delivery_mode")) throw new Error("Daemon state v6 delivery_mode is missing.");
+  const invalid = database.prepare("SELECT 1 FROM agent_configurations WHERE delivery_mode NOT IN ('mcp_polling','desktop_events','daemon_inbox') LIMIT 1").get();
+  if (invalid) throw new Error("Daemon state v6 delivery_mode is invalid.");
+  if (!this.tableColumns(database, "turn_control_journals").has("provider_turn_id")) {
+    throw new Error("Daemon state v6 provider_turn_id is missing.");
   }
 }
 

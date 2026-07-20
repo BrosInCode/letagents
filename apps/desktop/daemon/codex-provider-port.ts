@@ -2,6 +2,7 @@ import type {
   ProviderActionAttachment,
   ProviderActionAttachTerminal,
   ProviderActionCapabilities,
+  ProviderExactTurnControlResult,
   ProviderActionHandle,
   ProviderActionPort,
   ProviderActionRef,
@@ -28,7 +29,9 @@ type NativeAdapter = {
   attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
-  controlTurn(handle: NativeHandle, correction?: string | null, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
+  controlTurn(handle: NativeHandle, correction?: string | null, options?: { checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
+  inspectTurn?(handle: NativeHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
+  controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
@@ -106,13 +109,25 @@ export class CodexProviderActionPort implements ProviderActionPort {
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
   }
 
-  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
+  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
     const native = this.required(handle);
     const result = await (await this.adapter()).controlTurn(native, correction, {
-      markDispatched: options?.markDispatched,
+      checkpointTurnStarted: options?.checkpointTurnStarted, markDispatched: options?.markDispatched,
     });
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
     return result;
+  }
+
+  async inspectTurn(handle: ProviderActionHandle, turnId: string): Promise<"active" | "terminal" | "unknown"> {
+    const adapter = await this.adapter();
+    if (!adapter.inspectTurn) throw new Error("Codex provider adapter does not support exact turn inspection.");
+    return adapter.inspectTurn(this.required(handle), turnId);
+  }
+
+  async controlExactTurn(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> }): Promise<ProviderExactTurnControlResult> {
+    const adapter = await this.adapter();
+    if (!adapter.controlExactTurn) throw new Error("Codex provider adapter does not support exact turn control.");
+    return adapter.controlExactTurn(this.required(handle), options);
   }
 
   async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {

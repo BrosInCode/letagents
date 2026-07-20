@@ -386,6 +386,7 @@ export function desktopSmokeSupervisorEntries(): DesktopSupervisorManifestEntry[
     condition: "none",
     lastError: null,
     permissionProfileId: "full_access",
+    deliveryMode: "daemon_inbox",
     createdBy: "desktop-smoke",
     createdAt: now,
     workspacePath: process.cwd(),

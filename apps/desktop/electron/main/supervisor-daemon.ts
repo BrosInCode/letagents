@@ -49,6 +49,7 @@ type WireEntry = {
   condition: DesktopSupervisorManifestEntry["condition"];
   last_error?: string | null;
   permission_profile_id: string | null;
+  delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
@@ -310,6 +311,9 @@ export class SupervisorDaemonClient {
       observed_state: "absent",
       condition: "none",
       permission_profile_id: input.permissionProfileId ?? null,
+      // Supervised Codex is daemon-driven.  This is a durable routing fact,
+      // deliberately separate from opaque native app-server launch policy.
+      delivery_mode: input.providerId === "codex" ? "daemon_inbox" : "mcp_polling",
       // A caller-supplied policy belongs to the selected native provider. Do
       // not reinterpret it as a LetAgents permission profile on its way to
       // the daemon. The Codex default remains only for the existing UI that
@@ -786,6 +790,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     condition: entry.condition,
     lastError: entry.last_error ?? null,
     permissionProfileId: entry.permission_profile_id,
+    deliveryMode: entry.delivery_mode ?? "mcp_polling",
     createdBy: entry.created_by,
     createdAt: entry.created_at,
     workspacePath: entry.workspace_path ?? null,
