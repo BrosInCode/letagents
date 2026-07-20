@@ -107,7 +107,7 @@
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
       :delivery-recovery-available="deliveryRetryAvailable"
-      :delivery-retry-key="deliveryRetryingKey"
+      :delivery-retry-keys="deliveryRetryingKeys"
       :revealed-message-id="revealedMessageId"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
@@ -444,7 +444,7 @@ const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
-const deliveryRetryingKey = ref<string | null>(null);
+const deliveryRetryingKeys = ref<ReadonlySet<string>>(new Set());
 const deliveryRetryNegotiated = ref(false);
 const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
 const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
@@ -1530,14 +1530,14 @@ function openAddAgentModal(): void {
 }
 
 async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): Promise<void> {
-  const retryKey = `${agentId}\u0000${sourceMessageId}`;
-  if (!deliveryRetryAvailable.value || deliveryRetryingKey.value === retryKey) return;
+  const retryKey = `${agentId}:${sourceMessageId}`;
+  if (!deliveryRetryAvailable.value || deliveryRetryingKeys.value.has(retryKey)) return;
   const entry = supervisorEntries.value.find((candidate) => candidate.id === agentId);
   if (!entry?.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
     pushActionToast("This delivery binding changed. Refresh the room before retrying.", "error", 6_000);
     return;
   }
-  deliveryRetryingKey.value = retryKey;
+  deliveryRetryingKeys.value = new Set([...deliveryRetryingKeys.value, retryKey]);
   try {
     await desktopIpc.supervisor!.retryRoomDelivery({
       entryId: entry.id,
@@ -1558,7 +1558,7 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
   } catch (error) {
     pushActionToast(error instanceof Error ? error.message : "Could not retry room delivery.", "error", 7_000);
   } finally {
-    deliveryRetryingKey.value = null;
+    const next = new Set(deliveryRetryingKeys.value); next.delete(retryKey); deliveryRetryingKeys.value = next;
   }
 }
 

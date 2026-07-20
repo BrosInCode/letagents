@@ -272,7 +272,7 @@ const props = withDefaults(defineProps<{
   testId?: string;
   deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
-  deliveryRetryKey?: string | null;
+  deliveryRetryKeys?: ReadonlySet<string>;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
@@ -280,7 +280,7 @@ const props = withDefaults(defineProps<{
 });
 
 function retryingReceipt(agentId: string): boolean {
-  return props.deliveryRetryKey === `${agentId}\u0000${props.message.id}`;
+  return props.deliveryRetryKeys?.has(`${agentId}:${props.message.id}`) === true;
 }
 
 const emit = defineEmits<{
