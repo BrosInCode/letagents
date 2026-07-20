@@ -130,13 +130,12 @@ export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSup
   });
   const metadata = toMetadata(response);
   try {
-    const assignedAgentKeys = metadata.allowedAgentKeys.length > 0 ? metadata.allowedAgentKeys : [MANUAL_GRANT_KEY];
+    if (metadata.allowedAgentKeys.length !== 1) {
+      throw new Error("A per-agent desktop grant must be scoped to exactly one agent identity.");
+    }
+    const agentKey = canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!);
     const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant);
-    const grants = Object.fromEntries(assignedAgentKeys.map((rawKey) => {
-      const agentKey = rawKey === MANUAL_GRANT_KEY ? rawKey : canonicalSupervisorGrantAgentKey(rawKey);
-      return [agentKey, { ...metadata, agentKey, encryptedToken }];
-    }));
-    await writeRegistry({ version: 2, grants });
+    await writeRegistry({ version: 2, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } } });
     return metadata;
   } catch (error) {
     // Do not leave an unusable, owner-scoped server grant behind when the
@@ -155,8 +154,11 @@ export async function getDesktopSupervisorGrantMetadata(): Promise<DesktopSuperv
 /** Main-process only: daemon launchers may read this; renderer IPC must not. */
 export async function readDesktopSupervisorGrantToken(): Promise<string | null> {
   const registry = await readRegistry();
-  const first = registry && Object.values(registry.grants)[0];
-  return first ? decryptSupervisorGrantFromStorage(first.encryptedToken) : null;
+  if (!registry) return null;
+  const manual = registry.grants[MANUAL_GRANT_KEY];
+  const values = Object.values(registry.grants);
+  const unambiguous = manual ?? (values.length === 1 ? values[0] : null);
+  return unambiguous ? decryptSupervisorGrantFromStorage(unambiguous.encryptedToken) : null;
 }
 
 /** Main-process only. Renderer IPC intentionally exposes metadata, never this value. */
@@ -181,6 +183,10 @@ export async function storeDesktopSupervisorGrantForAgent(input: {
 }): Promise<void> {
   const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
   if (!input.token.trim()) throw new Error("A supervisor grant is required.");
+  if (input.metadata.allowedAgentKeys.length !== 1
+    || canonicalSupervisorGrantAgentKey(input.metadata.allowedAgentKeys[0]!) !== agentKey) {
+    throw new Error("A per-agent desktop grant must be scoped to that exact one agent identity.");
+  }
   const registry = (await readRegistry()) ?? { version: 2, grants: {} };
   registry.grants[agentKey] = { ...input.metadata, agentKey, encryptedToken: encryptSupervisorGrantForStorage(input.token) };
   await writeRegistry(registry);

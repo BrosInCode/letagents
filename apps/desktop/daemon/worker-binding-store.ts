@@ -80,7 +80,8 @@ export class WorkerBindingStore {
     // Test/fence seam must remain outside the SQLite transaction: a stalled
     // pre-commit caller must not lock unrelated manifest work during handoff.
     await this.write(input);
-    const bound = await this.withMutation(async (database) => this.transaction(database, () => {
+    return this.withMutation(async (database) => {
+      const bound = await this.transaction(database, () => {
       const prior = this.read(database, input.entry_id);
       const watermark = this.readWatermark(database, input.entry_id);
       const sameSession = prior?.agent_session_id === input.agent_session_id;
@@ -112,16 +113,20 @@ export class WorkerBindingStore {
         nextEpoch, binding.updated_at);
       this.upsertWatermark(database, input.entry_id, nextEpoch, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       return { binding, bindingEpoch: nextEpoch, priorCredentialRef: prior?.credential_ref ?? null };
-    }));
-    if (bound.priorCredentialRef) this.credentials.delete(bound.priorCredentialRef);
-    this.credentials.set(bound.binding.credential_ref, {
-      entry_id: bound.binding.entry_id,
-      agent_session_id: bound.binding.agent_session_id,
-      execution_generation_id: bound.binding.execution_generation_id,
-      binding_epoch: bound.bindingEpoch,
-      token: input.agent_session_token,
+      });
+      // SQLite is committed but this entry remains inside the same mutation
+      // queue, so a concurrent credential install cannot be overwritten by a
+      // stale formal bind's delayed vault write.
+      if (bound.priorCredentialRef) this.credentials.delete(bound.priorCredentialRef);
+      this.credentials.set(bound.binding.credential_ref, {
+        entry_id: bound.binding.entry_id,
+        agent_session_id: bound.binding.agent_session_id,
+        execution_generation_id: bound.binding.execution_generation_id,
+        binding_epoch: bound.bindingEpoch,
+        token: input.agent_session_token,
+      });
+      return bound.binding;
     });
-    return bound.binding;
   }
 
   async checkpointCursor(entryId: string, agentSessionId: string, executionGenerationId: string, roomCursor: string): Promise<WorkerSessionBinding> {
