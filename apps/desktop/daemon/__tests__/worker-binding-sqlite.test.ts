@@ -22,6 +22,14 @@ function legacyRaw(entry = "agent_a") {
   return JSON.stringify({ version: 1, bindings: { [entry]: { ...input(entry), room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" } } });
 }
 function checksum(raw: string) { return createHash("sha256").update(raw).digest("hex"); }
+function assertRedactedBackup(value: string, source: string) {
+  const evidence = JSON.parse(value) as { version: number; source_checksum: string; bindings: Array<Record<string, unknown>> };
+  assert.equal(evidence.version, 1);
+  assert.equal(evidence.source_checksum, checksum(source));
+  assert.equal(evidence.bindings.length, 1);
+  assert.equal(evidence.bindings[0]?.entry_id, "agent_a");
+  assert.doesNotMatch(value, /agent_session_token|token-session_a/);
+}
 
 test("slow native publication does not block another binding checkpoint or publication", async () => {
   const env = await fixture(); try {
@@ -99,7 +107,7 @@ test("synchronized fresh multi-process importers converge through WAL and schema
       for (const child of children) child.send("go");
       await Promise.all(children.map((child) => new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`fresh importer exited ${code}`))))));
     }
-    assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), legacyRaw("agent_a"));
+    assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), legacyRaw("agent_a"));
     assert.equal((await stat(`${env.legacy}.migrated-backup`)).mode & 0o777, 0o600);
   } finally { await env.cleanup(); }
 });
@@ -221,7 +229,7 @@ test("a durable backup exists before the migration record and an A→B swap quar
     await writeFile(env.legacy, rawA);
     let backupWasDurableBeforeRecord = false;
     const store = new WorkerBindingStore(env.legacy, undefined, env.database, async () => {
-      backupWasDurableBeforeRecord = await readFile(`${env.legacy}.migrated-backup`, "utf8") === rawA;
+      try { assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA); backupWasDurableBeforeRecord = true; } catch { backupWasDurableBeforeRecord = false; }
       await writeFile(env.legacy, rawB, { mode: 0o644 });
     });
     await assert.rejects(() => store.list(), /unexpected legacy evidence was quarantined/);
@@ -232,7 +240,7 @@ test("a durable backup exists before the migration record and an A→B swap quar
     db.close();
     const backup = `${env.legacy}.migrated-backup`;
     assert.equal(backupWasDurableBeforeRecord, true, "the crash-window hook observes A's fsynced backup before the record commits");
-    assert.equal(await readFile(backup, "utf8"), rawA);
+    assertRedactedBackup(await readFile(backup, "utf8"), rawA);
     assert.equal((await stat(backup)).mode & 0o777, 0o600);
     const unexpected = (await readdir(env.root)).filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
     assert.equal(unexpected.length, 1);
@@ -252,7 +260,7 @@ test("a crash after atomic claim recovers its one orphan instead of starting wit
     const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
     assert.equal((await reopened.get("agent_a"))?.agent_session_id, "session_a");
     await reopened.close();
-    assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
+    assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
     const db = new DatabaseSync(env.database);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM migration_records").get() as { count: number }).count, 1);
     db.close();
@@ -325,7 +333,7 @@ test("reopen retires matching post-record crash claims and preserves every diffe
     const unexpected = names.filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
     assert.equal(unexpected.length, 1);
     assert.equal(await readFile(join(env.root, unexpected[0]!), "utf8"), rawB);
-    assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
+    assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
   } finally { await env.cleanup(); }
 });
 
@@ -398,7 +406,7 @@ test("concurrent valid legacy importers converge on one exact private backup", a
     assert.equal(left.length, 1); assert.equal(right.length, 1);
     await one.close(); await two.close();
     const backup = `${env.legacy}.migrated-backup`;
-    assert.equal(await readFile(backup, "utf8"), rawA);
+    assertRedactedBackup(await readFile(backup, "utf8"), rawA);
     assert.equal((await stat(backup)).mode & 0o777, 0o600);
     await assert.rejects(() => readFile(env.legacy, "utf8"), { code: "ENOENT" });
   } finally { await env.cleanup(); }

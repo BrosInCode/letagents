@@ -68,6 +68,20 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
   } finally { await env.cleanup(); }
 });
 
+test("ingress cannot silently change an agent room and a non-head cannot block", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [first] = await store.ingestPoll({ agent_id: "stone", room_id: "room_A", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    const [second] = await store.ingestPoll({ agent_id: "stone", room_id: "room_A", last_observed_message_id: "2", messages: [{ source_message_id: "2", source_message: {}, activation: {} }] });
+    await assert.rejects(() => store.ingestPoll({ agent_id: "stone", room_id: "room_B", last_observed_message_id: "3", messages: [] }), /room changed/);
+    await assert.rejects(() => store.transition(second!.inbox_item_id, "blocked", { last_error: "must not hide head" }), /current FIFO head/);
+    await store.transition(first!.inbox_item_id, "dispatching");
+    await store.transition(first!.inbox_item_id, "blocked", { last_error: "actual head" });
+    assert.equal((await store.receipts("stone"))[1]!.blocked_by_inbox_item_id, first!.inbox_item_id);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("worker session secrets are memory-only and must be re-delivered after reopen", async () => {
   const env = await fixture(); try {
     const token = "do-not-write-this-secret-to-sqlite";

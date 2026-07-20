@@ -341,6 +341,10 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    // This marker is committed with the secret-column removal. It survives a
+    // crash between COMMIT and VACUUM, forcing the next opener to finish the
+    // physical scrub before treating v6 as healthy.
+    run(database.prepare("INSERT OR REPLACE INTO migration_records(migration_key, checksum, imported_at) VALUES ('v6-worker-token-scrub', 'pending', ?)") , new Date().toISOString());
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
   } catch (error) {
@@ -492,9 +496,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     // The old table contained a credential. secure_delete clears freed cells;
     // checkpoint + VACUUM rewrites both main and WAL before this initializer
     // returns a live v6 connection.
-    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    database.exec("VACUUM");
-    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    this.finishV6SecretScrub(database);
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
@@ -528,6 +530,7 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     this.validateV6Shape(database);
+    this.finishPendingV6SecretScrub(database);
     if (!needsLegacyPresenceRepair) return;
   } catch {
     // Do not validate or recreate the retired v5 credential shape on normal
@@ -546,6 +549,22 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
   }
+}
+
+private finishPendingV6SecretScrub(database: DatabaseSync): void {
+  const pending = database.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as Row | undefined;
+  if (pending?.checksum === "pending") this.finishV6SecretScrub(database);
+}
+
+private finishV6SecretScrub(database: DatabaseSync): void {
+  database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  database.exec("VACUUM");
+  database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    run(database.prepare("DELETE FROM migration_records WHERE migration_key='v6-worker-token-scrub' AND checksum='pending'"));
+    database.exec("COMMIT");
+  } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
 }
 
 applyV4Shape(database: DatabaseSync): void {
@@ -890,7 +909,13 @@ validateV6Shape(database: DatabaseSync): void {
   for (const [name, expected] of Object.entries(indexes)) {
     const listed = (database.prepare(`PRAGMA index_list(${expected.table})`).all() as Row[]).find((row) => row.name === name);
     const terms = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Row[]).filter((row) => Number(row.key) === 1).sort((a, b) => Number(a.seqno) - Number(b.seqno));
-    if (!listed || Number(listed.unique) !== expected.unique || terms.length !== expected.columns.length || terms.some((term, index) => term.name !== expected.columns[index] || Number(term.desc) !== (name.endsWith("_current") && index === terms.length - 1 ? 1 : 0) || String(term.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v6 index ${name} is invalid.`);
+    if (!listed || Number(listed.unique) !== expected.unique || Number(listed.partial) !== 0
+      || String(listed.origin) !== "c" || terms.length !== expected.columns.length
+      || terms.some((term, index) => Number(term.cid) < 0 || term.name !== expected.columns[index]
+        || Number(term.desc) !== (name.endsWith("_current") && index === terms.length - 1 ? 1 : 0)
+        || String(term.coll).toUpperCase() !== "BINARY")) {
+      throw new Error(`Daemon state v6 index ${name} is invalid.`);
+    }
   }
 }
 

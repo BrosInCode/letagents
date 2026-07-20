@@ -2293,8 +2293,11 @@ export class SupervisorDaemon {
   private async isExactCredentialRoute(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number }): Promise<boolean> {
     if (!Number.isSafeInteger(input.daemon_generation) || input.daemon_generation !== this.singleton.currentGeneration) return false;
     const entry = await this.store.getEntry(input.entry_id);
-    if (!entry || entry.room_id !== input.room_id || entry.work_attempt_id !== input.work_attempt_id
-      || entry.provider_ref?.execution_generation_id !== input.execution_generation_id) return false;
+    // During resume the manifest already names the successor while the only
+    // credential-bearing binding intentionally remains on its predecessor
+    // until exact native proof. The binding generation is the authority fence
+    // for this handoff window; room/work-attempt still bind it to this entry.
+    if (!entry || entry.room_id !== input.room_id || entry.work_attempt_id !== input.work_attempt_id) return false;
     const binding = await this.workerBindings.get(input.entry_id);
     return Boolean(binding && binding.room_id === input.room_id && binding.work_attempt_id === input.work_attempt_id
       && binding.execution_generation_id === input.execution_generation_id && binding.agent_session_id === input.agent_session_id);

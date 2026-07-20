@@ -44,7 +44,8 @@ export class SupervisedAgentInboxStore {
   async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; expected_cursor?: string | null; messages: readonly IngressMessage[] }): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const cursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
+      const cursor = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
+      if (cursor && String(cursor.room_id) !== input.room_id) throw new Error("Supervised inbox ingress room changed for the exact agent identity.");
       const currentCursor = cursor?.last_observed_message_id === null || cursor?.last_observed_message_id === undefined ? null : String(cursor.last_observed_message_id);
       if (input.expected_cursor !== undefined && input.expected_cursor !== currentCursor) {
         throw new Error("Supervised inbox ingress cursor changed before this poll could commit.");
@@ -97,7 +98,10 @@ export class SupervisedAgentInboxStore {
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (!transitions[item.state].includes(next)) throw new Error(`Invalid supervised inbox transition: ${item.state} -> ${next}.`);
-      if (next === "dispatching") this.assertHeadClaim(database, item);
+      // Every in-flight state is causally owned by the true FIFO head. This
+      // prevents a later item becoming blocked and hiding the real stall.
+      if (!finalStates.has(next)) this.assertCurrentHead(database, item);
+      if (next === "dispatching" && item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
       const attempts = next === "dispatching" ? item.attempt_count + 1 : item.attempt_count;
       const timestamp = this.now(); const acknowledged = finalStates.has(next) ? timestamp : null;
       run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
@@ -112,7 +116,7 @@ export class SupervisedAgentInboxStore {
       if (!row) return null;
       const item = rowToItem(row);
       if (item.state !== "pending") return null;
-      this.assertHeadClaim(database, item);
+      this.assertCurrentHead(database, item);
       const timestamp = this.now();
       run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',attempt_count=attempt_count+1,updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
@@ -122,7 +126,8 @@ export class SupervisedAgentInboxStore {
   async receipts(agentId: string): Promise<SupervisedInboxReceipt[]> {
     return this.read(async (database) => {
       const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence").all(agentId) as Row[];
-      const firstBlocked = rows.find((row) => String(row.state) === "blocked");
+      const head = rows.find((row) => !finalStates.has(String(row.state) as SupervisedInboxState));
+      const firstBlocked = head && String(head.state) === "blocked" ? head : undefined;
       return rows.map((row) => {
         const item = rowToItem(row);
         if (firstBlocked && item.fifo_sequence > Number(firstBlocked.fifo_sequence) && !finalStates.has(item.state)) {
@@ -147,9 +152,9 @@ export class SupervisedAgentInboxStore {
   }
   private require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }
   private requireNumericCursor(cursor: string): void { if (!/^(?:msg_)?\d+$/.test(cursor)) throw new Error("Supervised inbox cursor must be a numeric room message id."); }
-  private assertHeadClaim(database: DatabaseSync, item: SupervisedInboxItem): void {
+  private assertCurrentHead(database: DatabaseSync, item: SupervisedInboxItem): void {
     const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
-    if (!head || String(head.inbox_item_id) !== item.inbox_item_id || item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
+    if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
   }
 }
 
