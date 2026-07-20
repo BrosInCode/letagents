@@ -105,11 +105,13 @@
       :participants="roomParticipants"
       :presence="roomPresence"
       :local-agent-work="localAgentWork"
+      :delivery-receipts-by-message="deliveryReceiptsByMessage"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
       :resolving-permission-ids="resolvingComposerPermissionIds"
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
+      :supervisor-entries="supervisorEntries"
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
       :initial-draft="chatDraftText"
@@ -122,6 +124,7 @@
       @open-agent-detail="openAgentDetail"
       @open-add-agent="openAddAgentModal"
       @open-permission-detail="openComposerPermissionDetail"
+      @retry-delivery="retryRoomAgentDelivery"
       @resolve-permission="resolveComposerPermission"
       @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
@@ -162,6 +165,7 @@
         :board-settings="boardSettings"
         :presence="roomPresence"
         :workers="workers"
+        :supervisor-entries="supervisorEntries"
         :selected-task-id="boardSelectedTaskId"
         @task-updated="emit('task-updated', $event)"
         @refresh-room="emit('refresh-room')"
@@ -204,12 +208,14 @@
         :presence="roomPresence"
         :reasoning-sessions="reasoningSessions"
         :room-git-room="room.gitRoom"
+        :room-identifier="room.identifier"
         :room-artifacts="roomArtifacts"
         :activity-history-request="activityHistoryRequest"
         :artifact-task-filter-id="artifactTimelineTaskFilterId"
         :tasks="tasks"
         :messages="visibleMessages"
         :workers="workers"
+        :supervisor-entries="supervisorEntries"
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetail"
@@ -416,6 +422,8 @@ const emit = defineEmits<{
   "choose-worktree": [rootPath: string];
   "open-repo-root": [rootPath: string];
   "add-agent-open-request-consumed": [];
+  /** Placeholder until the daemon exposes a receipt retry control endpoint. */
+  "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -458,6 +466,13 @@ const eventsUnseenCount = ref(0);
 const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+const deliveryReceiptsByMessage = computed(() => {
+  const grouped: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>> = {};
+  for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
+    (grouped[receipt.sourceMessageId] ??= []).push({ agentId: entry.id, agentName: entry.displayName, state: receipt.state, blockedByMessageId: receipt.blockedByMessageId });
+  }
+  return grouped;
+});
 provide(managedAgentSessionsKey, {
   sessions: shallowReadonly(managedAgentSessions),
   refresh: refreshManagedAgentSessions,
@@ -1498,6 +1513,12 @@ function openRules(): void {
 
 function openAddAgentModal(): void {
   addAgentModalOpen.value = true;
+}
+
+function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): void {
+  // Deliberately emit intent only. There is no daemon retry endpoint yet, so
+  // this must not optimistically mutate a receipt or claim a retry succeeded.
+  emit("retry-room-agent-delivery", { agentId, sourceMessageId });
 }
 
 function refreshManagedAgentSessions(): Promise<void> {

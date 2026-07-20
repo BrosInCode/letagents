@@ -54,6 +54,7 @@
         :search-active="parent.id === activeSearchMessageId"
         :thread-message-id="parent.id"
         :test-id="`room-thread-message-${parent.id}`"
+        :delivery-receipts="deliveryReceiptsByMessage[parent.id] || []"
         @quote-reply="quoteInThread(parent)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
         @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -62,6 +63,7 @@
         @open-agent="$emit('open-agent', $event)"
         @open-github-event="$emit('open-github-event', $event)"
         @open-task="$emit('open-task', $event)"
+        @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
       />
 
       <div class="room-thread-divider">
@@ -87,6 +89,7 @@
           :search-active="reply.id === activeSearchMessageId"
           :thread-message-id="reply.id"
           :test-id="`room-thread-reply-${reply.id}`"
+          :delivery-receipts="deliveryReceiptsByMessage[reply.id] || []"
           @quote-reply="quoteInThread(reply)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
           @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -95,6 +98,7 @@
           @open-agent="$emit('open-agent', $event)"
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
         />
       </template>
 
@@ -232,6 +236,7 @@ const props = defineProps<{
   searchQuery: string;
   activeSearchMessageId: string | null;
   taskReferenceIds: ReadonlySet<string>;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
 }>();
 
 const emit = defineEmits<{
@@ -246,6 +251,7 @@ const emit = defineEmits<{
   "pick-attachments": [];
   "remove-attachment": [uploadId: string];
   "stage-dropped-attachments": [files: File[]];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
 const draft = ref("");
