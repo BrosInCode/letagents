@@ -439,9 +439,9 @@ test("Codex exact legacy-turn control proves no-active and persisted terminal bo
     return original<T>(method, params);
   };
   client.requests.length = 0;
-  const callbacks = { checkpoint: 0, dispatch: 0 };
+  const callbacks = { checkpointedTurnIds: [] as string[], dispatch: 0 };
   const options = {
-    checkpointTargetTurn: async () => { callbacks.checkpoint += 1; },
+    checkpointTargetTurn: async (turnId: string) => { callbacks.checkpointedTurnIds.push(turnId); },
     markDispatched: async () => { callbacks.dispatch += 1; },
   };
   assert.deepEqual(await adapter.controlExactTurn!(handle, options), { outcome: "no_active", targetTurnId: null });
@@ -449,7 +449,7 @@ test("Codex exact legacy-turn control proves no-active and persisted terminal bo
   assert.deepEqual(await adapter.controlExactTurn!(handle, { ...options, targetTurnId: "turn-polling" }), {
     outcome: "terminal", targetTurnId: "turn-polling",
   });
-  assert.deepEqual(callbacks, { checkpoint: 0, dispatch: 0 });
+  assert.deepEqual(callbacks, { checkpointedTurnIds: ["turn-polling"], dispatch: 0 }, "a discovered terminal latest is durably fenced before return and cannot be retargeted to turn-newer");
   assert.equal(client.requests.some((request) => request.method === "turn/interrupt"), false);
 });
 

@@ -519,7 +519,7 @@ export class SupervisedAgentDelivery {
   private daemonIngressAllowed(agent: SupervisedIngressAgent): boolean {
     // Older non-Codex adapters retain their established mcp-polling path. New
     // Codex delivery must present the committed daemon_inbox ownership fact.
-    return agent.provider !== "codex" || agent.deliveryMode === undefined || agent.deliveryMode === "daemon_inbox";
+    return agent.provider !== "codex" || agent.deliveryMode === "daemon_inbox";
   }
 
   private currentRefreshEpoch(agentId: string): number { return this.refreshEpochs.get(agentId) ?? 0; }

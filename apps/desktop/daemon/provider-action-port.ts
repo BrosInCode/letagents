@@ -94,7 +94,7 @@ export interface ProviderActionPort {
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderTurnControlResult>;
   inspectTurn?(handle: ProviderActionHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
-  controlExactTurn?(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> }): Promise<ProviderExactTurnControlResult>;
+  controlExactTurn?(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: {
     /** Durable intent checkpoint; completes before the first native turn/start side effect. */
     beforeNativeDispatch?: () => Promise<void>;

@@ -74,6 +74,8 @@ export interface ProviderExactTurnControlOptions {
   checkpointTargetTurn: (turnId: string) => Promise<void>;
   /** Must be the final awaited callback before native turn/interrupt. */
   markDispatched: () => Promise<void>;
+  /** Detach only this daemon's observation; never stop the native provider. */
+  detachSignal?: AbortSignal;
 }
 
 export type ProviderExactTurnControlResult = {
