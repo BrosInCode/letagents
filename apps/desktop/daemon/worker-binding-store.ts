@@ -168,13 +168,14 @@ export class WorkerBindingStore {
   }
 
   async unbind(entryId: string, expectedSessionId?: string, expectedExecutionGenerationId?: string): Promise<boolean> {
-    return this.withMutation(async (database) => this.transaction(database, () => {
+    const result = await this.withMutation(async (database) => this.transaction(database, () => {
       const current = this.read(database, entryId);
-      if (!current || (expectedSessionId && current.agent_session_id !== expectedSessionId) || (expectedExecutionGenerationId && current.execution_generation_id !== expectedExecutionGenerationId)) return false;
-      this.credentials.delete(current.credential_ref);
+      if (!current || (expectedSessionId && current.agent_session_id !== expectedSessionId) || (expectedExecutionGenerationId && current.execution_generation_id !== expectedExecutionGenerationId)) return { removed: false, credentialRef: null as string | null };
       run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id = ?"), entryId);
-      return true;
+      return { removed: true, credentialRef: current.credential_ref };
     }));
+    if (result.credentialRef) this.credentials.delete(result.credentialRef);
+    return result.removed;
   }
 
   /** Returns the exact in-memory credential, never a persisted value. */
@@ -213,7 +214,7 @@ export class WorkerBindingStore {
   }
 
   private async finalizePublication(reservation: Reservation, outcome: "accepted" | "rejected" | "transport_error"): Promise<void> {
-    await this.withMutation(async (database) => this.transaction(database, () => {
+    const revoked = await this.withMutation(async (database) => this.transaction(database, () => {
       // v4's state vocabulary predates transport-error observability. Keep a
       // durable failed reservation, but only an explicit server rejection may
       // revoke authority; timeout/throw must leave it usable.
@@ -227,11 +228,13 @@ export class WorkerBindingStore {
           UNION ALL SELECT reservation_id, sequence FROM worker_generation_verifications WHERE entry_id=?
         ) ORDER BY sequence DESC LIMIT 1`).get(reservation.binding.entry_id, reservation.binding.entry_id) as Row | undefined;
         if (latest?.reservation_id === reservation.reservationId && Number(latest.sequence) === reservation.sequence) {
-          this.credentials.delete(reservation.binding.credential_ref);
           run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id=? AND binding_epoch=? AND execution_generation_id=? AND agent_session_id=?"), reservation.binding.entry_id, reservation.bindingEpoch, reservation.binding.execution_generation_id, reservation.binding.agent_session_id);
+          return reservation.binding.credential_ref;
         }
       }
+      return null;
     }));
+    if (revoked) this.credentials.delete(revoked);
   }
 
   private async reserveVerification(input: { entryId: string; roomId: string; workAttemptId: string; fromExecutionGenerationId: string; toExecutionGenerationId: string; agentSessionId: string }): Promise<{ kind: "idempotent"; binding: WorkerSessionBinding } | { kind: "reserved"; reservation: Reservation }> {
@@ -250,7 +253,7 @@ export class WorkerBindingStore {
   }
 
   private async finalizeVerification(reservation: Reservation, input: { entryId: string; fromExecutionGenerationId: string; toExecutionGenerationId: string; agentSessionId: string }, accepted: boolean): Promise<{ binding: WorkerSessionBinding; advanced: boolean; accepted: boolean }> {
-    return this.withMutation(async (database) => this.transaction(database, () => {
+    const result = await this.withMutation(async (database) => this.transaction(database, () => {
       const current = this.read(database, input.entryId); const now = new Date().toISOString();
       if (!accepted) { run(database.prepare("UPDATE worker_generation_verifications SET state='failed', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId); return { binding: current ?? reservation.binding, advanced: false, accepted: false }; }
       const epoch = current ? this.readBindingEpoch(database, input.entryId) : -1;
@@ -258,10 +261,6 @@ export class WorkerBindingStore {
         run(database.prepare("UPDATE worker_session_bindings SET execution_generation_id=?, updated_at=? WHERE entry_id=? AND binding_epoch=? AND execution_generation_id=? AND agent_session_id=?"), input.toExecutionGenerationId, now, input.entryId, epoch, input.fromExecutionGenerationId, input.agentSessionId);
         run(database.prepare("UPDATE worker_generation_verifications SET state='accepted', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId);
         const binding = this.read(database, input.entryId)!;
-        const credential = this.credentials.get(binding.credential_ref);
-        if (credential && credential.entry_id === binding.entry_id && credential.agent_session_id === binding.agent_session_id && credential.binding_epoch === epoch && credential.execution_generation_id === input.fromExecutionGenerationId) {
-          this.credentials.set(binding.credential_ref, { ...credential, execution_generation_id: binding.execution_generation_id });
-        }
         return { binding, advanced: true, accepted: true };
       }
       run(database.prepare("UPDATE worker_generation_verifications SET state='lost_race', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId);
@@ -271,6 +270,13 @@ export class WorkerBindingStore {
         && current.work_attempt_id === reservation.binding.work_attempt_id) return { binding: current, advanced: false, accepted: true };
       return { binding: current ?? reservation.binding, advanced: false, accepted: false };
     }));
+    if (result.advanced) {
+      const credential = this.credentials.get(result.binding.credential_ref);
+      if (credential && credential.entry_id === result.binding.entry_id && credential.agent_session_id === result.binding.agent_session_id && credential.binding_epoch === this.readBindingEpoch(await this.getDatabase(), result.binding.entry_id) && credential.execution_generation_id === input.fromExecutionGenerationId) {
+        this.credentials.set(result.binding.credential_ref, { ...credential, execution_generation_id: result.binding.execution_generation_id });
+      }
+    }
+    return result;
   }
 
   private match(database: DatabaseSync, entryId: string, sessionId: string, generationId: string): WorkerSessionBinding {
@@ -462,7 +468,7 @@ export class WorkerBindingStore {
       throw error;
     }
     await chmod(backup, 0o600);
-    if (checksumOf(raw) !== expectedChecksum) {
+    if (!isRedactedLegacyBackup(raw, expectedChecksum)) {
       await this.chmodIfPresent(this.legacyJsonPath);
       throw new Error("Legacy worker binding migration integrity error: migrated backup does not match the committed migration record.");
     }
@@ -475,7 +481,9 @@ export class WorkerBindingStore {
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
       handle = await open(temporary, "wx", 0o600);
-      await handle.writeFile(raw, "utf8");
+      // Recovery evidence proves the exact imported source without retaining
+      // its bearer token in a second filesystem artifact.
+      await handle.writeFile(redactedLegacyBackup(raw, expectedChecksum), "utf8");
       await handle.sync();
     } finally { await handle?.close(); }
     try {
@@ -675,6 +683,25 @@ export class WorkerBindingStore {
 }
 
 function rowToBinding(row: Row): WorkerSessionBinding { return { entry_id: String(row.entry_id), room_id: String(row.room_id), work_attempt_id: String(row.work_attempt_id), execution_generation_id: String(row.execution_generation_id), agent_session_id: String(row.agent_session_id), credential_ref: String(row.credential_ref), api_url: String(row.api_url), room_cursor: row.room_cursor === null ? null : String(row.room_cursor), last_sequence: Number(row.last_sequence), last_observed_at_ms: Number(row.last_observed_at_ms), updated_at: String(row.updated_at) }; }
+
+function redactedLegacyBackup(raw: string, checksum: string): string {
+  const parsed = JSON.parse(raw) as LegacyBindings;
+  const bindings = Object.values(parsed.bindings).map((binding) => ({
+    entry_id: binding.entry_id, room_id: binding.room_id, work_attempt_id: binding.work_attempt_id,
+    execution_generation_id: binding.execution_generation_id, agent_session_id: binding.agent_session_id,
+    api_url: new URL(binding.api_url).origin, room_cursor: binding.room_cursor,
+    last_sequence: binding.last_sequence, last_observed_at_ms: binding.last_observed_at_ms, updated_at: binding.updated_at,
+  }));
+  return `${JSON.stringify({ version: 1, source_checksum: checksum, bindings })}\n`;
+}
+
+function isRedactedLegacyBackup(raw: string, checksum: string): boolean {
+  try {
+    const value = JSON.parse(raw) as { version?: unknown; source_checksum?: unknown; bindings?: unknown };
+    return value.version === 1 && value.source_checksum === checksum && Array.isArray(value.bindings)
+      && !/agent_session_token|session_token/.test(raw);
+  } catch { return false; }
+}
 function parseRoomMessageNumber(value: string | null): number | null { const match = value && /^msg_(\d+)$/.exec(value); const parsed = match ? Number(match[1]) : NaN; return Number.isSafeInteger(parsed) ? parsed : null; }
 function defaultDatabasePath(legacyJsonPath: string): string {
   // SupervisorDaemon always injects the canonical path. Standalone tooling

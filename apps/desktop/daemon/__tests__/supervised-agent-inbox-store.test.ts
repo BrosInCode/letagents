@@ -29,6 +29,9 @@ test("poll ingestion advances its cursor atomically, deduplicates replay, and re
     assert.equal((await store.cursor("stone"))?.last_observed_message_id, "3");
     await store.ingestPoll({ agent_id: "stone", room_id: "room", last_observed_message_id: null, messages: [] });
     assert.equal((await store.cursor("stone"))?.last_observed_message_id, "3", "a replay without a cursor cannot regress durable progress");
+    await store.ingestPoll({ agent_id: "stone", room_id: "room", last_observed_message_id: "1", messages: [] });
+    assert.equal((await store.cursor("stone"))?.last_observed_message_id, "3", "a delayed older poll cannot regress the cursor");
+    await assert.rejects(() => store.ingestPoll({ agent_id: "stone", room_id: "room", expected_cursor: "2", last_observed_message_id: "4", messages: [] }), /cursor changed/);
     assert.equal((await store.head("stone"))?.source_message_id, "1");
     assert.match(first[0]!.action_id, /stone:1:action:v1$/);
     assert.match(first[0]!.reply_client_message_id, /stone:1:reply:v1$/);
@@ -51,6 +54,7 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
     const [blocked] = await store.ingestPoll({ agent_id: "blocked", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "b", source_message: {}, activation: {} }] });
     const [later] = await store.ingestPoll({ agent_id: "blocked", room_id: "room", last_observed_message_id: "2", messages: [{ source_message_id: "c", source_message: {}, activation: {} }] });
     await store.transition(blocked!.inbox_item_id, "dispatching");
+    await assert.rejects(() => store.transition(later!.inbox_item_id, "dispatching"), /FIFO head/);
     await store.transition(blocked!.inbox_item_id, "blocked", { last_error: "terminal failure" });
     assert.equal((await store.head("blocked"))?.inbox_item_id, blocked!.inbox_item_id);
     const blockedReceipts = await store.receipts("blocked");
@@ -59,6 +63,7 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
     assert.equal(retriedBlocked.blocked_by_inbox_item_id, null);
     assert.equal(retriedBlocked.next_attempt_at_ms, null);
     assert.equal(later!.state, "pending");
+    assert.equal((await store.claimHead("blocked"))?.inbox_item_id, blocked!.inbox_item_id);
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -119,6 +124,34 @@ test("generation rollover preserves only the exact in-memory credential authorit
     assert.equal(result.advanced, true);
     assert.equal(await store.credentialFor(result.binding), "memory-only");
     assert.equal(await store.credentialFor(binding), null, "the predecessor generation cannot borrow the credential");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("legacy import retains token-free recovery evidence", async () => {
+  const env = await fixture(); try {
+    const secret = "legacy-secret-must-not-survive";
+    await (await import("node:fs/promises")).writeFile(env.legacy, JSON.stringify({ version: 1, bindings: {
+      stone: { entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: secret, api_url: "https://letagents.test", room_cursor: null, last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-01-01T00:00:00.000Z" },
+    } }));
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await store.list(); await store.close();
+    const evidence = await readFile(`${env.legacy}.migrated-backup`, "utf8");
+    assert.doesNotMatch(evidence, new RegExp(secret));
+    assert.doesNotMatch(evidence, /agent_session_token/);
+  } finally { await env.cleanup(); }
+});
+
+test("failed durable unbind does not revoke the in-memory credential", async () => {
+  const env = await fixture(); try {
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const binding = await store.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: "still-live", api_url: "https://letagents.test" });
+    const database = new DatabaseSync(env.database);
+    database.exec("CREATE TRIGGER reject_worker_unbind BEFORE DELETE ON worker_session_bindings BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END");
+    database.close();
+    await assert.rejects(() => store.unbind("stone", "session", "run"), /injected delete failure/);
+    assert.equal(await store.credentialFor(binding), "still-live");
+    assert.ok(await store.get("stone"));
     await store.close();
   } finally { await env.cleanup(); }
 });
