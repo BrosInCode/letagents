@@ -131,7 +131,16 @@
           >
             View earlier message
           </button>
-          <button v-if="receipt.state === 'blocked'" type="button" :aria-label="`Retry delivery for ${receipt.agentName}`" @click="$emit('retry-delivery', receipt.agentId, message.id)">Retry</button>
+          <template v-if="receipt.state === 'blocked'">
+            <button
+              type="button"
+              :disabled="!deliveryRecoveryAvailable"
+              :aria-label="deliveryRecoveryAvailable ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
+              :title="deliveryRecoveryAvailable ? 'Retry delivery' : 'Retry will be available when delivery recovery is connected'"
+              @click="deliveryRecoveryAvailable && $emit('retry-delivery', receipt.agentId, message.id)"
+            >{{ deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+            <small v-if="!deliveryRecoveryAvailable">Retry will be available when delivery recovery is connected.</small>
+          </template>
         </li>
       </ul>
 
@@ -262,9 +271,11 @@ const props = withDefaults(defineProps<{
   threadMessageId?: string;
   testId?: string;
   deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>;
+  deliveryRecoveryAvailable?: boolean;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
+  deliveryRecoveryAvailable: false,
 });
 
 const emit = defineEmits<{

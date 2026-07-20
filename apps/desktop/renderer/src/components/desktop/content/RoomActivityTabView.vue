@@ -51,23 +51,23 @@
             </button>
           </section>
 
-          <section v-if="!truthfulAgents.length && reachableAgents.length" class="desktop-activity-group">
+          <section v-if="legacyReachableAgents.length" class="desktop-activity-group">
             <header>
               <div>
                 <h3>Available now</h3>
                 <p>Agents available for new room messages.</p>
               </div>
-              <strong>{{ reachableAgents.length }}</strong>
+              <strong>{{ legacyReachableAgents.length }}</strong>
             </header>
 
             <button
-              v-for="agent in reachableAgents"
+              v-for="agent in legacyReachableAgents"
               :key="agent.key"
               class="desktop-activity-roster-item"
               :data-selected="selectedLiveParticipant?.key === agent.key"
               :data-state="agent.activityState || 'offline'"
               type="button"
-              @click="selectedLiveKey = agent.key"
+              @click="selectLegacyAgent(agent.key)"
             >
               <span class="desktop-activity-avatar" :data-state="agent.activityState || 'offline'">{{ initials(agent.label) }}</span>
               <span>
@@ -81,23 +81,23 @@
             </button>
           </section>
 
-          <section v-if="!truthfulAgents.length && workingAgents.length" class="desktop-activity-group">
+          <section v-if="legacyWorkingAgents.length" class="desktop-activity-group">
             <header>
               <div>
                 <h3>Working</h3>
                 <p>Recent task, status, or progress updates from agents at work.</p>
               </div>
-              <strong>{{ workingAgents.length }}</strong>
+              <strong>{{ legacyWorkingAgents.length }}</strong>
             </header>
 
             <button
-              v-for="agent in workingAgents"
+              v-for="agent in legacyWorkingAgents"
               :key="agent.key"
               class="desktop-activity-roster-item"
               :data-selected="selectedLiveParticipant?.key === agent.key"
               :data-state="agent.workState || 'working'"
               type="button"
-              @click="selectedLiveKey = agent.key"
+              @click="selectLegacyAgent(agent.key)"
             >
               <span class="desktop-activity-avatar" :data-state="agent.workState || 'active'">
                 <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -423,7 +423,7 @@ import type {
 import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
-import { roomAgentDeliveryGroup } from "../../../domain/room-agent-delivery";
+import { roomAgentDeliveryGroup, roomAgentDeliverySummary } from "../../../domain/room-agent-delivery";
 import {
   findLinkedPullRequest,
   retainExpandableChangeArtifacts,
@@ -536,6 +536,16 @@ const selectedLiveBranchMismatchLabel = computed(() =>
 );
 const selectedTruthfulId = ref<string | null>(null);
 const truthfulAgents = computed(() => props.supervisorEntries.filter((entry) => entry.roomId === props.roomIdentifier && entry.roomAgentState));
+const projectedSessionIds = computed(() => new Set(
+  truthfulAgents.value
+    .map((entry) => entry.agentSessionId)
+    .filter((value): value is string => Boolean(value)),
+));
+const isProjectedLegacyAgent = (agent: ActivityParticipant) => Boolean(
+  agent.agentSessionId && projectedSessionIds.value.has(agent.agentSessionId),
+);
+const legacyReachableAgents = computed(() => reachableAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
+const legacyWorkingAgents = computed(() => workingAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
 const truthfulGroups = computed(() => {
   const groups = [
     { key: "listening", label: "Listening", description: "Connected and ready for a room message.", agents: [] as DesktopSupervisorManifestEntry[] },
@@ -546,11 +556,12 @@ const truthfulGroups = computed(() => {
   for (const agent of truthfulAgents.value) groups.find((group) => group.key === roomAgentDeliveryGroup(agent))!.agents.push(agent);
   return groups;
 });
-const selectedTruthfulAgent = computed(() => truthfulAgents.value.find((agent) => agent.id === selectedTruthfulId.value) || truthfulAgents.value[0] || null);
+const selectedTruthfulAgent = computed(() => truthfulAgents.value.find((agent) => agent.id === selectedTruthfulId.value) || null);
 const selectedTruthfulReceipt = computed(() => selectedTruthfulAgent.value?.deliveryReceipts?.find((receipt) => receipt.sourceMessageId === selectedTruthfulAgent.value?.roomAgentState?.turn.sourceMessageId) || selectedTruthfulAgent.value?.deliveryReceipts?.[0] || null);
 watch(truthfulAgents, (agents) => { if (agents.length && !agents.some((agent) => agent.id === selectedTruthfulId.value)) selectedTruthfulId.value = agents[0]!.id; }, { immediate: true });
 function truthfulTone(agent: DesktopSupervisorManifestEntry): string { return roomAgentDeliveryGroup(agent) === "attention" ? "blocked" : roomAgentDeliveryGroup(agent) === "disconnected" ? "offline" : roomAgentDeliveryGroup(agent) === "responding" ? "working" : "active"; }
-function truthfulSummary(agent: DesktopSupervisorManifestEntry): string { const state = agent.roomAgentState!; return state.turn.state === "dispatching" || state.turn.state === "responding" ? "Responding to a room message" : state.inbox.state === "blocked" ? "Delivery needs attention" : state.connection.state === "connected" ? "Connected · Listening" : "Not reachable"; }
+function truthfulSummary(agent: DesktopSupervisorManifestEntry): string { return roomAgentDeliverySummary(agent.roomAgentState!); }
+function selectLegacyAgent(key: string): void { selectedTruthfulId.value = null; selectedLiveKey.value = key; }
 const artifactTimeline = computed(() =>
   roomArtifactTimelineItems(props.roomArtifacts, {
     taskId: props.artifactTaskFilterId,

@@ -33,6 +33,8 @@
           :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
           :delivery-receipts-by-message="deliveryReceiptsByMessage"
+          :delivery-recovery-available="deliveryRecoveryAvailable"
+          @reveal-message="requestMessageReveal"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
           :github-activity-available="githubEventsAvailable"
@@ -155,6 +157,7 @@
         :active-search-message-id="activeSearchMessageId"
         :task-reference-ids="taskReferenceIds"
         :delivery-receipts-by-message="deliveryReceiptsByMessage"
+        :delivery-recovery-available="deliveryRecoveryAvailable"
         @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
         @close="closeThread"
         @open-image="openImageViewer"
@@ -214,6 +217,7 @@ import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher
 import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
 import { desktopIpc } from "../../../ipc/index.js";
+import { roomMessageRevealDestination } from "../../../domain/room-message-reveal";
 
 const props = defineProps<{
   active: boolean;
@@ -222,6 +226,8 @@ const props = defineProps<{
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
   deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
+  deliveryRecoveryAvailable?: boolean;
+  revealedMessageId?: string | null;
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
   composerEventPreviews: ComposerEventPreview[];
@@ -260,6 +266,7 @@ const emit = defineEmits<{
   "open-events": [];
   "open-task": [taskId: string];
   "retry-delivery": [agentId: string, sourceMessageId: string];
+  "reveal-message": [messageId: string];
   "dismiss-event-preview": [messageId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
@@ -662,8 +669,24 @@ function mergeThreadMessages(
 }
 
 function jumpToMessage(messageId: string): void {
+  const destination = roomMessageRevealDestination(
+    messageId,
+    messagesWithThreadOverrides.value,
+    threadMessagesWithThreadOverrides.value,
+  );
+  if (destination.kind === "thread") {
+    openThread(destination.threadRootId);
+    return;
+  }
+  if (destination.kind === "history") {
+    emit("reveal-message", messageId);
+    return;
+  }
   transientHighlightMessageId.value = messageId;
-  messageViewport.value?.scrollToMessage(messageId);
+  if (!messageViewport.value?.scrollToMessage(messageId)) {
+    emit("reveal-message", messageId);
+    return;
+  }
   if (transientHighlightTimeout !== null) {
     window.clearTimeout(transientHighlightTimeout);
   }
@@ -672,6 +695,17 @@ function jumpToMessage(messageId: string): void {
     transientHighlightTimeout = null;
   }, 1800);
 }
+
+function requestMessageReveal(messageId: string): void {
+  emit("reveal-message", messageId);
+}
+
+watch(
+  () => props.revealedMessageId,
+  (messageId) => {
+    if (messageId) void nextTick(() => jumpToMessage(messageId));
+  },
+);
 
 function handleComposerSend(
   text: string,

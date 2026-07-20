@@ -144,8 +144,9 @@ test("one room message groups delivery receipts for every activated agent", asyn
   assert.match(html, /StoneRidge is responding/);
   assert.match(html, /Waiting — DawnPeak needs attention on msg_blocked/);
   assert.match(html, /View earlier message/);
-  assert.match(html, /aria-label="Retry delivery for Oak"/);
-  assert.match(html, />Retry<\/button>/);
+  assert.match(html, /disabled aria-label="Retry delivery for Oak is unavailable"/);
+  assert.match(html, />Retry unavailable<\/button>/);
+  assert.match(html, /Retry will be available when delivery recovery is connected/);
 });
 
 test("GitHub event task chips expose the shared Board navigation contract", async () => {
