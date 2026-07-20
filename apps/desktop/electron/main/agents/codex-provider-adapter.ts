@@ -228,6 +228,7 @@ function exactTurnFinalText(turn: ThreadReadTurn): string {
 class CodexRoomTurnRecoveryError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
+class CodexRoomTurnObservationDetachedError extends Error {}
 
 function isMethodNotFound(error: unknown): boolean {
   return /(?:-32601|method\s+not\s+found|unknown\s+method|unsupported\s+method)/i.test(
@@ -306,7 +307,7 @@ class CodexProviderHandle implements ProviderHandle {
   streamSequence = 0;
   /** At most one terminal fact per recent native turn; never infer a latest turn. */
   readonly terminalTurns = new Map<string, string>();
-  readonly turnWaiters = new Map<string, { resolve: (status: string) => void; reject: (error: Error) => void }>();
+  readonly turnWaiters = new Map<string, { owner: symbol; resolve: (status: string) => void; reject: (error: Error) => void }>();
 
   constructor(
     readonly workAttemptId: string,
@@ -494,7 +495,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw error;
     }
     handle.state = "working";
-    const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId);
+    const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     handle.state = terminal.status === "failed" ? "failed" : "idle";
     if (terminal.status !== "completed") throw new Error(`Codex bounded room turn ${turnId} ended ${terminal.status}.`);
     const text = exactTurnFinalText(terminal.turn);
@@ -507,27 +508,24 @@ export class CodexProviderAdapter implements ProviderAdapter {
   async recoverRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRecoveryRequest,
+    options: { detachSignal?: AbortSignal } = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     const turnId = request.providerTurnId.trim();
     if (!turnId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery requires an exact persisted turn id.");
-    const key = exactTurnKey(handle.providerContinuationId, turnId);
-    try {
-      const read = await handle.client.request<ThreadReadResult>("thread/read", { threadId: handle.providerContinuationId, includeTurns: true });
-      if (read.thread?.id !== handle.providerContinuationId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery resolved a different continuation thread.");
-      const turn = read.thread?.turns?.find((candidate) => candidate.id === turnId);
-      if (!turn) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery cannot find the persisted exact turn.");
-      const status = String(typeof turn.status === "string" ? turn.status : turn.status?.status ?? "").toLowerCase();
-      if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) return this.roomTurnResultFromTerminal(turnId, status, turn);
-      if (!isActiveCodexTurnStatus(status)) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
-      handle.state = "working";
-      const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId);
-      return this.roomTurnResultFromTerminal(turnId, terminal.status, terminal.turn);
-    } finally {
-      // A recovered attempt owns this exact turn key only for its lifetime.
-      handle.terminalTurns.delete(key);
-      handle.turnWaiters.delete(key);
+    const read = await handle.client.request<ThreadReadResult>("thread/read", { threadId: handle.providerContinuationId, includeTurns: true });
+    if (read.thread?.id !== handle.providerContinuationId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery resolved a different continuation thread.");
+    const turn = read.thread?.turns?.find((candidate) => candidate.id === turnId);
+    if (!turn) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery cannot find the persisted exact turn.");
+    const status = String(typeof turn.status === "string" ? turn.status : turn.status?.status ?? "").toLowerCase();
+    if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
+      handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
+      return this.roomTurnResultFromTerminal(turnId, status, turn);
     }
+    if (!isActiveCodexTurnStatus(status)) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
+    handle.state = "working";
+    const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
+    return this.roomTurnResultFromTerminal(turnId, terminal.status, terminal.turn);
   }
 
   async stop(
@@ -958,8 +956,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private async waitForExactRoomTurnTerminal(
     handle: CodexProviderHandle,
     turnId: string,
+    detachSignal?: AbortSignal,
   ): Promise<{ status: string; turn: ThreadReadTurn }> {
-    const status = await this.waitForExactTurnNotification(handle, exactTurnKey(handle.providerContinuationId, turnId));
+    const status = await this.waitForExactTurnNotification(handle, exactTurnKey(handle.providerContinuationId, turnId), detachSignal);
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
       includeTurns: true,
@@ -984,11 +983,32 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return { turnId, outcome: "reply", text };
   }
 
-  private waitForExactTurnNotification(handle: CodexProviderHandle, key: string): Promise<string> {
+  private waitForExactTurnNotification(handle: CodexProviderHandle, key: string, detachSignal?: AbortSignal): Promise<string> {
     const cached = handle.terminalTurns.get(key);
     if (cached) { handle.terminalTurns.delete(key); return Promise.resolve(cached); }
     if (handle.turnWaiters.has(key)) throw new Error("Codex bounded room turn already has a terminal waiter.");
-    return new Promise<string>((resolve, reject) => handle.turnWaiters.set(key, { resolve, reject }));
+    if (detachSignal?.aborted) return Promise.reject(new CodexRoomTurnObservationDetachedError("Codex room-turn observation detached."));
+    return new Promise<string>((resolve, reject) => {
+      const onDetach = () => {
+        const current = handle.turnWaiters.get(key);
+        if (current?.owner === owner) handle.turnWaiters.delete(key);
+        reject(new CodexRoomTurnObservationDetachedError("Codex room-turn observation detached."));
+      };
+      const owner = Symbol(key);
+      const waiter = {
+        owner,
+        resolve: (status: string) => {
+          detachSignal?.removeEventListener("abort", onDetach);
+          resolve(status);
+        },
+        reject: (error: Error) => {
+          detachSignal?.removeEventListener("abort", onDetach);
+          reject(error);
+        },
+      };
+      handle.turnWaiters.set(key, waiter);
+      detachSignal?.addEventListener("abort", onDetach, { once: true });
+    });
   }
 
   private noteExactTurnTerminal(handle: CodexProviderHandle, key: string, status: string): void {
