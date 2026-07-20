@@ -46,12 +46,16 @@ const POLL_ERROR_BACKOFF_CAP_MS = 30_000;
  */
 export class SupervisedAgentDelivery {
   private readonly polling = new Map<string, AbortController>();
+  private readonly pollOperations = new Map<string, Promise<void>>();
   private readonly loops = new Map<string, Promise<void>>();
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
   private readonly pumpControllers = new Map<string, AbortController>();
   private readonly retries = new Map<string, Set<Promise<void>>>();
   private readonly retryControllers = new Map<string, Set<AbortController>>();
+  private readonly agentWork = new Map<string, Set<Promise<void>>>();
+  private readonly stoppingAgents = new Set<string>();
+  private readonly stoppingOperations = new Map<string, Promise<void>>();
   private readonly controllers = new Set<AbortController>();
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly startupRecovered = new Map<string, string>();
@@ -89,10 +93,10 @@ export class SupervisedAgentDelivery {
 
   /** Starts the daemon-owned long-poll loop and normalizes persisted work first. */
   start(agent: SupervisedIngressAgent): Promise<void> {
-    if (this.fenced || this.loops.has(agent.agentId)) return Promise.resolve();
+    if (this.fenced || this.stoppingAgents.has(agent.agentId) || this.loops.has(agent.agentId)) return Promise.resolve();
     const controller = new AbortController();
     this.loopControllers.set(agent.agentId, controller);
-    const operation = this.track(controller, this.pollLoop(agent, controller));
+    const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pollLoop(agent, controller)));
     this.loops.set(agent.agentId, operation);
     void operation.then(() => {
       if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
@@ -113,20 +117,37 @@ export class SupervisedAgentDelivery {
   }
 
   /** Cancel and join a removed or superseded agent without fencing other workers. */
-  async stop(agentId: string): Promise<void> {
+  stop(agentId: string): Promise<void> {
+    const prior = this.stoppingOperations.get(agentId);
+    if (prior) return prior;
+    this.stoppingAgents.add(agentId);
+    const operation = this.stopOperation(agentId);
+    this.stoppingOperations.set(agentId, operation);
+    void operation.then(() => {
+      if (this.stoppingOperations.get(agentId) === operation) this.stoppingOperations.delete(agentId);
+      this.stoppingAgents.delete(agentId);
+    }, () => {
+      if (this.stoppingOperations.get(agentId) === operation) this.stoppingOperations.delete(agentId);
+      this.stoppingAgents.delete(agentId);
+    });
+    return operation;
+  }
+
+  private async stopOperation(agentId: string): Promise<void> {
     this.polling.get(agentId)?.abort();
     this.pumpControllers.get(agentId)?.abort();
     this.loopControllers.get(agentId)?.abort();
     for (const controller of this.retryControllers.get(agentId) ?? []) controller.abort();
-    // A poll can have started a detached pump, and a provider turn does not
-    // necessarily honor abort. Join all agent-scoped work before its successor
-    // can observe or claim this inbox.
-    await Promise.allSettled([
-      this.loops.get(agentId),
-      this.pumping.get(agentId),
-      this.polling.get(agentId),
-      ...(this.retries.get(agentId) ?? []),
-    ].filter(Boolean) as Promise<void>[]);
+    // New work is barred before aborting. Re-check the registry until it is
+    // empty so a child that was registered while its parent settled is joined.
+    for (;;) {
+      const work = [...(this.agentWork.get(agentId) ?? [])];
+      if (work.length === 0) break;
+      await Promise.allSettled(work);
+      // Give identity-guarded cleanup continuations a chance to unregister
+      // before deciding whether a child was attached during parent teardown.
+      await Promise.resolve();
+    }
     this.startupRecovered.delete(agentId);
   }
 
@@ -149,14 +170,21 @@ export class SupervisedAgentDelivery {
   }
 
   private pollOnce(agent: SupervisedIngressAgent, parent?: AbortController): Promise<void> {
-    if (this.fenced) return Promise.resolve();
+    if (this.fenced || this.stoppingAgents.has(agent.agentId)) return Promise.resolve();
     const prior = this.polling.get(agent.agentId);
     if (prior) return Promise.resolve();
     const controller = new AbortController();
     const relayAbort = () => controller.abort();
     parent?.signal.addEventListener("abort", relayAbort, { once: true });
     this.polling.set(agent.agentId, controller);
-    return this.track(controller, this.pollOperation(agent, controller)).finally(() => parent?.signal.removeEventListener("abort", relayAbort));
+    const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pollOperation(agent, controller)).finally(() => parent?.signal.removeEventListener("abort", relayAbort)));
+    this.pollOperations.set(agent.agentId, operation);
+    void operation.then(() => {
+      if (this.pollOperations.get(agent.agentId) === operation) this.pollOperations.delete(agent.agentId);
+    }, () => {
+      if (this.pollOperations.get(agent.agentId) === operation) this.pollOperations.delete(agent.agentId);
+    });
+    return operation;
   }
 
   private async waitForNextPoll(controller: AbortController, delayMs: number): Promise<boolean> {
@@ -179,15 +207,19 @@ export class SupervisedAgentDelivery {
         last_observed_message_id: stringOrNull(response.last_observed_message_id),
         messages,
       });
-      void this.pump(agent);
+      // Ingest can be deliberately slow. Do not create detached delivery work
+      // after a stop/rebind changed authority while its commit was pending.
+      if (!await this.hasAuthority(agent, controller)) return;
+      await this.pump(agent);
     } finally {
       if (this.polling.get(agent.agentId) === controller) this.polling.delete(agent.agentId);
     }
   }
 
   retry(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
+    if (this.fenced || this.stoppingAgents.has(agent.agentId)) return Promise.resolve();
     const controller = new AbortController();
-    const operation = this.track(controller, this.retryOperation(agent, sourceMessageId, controller));
+    const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.retryOperation(agent, sourceMessageId, controller)));
     const retries = this.retries.get(agent.agentId) ?? new Set<Promise<void>>();
     const controllers = this.retryControllers.get(agent.agentId) ?? new Set<AbortController>();
     retries.add(operation); controllers.add(controller);
@@ -214,9 +246,9 @@ export class SupervisedAgentDelivery {
   }
 
   pump(agent: SupervisedIngressAgent): Promise<void> {
-    if (this.fenced || this.pumping.has(agent.agentId)) return Promise.resolve();
+    if (this.fenced || this.stoppingAgents.has(agent.agentId) || this.pumping.has(agent.agentId)) return Promise.resolve();
     const controller = new AbortController();
-    const operation = this.track(controller, this.pumpOperation(agent, controller));
+    const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pumpOperation(agent, controller)));
     this.pumping.set(agent.agentId, operation);
     this.pumpControllers.set(agent.agentId, controller);
     void operation.then(() => {
@@ -326,7 +358,7 @@ export class SupervisedAgentDelivery {
   }
 
   private async hasAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
-    if (this.fenced || controller?.signal.aborted) return false;
+    if (this.fenced || this.stoppingAgents.has(agent.agentId) || controller?.signal.aborted) return false;
     const allowed = await this.revalidateAuthority({
       agentId: agent.agentId,
       roomId: agent.roomId,
@@ -341,7 +373,7 @@ export class SupervisedAgentDelivery {
       pid: agent.handle.pid,
       handle: agent.handle,
     });
-    return allowed && !this.fenced && !controller?.signal.aborted;
+    return allowed && !this.fenced && !this.stoppingAgents.has(agent.agentId) && !controller?.signal.aborted;
   }
 
   private recoveryContext(agent: SupervisedIngressAgent): string {
@@ -355,6 +387,18 @@ export class SupervisedAgentDelivery {
       agent.agentSessionId, agent.handle.workAttemptId, agent.handle.providerContinuationId,
       agent.handle.pid, handleId,
     ].join("\u0000");
+  }
+
+  private trackAgentWork<T>(agentId: string, operation: Promise<T>): Promise<T> {
+    const work = this.agentWork.get(agentId) ?? new Set<Promise<void>>();
+    work.add(operation as Promise<void>);
+    this.agentWork.set(agentId, work);
+    const cleanup = () => {
+      work.delete(operation as Promise<void>);
+      if (this.agentWork.get(agentId) === work && work.size === 0) this.agentWork.delete(agentId);
+    };
+    void operation.then(cleanup, cleanup);
+    return operation;
   }
 
   private track<T>(controller: AbortController, operation: Promise<T>): Promise<T> {

@@ -247,6 +247,43 @@ test("rebind waits for an old provider turn, recovers its interrupted FIFO head,
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("refresh fences a poll paused in ingest and lets the successor recover before its first hanging poll", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-ingest-rebind-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const successorPoll = deferred<void>();
+    const ingest = store.ingestPoll.bind(store);
+    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+      ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
+    };
+    let polls = 0; let turns = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      turns += 1;
+      return { turnId: `turn:${turns}`, outcome: "no_reply", text: null };
+    }), {
+      poll: ({ signal }) => {
+        polls += 1;
+        if (polls === 1) return Promise.resolve({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] });
+        successorPoll.resolve();
+        return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority);
+    await delivery.start(agent); await ingestEntered.promise;
+    const successor = { ...agent, executionGenerationId: "generation-2", handle: { ...agent.handle, pid: 2 } };
+    let refreshed = false;
+    const refresh = delivery.refresh(successor).then(() => { refreshed = true; });
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(refreshed, false, "refresh waits for the old poll's ingest commit");
+    releaseIngest.resolve();
+    await refresh; await successorPoll.promise;
+    assert.equal(turns, 1, "the stopped poll cannot launch a stale delivery pump after ingest");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply", "successor recovery and delivery happen before its hanging poll");
+    await delivery.fenceAndDrain();
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a credential-only rebind clears recovery ownership for the successor context", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-credential-rebind-"));
   try {
