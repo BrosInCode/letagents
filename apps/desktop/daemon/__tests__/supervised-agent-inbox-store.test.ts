@@ -107,6 +107,31 @@ test("delivery timeline records causal phases durably across a daemon restart", 
   } finally { await env.cleanup(); }
 });
 
+test("v6 repair adds a missing causal-event table without rewriting canonical inbox rows", async () => {
+  const env = await fixture(); try {
+    const first = new SupervisedAgentInboxStore(env.database);
+    const [item] = await first.ingestPoll({ agent_id: "repair", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "msg_1", source_message: { durable: true }, activation: {} }] });
+    await first.close();
+    const partialV6 = new DatabaseSync(env.database);
+    partialV6.exec("DROP TABLE supervised_agent_inbox_events");
+    assert.equal((partialV6.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+    partialV6.close();
+    const repaired = new SupervisedAgentInboxStore(env.database);
+    const preserved = (await repaired.receipts("repair"))[0]!;
+    assert.equal(preserved.inbox_item_id, item!.inbox_item_id);
+    assert.equal(preserved.source_message_id, "msg_1");
+    assert.deepEqual(preserved.source_message, { durable: true });
+    await repaired.close();
+    const inspection = new DatabaseSync(env.database);
+    const table = inspection.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox_events'").get() as { sql: string } | undefined;
+    assert.match(table?.sql ?? "", /event_sequence INTEGER NOT NULL CHECK\(event_sequence > 0\)/);
+    inspection.close();
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await reopened.receipts("repair"))[0]?.inbox_item_id, item!.inbox_item_id, "a second canonical reopen is stable");
+    await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
 test("causal event journal is idempotent when an ingress replay shares a constant clock", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-20T12:00:00.000Z");
