@@ -11,7 +11,8 @@ export interface WorkerSessionBinding {
   work_attempt_id: string;
   execution_generation_id: string;
   agent_session_id: string;
-  agent_session_token: string;
+  /** Opaque durable handle only. The credential itself is process memory. */
+  credential_ref: string;
   api_url: string;
   room_cursor: string | null;
   last_sequence: number;
@@ -19,10 +20,13 @@ export interface WorkerSessionBinding {
   updated_at: string;
 }
 
-type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at">;
+export type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "credential_ref" | "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at"> & {
+  agent_session_token: string;
+};
 type Row = Record<string, unknown>;
 type Reservation = { reservationId: string; binding: WorkerSessionBinding; bindingEpoch: number; sequence: number; observedAt: string; observedAtMs: number };
-type LegacyBindings = { version: 1; bindings: Record<string, WorkerSessionBinding> };
+type LegacyWorkerSessionBinding = WorkerSessionBindingInput & Pick<WorkerSessionBinding, "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at">;
+type LegacyBindings = { version: 1; bindings: Record<string, LegacyWorkerSessionBinding> };
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
 function checksumOf(raw: string): string { return createHash("sha256").update(raw).digest("hex"); }
 
@@ -36,6 +40,14 @@ export class WorkerBindingStore {
   private initializing: Promise<DatabaseSync> | null = null;
   private mutations: Promise<void> = Promise.resolve();
   private closed = false;
+  /** Deliberately instance-local: reopening a daemon cannot recover a secret. */
+  private readonly credentials = new Map<string, {
+    entry_id: string;
+    agent_session_id: string;
+    execution_generation_id: string;
+    binding_epoch: number;
+    token: string;
+  }>();
 
   constructor(
     readonly legacyJsonPath: string,
@@ -53,6 +65,7 @@ export class WorkerBindingStore {
     await this.mutations.catch(() => undefined);
     this.database?.close();
     this.database = null;
+    this.credentials.clear();
   }
 
   async get(entryId: string): Promise<WorkerSessionBinding | null> {
@@ -67,14 +80,16 @@ export class WorkerBindingStore {
     // Test/fence seam must remain outside the SQLite transaction: a stalled
     // pre-commit caller must not lock unrelated manifest work during handoff.
     await this.write(input);
-    return this.withMutation(async (database) => this.transaction(database, () => {
+    const bound = await this.withMutation(async (database) => this.transaction(database, () => {
       const prior = this.read(database, input.entry_id);
       const watermark = this.readWatermark(database, input.entry_id);
       const sameSession = prior?.agent_session_id === input.agent_session_id;
       const now = new Date().toISOString();
       const nextEpoch = Math.max(prior ? this.readBindingEpoch(database, input.entry_id) : 0, watermark?.binding_epoch ?? 0) + 1;
       const binding: WorkerSessionBinding = {
-        ...input, api_url: new URL(input.api_url).origin,
+        entry_id: input.entry_id, room_id: input.room_id, work_attempt_id: input.work_attempt_id,
+        execution_generation_id: input.execution_generation_id, agent_session_id: input.agent_session_id,
+        credential_ref: randomUUID(), api_url: new URL(input.api_url).origin,
         room_cursor: sameSession ? prior!.room_cursor : null,
         // Credentials may rotate, but the native API's sequence authority is
         // per durable agent entry. Never reuse a journal/API sequence.
@@ -85,19 +100,28 @@ export class WorkerBindingStore {
       // Any formal bind/rebind establishes a new authority epoch. This makes
       // delayed responses unable to revoke or advance replacement credentials.
       run(database.prepare(`INSERT INTO worker_session_bindings
-        (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, agent_session_token, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at)
+        (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, credential_ref, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(entry_id) DO UPDATE SET room_id=excluded.room_id, work_attempt_id=excluded.work_attempt_id,
           execution_generation_id=excluded.execution_generation_id, agent_session_id=excluded.agent_session_id,
-          agent_session_token=excluded.agent_session_token, api_url=excluded.api_url, room_cursor=excluded.room_cursor,
+          credential_ref=excluded.credential_ref, api_url=excluded.api_url, room_cursor=excluded.room_cursor,
           last_sequence=excluded.last_sequence, last_observed_at_ms=excluded.last_observed_at_ms,
           binding_epoch=excluded.binding_epoch, updated_at=excluded.updated_at`),
         binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id,
-        binding.agent_session_token, binding.api_url, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms,
+        binding.credential_ref, binding.api_url, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms,
         nextEpoch, binding.updated_at);
       this.upsertWatermark(database, input.entry_id, nextEpoch, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
-      return binding;
+      return { binding, bindingEpoch: nextEpoch, priorCredentialRef: prior?.credential_ref ?? null };
     }));
+    if (bound.priorCredentialRef) this.credentials.delete(bound.priorCredentialRef);
+    this.credentials.set(bound.binding.credential_ref, {
+      entry_id: bound.binding.entry_id,
+      agent_session_id: bound.binding.agent_session_id,
+      execution_generation_id: bound.binding.execution_generation_id,
+      binding_epoch: bound.bindingEpoch,
+      token: input.agent_session_token,
+    });
+    return bound.binding;
   }
 
   async checkpointCursor(entryId: string, agentSessionId: string, executionGenerationId: string, roomCursor: string): Promise<WorkerSessionBinding> {
@@ -147,9 +171,32 @@ export class WorkerBindingStore {
     return this.withMutation(async (database) => this.transaction(database, () => {
       const current = this.read(database, entryId);
       if (!current || (expectedSessionId && current.agent_session_id !== expectedSessionId) || (expectedExecutionGenerationId && current.execution_generation_id !== expectedExecutionGenerationId)) return false;
+      this.credentials.delete(current.credential_ref);
       run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id = ?"), entryId);
       return true;
     }));
+  }
+
+  /** Returns the exact in-memory credential, never a persisted value. */
+  async credentialFor(input: {
+    entry_id: string;
+    agent_session_id: string;
+    execution_generation_id: string;
+  }): Promise<string | null> {
+    return this.withMutation(async (database) => {
+      const binding = this.read(database, input.entry_id);
+      if (!binding
+        || binding.agent_session_id !== input.agent_session_id
+        || binding.execution_generation_id !== input.execution_generation_id) return null;
+      const epoch = this.readBindingEpoch(database, input.entry_id);
+      const credential = this.credentials.get(binding.credential_ref);
+      if (!credential
+        || credential.entry_id !== binding.entry_id
+        || credential.agent_session_id !== binding.agent_session_id
+        || credential.execution_generation_id !== binding.execution_generation_id
+        || credential.binding_epoch !== epoch) return null;
+      return credential.token;
+    });
   }
 
   private async reservePublication(entryId: string, observedAtMs: number): Promise<Reservation | null> {
@@ -179,7 +226,10 @@ export class WorkerBindingStore {
           SELECT reservation_id, sequence FROM worker_binding_publications WHERE entry_id=?
           UNION ALL SELECT reservation_id, sequence FROM worker_generation_verifications WHERE entry_id=?
         ) ORDER BY sequence DESC LIMIT 1`).get(reservation.binding.entry_id, reservation.binding.entry_id) as Row | undefined;
-        if (latest?.reservation_id === reservation.reservationId && Number(latest.sequence) === reservation.sequence) run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id=? AND binding_epoch=? AND execution_generation_id=? AND agent_session_id=?"), reservation.binding.entry_id, reservation.bindingEpoch, reservation.binding.execution_generation_id, reservation.binding.agent_session_id);
+        if (latest?.reservation_id === reservation.reservationId && Number(latest.sequence) === reservation.sequence) {
+          this.credentials.delete(reservation.binding.credential_ref);
+          run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id=? AND binding_epoch=? AND execution_generation_id=? AND agent_session_id=?"), reservation.binding.entry_id, reservation.bindingEpoch, reservation.binding.execution_generation_id, reservation.binding.agent_session_id);
+        }
       }
     }));
   }
@@ -207,7 +257,12 @@ export class WorkerBindingStore {
       if (current && epoch === reservation.bindingEpoch && current.execution_generation_id === input.fromExecutionGenerationId && current.agent_session_id === input.agentSessionId) {
         run(database.prepare("UPDATE worker_session_bindings SET execution_generation_id=?, updated_at=? WHERE entry_id=? AND binding_epoch=? AND execution_generation_id=? AND agent_session_id=?"), input.toExecutionGenerationId, now, input.entryId, epoch, input.fromExecutionGenerationId, input.agentSessionId);
         run(database.prepare("UPDATE worker_generation_verifications SET state='accepted', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId);
-        return { binding: this.read(database, input.entryId)!, advanced: true, accepted: true };
+        const binding = this.read(database, input.entryId)!;
+        const credential = this.credentials.get(binding.credential_ref);
+        if (credential && credential.entry_id === binding.entry_id && credential.agent_session_id === binding.agent_session_id && credential.binding_epoch === epoch && credential.execution_generation_id === input.fromExecutionGenerationId) {
+          this.credentials.set(binding.credential_ref, { ...credential, execution_generation_id: binding.execution_generation_id });
+        }
+        return { binding, advanced: true, accepted: true };
       }
       run(database.prepare("UPDATE worker_generation_verifications SET state='lost_race', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId);
       if (current?.execution_generation_id === input.toExecutionGenerationId
@@ -337,7 +392,7 @@ export class WorkerBindingStore {
       if (existing) return String(existing.checksum);
       if (database.prepare("SELECT 1 FROM migration_failures WHERE migration_key=?").get(key)) throw new Error("Legacy worker binding import is quarantined.");
       for (const binding of Object.values(parsed.bindings)) {
-        run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, agent_session_token, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, binding.agent_session_token, new URL(binding.api_url).origin, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
+        run(database.prepare("INSERT INTO worker_session_bindings (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id, credential_ref, api_url, room_cursor, last_sequence, last_observed_at_ms, binding_epoch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"), binding.entry_id, binding.room_id, binding.work_attempt_id, binding.execution_generation_id, binding.agent_session_id, randomUUID(), new URL(binding.api_url).origin, binding.room_cursor, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
         this.upsertWatermark(database, binding.entry_id, 1, binding.last_sequence, binding.last_observed_at_ms, binding.updated_at);
       }
       run(database.prepare("INSERT INTO migration_records (migration_key, checksum, imported_at) VALUES (?, ?, ?)"), key, checksum, new Date().toISOString());
@@ -619,7 +674,7 @@ export class WorkerBindingStore {
   private validateLegacy(value: LegacyBindings, raw: string): void { assertNoDuplicateJsonKeys(raw); if (!value || value.version !== 1 || !value.bindings || Array.isArray(value.bindings)) throw new Error("invalid v1 envelope"); const seen = new Set<string>(); for (const [key, binding] of Object.entries(value.bindings)) { if (key !== binding.entry_id || seen.has(key)) throw new Error("duplicate or mismatched entry id"); seen.add(key); this.validate(binding); if (!Number.isSafeInteger(binding.last_sequence) || binding.last_sequence < 0 || !Number.isSafeInteger(binding.last_observed_at_ms) || binding.last_observed_at_ms < 0 || !Number.isFinite(Date.parse(binding.updated_at)) || (binding.room_cursor !== null && typeof binding.room_cursor !== "string")) throw new Error(`invalid legacy binding ${key}`); } }
 }
 
-function rowToBinding(row: Row): WorkerSessionBinding { return { entry_id: String(row.entry_id), room_id: String(row.room_id), work_attempt_id: String(row.work_attempt_id), execution_generation_id: String(row.execution_generation_id), agent_session_id: String(row.agent_session_id), agent_session_token: String(row.agent_session_token), api_url: String(row.api_url), room_cursor: row.room_cursor === null ? null : String(row.room_cursor), last_sequence: Number(row.last_sequence), last_observed_at_ms: Number(row.last_observed_at_ms), updated_at: String(row.updated_at) }; }
+function rowToBinding(row: Row): WorkerSessionBinding { return { entry_id: String(row.entry_id), room_id: String(row.room_id), work_attempt_id: String(row.work_attempt_id), execution_generation_id: String(row.execution_generation_id), agent_session_id: String(row.agent_session_id), credential_ref: String(row.credential_ref), api_url: String(row.api_url), room_cursor: row.room_cursor === null ? null : String(row.room_cursor), last_sequence: Number(row.last_sequence), last_observed_at_ms: Number(row.last_observed_at_ms), updated_at: String(row.updated_at) }; }
 function parseRoomMessageNumber(value: string | null): number | null { const match = value && /^msg_(\d+)$/.exec(value); const parsed = match ? Number(match[1]) : NaN; return Number.isSafeInteger(parsed) ? parsed : null; }
 function defaultDatabasePath(legacyJsonPath: string): string {
   // SupervisorDaemon always injects the canonical path. Standalone tooling

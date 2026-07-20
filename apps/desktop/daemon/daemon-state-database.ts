@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 5;
+export const DAEMON_STATE_SCHEMA_VERSION = 6;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -41,11 +41,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV4ToV5(database);
     return;
   }
+  if (existingVersion === 5) {
+    this.migrateV5ToV6(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV5Shape(database);
+    this.repairAndValidateV6Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -312,10 +316,7 @@ createSchema(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
-    this.applyV4Shape(database);
-    this.validateV4Shape(database);
-    this.applyV5Shape(database);
-    this.validateV5Shape(database);
+    this.migrateWorkerShapeToV6(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -337,10 +338,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
-    this.applyV4Shape(database);
-    this.validateV4Shape(database);
-    this.applyV5Shape(database);
-    this.validateV5Shape(database);
+    this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -361,10 +359,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
-    this.applyV4Shape(database);
-    this.validateV4Shape(database);
-    this.applyV5Shape(database);
-    this.validateV5Shape(database);
+    this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -385,9 +380,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.applyV3Shape(database);
     this.validateV3Shape(database);
     this.applyV4Shape(database);
-    this.validateV4Shape(database);
-    this.applyV5Shape(database);
-    this.validateV5Shape(database);
+    this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -444,9 +437,7 @@ migrateV4ToV5(database: DatabaseSync): void {
   try {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
-    this.validateV4Shape(database);
-    this.applyV5Shape(database);
-    this.validateV5Shape(database);
+    this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -481,6 +472,69 @@ repairAndValidateV5Shape(database: DatabaseSync): void {
     this.validateV4Shape(database);
     this.applyV5Shape(database);
     this.validateV5Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+migrateV5ToV6(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV2Shape(database);
+    this.validateV3Shape(database);
+    this.migrateWorkerShapeToV6(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/**
+ * Older-version test fixtures can carry a newer physical worker table after a
+ * version-marker rollback.  Prefer its already-secret-free v6 shape; real
+ * v1–v5 databases still build and validate each predecessor in order.
+ */
+private migrateWorkerShapeToV6(database: DatabaseSync): void {
+  const columns = this.tableColumns(database, "worker_session_bindings");
+  if (!columns.has("credential_ref")) {
+    this.applyV4Shape(database);
+    this.validateV4Shape(database);
+  }
+  this.applyV5Shape(database);
+  this.validateV5Shape(database);
+  this.applyV6Shape(database);
+  this.validateV6Shape(database);
+}
+
+repairAndValidateV6Shape(database: DatabaseSync): void {
+  if (this.tableColumns(database, "worker_session_bindings").has("agent_session_token")) {
+    throw new Error("Daemon state v6 must not persist agent_session_token.");
+  }
+  const needsLegacyPresenceRepair = this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")
+    && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
+  try {
+    this.validateV2Shape(database);
+    this.validateV3Shape(database);
+    this.validateV6Shape(database);
+    if (!needsLegacyPresenceRepair) return;
+  } catch {
+    // Do not validate or recreate the retired v5 credential shape on normal
+    // v6 opens. v2/v3 repairs remain necessary for old partial-marker cases.
+  }
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV2Shape(database, true);
+    this.validateV2Shape(database);
+    this.applyV3Shape(database);
+    this.validateV3Shape(database);
+    this.applyV6Shape(database);
+    this.validateV6Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -701,6 +755,112 @@ validateV5Shape(database: DatabaseSync): void {
     } finally { database.exec("ROLLBACK TO worker_v5_check_probe"); database.exec("RELEASE worker_v5_check_probe"); }
   };
   for (const invalid of [[0, 0, 0], [1, -1, 0], [1, 0, -1]]) rejectsCheck("INSERT INTO worker_binding_watermarks VALUES (?, ?, ?, ?, ?)", "probe", invalid[0], invalid[1], invalid[2], "2026-01-01T00:00:00.000Z");
+}
+
+applyV6Shape(database: DatabaseSync): void {
+  // v4/v5 persisted the raw worker-session token. Rebuild rather than ALTER
+  // so no live table in a completed v6 database has a secret column.
+  const columns = this.tableColumns(database, "worker_session_bindings");
+  if (columns.has("agent_session_token")) {
+    database.exec(`
+      -- A prior interrupted/manual attempt may have left the staging name.
+      -- The caller is in one IMMEDIATE transaction, so discarding that
+      -- incomplete copy is safe; the authoritative legacy source remains.
+      DROP TABLE IF EXISTS worker_session_bindings_v6;
+      CREATE TABLE worker_session_bindings_v6 (
+        entry_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        work_attempt_id TEXT NOT NULL,
+        execution_generation_id TEXT NOT NULL,
+        agent_session_id TEXT NOT NULL,
+        credential_ref TEXT NOT NULL,
+        api_url TEXT NOT NULL,
+        room_cursor TEXT,
+        last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+        last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0),
+        binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      INSERT INTO worker_session_bindings_v6
+        (entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id,
+         credential_ref, api_url, room_cursor, last_sequence, last_observed_at_ms,
+         binding_epoch, updated_at)
+      SELECT entry_id, room_id, work_attempt_id, execution_generation_id, agent_session_id,
+        lower(hex(randomblob(16))), api_url, room_cursor, last_sequence,
+        last_observed_at_ms, binding_epoch, updated_at
+      FROM worker_session_bindings;
+      DROP TABLE worker_session_bindings;
+      ALTER TABLE worker_session_bindings_v6 RENAME TO worker_session_bindings;
+      CREATE UNIQUE INDEX worker_session_binding_authority
+        ON worker_session_bindings(entry_id, binding_epoch, execution_generation_id, agent_session_id);
+    `);
+  }
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS supervised_agent_inbox (
+      inbox_item_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      source_message_json TEXT NOT NULL,
+      activation_json TEXT NOT NULL,
+      fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
+      state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','publishing','retryable','blocked','acknowledged','acknowledged_no_reply')),
+      attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+      action_id TEXT NOT NULL,
+      reply_client_message_id TEXT NOT NULL,
+      provider_turn_id TEXT,
+      outcome TEXT,
+      last_error TEXT,
+      blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
+      next_attempt_at_ms INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      acknowledged_at TEXT,
+      UNIQUE(agent_id, source_message_id),
+      UNIQUE(agent_id, fifo_sequence)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS supervised_agent_inbox_head
+      ON supervised_agent_inbox(agent_id, fifo_sequence);
+    CREATE TABLE IF NOT EXISTS supervised_agent_ingress_cursors (
+      agent_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      last_observed_message_id TEXT,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS supervised_worker_sessions (
+      agent_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      agent_session_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      credential_ref TEXT NOT NULL,
+      expires_at TEXT,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+  `);
+}
+
+validateV6Shape(database: DatabaseSync): void {
+  const required: Record<string, string[]> = {
+    worker_session_bindings: ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "credential_ref", "api_url", "room_cursor", "last_sequence", "last_observed_at_ms", "binding_epoch", "updated_at"],
+    supervised_agent_inbox: ["inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "fifo_sequence", "state", "attempt_count", "action_id", "reply_client_message_id", "provider_turn_id", "outcome", "last_error", "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at"],
+    supervised_agent_ingress_cursors: ["agent_id", "room_id", "last_observed_message_id", "updated_at"],
+    supervised_worker_sessions: ["agent_id", "room_id", "agent_session_id", "execution_generation_id", "credential_ref", "expires_at", "updated_at"],
+  };
+  for (const [table, expected] of Object.entries(required)) {
+    const details = database.prepare(`PRAGMA table_xinfo(${table})`).all() as Array<{ name: string; hidden: number }>;
+    const columns = details.map((column) => String(column.name));
+    const missing = expected.filter((column) => !columns.includes(column));
+    const extra = columns.filter((column) => !expected.includes(column));
+    const info = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === table && row.type === "table");
+    if (!info || Number(info.strict) !== 1 || missing.length || extra.length || details.some((column) => Number(column.hidden) !== 0)) {
+      throw new Error(`Daemon state v6 table ${table} has an invalid strict schema.`);
+    }
+  }
+  if (this.tableColumns(database, "worker_session_bindings").has("agent_session_token")) {
+    throw new Error("Daemon state v6 must not persist agent_session_token.");
+  }
+  const duplicateInbox = database.prepare(`SELECT 1 FROM supervised_agent_inbox GROUP BY agent_id, source_message_id HAVING COUNT(*) > 1 LIMIT 1`).get();
+  if (duplicateInbox) throw new Error("Daemon state v6 inbox uniqueness is invalid.");
 }
 
 applyV3Shape(database: DatabaseSync): void {
@@ -1020,6 +1180,9 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
       database.exec("PRAGMA foreign_keys = ON");
       database.exec("PRAGMA synchronous = FULL");
+      // v6 can retire a formerly-secret column. Zero deleted cells so a
+      // successful migration does not leave its token in reusable SQLite pages.
+      database.exec("PRAGMA secure_delete = ON");
       for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await chmod(candidate, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
       await initializeSchema(database);
       return database;

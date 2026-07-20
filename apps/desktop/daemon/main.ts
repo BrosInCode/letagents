@@ -1928,6 +1928,8 @@ export class SupervisorDaemon {
       toExecutionGenerationId: pending.successorExecutionGenerationId,
       agentSessionId: pending.agentSessionId,
     }, async ({ binding, sequence, observed_at }) => {
+      const credential = await this.workerBindings.credentialFor(binding);
+      if (!credential) throw new Error("Worker credential is unavailable until desktop credential delivery.");
       const roomPath = binding.room_id.split("/").map(encodeURIComponent).join("/");
       const endpoint = `${binding.api_url}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(binding.agent_session_id)}/native-activity`;
       const response = await fetch(endpoint, {
@@ -1935,7 +1937,7 @@ export class SupervisorDaemon {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           agent_session_id: binding.agent_session_id,
-          agent_session_token: binding.agent_session_token,
+          agent_session_token: credential,
           observed_at,
           sequence,
           method,
@@ -2161,6 +2163,9 @@ export class SupervisorDaemon {
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
     const currentBinding = await this.workerBindings.get(input.entry_id);
+    const currentCredential = currentBinding
+      ? await this.workerBindings.credentialFor(currentBinding)
+      : null;
     const normalizedApiUrl = new URL(input.api_url).origin;
     const exactCurrentBinding = Boolean(currentBinding
       && currentBinding.entry_id === input.entry_id
@@ -2168,7 +2173,7 @@ export class SupervisorDaemon {
       && currentBinding.work_attempt_id === input.work_attempt_id
       && currentBinding.execution_generation_id === input.execution_generation_id
       && currentBinding.agent_session_id === input.agent_session_id
-      && currentBinding.agent_session_token === input.agent_session_token
+      && currentCredential === input.agent_session_token
       && currentBinding.api_url === normalizedApiUrl);
     const binding = exactCurrentBinding && currentBinding
       ? currentBinding
@@ -2240,6 +2245,7 @@ export class SupervisorDaemon {
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
     const binding = await this.workerBindings.get(input.entry_id);
+    const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
     const normalizedApiUrl = new URL(input.api_url).origin;
     if (!binding
       || binding.entry_id !== input.entry_id
@@ -2247,7 +2253,7 @@ export class SupervisorDaemon {
       || binding.work_attempt_id !== input.work_attempt_id
       || binding.execution_generation_id !== input.execution_generation_id
       || binding.agent_session_id !== input.agent_session_id
-      || binding.agent_session_token !== input.agent_session_token
+      || credential !== input.agent_session_token
       || binding.api_url !== normalizedApiUrl) {
       throw new Error("Worker session verification does not match the active supervised binding.");
     }
@@ -2305,7 +2311,11 @@ export class SupervisorDaemon {
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
     const safeMethod = redactCredentialText(method, 160).value;
     const observedMs = Date.parse(observedAt);
+    const currentBinding = await this.workerBindings.get(entryId);
+    if (!currentBinding || !await this.workerBindings.credentialFor(currentBinding)) return false;
     const publication = await this.workerBindings.publish(entryId, observedMs, async ({ binding, sequence, observed_at }) => {
+      const credential = await this.workerBindings.credentialFor(binding);
+      if (!credential) throw new Error("Worker credential is unavailable until desktop credential delivery.");
       const roomPath = binding.room_id.split("/").map(encodeURIComponent).join("/");
       const endpoint = `${binding.api_url}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(binding.agent_session_id)}/native-activity`;
       const response = await fetch(endpoint, {
@@ -2313,7 +2323,7 @@ export class SupervisorDaemon {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           agent_session_id: binding.agent_session_id,
-          agent_session_token: binding.agent_session_token,
+          agent_session_token: credential,
           observed_at,
           sequence,
           method: safeMethod,
