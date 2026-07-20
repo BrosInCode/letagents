@@ -3,12 +3,14 @@ import { getEventListeners } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createConnection } from "node:net";
 import test from "node:test";
 
 import type { ProviderActionPort } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { DAEMON_PROTOCOL_VERSION } from "../types.js";
 
 const agent = {
   agentId: "stone", roomId: "room", provider: "codex", apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
@@ -40,6 +42,23 @@ async function waitForAsync(check: () => Promise<boolean>, timeoutMs = 1_000): P
     if (Date.now() >= deadline) throw new Error("Timed out waiting for asynchronous delivery progress.");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      socket.end();
+      resolve(JSON.parse(buffer.slice(0, newline)) as { ok: boolean; result?: unknown; error?: string });
+    });
+    socket.once("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: `delivery-${Date.now()}`, method, params })}\n`));
+  });
 }
 
 async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
@@ -569,6 +588,91 @@ test("retry acknowledges durable scheduling without waiting for a long provider 
     await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("daemon socket retry accepts only the exact blocked binding and leaves other rows isolated", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-socket-"));
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    const entered = deferred<void>(); const release = deferred<{ turnId: string; outcome: "no_reply"; text: null }>();
+    const paths = {
+      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
+      attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+    };
+    daemon = new SupervisorDaemon(paths, "darwin", provider(async (_handle, _request, options) => {
+      await options?.markDispatched?.(); entered.resolve(); return release.promise;
+    }), false, 60_000, undefined, {}, {
+      poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    });
+    const internals = daemon as unknown as {
+      liveHandles: Map<string, typeof agent.handle>;
+      supervisedInbox: SupervisedAgentInboxStore;
+      workerBindings: { bind(input: Record<string, string>): Promise<unknown>; unbind(entryId: string): Promise<void> };
+    };
+    await daemon.start();
+    const identities = {
+      stone: { attempt: "00000000-0000-4000-8000-000000000001", execution: "00000000-0000-4000-8000-000000000011", session: "00000000-0000-4000-8000-000000000021" },
+      other: { attempt: "00000000-0000-4000-8000-000000000002", execution: "00000000-0000-4000-8000-000000000012", session: "00000000-0000-4000-8000-000000000022" },
+    } as const;
+    for (const id of ["stone", "other"] as const) {
+      const identity = identities[id];
+      const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        id, room_id: id === "stone" ? "room" : "other-room", display_name: id, provider: "codex", model: null, charter: "test",
+        desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null, created_by: "test", created_at: new Date().toISOString(), work_attempt_id: identity.attempt,
+        provider_ref: { work_attempt_id: identity.attempt, provider_continuation_id: `${id}-thread`, provider_connection: null, execution_generation_id: identity.execution },
+      } });
+      assert.equal(put.ok, true, put.error);
+      internals.liveHandles.set(id, { workAttemptId: identity.attempt, providerContinuationId: `${id}-thread`, pid: id === "stone" ? 1 : 2, observedState: "working" });
+      await internals.workerBindings.bind({
+        entry_id: id, room_id: id === "stone" ? "room" : "other-room", work_attempt_id: identity.attempt, execution_generation_id: identity.execution,
+        agent_session_id: identity.session, agent_session_token: `${id}-token`, api_url: "https://letagents.test",
+      });
+      await internals.supervisedInbox.ingestPoll({ agent_id: id, room_id: id === "stone" ? "room" : "other-room", last_observed_message_id: "1", messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1" }, activation: {} }] });
+      const item = await internals.supervisedInbox.claimHead(id);
+      await internals.supervisedInbox.transition(item!.inbox_item_id, "blocked", { last_error: "manual retry" });
+    }
+    await internals.supervisedInbox.ingestPoll({ agent_id: "other", room_id: "other-room", last_observed_message_id: "2", messages: [{ source_message_id: "msg_2", source_message: { id: "msg_2" }, activation: {} }] });
+    const generation = (await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number };
+    const exact = { entry_id: "stone", room_id: "room", source_message_id: "msg_1", work_attempt_id: identities.stone.attempt, execution_generation_id: identities.stone.execution, agent_session_id: identities.stone.session, daemon_generation: generation.generation };
+    for (const [field, value] of Object.entries({ room_id: "wrong-room", work_attempt_id: "old-attempt", execution_generation_id: "old-generation", agent_session_id: "old-session", daemon_generation: generation.generation + 1 })) {
+      const response = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", { ...exact, [field]: value });
+      assert.equal(response.ok, false, `stale ${field} must reject`);
+    }
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", { ...exact, source_message_id: "unknown" })).ok, false, "an unknown source row rejects");
+    internals.liveHandles.delete("stone");
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", exact)).ok, false, "a missing live handle rejects");
+    internals.liveHandles.set("stone", { workAttemptId: identities.stone.attempt, providerContinuationId: "stone-thread", pid: 1, observedState: "working" });
+    const accepted = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", exact);
+    assert.equal(accepted.ok, true, accepted.error);
+    await entered.promise;
+    const duplicate = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", exact);
+    assert.equal(duplicate.ok, false, "a dispatching row is not retryable again");
+    const listed = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{ id: string; delivery_receipts?: Array<{ state: string; source_message_id: string }> }>;
+    assert.equal(listed.find((entry) => entry.id === "stone")?.delivery_receipts?.[0]?.state, "dispatching");
+    const otherReceipts = listed.find((entry) => entry.id === "other")?.delivery_receipts ?? [];
+    assert.equal(otherReceipts[0]?.state, "blocked", "retry targets only the selected agent row");
+    assert.equal(otherReceipts[1]?.state, "queued_behind_blocked");
+    assert.equal((otherReceipts[1] as { blocked_by_message_id?: string }).blocked_by_message_id, "msg_1", "projection exposes the public source ID, not a private inbox ID");
+    release.resolve({ turnId: "turn", outcome: "no_reply", text: null });
+    await waitForAsync(async () => (await internals.supervisedInbox.receipts("stone"))[0]?.state === "acknowledged_no_reply");
+    const completed = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{ id: string; delivery_receipts?: Array<{ state: string; timeline?: Array<{ phase: string }> }> }>;
+    assert.equal(completed.find((entry) => entry.id === "stone")?.delivery_receipts?.[0]?.state, "acknowledged_no_reply");
+    assert.equal(completed.find((entry) => entry.id === "stone")?.delivery_receipts?.[0]?.timeline?.at(-1)?.phase, "no_reply");
+    const final = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", exact);
+    assert.equal(final.ok, false, "final rows cannot be retried");
+    await internals.workerBindings.unbind("other");
+    const missingCredential = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", { ...exact, entry_id: "other", room_id: "other-room", work_attempt_id: identities.other.attempt, execution_generation_id: identities.other.execution, agent_session_id: identities.other.session });
+    assert.equal(missingCredential.ok, false, "missing binding/credential rejects");
+    await internals.workerBindings.bind({ entry_id: "other", room_id: "other-room", work_attempt_id: identities.other.attempt, execution_generation_id: identities.other.execution, agent_session_id: identities.other.session, agent_session_token: "other-token", api_url: "https://letagents.test" });
+    await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "other", desired_state: "stopped" });
+    const stopped = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", { ...exact, entry_id: "other", room_id: "other-room", work_attempt_id: identities.other.attempt, execution_generation_id: identities.other.execution, agent_session_id: identities.other.session });
+    assert.equal(stopped.ok, false, "desired non-running rejects before retry");
+    await daemon.stop(); daemon = null;
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("startup recovery republishes a durable publishing outcome without rerunning its provider turn", async () => {
