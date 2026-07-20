@@ -34,7 +34,7 @@
           :local-agent-work="localAgentWork"
           :delivery-receipts-by-message="deliveryReceiptsByMessage"
           :delivery-recovery-available="deliveryRecoveryAvailable"
-          :delivery-retry-key="deliveryRetryKey"
+          :delivery-retry-keys="deliveryRetryKeys"
           @reveal-message="requestMessageReveal"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
@@ -160,7 +160,7 @@
         :task-reference-ids="taskReferenceIds"
         :delivery-receipts-by-message="deliveryReceiptsByMessage"
         :delivery-recovery-available="deliveryRecoveryAvailable"
-        :delivery-retry-key="deliveryRetryKey"
+        :delivery-retry-keys="deliveryRetryKeys"
         @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
         @close="closeThread"
         @open-image="openImageViewer"
@@ -230,7 +230,7 @@ const props = defineProps<{
   localAgentWork: ManagedAgentWorkIndicator[];
   deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
-  deliveryRetryKey?: string | null;
+  deliveryRetryKeys?: ReadonlySet<string>;
   revealedMessageId?: string | null;
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;

@@ -61,6 +61,8 @@ export class SupervisedAgentDelivery {
   private readonly controllers = new Set<AbortController>();
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly startupRecovered = new Map<string, string>();
+  /** Runtime-only proof of one actual provider delivery, never reconstructed from inbox state. */
+  private readonly activeTurns = new Map<string, { recoveryContext: string; inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing" }>();
   private readonly handleContextIds = new WeakMap<object, number>();
   private nextHandleContextId = 1;
   private fenced = false;
@@ -180,6 +182,7 @@ export class SupervisedAgentDelivery {
       await Promise.resolve();
     }
     this.startupRecovered.delete(agentId);
+    this.activeTurns.delete(agentId);
   }
 
   private async pollLoop(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
@@ -264,6 +267,13 @@ export class SupervisedAgentDelivery {
     return operation;
   }
 
+  activeTurn(agent: SupervisedIngressAgent): { inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing" } | null {
+    const active = this.activeTurns.get(agent.agentId);
+    return active?.recoveryContext === this.recoveryContext(agent)
+      ? { inboxItemId: active.inboxItemId, sourceMessageId: active.sourceMessageId, phase: active.phase }
+      : null;
+  }
+
   private async retryOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
     if (!await this.hasAuthority(agent, controller)) return;
     const receipts = await this.inbox.receipts(agent.agentId);
@@ -311,9 +321,14 @@ export class SupervisedAgentDelivery {
   }
 
   private async deliver(agent: SupervisedIngressAgent, item: SupervisedInboxItem, controller: AbortController): Promise<void> {
+    const recoveryContext = this.recoveryContext(agent);
+    const setActive = (phase: "dispatching" | "responding" | "publishing") => {
+      this.activeTurns.set(agent.agentId, { recoveryContext, inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id, phase });
+    };
     try {
       const persistedReply = persistedReplyText(item.outcome);
       if (persistedReply) {
+        setActive("publishing");
         if (!await this.hasAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: item.outcome });
         if (!await this.hasAuthority(agent, controller)) return;
@@ -324,6 +339,7 @@ export class SupervisedAgentDelivery {
         return;
       }
       if (!await this.hasAuthority(agent, controller)) return;
+      setActive("dispatching");
       const turn = this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
@@ -339,6 +355,7 @@ export class SupervisedAgentDelivery {
       try { result = turn && await this.track(turnController, turn); }
       finally { controller.signal.removeEventListener("abort", relayAbort); }
       if (!result) throw new Error("Provider does not support bounded room turns.");
+      setActive("responding");
       if (!await this.hasAuthority(agent, controller)) return;
       const outcome = result.outcome === "reply" && result.text?.trim()
         ? JSON.stringify({ kind: "reply", text: result.text.trim() })
@@ -356,6 +373,7 @@ export class SupervisedAgentDelivery {
       // The terminal payload is checkpointed before the external publication.
       // A crash after this point retries the same client id without rerunning Codex.
       await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
+      setActive("publishing");
       if (!await this.publish(agent, item, text, controller)) return;
       if (!await this.hasAuthority(agent, controller)) return;
       await this.inbox.transition(item.inbox_item_id, "acknowledged");
@@ -374,6 +392,9 @@ export class SupervisedAgentDelivery {
       await this.sleep(this.retryDelayMs);
       const retryable = await this.inbox.get(item.inbox_item_id);
       if (await this.hasAuthority(agent, controller) && retryable?.state === "retryable") await this.inbox.transition(item.inbox_item_id, "pending");
+    } finally {
+      const active = this.activeTurns.get(agent.agentId);
+      if (active?.recoveryContext === recoveryContext && active.inboxItemId === item.inbox_item_id) this.activeTurns.delete(agent.agentId);
     }
   }
 
