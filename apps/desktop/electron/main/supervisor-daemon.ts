@@ -428,6 +428,21 @@ export class SupervisorDaemonClient {
     }));
   }
 
+  /** Main-process only: a secret crosses only the owner-only local socket. */
+  async installWorkerCredential(input: {
+    entryId: string; roomId: string; workAttemptId: string;
+    executionGenerationId: string; agentSessionId: string; credential: string;
+  }): Promise<"installed" | "stale"> {
+    if (!input.credential.trim()) throw new Error("A supervised worker credential is required.");
+    const status = await this.ensureRunning();
+    const result = await this.request<{ status?: unknown }>("supervisor.install_worker_credential", {
+      entry_id: input.entryId, room_id: input.roomId, work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId, agent_session_id: input.agentSessionId,
+      agent_session_token: input.credential, daemon_generation: status.generation,
+    });
+    return result.status === "installed" ? "installed" : "stale";
+  }
+
   private async ensureRunningOnce(): Promise<DesktopSupervisorDaemonStatus> {
     let retiredGeneration: number | undefined;
     try {

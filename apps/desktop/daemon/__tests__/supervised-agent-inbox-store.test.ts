@@ -79,8 +79,9 @@ test("worker session secrets are memory-only and must be re-delivered after reop
     const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
     const persisted = await reopened.get("stone");
     assert.ok(persisted); assert.equal(await reopened.credentialFor(persisted), null);
-    const redelivered = await reopened.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: "fresh-memory-secret", api_url: "https://letagents.test" });
-    assert.equal(await reopened.credentialFor(redelivered), "fresh-memory-secret");
+    assert.equal(await reopened.installCredential({ entry_id: "stone", agent_session_id: "session", execution_generation_id: "run", agent_session_token: "fresh-memory-secret" }), true);
+    assert.equal(await reopened.credentialFor(persisted), "fresh-memory-secret");
+    assert.equal(await reopened.installCredential({ entry_id: "stone", agent_session_id: "other", execution_generation_id: "run", agent_session_token: "must-not-install" }), false);
     await reopened.close();
   } finally { await env.cleanup(); }
 });

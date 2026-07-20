@@ -37,6 +37,7 @@ type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
 type NegotiatedSupervisor = {
   protocolVersion: number;
   daemonIdentity: string | null;
+  generation: number | null;
 };
 
 const confirmedBindingsBySession = new Map<string, string>();
@@ -58,6 +59,48 @@ export type SupervisedWorkerBindingResult = {
   /** Validated, canonical, non-secret route suitable for protected local state. */
   supervisorContextCwd: string | null;
 };
+
+/** A credential is returned only to the supervised MCP process that proved all identities. */
+export type SupervisedCredentialBorrowResult =
+  | { state: "not_supervised" }
+  | { state: "available"; credential: string }
+  | { state: "deferred"; code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" }
+  | { state: "stale"; code: "SUPERVISED_CREDENTIAL_STALE" };
+
+/**
+ * Borrow an in-memory, exact-generation worker bearer. This intentionally has
+ * no fallback to the owner/session token: a daemon restarted without Electron
+ * handoff must retain its durable inbox and wait.
+ */
+export async function borrowSupervisedWorkerCredential(
+  session: StoredAgentSessionState,
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+): Promise<SupervisedCredentialBorrowResult> {
+  const coordinates = options.resolvedCoordinates ?? await resolveSupervisorCoordinates(session, env, options);
+  if (!coordinates) return { state: "not_supervised" };
+  if (session.session_kind !== "worker") return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
+  if (negotiated.generation === null) return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: negotiated.protocolVersion,
+    id: randomUUID(),
+    method: "supervisor.borrow_worker_credential",
+    params: {
+      entry_id: coordinates.entryId, room_id: session.room_id, work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId, agent_session_id: session.session_id,
+      daemon_generation: negotiated.generation,
+    },
+  }, timeoutMs);
+  if (!response.ok || response.version !== negotiated.protocolVersion) return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  const result = response.result && typeof response.result === "object" ? response.result as Record<string, unknown> : {};
+  if (result.status === "deferred") return { state: "deferred", code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" };
+  if (result.status !== "available" || typeof result.credential !== "string" || !result.credential.trim()) {
+    return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  }
+  return { state: "available", credential: result.credential };
+}
 
 /** Bind the exact worker credential minted by registration to its daemon lane. */
 export async function bindSupervisedWorkerSession(
@@ -522,7 +565,7 @@ async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promi
   const daemonIdentity = hasCompleteIdentity
     ? [result.generation, result.pid, result.started_at].join(":")
     : null;
-  return { protocolVersion, daemonIdentity };
+  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null };
 }
 
 function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number): Promise<SupervisorResponse> {

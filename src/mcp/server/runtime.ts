@@ -81,6 +81,7 @@ export {
 } from "./runtime/presence.js";
 export { roomScopedApiCall } from "./runtime/room-api.js";
 export {
+  borrowSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
   checkpointSupervisedWorkerCursor,
   isRetryableSupervisorBridgeError,

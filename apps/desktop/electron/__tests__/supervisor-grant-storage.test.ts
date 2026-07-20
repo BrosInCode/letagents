@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { Buffer } from "node:buffer";
-import { decryptSupervisorGrantFromStorage, encryptSupervisorGrantForStorage } from "../main/supervisor-grant.js";
+import { canonicalSupervisorGrantAgentKey, decryptSupervisorGrantFromStorage, encryptSupervisorGrantForStorage } from "../main/supervisor-grant.js";
 
 test("supervisor grant storage uses the injected Keychain adapter and never returns plaintext", () => {
   const storage = {
@@ -24,4 +24,9 @@ test("supervisor grant storage fails closed without Keychain encryption", () => 
   };
   assert.throws(() => encryptSupervisorGrantForStorage("lashg_secret", unavailable), /Keychain encryption is unavailable/);
   assert.equal(decryptSupervisorGrantFromStorage("plain:lashg_secret", unavailable), null);
+});
+
+test("supervisor grant registry keys are stable agent identities rather than display names", () => {
+  assert.equal(canonicalSupervisorGrantAgentKey(" Agent_8F31 "), "agent_8f31");
+  assert.throws(() => canonicalSupervisorGrantAgentKey("  "), /identity is required/);
 });

@@ -547,6 +547,23 @@ export class SupervisorDaemon {
           api_url: String(params.api_url ?? ""),
         });
       }
+      if (request.method === "supervisor.install_worker_credential") {
+        const params = this.paramsRecord(request.params);
+        return this.installWorkerCredential({
+          entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
+          work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
+          agent_session_id: String(params.agent_session_id ?? ""), agent_session_token: String(params.agent_session_token ?? ""),
+          daemon_generation: Number(params.daemon_generation ?? 0),
+        });
+      }
+      if (request.method === "supervisor.borrow_worker_credential") {
+        const params = this.paramsRecord(request.params);
+        return this.borrowWorkerCredential({
+          entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
+          work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
+          agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
+        });
+      }
       if (request.method === "supervisor.checkpoint_worker_cursor") {
         const params = this.paramsRecord(request.params);
         return this.checkpointWorkerCursor({
@@ -2258,6 +2275,29 @@ export class SupervisorDaemon {
       throw new Error("Worker session verification does not match the active supervised binding.");
     }
     return { verified: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
+  }
+
+  /** Main-process-only handoff path. Tokens live only in WorkerBindingStore memory. */
+  private async installWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; daemon_generation: number }): Promise<{ status: "installed" | "stale" }> {
+    if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
+    return { status: await this.workerBindings.installCredential(input) ? "installed" : "stale" };
+  }
+
+  private async borrowWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number }): Promise<{ status: "available"; credential: string } | { status: "deferred" | "stale" }> {
+    if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
+    const credential = await this.workerBindings.credentialFor(input);
+    return credential ? { status: "available", credential } : { status: "deferred" };
+  }
+
+  /** All four durable identities fence a credential from a retired daemon/turn. */
+  private async isExactCredentialRoute(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number }): Promise<boolean> {
+    if (!Number.isSafeInteger(input.daemon_generation) || input.daemon_generation !== this.singleton.currentGeneration) return false;
+    const entry = await this.store.getEntry(input.entry_id);
+    if (!entry || entry.room_id !== input.room_id || entry.work_attempt_id !== input.work_attempt_id
+      || entry.provider_ref?.execution_generation_id !== input.execution_generation_id) return false;
+    const binding = await this.workerBindings.get(input.entry_id);
+    return Boolean(binding && binding.room_id === input.room_id && binding.work_attempt_id === input.work_attempt_id
+      && binding.execution_generation_id === input.execution_generation_id && binding.agent_session_id === input.agent_session_id);
   }
 
   private async checkpointWorkerCursor(input: { entry_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; room_cursor: string }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {

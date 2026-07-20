@@ -200,6 +200,29 @@ export class WorkerBindingStore {
     });
   }
 
+  /** Electron re-delivers a rotated token after the daemon has proved identity.
+   * The value never reaches SQLite; it is cleared on process exit or binding change. */
+  async installCredential(input: {
+    entry_id: string;
+    agent_session_id: string;
+    execution_generation_id: string;
+    agent_session_token: string;
+  }): Promise<boolean> {
+    if (!input.agent_session_token.trim()) throw new Error("Worker credential is required.");
+    return this.withMutation(async (database) => {
+      const binding = this.read(database, input.entry_id);
+      if (!binding || binding.agent_session_id !== input.agent_session_id || binding.execution_generation_id !== input.execution_generation_id) return false;
+      this.credentials.set(binding.credential_ref, {
+        entry_id: binding.entry_id,
+        agent_session_id: binding.agent_session_id,
+        execution_generation_id: binding.execution_generation_id,
+        binding_epoch: this.readBindingEpoch(database, binding.entry_id),
+        token: input.agent_session_token,
+      });
+      return true;
+    });
+  }
+
   private async reservePublication(entryId: string, observedAtMs: number): Promise<Reservation | null> {
     return this.withMutation(async (database) => this.transaction(database, () => {
       const prior = this.read(database, entryId); if (!prior) return null;
