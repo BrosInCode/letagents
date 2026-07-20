@@ -198,8 +198,8 @@ test("malformed pre-existing v3 work tables are rejected without claiming succes
   } finally { await env.cleanup(); }
 });
 
-test("v3 validation rejects same-name non-unique or expression indexes and non-STRICT execution tables", async () => {
-  for (const corruption of ["index", "expression-index", "table"] as const) {
+test("v3 validation rejects malformed live-execution authority indexes and non-STRICT execution tables", async () => {
+  for (const corruption of ["index", "expression-index", "nocase-desc-index", "table"] as const) {
     const env = await fixture();
     try {
       const manifest = new ManifestStore(env.database);
@@ -208,6 +208,7 @@ test("v3 validation rejects same-name non-unique or expression indexes and non-S
       const database = new DatabaseSync(env.database);
       if (corruption === "index") database.exec("DROP INDEX one_live_work_attempt_execution; CREATE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL");
       else if (corruption === "expression-index") database.exec("DROP INDEX one_live_work_attempt_execution; CREATE UNIQUE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id, lower(actor)) WHERE terminal_json IS NULL");
+      else if (corruption === "nocase-desc-index") database.exec("DROP INDEX one_live_work_attempt_execution; CREATE UNIQUE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id COLLATE NOCASE DESC) WHERE terminal_json IS NULL");
       else database.exec(`DROP TABLE work_attempt_executions; CREATE TABLE work_attempt_executions(
         execution_generation_id TEXT, work_attempt_id TEXT, started_at TEXT, actor TEXT, generation INTEGER, terminal_json TEXT
       ); CREATE UNIQUE INDEX one_live_work_attempt_execution ON work_attempt_executions(work_attempt_id) WHERE terminal_json IS NULL`);

@@ -8,7 +8,13 @@ function run(statement: StatementSync, ...values: unknown[]): void { statement.r
 
 /** Owns the single daemon-state schema and all version transitions. */
 export class DaemonStateSchema {
-  constructor(private readonly schemaInitializationHook?: (database: DatabaseSync) => void) {}
+  constructor(
+    private readonly schemaInitializationHook?: (database: DatabaseSync) => void,
+    /** Test-only interruption seam after v6 COMMIT, before physical scrub. */
+    private readonly postV6CommitBeforeScrubHook?: () => void,
+    /** Test-only failure seam used to prove a pending scrub fails closed. */
+    private readonly beforeV6ScrubHook?: () => void,
+  ) {}
 
 createSchema(database: DatabaseSync): void {
   const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
@@ -316,7 +322,7 @@ createSchema(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
-    this.migrateWorkerShapeToV6(database);
+    const requiresScrub = this.migrateWorkerShapeToV6(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -338,15 +344,13 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
-    this.migrateWorkerShapeToV6(database);
+    const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
-    // This marker is committed with the secret-column removal. It survives a
-    // crash between COMMIT and VACUUM, forcing the next opener to finish the
-    // physical scrub before treating v6 as healthy.
-    run(database.prepare("INSERT OR REPLACE INTO migration_records(migration_key, checksum, imported_at) VALUES ('v6-worker-token-scrub', 'pending', ?)") , new Date().toISOString());
+    if (requiresScrub) this.markV6SecretScrubPending(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
+    if (requiresScrub) this.completeV6SecretScrub(database);
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
@@ -363,11 +367,13 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.applyV3Shape(database);
     this.validateV3Shape(database);
-    this.migrateWorkerShapeToV6(database);
+    const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    if (requiresScrub) this.markV6SecretScrubPending(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
+    if (requiresScrub) this.completeV6SecretScrub(database);
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
@@ -384,11 +390,13 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.applyV3Shape(database);
     this.validateV3Shape(database);
     this.applyV4Shape(database);
-    this.migrateWorkerShapeToV6(database);
+    const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    if (requiresScrub) this.markV6SecretScrubPending(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
+    if (requiresScrub) this.completeV6SecretScrub(database);
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
@@ -441,11 +449,13 @@ migrateV4ToV5(database: DatabaseSync): void {
   try {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
-    this.migrateWorkerShapeToV6(database);
+    const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    if (requiresScrub) this.markV6SecretScrubPending(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
+    if (requiresScrub) this.completeV6SecretScrub(database);
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
@@ -488,15 +498,16 @@ migrateV5ToV6(database: DatabaseSync): void {
   try {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
-    this.migrateWorkerShapeToV6(database);
+    const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    if (requiresScrub) this.markV6SecretScrubPending(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
     // The old table contained a credential. secure_delete clears freed cells;
     // checkpoint + VACUUM rewrites both main and WAL before this initializer
     // returns a live v6 connection.
-    this.finishV6SecretScrub(database);
+    if (requiresScrub) this.completeV6SecretScrub(database);
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
@@ -508,8 +519,9 @@ migrateV5ToV6(database: DatabaseSync): void {
  * version-marker rollback.  Prefer its already-secret-free v6 shape; real
  * v1–v5 databases still build and validate each predecessor in order.
  */
-private migrateWorkerShapeToV6(database: DatabaseSync): void {
+private migrateWorkerShapeToV6(database: DatabaseSync): boolean {
   const columns = this.tableColumns(database, "worker_session_bindings");
+  const requiresScrub = columns.has("agent_session_token");
   if (!columns.has("credential_ref")) {
     this.applyV4Shape(database);
     this.validateV4Shape(database);
@@ -518,6 +530,7 @@ private migrateWorkerShapeToV6(database: DatabaseSync): void {
   this.validateV5Shape(database);
   this.applyV6Shape(database);
   this.validateV6Shape(database);
+  return requiresScrub;
 }
 
 repairAndValidateV6Shape(database: DatabaseSync): void {
@@ -532,7 +545,11 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
     this.validateV6Shape(database);
     this.finishPendingV6SecretScrub(database);
     if (!needsLegacyPresenceRepair) return;
-  } catch {
+  } catch (error) {
+    // A pending scrub is safety-critical. Do not convert a failed VACUUM or
+    // checkpoint into an unrelated shape-repair attempt that could claim the
+    // database healthy while raw credential pages remain.
+    if (this.hasPendingV6SecretScrub(database)) throw error;
     // Do not validate or recreate the retired v5 credential shape on normal
     // v6 opens. v2/v3 repairs remain necessary for old partial-marker cases.
   }
@@ -552,11 +569,25 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
 }
 
 private finishPendingV6SecretScrub(database: DatabaseSync): void {
+  if (this.hasPendingV6SecretScrub(database)) this.finishV6SecretScrub(database);
+}
+
+private hasPendingV6SecretScrub(database: DatabaseSync): boolean {
   const pending = database.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as Row | undefined;
-  if (pending?.checksum === "pending") this.finishV6SecretScrub(database);
+  return pending?.checksum === "pending";
+}
+
+private markV6SecretScrubPending(database: DatabaseSync): void {
+  run(database.prepare("INSERT OR REPLACE INTO migration_records(migration_key, checksum, imported_at) VALUES ('v6-worker-token-scrub', 'pending', ?)"), new Date().toISOString());
+}
+
+private completeV6SecretScrub(database: DatabaseSync): void {
+  this.postV6CommitBeforeScrubHook?.();
+  this.finishV6SecretScrub(database);
 }
 
 private finishV6SecretScrub(database: DatabaseSync): void {
+  this.beforeV6ScrubHook?.();
   database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   database.exec("VACUUM");
   database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -1000,10 +1031,15 @@ validateV3Shape(database: DatabaseSync): void {
   }
   const named = (database.prepare("PRAGMA index_list(work_attempt_executions)").all() as Row[])
     .find((row) => row.name === "one_live_work_attempt_execution");
+  const namedTerms = (database.prepare("PRAGMA index_xinfo(one_live_work_attempt_execution)").all() as Row[])
+    .filter((row) => Number(row.key) === 1)
+    .sort((left, right) => Number(left.seqno) - Number(right.seqno));
   const sql = database.prepare("SELECT tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name = 'one_live_work_attempt_execution'").get() as Row | undefined;
   const normalizedSql = String(sql?.sql ?? "").replace(/[\s"`\[\]]+/g, " ").trim().toLowerCase();
-  if (!named || Number(named.unique) !== 1 || Number(named.partial) !== 1 || sql?.tbl_name !== "work_attempt_executions"
+  if (!named || Number(named.unique) !== 1 || Number(named.partial) !== 1 || String(named.origin) !== "c" || sql?.tbl_name !== "work_attempt_executions"
     || !this.hasUniqueIndex(database, "work_attempt_executions", ["work_attempt_id"], true, "one_live_work_attempt_execution")
+    || namedTerms.length !== 1 || Number(namedTerms[0]?.cid) < 0 || namedTerms[0]?.name !== "work_attempt_id"
+    || Number(namedTerms[0]?.desc) !== 0 || String(namedTerms[0]?.coll).toUpperCase() !== "BINARY"
     || !normalizedSql.endsWith("where terminal_json is null")) {
     throw new Error("Daemon state v3 live execution uniqueness index is missing or malformed.");
   }
