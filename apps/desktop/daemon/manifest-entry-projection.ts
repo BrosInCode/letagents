@@ -83,6 +83,7 @@ export function projectDaemonManifestEntry(entry: DaemonManifestEntry): DaemonMa
       model: entry.model,
       charter: entry.charter,
       permission_profile_id: entry.permission_profile_id,
+      ...(Object.hasOwn(entry, "delivery_mode") ? { delivery_mode: entry.delivery_mode } : {}),
       ...(Object.hasOwn(entry, "provider_launch_policy") ? { provider_launch_policy: entry.provider_launch_policy } : {}),
     },
     launch_intent: {
@@ -177,6 +178,7 @@ export function composeDaemonManifestEntry(projection: DaemonManifestDomainProje
     observed_state: runtime.observed_state,
     condition: lifecycle.condition,
     permission_profile_id: configuration.permission_profile_id,
+    ...(Object.hasOwn(configuration, "delivery_mode") ? { delivery_mode: configuration.delivery_mode } : {}),
     created_by: identity.created_by,
     created_at: identity.created_at,
     ...(Object.hasOwn(lifecycle, "last_error") ? { last_error: lifecycle.last_error } : {}),
@@ -214,6 +216,7 @@ export function projectDaemonCreateRequestReplayParameters(entry: DaemonManifest
     model: projection.configuration.model,
     charter: projection.configuration.charter,
     permission_profile_id: projection.configuration.permission_profile_id,
+    delivery_mode: projection.configuration.delivery_mode,
     provider_launch_policy: projection.configuration.provider_launch_policy ?? null,
     created_by: projection.identity.created_by,
     source_repo_path: projection.launch_intent.source_repo_path ?? null,

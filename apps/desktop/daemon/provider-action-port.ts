@@ -43,7 +43,7 @@ export function sameProviderActionConnectionIdentity(
 }
 
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; provider?: string; providerConnection?: ProviderActionConnectionRef | null };
-export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; provider?: string; agentDisplayName?: string; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null }; devMcpServerEntryPath?: string };
+export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; provider?: string; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null }; devMcpServerEntryPath?: string };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal };
@@ -78,6 +78,7 @@ export type ProviderRoomTurnResult = {
   text: string | null;
 };
 export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
+export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 
 export interface ProviderActionPort {
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
@@ -89,8 +90,11 @@ export interface ProviderActionPort {
   poke(handle: ProviderActionHandle, message: string, options?: { actionId?: string }): Promise<void>;
   controlTurn?(handle: ProviderActionHandle, correction?: string | null, options?: {
     actionId?: string;
+    checkpointTurnStarted?: (turnId: string) => Promise<void>;
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderTurnControlResult>;
+  inspectTurn?(handle: ProviderActionHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
+  controlExactTurn?(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: {
     /** Durable intent checkpoint; completes before the first native turn/start side effect. */
     beforeNativeDispatch?: () => Promise<void>;

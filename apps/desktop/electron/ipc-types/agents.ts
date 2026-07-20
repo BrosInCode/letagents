@@ -114,7 +114,8 @@ export interface DesktopManagedAgentFailure {
 
 export type DesktopManagedAgentDeliveryMode =
   | "mcp_polling"
-  | "desktop_events";
+  | "desktop_events"
+  | "daemon_inbox";
 
 export type DesktopManagedAgentEffort =
   | "low"
@@ -458,6 +459,8 @@ export interface DesktopSupervisorManifestEntry {
   /** Latest actionable daemon lifecycle failure, when one is retained. */
   lastError?: string | null;
   permissionProfileId: string | null;
+  /** Durable room-ingress owner for this supervised provider. */
+  deliveryMode: DesktopManagedAgentDeliveryMode;
   createdBy: string;
   createdAt: string;
   workspacePath: string | null;

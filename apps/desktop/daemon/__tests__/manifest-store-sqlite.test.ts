@@ -734,3 +734,41 @@ test("detached deployment identity survives lane-owner full writes and restart",
     await env.cleanup();
   }
 });
+
+test("v6 repair adds bounded delivery columns without shifting an exact persisted turn id", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const seeded: DaemonManifestEntry = {
+      ...entry,
+      delivery_mode: "daemon_inbox",
+      turn_control: { ...entry.turn_control!, provider_turn_id: "turn_legacy_poll" },
+    };
+    await store.write(0, [seeded]);
+    const database = (store as unknown as { database: DatabaseSync }).database;
+    database.exec("ALTER TABLE agent_configurations DROP COLUMN delivery_mode; ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id");
+    await store.close();
+
+    const repaired = new ManifestStore(env.databasePath);
+    const loaded = await repaired.load();
+    const restored = loaded.entries[0]!;
+    assert.equal(restored.delivery_mode ?? "mcp_polling", "mcp_polling", "old v6 rows safely default to legacy ingress before cutover");
+    assert.equal(restored.turn_control?.provider_turn_id, undefined, "missing v6 extension does not shift booleans into the turn id");
+    assert.equal(restored.turn_control?.has_correction, true);
+    assert.equal(restored.turn_control?.status, "completed");
+    await repaired.replaceEntry(loaded.generation, {
+      ...restored,
+      delivery_mode: "daemon_inbox",
+      turn_control: { ...restored.turn_control!, provider_turn_id: "turn_repaired_exact" },
+    });
+    const roundTrip = await repaired.load();
+    assert.equal(roundTrip.entries[0]?.delivery_mode, "daemon_inbox");
+    assert.equal(roundTrip.entries[0]?.turn_control?.provider_turn_id, "turn_repaired_exact");
+    assert.equal(roundTrip.entries[0]?.turn_control?.has_correction, true);
+    assert.equal(roundTrip.entries[0]?.turn_control?.status, "completed");
+    await repaired.close();
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});

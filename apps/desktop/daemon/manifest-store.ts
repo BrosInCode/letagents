@@ -103,7 +103,7 @@ export class ManifestStore {
       SELECT
         i.agent_id, i.created_by, i.created_at,
         p.display_name, m.room_id,
-        c.provider, c.model, c.charter, c.permission_profile_id,
+        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,
         d.deployment_id, d.run_id, d.observed_state,
@@ -122,6 +122,7 @@ export class ManifestStore {
         r.ready_reached_at_present, r.ready_reached_at,
         t.turn_control_present, t.action_id, t.turn_work_attempt_id,
         t.turn_execution_generation_id, t.has_correction, t.status AS turn_status,
+        t.provider_turn_id,
         t.capability, t.interrupted, t.resumed, t.turn_state, t.error AS turn_error,
         t.recorded_at, t.updated_at,
         b.last_worker_binding_present, b.binding_agent_session_id,
@@ -179,7 +180,7 @@ export class ManifestStore {
       SELECT
         i.agent_id, i.created_by, i.created_at,
         p.display_name, m.room_id,
-        c.provider, c.model, c.charter, c.permission_profile_id,
+        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,
         d.deployment_id, d.run_id, d.observed_state,
@@ -197,6 +198,7 @@ export class ManifestStore {
         r.ready_reached_at_present, r.ready_reached_at,
         t.turn_control_present, t.action_id, t.turn_work_attempt_id,
         t.turn_execution_generation_id, t.has_correction, t.status AS turn_status,
+        t.provider_turn_id,
         t.capability, t.interrupted, t.resumed, t.turn_state, t.error AS turn_error,
         t.recorded_at, t.updated_at,
         b.last_worker_binding_present, b.binding_agent_session_id,
@@ -496,10 +498,10 @@ export class ManifestStore {
     const policyUndefined = policyPresent && configuration.provider_launch_policy === undefined;
     run(database.prepare(`
       INSERT INTO agent_configurations(
-        agent_id, provider, model, charter, permission_profile_id,
+        agent_id, provider, model, charter, permission_profile_id, delivery_mode,
         provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.charter, configuration.permission_profile_id, Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.charter, configuration.permission_profile_id, configuration.delivery_mode ?? "mcp_polling", Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 
@@ -549,9 +551,15 @@ export class ManifestStore {
 
     const turnPresent = Object.hasOwn(turnJournal, "turn_control");
     const turn = turnJournal.turn_control ?? null;
-    run(database.prepare(`INSERT INTO turn_control_journals VALUES (${Array.from({ length: 14 }, () => "?").join(", ")})`),
+    run(database.prepare(`
+      INSERT INTO turn_control_journals(
+        agent_id, turn_control_present, action_id, turn_work_attempt_id,
+        turn_execution_generation_id, provider_turn_id, has_correction, status,
+        capability, interrupted, resumed, turn_state, error, recorded_at, updated_at
+      ) VALUES (${Array.from({ length: 15 }, () => "?").join(", ")})
+    `),
       identity.agent_id, Number(turnPresent), turn?.action_id ?? null, turn?.work_attempt_id ?? null,
-      turn?.execution_generation_id ?? null, turn ? Number(turn.has_correction) : null,
+      turn?.execution_generation_id ?? null, turn?.provider_turn_id ?? null, turn ? Number(turn.has_correction) : null,
       turn?.status ?? null, turn?.capability ?? null,
       turn?.interrupted === null || turn?.interrupted === undefined ? null : Number(turn.interrupted),
       turn?.resumed === null || turn?.resumed === undefined ? null : Number(turn.resumed),
@@ -651,6 +659,7 @@ export class ManifestStore {
     if (bool(row.turn_control_present)) turn = row.action_id === null ? null : {
       action_id: String(row.action_id), work_attempt_id: String(row.turn_work_attempt_id),
       execution_generation_id: String(row.turn_execution_generation_id), has_correction: bool(row.has_correction),
+      ...(nullableString(row.provider_turn_id) ? { provider_turn_id: nullableString(row.provider_turn_id) } : {}),
       status: String(row.turn_status) as DaemonTurnControlEffect["status"], capability: String(row.capability) as DaemonTurnControlEffect["capability"],
       interrupted: row.interrupted === null ? null : bool(row.interrupted), resumed: row.resumed === null ? null : bool(row.resumed),
       state: row.turn_state === null ? null : String(row.turn_state) as "idle" | "working", stages,
@@ -670,7 +679,7 @@ export class ManifestStore {
       identity: { agent_id: agentId, created_by: String(row.created_by), created_at: String(row.created_at) },
       profile: { agent_id: agentId, display_name: String(row.display_name) },
       membership: { agent_id: agentId, room_id: String(row.room_id) },
-      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
+      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
       launch_intent: { agent_id: agentId, desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"], ...(bool(row.source_repo_path_present) ? { source_repo_path: nullableString(row.source_repo_path) } : {}) },
       runtime_deployment: runtime,
       lifecycle: { agent_id: agentId, condition: String(row.condition) as DaemonManifestEntry["condition"], ...(bool(row.last_error_present) ? { last_error: nullableString(row.last_error) } : {}) },

@@ -388,6 +388,94 @@ test("Codex turn control interrupts the exact turn and resumes the same thread w
   assert.equal(handle.providerContinuationId, "thread-1");
 });
 
+test("Codex exact legacy-turn control checkpoints once and never selects a newer latest turn", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const original = client.request.bind(client);
+  let turns: Array<{ id: string; status: string }> = [
+    { id: "turn-polling", status: "inProgress" },
+    { id: "turn-newer", status: "inProgress" },
+  ];
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return {
+      thread: { id: handle.providerContinuationId, turns: turns.map((turn) => ({ ...turn, items: [] })) },
+    } as T;
+    if (method === "turn/interrupt") {
+      await original<T>(method, params);
+      const id = (params as { turnId: string }).turnId;
+      turns = turns.map((turn) => turn.id === id ? { ...turn, status: "interrupted" } : turn);
+      return {} as T;
+    }
+    return original<T>(method, params);
+  };
+  client.requests.length = 0;
+  const events: string[] = [];
+
+  const result = await adapter.controlExactTurn!(handle, {
+    targetTurnId: "turn-polling",
+    checkpointTargetTurn: async (turnId) => { events.push(`checkpoint:${turnId}`); },
+    markDispatched: async () => { events.push("dispatch"); },
+  });
+
+  assert.deepEqual(result, { outcome: "interrupt_dispatched", targetTurnId: "turn-polling" });
+  assert.deepEqual(events, ["checkpoint:turn-polling", "dispatch"]);
+  assert.deepEqual(
+    client.requests.filter((request) => request.method === "turn/interrupt").map((request) => request.params),
+    [{ threadId: "thread-1", turnId: "turn-polling" }],
+  );
+});
+
+test("Codex exact legacy-turn control proves no-active and persisted terminal boundaries without interrupting", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const original = client.request.bind(client);
+  let turns: Array<{ id: string; status: string }> = [];
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns } } as T;
+    return original<T>(method, params);
+  };
+  client.requests.length = 0;
+  const callbacks = { checkpoint: 0, dispatch: 0 };
+  const options = {
+    checkpointTargetTurn: async () => { callbacks.checkpoint += 1; },
+    markDispatched: async () => { callbacks.dispatch += 1; },
+  };
+  assert.deepEqual(await adapter.controlExactTurn!(handle, options), { outcome: "no_active", targetTurnId: null });
+  turns = [{ id: "turn-polling", status: "interrupted" }, { id: "turn-newer", status: "inProgress" }];
+  assert.deepEqual(await adapter.controlExactTurn!(handle, { ...options, targetTurnId: "turn-polling" }), {
+    outcome: "terminal", targetTurnId: "turn-polling",
+  });
+  assert.deepEqual(callbacks, { checkpoint: 0, dispatch: 0 });
+  assert.equal(client.requests.some((request) => request.method === "turn/interrupt"), false);
+});
+
+test("Codex exact legacy-turn control refuses missing, unknown, or callback-failed targets before native interrupt", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const original = client.request.bind(client);
+  let turns: Array<{ id: string; status: string }> = [{ id: "turn-polling", status: "mystery" }];
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns } } as T;
+    return original<T>(method, params);
+  };
+  client.requests.length = 0;
+  const stable = { checkpointTargetTurn: async () => {}, markDispatched: async () => {} };
+  await assert.rejects(adapter.controlExactTurn!(handle, { ...stable, targetTurnId: "turn-missing" }), /cannot find/);
+  await assert.rejects(adapter.controlExactTurn!(handle, { ...stable, targetTurnId: "turn-polling" }), /unknown target state/);
+  turns = [{ id: "turn-polling", status: "inProgress" }];
+  await assert.rejects(adapter.controlExactTurn!(handle, {
+    checkpointTargetTurn: async () => {},
+    markDispatched: async () => { throw new Error("durable dispatch failed"); },
+  }), /durable dispatch failed/);
+  assert.equal(client.requests.some((request) => request.method === "turn/interrupt"), false);
+});
+
 test("Codex bounded room turn waits for its exact terminal event and publishes only final agent text", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

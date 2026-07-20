@@ -85,9 +85,14 @@ export type DaemonAgentConfiguration = {
   model: string | null;
   charter: string;
   permission_profile_id: string | null;
+  /** Explicit inbox owner; never infer daemon delivery from native policy. */
+  delivery_mode?: DaemonAgentDeliveryMode;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
 };
+
+/** Durable owner of room ingress for one supervised provider execution. */
+export type DaemonAgentDeliveryMode = "mcp_polling" | "desktop_events" | "daemon_inbox";
 
 /** Requested launch/control state. This is intent, not agent identity or observed runtime. */
 export type DaemonAgentLaunchIntent = {
@@ -115,6 +120,8 @@ export type DaemonTurnControlEffect = {
   action_id: string;
   work_attempt_id: string;
   execution_generation_id: string;
+  /** Exact native turn fenced before the first interrupt side effect. */
+  provider_turn_id?: string | null;
   has_correction: boolean;
   status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
   capability: "native_interrupt" | "restart_resume" | "unsupported";
@@ -197,6 +204,7 @@ export type DaemonManifestEntry = {
   condition: PolicyCondition;
   last_error?: string | null;
   permission_profile_id: string | null;
+  delivery_mode?: DaemonAgentDeliveryMode;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
