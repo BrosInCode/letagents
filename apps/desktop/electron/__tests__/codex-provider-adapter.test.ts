@@ -388,6 +388,141 @@ test("Codex turn control interrupts the exact turn and resumes the same thread w
   assert.equal(handle.providerContinuationId, "thread-1");
 });
 
+test("Codex bounded room turn waits for its exact terminal event and publishes only final agent text", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  const causal: string[] = []; let boundedStatus = "inProgress"; let settled = false;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      causal.push("turn/start");
+      return { turn: { id: "turn-bounded" } } as T;
+    }
+    if (method === "thread/read") return {
+      thread: { id: handle.providerContinuationId, turns: [{ id: "turn-bounded", status: boundedStatus, items: [
+        { type: "userMessage", phase: "final", text: "Never publish this." },
+        { type: "agentMessage", phase: "commentary", text: "Thinking aloud." },
+        { type: "tool", phase: "final", text: "Tool transcript." },
+        { type: "agentMessage", phase: "final", content: [{ text: "Final answer, part one." }, { text: "Part two." }] },
+      ] }] },
+    } as T;
+    return originalRequest<T>(method, params);
+  };
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-1",
+    actionId: "action-1",
+    sourceMessage: { id: "message-1", text: "Please investigate." },
+    activation: { for_current_agent: { reason: "mention" } },
+  }, {
+    beforeNativeDispatch: async () => { causal.push("before-native"); },
+    checkpointTurnStarted: async (turnId) => { causal.push(`started:${turnId}`); },
+  });
+  void pending.then(() => { settled = true; });
+  await flush();
+  assert.deepEqual(causal, ["before-native", "turn/start", "started:turn-bounded"]);
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "other-turn" } });
+  client.emit({ method: "turn/completed", params: { threadId: "other-thread", turnId: "turn-bounded" } });
+  await flush();
+  assert.equal(settled, false, "an unrelated turn terminal cannot settle this bounded delivery");
+  boundedStatus = "completed";
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-bounded" } });
+  const result = await pending;
+
+  assert.deepEqual(result, {
+    turnId: "turn-bounded",
+    outcome: "reply",
+    text: "Final answer, part one.\nPart two.",
+  });
+  assert.equal(handle.pid, 4100);
+  assert.equal(handle.providerContinuationId, "thread-1", "the bounded delivery retains the original app-server thread");
+});
+
+test("Codex bounded room turn consumes a fast exact terminal cached before its waiter", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-fast" } });
+      return { turn: { id: "turn-fast" } } as T;
+    }
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-fast", status: "completed", items: [{ type: "agentMessage", phase: "final", text: "LETAGENTS_NO_ROOM_REPLY" }] }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  assert.deepEqual(await adapter.runRoomTurn!(handle, { inboxItemId: "inbox-fast", actionId: "action-fast", sourceMessage: {}, activation: {} }, {
+    beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {},
+  }), { turnId: "turn-fast", outcome: "no_reply", text: null });
+});
+
+test("Codex bounded room turn rejects an empty final answer", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: "turn-empty" } } as T;
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-empty", status: "completed", items: [{ type: "agentMessage", phase: "final", text: "  " }] }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const pending = adapter.runRoomTurn!(handle, { inboxItemId: "inbox-empty", actionId: "action-empty", sourceMessage: {}, activation: {} }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  await flush(); client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-empty" } });
+  await assert.rejects(pending, /completed without a final answer/);
+});
+
+test("Codex bounded room turn does not treat a sentinel with extra text as no-reply", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: "turn-sentinel-extra" } } as T;
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-sentinel-extra", status: "completed", items: [{ type: "agentMessage", phase: "final", text: "LETAGENTS_NO_ROOM_REPLY\nextra" }] }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const pending = adapter.runRoomTurn!(handle, { inboxItemId: "inbox-sentinel-extra", actionId: "action-sentinel-extra", sourceMessage: {}, activation: {} }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  await flush(); client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-sentinel-extra" } });
+  assert.deepEqual(await pending, { turnId: "turn-sentinel-extra", outcome: "reply", text: "LETAGENTS_NO_ROOM_REPLY\nextra" });
+});
+
+test("Codex room-turn recovery reattaches only the persisted exact active turn and never starts another", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  let status = "inProgress";
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-recover", status, items: [{ type: "agentMessage", phase: "final", text: "Recovered reply." }] }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const startsBefore = client.requests.filter((request) => request.method === "turn/start").length;
+  const pending = adapter.recoverRoomTurn!(handle, { inboxItemId: "inbox-recover", providerTurnId: "turn-recover" });
+  await flush();
+  client.emit({ method: "turn/completed", params: { threadId: "other-thread", turnId: "turn-recover" } });
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "other-turn" } });
+  await flush(); status = "completed";
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-recover" } });
+  assert.deepEqual(await pending, { turnId: "turn-recover", outcome: "reply", text: "Recovered reply." });
+  assert.equal(client.requests.filter((request) => request.method === "turn/start").length, startsBefore);
+});
+
+test("Codex room-turn recovery returns already-terminal exact output without starting a turn", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-done", status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Already durable." }] }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const startsBefore = client.requests.filter((request) => request.method === "turn/start").length;
+  assert.deepEqual(await adapter.recoverRoomTurn!(handle, { inboxItemId: "inbox-done", providerTurnId: "turn-done" }), { turnId: "turn-done", outcome: "reply", text: "Already durable." });
+  assert.equal(client.requests.filter((request) => request.method === "turn/start").length, startsBefore);
+});
+
+test("Codex room-turn recovery rejects missing and unknown exact turns as ambiguous", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-unknown", status: "mystery" }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  await assert.rejects(adapter.recoverRoomTurn!(handle, { inboxItemId: "missing", providerTurnId: "turn-missing" }), /cannot find/);
+  await assert.rejects(adapter.recoverRoomTurn!(handle, { inboxItemId: "unknown", providerTurnId: "turn-unknown" }), /unknown exact turn state/);
+});
+
 test("Codex supervised launch passes only its daemon generation binding to the MCP child", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

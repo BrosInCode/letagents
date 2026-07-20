@@ -359,16 +359,36 @@ export class SupervisedAgentDelivery {
         return;
       }
       if (!await this.hasAuthority(agent, controller)) return;
-      setActive("dispatching");
-      const turn = this.provider.runRoomTurn?.(agent.handle, {
+      const recovering = Boolean(item.provider_turn_id);
+      if (recovering) setActive("responding");
+      else setActive("dispatching");
+      const turn = recovering
+        ? this.provider.recoverRoomTurn?.(agent.handle, {
+          inboxItemId: item.inbox_item_id,
+          providerTurnId: item.provider_turn_id!,
+        })
+        : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
         activation: item.activation,
         actionId: item.action_id,
-      }, { markDispatched: async () => {
+      }, { beforeNativeDispatch: async () => {
         if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
-        // This callback is the provider's exact dispatch edge. A queued or
-        // merely persisted inbox item must never be projected as responding.
+        // The provider cannot call turn/start until this durable causal edge
+        // has committed. Dispatching remains truthful until its exact native
+        // turn id has also been checkpointed below.
+        await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
+      }, markDispatched: async () => {
+        // Compatibility only for a pre-checkpoint adapter during upgrade. It
+        // retains the truthful activity projection but cannot replace the
+        // exact turn-id callback implemented by bounded Codex.
+        if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+        await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
+        setActive("responding");
+      }, checkpointTurnStarted: async (turnId) => {
+        if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+        await this.inbox.checkpointTurnStarted(item.inbox_item_id, turnId);
+        // Only an acknowledged exact provider turn is projected responding.
         setActive("responding");
       } });
       // Native provider turns are intentionally not cancelable by the daemon:
@@ -405,6 +425,10 @@ export class SupervisedAgentDelivery {
       const message = error instanceof Error ? error.message : "Room delivery failed.";
       const current = await this.inbox.get(item.inbox_item_id);
       if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply") return;
+      if ((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome === "ambiguous") {
+        await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
+        return;
+      }
       if (current.attempt_count >= 3) {
         await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
         return;

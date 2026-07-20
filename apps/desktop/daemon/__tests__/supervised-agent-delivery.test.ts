@@ -17,9 +17,9 @@ const agent = {
   handle: { workAttemptId: "attempt", providerContinuationId: "thread", pid: 1, observedState: "working" as const },
 };
 const currentAuthority = async () => true;
-const provider = (runRoomTurn: NonNullable<ProviderActionPort["runRoomTurn"]>) => ({
+const provider = (runRoomTurn: NonNullable<ProviderActionPort["runRoomTurn"]>, recoverRoomTurn?: NonNullable<ProviderActionPort["recoverRoomTurn"]>) => ({
   capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true, turnControl: "unsupported" as const }),
-  spawn: async () => { throw new Error("not used"); }, attach: async () => null, attachAction: async () => ({ state: "absent" as const }), resume: async () => { throw new Error("not used"); }, poke: async () => {}, stop: async () => ({ endedAt: "", exitCode: 0, signal: null, terminalCause: "stopped" as const, providerContinuationId: null }), onExit: async () => () => {}, runRoomTurn,
+  spawn: async () => { throw new Error("not used"); }, attach: async () => null, attachAction: async () => ({ state: "absent" as const }), resume: async () => { throw new Error("not used"); }, poke: async () => {}, stop: async () => ({ endedAt: "", exitCode: 0, signal: null, terminalCause: "stopped" as const, providerContinuationId: null }), onExit: async () => () => {}, runRoomTurn, recoverRoomTurn,
 } satisfies ProviderActionPort);
 
 function deferred<T>() {
@@ -900,5 +900,34 @@ test("startup recovery blocks ambiguous awaiting and retryable work instead of a
     await retryDelivery.pump(agent);
     assert.equal((await retryStore.receipts(agent.agentId))[0]?.state, "blocked");
     await retryStore.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("startup recovery reattaches only a persisted exact provider turn and blocks ambiguity without rerunning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-exact-recovery-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-exact");
+    let recoveries = 0; let newTurns = 0; const published: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async () => { newTurns += 1; throw new Error("must not rerun"); },
+      async (_handle, request) => { recoveries += 1; assert.equal(request.providerTurnId, "turn-exact"); return { turnId: "turn-exact", outcome: "reply", text: "recovered" }; },
+    ), { poll: async () => ({}), publish: async (input) => { published.push(input.text); } }, currentAuthority, 0);
+    await delivery.pump(agent);
+    assert.equal(recoveries, 1); assert.equal(newTurns, 0); assert.deepEqual(published, ["recovered"]);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+    await store.close();
+
+    const ambiguousStore = new SupervisedAgentInboxStore(join(root, "ambiguous.sqlite"));
+    const ambiguous = await enqueue(ambiguousStore);
+    await ambiguousStore.checkpointTurnStarted(ambiguous.inbox_item_id, "turn-ambiguous");
+    const ambiguousDelivery = new SupervisedAgentDelivery(ambiguousStore, provider(
+      async () => { throw new Error("must not rerun"); },
+      async () => { throw Object.assign(new Error("exact turn missing"), { roomTurnRecoveryOutcome: "ambiguous" as const }); },
+    ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 0);
+    await ambiguousDelivery.pump(agent);
+    assert.equal((await ambiguousStore.receipts(agent.agentId))[0]?.state, "blocked");
+    await ambiguousStore.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -6,6 +6,7 @@ import type {
   ProviderActionPort,
   ProviderActionRef,
   ProviderRoomTurnRequest,
+  ProviderRoomTurnRecoveryRequest,
   ProviderRoomTurnResult,
   ProviderActionSpawn,
   ProviderActionStreamEvent,
@@ -28,7 +29,8 @@ type NativeAdapter = {
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
   controlTurn(handle: NativeHandle, correction?: string | null, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
-  runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderRoomTurnResult>;
+  runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderRoomTurnResult>;
+  recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest): Promise<ProviderRoomTurnResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -113,10 +115,16 @@ export class CodexProviderActionPort implements ProviderActionPort {
     return result;
   }
 
-  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderRoomTurnResult> {
+  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderRoomTurnResult> {
     const adapter = await this.adapter();
     if (!adapter.runRoomTurn) throw new Error("Codex provider adapter does not support bounded room turns.");
     return adapter.runRoomTurn(this.required(handle), request, options);
+  }
+
+  async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest): Promise<ProviderRoomTurnResult> {
+    const adapter = await this.adapter();
+    if (!adapter.recoverRoomTurn) throw new Error("Codex provider adapter does not support bounded room-turn recovery.");
+    return adapter.recoverRoomTurn(this.required(handle), request);
   }
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {

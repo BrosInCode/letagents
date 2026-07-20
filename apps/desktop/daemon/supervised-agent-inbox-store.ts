@@ -131,8 +131,38 @@ export class SupervisedAgentInboxStore {
       const timestamp = this.now();
       run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',attempt_count=attempt_count+1,updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
       const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
-      this.recordEvent(database, updated.inbox_item_id, `turn_started:${updated.attempt_count}`, "turn_started", timestamp, null);
       return updated;
+    }));
+  }
+  /**
+   * Revalidate the durable dispatch fact immediately before turn/start. The
+   * fact itself is the FIFO claim's committed `dispatching` state; this is
+   * intentionally not a second synthetic transition.
+   */
+  async checkpointDispatchIntent(inboxItemId: string): Promise<SupervisedInboxItem> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
+      const item = rowToItem(current);
+      if (item.state !== "dispatching" || item.provider_turn_id) throw new Error("Provider dispatch intent requires an unstarted dispatching inbox item.");
+      this.assertCurrentHead(database, item);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
+  /** Persist the exact provider turn id before waiting for any terminal evidence. */
+  async checkpointTurnStarted(inboxItemId: string, providerTurnId: string): Promise<SupervisedInboxItem> {
+    if (!providerTurnId.trim()) throw new Error("Provider turn id is required for the turn-start checkpoint.");
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
+      const item = rowToItem(current);
+      if (item.state !== "dispatching") throw new Error("Provider turn-start checkpoint requires a dispatching inbox item.");
+      this.assertCurrentHead(database, item);
+      if (item.provider_turn_id && item.provider_turn_id !== providerTurnId) throw new Error("Provider turn-start checkpoint conflicts with the durable exact turn id.");
+      const timestamp = this.now();
+      run(database.prepare("UPDATE supervised_agent_inbox SET provider_turn_id=?,updated_at=? WHERE inbox_item_id=?"), providerTurnId, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, `turn_started:${item.attempt_count}:${providerTurnId}`, "turn_started", timestamp, null);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
   /** Persist provider terminal evidence before advancing out of dispatching. */
@@ -181,6 +211,11 @@ export class SupervisedAgentInboxStore {
           } else if (terminal?.kind === "no_reply") {
             next = "acknowledged_no_reply";
             error = null;
+          } else if (item.provider_turn_id && (item.state === "dispatching" || item.state === "awaiting_result")) {
+            // This is not a retry: delivery will ask the provider to inspect
+            // precisely this persisted turn id and will block if it cannot.
+            next = "pending";
+            error = "Daemon restarted while awaiting the exact persisted provider turn; recovering it without rerunning.";
           } else {
             next = "blocked";
             error = `Daemon restarted during ${item.state} without authoritative terminal or publication evidence; acknowledgement is unsafe.`;

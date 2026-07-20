@@ -275,9 +275,14 @@ export interface ProviderRoomTurnResult {
   outcome: "reply" | "no_reply";
   text: string | null;
 }
+export interface ProviderRoomTurnRecoveryRequest { inboxItemId: string; providerTurnId: string; }
 
 export interface ProviderRoomTurnOptions {
   /** Persist dispatch intent before the first native turn/start side effect. */
+  beforeNativeDispatch?: () => Promise<void>;
+  /** Persist the exact native turn id before awaiting its terminal state. */
+  checkpointTurnStarted?: (turnId: string) => Promise<void>;
+  /** @deprecated compatibility alias; new adapters must call beforeNativeDispatch. */
   markDispatched?: () => Promise<void>;
 }
 
@@ -315,6 +320,8 @@ export interface ProviderAdapter {
 
   /** Run one bounded room turn without launching or replacing the provider. */
   runRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult>;
+  /** Recover only a persisted exact native turn; it must not start another turn. */
+  recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest): Promise<ProviderRoomTurnResult>;
 
   /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
   stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;
