@@ -172,7 +172,6 @@
           :durable-project-root-path="selectedRoomProjectRootPath"
           :home-path="appInfo?.homePath || null"
           :workers="workers"
-          :room-agent-delivery-recovery-available="false"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
           @chat-scroll-position="rememberChatScrollPosition"

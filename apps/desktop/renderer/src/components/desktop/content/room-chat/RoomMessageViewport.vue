@@ -35,7 +35,7 @@
           :animate-arrival="arrivingMessageIds.has(entry.message.id)"
           :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
-          :delivery-retry-busy="deliveryRetryBusy"
+          :delivery-retry-key="deliveryRetryKey"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
@@ -179,7 +179,7 @@ const props = defineProps<{
   localAgentWork: ManagedAgentWorkIndicator[];
   deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
-  deliveryRetryBusy?: boolean;
+  deliveryRetryKey?: string | null;
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubActivityAvailable: boolean;

@@ -232,11 +232,19 @@ export class SupervisedAgentInboxStore {
     const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
   }
-  private recordEvent(database: DatabaseSync, inboxItemId: string, transitionKey: string, phase: SupervisedInboxEvent["phase"], observedAt: string, detail: string | null): void {
-    run(database.prepare("INSERT OR IGNORE INTO supervised_agent_inbox_events(inbox_item_id,transition_key,phase,observed_at,detail) VALUES (?,?,?,?,?)"), inboxItemId, transitionKey, phase, observedAt, detail);
+  private recordEvent(database: DatabaseSync, inboxItemId: string, idempotencyKey: string, phase: SupervisedInboxEvent["phase"], observedAt: string, detail: string | null): void {
+    // The ordinal is allocated in the same inbox transaction as its state
+    // fact. The idempotency key remains independent so replay cannot append a
+    // duplicate phase, even when timestamps are identical.
+    run(database.prepare(`INSERT INTO supervised_agent_inbox_events(inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+      SELECT ?,COALESCE(MAX(event_sequence),0)+1,?,?,?,?
+      FROM supervised_agent_inbox_events
+      WHERE inbox_item_id=? AND NOT EXISTS (
+        SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key=?
+      )`), inboxItemId, idempotencyKey, phase, observedAt, detail, inboxItemId, inboxItemId, idempotencyKey);
   }
   private events(database: DatabaseSync, inboxItemId: string): SupervisedInboxEvent[] {
-    return (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY observed_at,transition_key").all(inboxItemId) as Row[]).map((row) => ({
+    return (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence").all(inboxItemId) as Row[]).map((row) => ({
       phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail),
     }));
   }

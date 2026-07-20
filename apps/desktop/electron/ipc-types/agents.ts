@@ -362,6 +362,7 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
+  capabilities: { roomDeliveryRetry: boolean };
 }
 
 export interface DesktopSupervisorLivenessAxis {
