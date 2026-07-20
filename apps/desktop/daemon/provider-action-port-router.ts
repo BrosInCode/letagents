@@ -5,6 +5,8 @@ import type {
   ProviderActionHandle,
   ProviderActionPort,
   ProviderActionRef,
+  ProviderRoomTurnRequest,
+  ProviderRoomTurnResult,
   ProviderActionSpawn,
   ProviderActionStreamEvent,
   ProviderActionTerminal,
@@ -27,6 +29,7 @@ export type NativeProviderAdapter = {
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
   controlTurn(handle: NativeHandle, correction?: string | null, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
+  runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderRoomTurnResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -119,6 +122,13 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     });
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
     return result;
+  }
+
+  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderRoomTurnResult> {
+    const remembered = this.required(handle);
+    const adapter = await this.adapter(remembered.provider);
+    if (!adapter.runRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room turns.`);
+    return adapter.runRoomTurn(remembered.handle, request, options);
   }
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {

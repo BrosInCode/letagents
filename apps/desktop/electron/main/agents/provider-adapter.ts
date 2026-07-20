@@ -262,6 +262,25 @@ export interface ProviderStreamEvent {
   durablePayloadRef: string | null;
 }
 
+/** A single daemon-owned inbox item executed on an existing provider thread. */
+export interface ProviderRoomTurnRequest {
+  inboxItemId: string;
+  sourceMessage: unknown;
+  activation: Record<string, unknown>;
+  actionId: string;
+}
+
+export interface ProviderRoomTurnResult {
+  turnId: string;
+  outcome: "reply" | "no_reply";
+  text: string | null;
+}
+
+export interface ProviderRoomTurnOptions {
+  /** Persist dispatch intent before the first native turn/start side effect. */
+  markDispatched?: () => Promise<void>;
+}
+
 export interface ProviderAdapter {
   readonly id: ProviderAdapterId;
 
@@ -293,6 +312,9 @@ export interface ProviderAdapter {
    * same provider continuation. This must never make the work attempt terminal.
    */
   controlTurn?(handle: ProviderHandle, correction?: string | null, options?: ProviderTurnControlOptions): Promise<ProviderTurnControlResult>;
+
+  /** Run one bounded room turn without launching or replacing the provider. */
+  runRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult>;
 
   /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
   stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;

@@ -62,6 +62,22 @@ export type ProviderActionStreamEvent = {
   durablePayloadRef: string | null;
 };
 
+/**
+ * One durable room delivery. The daemon owns retries and publication; the
+ * provider adapter owns only this bounded turn on an already-running handle.
+ */
+export type ProviderRoomTurnRequest = {
+  inboxItemId: string;
+  sourceMessage: unknown;
+  activation: Record<string, unknown>;
+  actionId: string;
+};
+export type ProviderRoomTurnResult = {
+  turnId: string;
+  outcome: "reply" | "no_reply";
+  text: string | null;
+};
+
 export interface ProviderActionPort {
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
@@ -74,6 +90,10 @@ export interface ProviderActionPort {
     actionId?: string;
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderTurnControlResult>;
+  runRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: {
+    /** Called immediately before the provider's first turn/start side effect. */
+    markDispatched?: () => Promise<void>;
+  }): Promise<ProviderRoomTurnResult>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;
