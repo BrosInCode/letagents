@@ -276,7 +276,8 @@ export class WorkerBindingStore {
   }
 
   private async finalizeVerification(reservation: Reservation, input: { entryId: string; fromExecutionGenerationId: string; toExecutionGenerationId: string; agentSessionId: string }, accepted: boolean): Promise<{ binding: WorkerSessionBinding; advanced: boolean; accepted: boolean }> {
-    const result = await this.withMutation(async (database) => this.transaction(database, () => {
+    return this.withMutation(async (database) => {
+      const result = await this.transaction(database, () => {
       const current = this.read(database, input.entryId); const now = new Date().toISOString();
       if (!accepted) { run(database.prepare("UPDATE worker_generation_verifications SET state='failed', finalized_at=? WHERE reservation_id=? AND state='reserved'"), now, reservation.reservationId); return { binding: current ?? reservation.binding, advanced: false, accepted: false }; }
       const epoch = current ? this.readBindingEpoch(database, input.entryId) : -1;
@@ -292,14 +293,20 @@ export class WorkerBindingStore {
         && current.room_id === reservation.binding.room_id
         && current.work_attempt_id === reservation.binding.work_attempt_id) return { binding: current, advanced: false, accepted: true };
       return { binding: current ?? reservation.binding, advanced: false, accepted: false };
-    }));
-    if (result.advanced) {
-      const credential = this.credentials.get(result.binding.credential_ref);
-      if (credential && credential.entry_id === result.binding.entry_id && credential.agent_session_id === result.binding.agent_session_id && credential.binding_epoch === this.readBindingEpoch(await this.getDatabase(), result.binding.entry_id) && credential.execution_generation_id === input.fromExecutionGenerationId) {
-        this.credentials.set(result.binding.credential_ref, { ...credential, execution_generation_id: result.binding.execution_generation_id });
+      });
+      // Commit happened, but the mutation mutex is still held. Move the vault
+      // authority before another operation can unbind/rebind the same entry.
+      if (result.advanced) {
+        const credential = this.credentials.get(result.binding.credential_ref);
+        if (credential && credential.entry_id === result.binding.entry_id
+          && credential.agent_session_id === result.binding.agent_session_id
+          && credential.binding_epoch === this.readBindingEpoch(database, result.binding.entry_id)
+          && credential.execution_generation_id === input.fromExecutionGenerationId) {
+          this.credentials.set(result.binding.credential_ref, { ...credential, execution_generation_id: result.binding.execution_generation_id });
+        }
       }
-    }
-    return result;
+      return result;
+    });
   }
 
   private match(database: DatabaseSync, entryId: string, sessionId: string, generationId: string): WorkerSessionBinding {

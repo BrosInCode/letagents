@@ -3856,6 +3856,17 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(afterInvalidWaits?.room_cursor, "msg_2822", "mismatched or missing wait identity cannot advance the cursor");
     assert.equal((((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!.condition, "coordination_blocked");
 
+    // A fresh daemon never recovers a secret from SQLite. Electron must
+    // explicitly re-deliver the exact retained predecessor authority before
+    // compatibility verification can advance it to the successor.
+    const daemonGeneration = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const installed = await daemonRequest(paths.socketPath, "supervisor.install_worker_credential", {
+      entry_id: "supervised_handoff", room_id: "focus_37", work_attempt_id: workAttemptId,
+      execution_generation_id: stoppedGenerationId, agent_session_id: "agent_session_exact",
+      agent_session_token: "session-secret", daemon_generation: daemonGeneration,
+    });
+    assert.equal((installed.result as { status: string }).status, "installed");
+
     rejectNativeActivity = true;
     const verificationRequestsBeforeReject = nativeRequests.filter((request) => request.body.method === "native_harness.resumed_binding").length;
     emitCompatWaitCursor("msg_2823");
@@ -3980,6 +3991,15 @@ test("generation handoff reattaches the same provider and publishes its supervis
       const resumedAfterHandoff = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
       return resumedAfterHandoff.observed_state === "recovering" && resumedAfterHandoff.condition === "coordination_blocked";
     }, "replacement daemon resumes the stopped work attempt awaiting wait proof");
+    const retainedAfterHandoff = await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff");
+    assert.ok(retainedAfterHandoff);
+    const thirdGeneration = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const thirdInstall = await daemonRequest(paths.socketPath, "supervisor.install_worker_credential", {
+      entry_id: "supervised_handoff", room_id: "focus_37", work_attempt_id: workAttemptId,
+      execution_generation_id: retainedAfterHandoff.execution_generation_id, agent_session_id: "agent_session_exact",
+      agent_session_token: "session-secret", daemon_generation: thirdGeneration,
+    });
+    assert.equal((thirdInstall.result as { status: string }).status, "installed");
     emitCompatWaitCursor("msg_2826");
     await eventually(async () => {
       const resumedAfterHandoff = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
@@ -4774,7 +4794,7 @@ test("worker binding cursor survives an exact-session generation rebind and fenc
     const rebound = reboundResult.binding;
     assert.equal(verifiedPredecessorGeneration, "execution_1", "credential verification runs before durable generation mutation");
     assert.equal(rebound.room_cursor, "msg_2822");
-    assert.equal(rebound.agent_session_token, "session-secret", "generation rollover can preserve but never replace private authority");
+    assert.equal(await store.credentialFor(rebound), "session-secret", "generation rollover preserves only the private in-memory authority");
     let racedVerificationCalled = false;
     assert.equal((await store.verifyAndAdvanceExecutionGeneration({
       entryId: "entry_exact", roomId: "focus_37", workAttemptId: "attempt_exact",
