@@ -77,6 +77,7 @@ export type ProviderRoomTurnResult = {
   outcome: "reply" | "no_reply";
   text: string | null;
 };
+export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
 
 export interface ProviderActionPort {
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
@@ -91,9 +92,15 @@ export interface ProviderActionPort {
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderTurnControlResult>;
   runRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: {
-    /** Called immediately before the provider's first turn/start side effect. */
+    /** Durable intent checkpoint; completes before the first native turn/start side effect. */
+    beforeNativeDispatch?: () => Promise<void>;
+    /** Durable exact turn checkpoint; completes after turn/start returns and before terminal observation. */
+    checkpointTurnStarted?: (turnId: string) => Promise<void>;
+    /** @deprecated compatibility alias; new providers must use beforeNativeDispatch. */
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderRoomTurnResult>;
+  /** Recover only this persisted native turn; implementations must never call turn/start. */
+  recoverRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest): Promise<ProviderRoomTurnResult>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;
