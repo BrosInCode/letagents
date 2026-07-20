@@ -170,3 +170,22 @@ test("failed durable unbind does not revoke the in-memory credential", async () 
     await store.close();
   } finally { await env.cleanup(); }
 });
+
+test("formal bind and desktop credential installation serialize to the latest exact authority", async () => {
+  const env = await fixture(); try {
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const first = await store.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: "initial", api_url: "https://letagents.test" });
+    // Bind commits its new credential reference before releasing its mutation
+    // lane; the following install is therefore applied to that exact binding.
+    const rebound = await store.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: "bound-second", api_url: "https://letagents.test" });
+    assert.notEqual(rebound.credential_ref, first.credential_ref);
+    assert.equal(await store.installCredential({ entry_id: "stone", agent_session_id: "session", execution_generation_id: "run", agent_session_token: "desktop-last" }), true);
+    assert.equal(await store.credentialFor(rebound), "desktop-last");
+    // A subsequent formal bind wins only when it actually replaces durable
+    // authority; a delayed install for the old session cannot overwrite it.
+    const successor = await store.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run_2", agent_session_id: "session_2", agent_session_token: "bound-successor", api_url: "https://letagents.test" });
+    assert.equal(await store.installCredential({ entry_id: "stone", agent_session_id: "session", execution_generation_id: "run", agent_session_token: "stale-install" }), false);
+    assert.equal(await store.credentialFor(successor), "bound-successor");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
