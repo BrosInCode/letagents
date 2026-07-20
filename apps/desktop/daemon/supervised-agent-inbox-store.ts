@@ -122,6 +122,18 @@ export class SupervisedAgentInboxStore {
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
     }));
   }
+  /** Persist provider terminal evidence before advancing out of dispatching. */
+  async checkpointTerminalOutcome(inboxItemId: string, outcome: string): Promise<SupervisedInboxItem> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
+      const item = rowToItem(current);
+      if (item.state !== "dispatching" && item.state !== "awaiting_result") throw new Error("Provider terminal evidence may only be checkpointed while delivery is in-flight.");
+      this.assertCurrentHead(database, item);
+      run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, this.now(), inboxItemId);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
   async retryBlocked(inboxItemId: string): Promise<SupervisedInboxItem> { return this.transition(inboxItemId, "pending", { blocked_by_inbox_item_id: null, next_attempt_at_ms: null }); }
   /**
    * Normalize work interrupted by a daemon crash before a new runtime is
@@ -139,15 +151,14 @@ export class SupervisedAgentInboxStore {
         const terminal = persistedTerminalOutcome(item.outcome);
         let next: SupervisedInboxState | null = null;
         let error: string | null = item.last_error;
-        if (item.state === "dispatching") {
-          next = "blocked";
-          error = "Daemon restarted while provider dispatch was in-flight; terminal outcome is ambiguous.";
-        } else if (item.state === "awaiting_result" || item.state === "publishing" || item.state === "retryable") {
+        if (item.state === "dispatching" || item.state === "awaiting_result" || item.state === "publishing" || item.state === "retryable") {
           if (terminal?.kind === "reply") {
             // Republish only: delivery sees the durable outcome before it can
             // consider runRoomTurn, so a recovered provider turn is impossible.
             next = "pending";
-            error = item.state === "publishing"
+            error = item.state === "dispatching"
+              ? "Daemon restarted after a durable provider reply; publishing it without rerunning the provider."
+              : item.state === "publishing"
               ? "Daemon restarted during publication; retrying the durable reply."
               : item.state === "retryable"
                 ? "Retrying the durable reply after a recoverable failure."
@@ -157,7 +168,7 @@ export class SupervisedAgentInboxStore {
             error = null;
           } else {
             next = "blocked";
-            error = "Daemon restarted without authoritative terminal or publication evidence; acknowledgement is unsafe.";
+            error = `Daemon restarted during ${item.state} without authoritative terminal or publication evidence; acknowledgement is unsafe.`;
           }
         }
         if (!next) continue;
