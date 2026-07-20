@@ -48,6 +48,7 @@ export class SupervisedAgentDelivery {
   private readonly polling = new Map<string, AbortController>();
   private readonly pollOperations = new Map<string, Promise<void>>();
   private readonly loops = new Map<string, Promise<void>>();
+  private readonly loopEpochs = new Map<string, number>();
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
   private readonly pumpControllers = new Map<string, AbortController>();
@@ -56,6 +57,7 @@ export class SupervisedAgentDelivery {
   private readonly agentWork = new Map<string, Set<Promise<void>>>();
   private readonly stoppingAgents = new Set<string>();
   private readonly stoppingOperations = new Map<string, Promise<void>>();
+  private readonly refreshEpochs = new Map<string, number>();
   private readonly controllers = new Set<AbortController>();
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly startupRecovered = new Map<string, string>();
@@ -92,17 +94,25 @@ export class SupervisedAgentDelivery {
   }
 
   /** Starts the daemon-owned long-poll loop and normalizes persisted work first. */
-  start(agent: SupervisedIngressAgent): Promise<void> {
-    if (this.fenced || this.stoppingAgents.has(agent.agentId) || this.loops.has(agent.agentId)) return Promise.resolve();
+  start(agent: SupervisedIngressAgent, expectedEpoch = this.currentRefreshEpoch(agent.agentId)): Promise<void> {
+    const existingLoop = this.loops.get(agent.agentId);
+    if (this.fenced || this.stoppingAgents.has(agent.agentId) || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) return Promise.resolve();
+    if (existingLoop && this.loopEpochs.get(agent.agentId) === expectedEpoch) return Promise.resolve();
+    // refresh() drains a prior epoch before reaching start(). If an old loop is
+    // still registered, it cannot be mistaken for this epoch's successor.
+    if (existingLoop) return Promise.resolve();
     const controller = new AbortController();
     this.loopControllers.set(agent.agentId, controller);
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pollLoop(agent, controller)));
     this.loops.set(agent.agentId, operation);
+    this.loopEpochs.set(agent.agentId, expectedEpoch);
     void operation.then(() => {
       if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
+      if (this.loopEpochs.get(agent.agentId) === expectedEpoch) this.loopEpochs.delete(agent.agentId);
       if (this.loopControllers.get(agent.agentId) === controller) this.loopControllers.delete(agent.agentId);
     }, () => {
       if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
+      if (this.loopEpochs.get(agent.agentId) === expectedEpoch) this.loopEpochs.delete(agent.agentId);
       if (this.loopControllers.get(agent.agentId) === controller) this.loopControllers.delete(agent.agentId);
     });
     // The loop itself is tracked by fenceAndDrain(); callers only need to know
@@ -112,8 +122,14 @@ export class SupervisedAgentDelivery {
 
   /** Stop one stale binding before a rebind starts its successor loop. */
   async refresh(agent: SupervisedIngressAgent): Promise<void> {
+    const refreshEpoch = this.nextRefreshEpoch(agent.agentId);
     await this.stop(agent.agentId);
-    if (!this.fenced) await this.start(agent);
+    // Multiple callers may share one drain. Only the most recent binding may
+    // install the successor after it settles; stale refresh continuations are
+    // deliberately no-ops instead of stealing the active loop slot.
+    if (!this.fenced && refreshEpoch === this.currentRefreshEpoch(agent.agentId)) {
+      await this.start(agent, refreshEpoch);
+    }
   }
 
   /** Cancel and join a removed or superseded agent without fencing other workers. */
@@ -387,6 +403,14 @@ export class SupervisedAgentDelivery {
       agent.agentSessionId, agent.handle.workAttemptId, agent.handle.providerContinuationId,
       agent.handle.pid, handleId,
     ].join("\u0000");
+  }
+
+  private currentRefreshEpoch(agentId: string): number { return this.refreshEpochs.get(agentId) ?? 0; }
+
+  private nextRefreshEpoch(agentId: string): number {
+    const epoch = this.currentRefreshEpoch(agentId) + 1;
+    this.refreshEpochs.set(agentId, epoch);
+    return epoch;
   }
 
   private trackAgentWork<T>(agentId: string, operation: Promise<T>): Promise<T> {

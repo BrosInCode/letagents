@@ -256,9 +256,10 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
     (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
-    let polls = 0; let turns = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    let polls = 0; let turns = 0; const turnHandles: unknown[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (handle) => {
       turns += 1;
+      turnHandles.push(handle);
       return { turnId: `turn:${turns}`, outcome: "no_reply", text: null };
     }), {
       poll: ({ signal }) => {
@@ -278,7 +279,50 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
     releaseIngest.resolve();
     await refresh; await successorPoll.promise;
     assert.equal(turns, 1, "the stopped poll cannot launch a stale delivery pump after ingest");
+    assert.equal(turnHandles[0], successor.handle, "only the successor context may run the recovered delivery turn");
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply", "successor recovery and delivery happen before its hanging poll");
+    await delivery.fenceAndDrain();
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("concurrent refreshes install only the newest epoch and its handle drains recovered FIFO work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-refresh-epoch-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const currentPoll = deferred<void>();
+    const ingest = store.ingestPoll.bind(store);
+    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+      ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
+    };
+    let polls = 0; const turnHandles: unknown[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (handle) => {
+      turnHandles.push(handle);
+      return { turnId: `turn:${turnHandles.length}`, outcome: "no_reply", text: null };
+    }), {
+      poll: ({ signal }) => {
+        polls += 1;
+        if (polls === 1) return Promise.resolve({ last_observed_message_id: "2", messages: [
+          { id: "1", activation: { for_current_agent: {} } },
+          { id: "2", activation: { for_current_agent: {} } },
+        ] });
+        currentPoll.resolve();
+        return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority);
+    await delivery.start(agent); await ingestEntered.promise;
+    const stale = { ...agent, executionGenerationId: "generation-stale", handle: { ...agent.handle, pid: 2 } };
+    const current = { ...agent, executionGenerationId: "generation-current", handle: { ...agent.handle, pid: 3 } };
+    const staleRefresh = delivery.refresh(stale);
+    const currentRefresh = delivery.refresh(current);
+    releaseIngest.resolve();
+    await Promise.all([staleRefresh, currentRefresh]); await currentPoll.promise;
+    assert.deepEqual(turnHandles, [current.handle, current.handle], "the stale refresh cannot own either recovered FIFO turn");
+    const internals = delivery as unknown as { loops: Map<string, Promise<void>>; loopEpochs: Map<string, number> };
+    assert.equal(internals.loops.has(agent.agentId), true, "the current successor remains in its long poll");
+    assert.equal(internals.loopEpochs.get(agent.agentId), 2, "the live loop belongs to the latest refresh epoch");
+    assert.equal((await store.receipts(agent.agentId)).every((item) => item.state === "acknowledged_no_reply"), true);
     await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
