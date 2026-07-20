@@ -20,6 +20,7 @@ import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
+import { SupervisedAgentDelivery, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
@@ -42,6 +43,32 @@ const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const LIVENESS_GRACE_MS = 30_000;
 const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
+
+function supervisedRoomPath(roomId: string): string {
+  return roomId.split("/").map(encodeURIComponent).join("/");
+}
+
+/** The daemon talks to the room API only through the live worker bearer. */
+const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
+  async poll(input) {
+    const query = new URLSearchParams({ timeout: String(DEFAULT_ROOM_POLL_MAX_MS) });
+    if (input.afterMessageId) query.set("after", input.afterMessageId);
+    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
+    });
+    if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
+    return await response.json() as { messages?: Array<Record<string, unknown>>; last_observed_message_id?: string | null };
+  },
+  async publish(input) {
+    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ sender: "supervised-daemon", text: input.text, client_message_id: input.clientMessageId }),
+      signal: input.signal,
+    });
+    if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
+  },
+};
 
 /** Room waits are normally long polls, so a healthy worker can be silent for
  * the entire configured poll window. Reachability must not expire before that
@@ -373,6 +400,7 @@ export class SupervisorDaemon {
   private readonly workerBindings: WorkerBindingStore;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
+  private readonly supervisedDelivery: SupervisedAgentDelivery | null;
   private readonly socket: DaemonControlSocket;
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
   private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
@@ -401,7 +429,7 @@ export class SupervisorDaemon {
   private resolveHandoffCompletion!: () => void;
   private rejectHandoffCompletion!: (error: unknown) => void;
 
-  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}) {
+  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp) {
     this.handoffCompletion = new Promise<void>((resolve, reject) => {
       this.resolveHandoffCompletion = resolve;
       this.rejectHandoffCompletion = reject;
@@ -434,6 +462,9 @@ export class SupervisorDaemon {
       paths.manifestPath,
     );
     this.supervisedInbox = new SupervisedAgentInboxStore(paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`);
+    this.supervisedDelivery = providerPort
+      ? new SupervisedAgentDelivery(this.supervisedInbox, providerPort, supervisedDeliveryHttp, (authority) => this.isExactSupervisedDeliveryAuthority(authority))
+      : null;
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
       await this.singleton.assertCurrent();
       const isLifecycleRequest = request.method === "daemon.negotiate"
@@ -595,6 +626,9 @@ export class SupervisorDaemon {
     await this.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
     await this.socket.start();
+    for (const entry of (await this.store.load()).entries) {
+      void this.startSupervisedDelivery(entry.id).catch(() => undefined);
+    }
     if (this.providerPort && this.autoConverge) {
       for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id);
     }
@@ -628,6 +662,7 @@ export class SupervisorDaemon {
   }
 
   async stop(): Promise<void> {
+    await this.supervisedDelivery?.fenceAndDrain();
     for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
     this.recoveryTimers.clear();
     await Promise.all([...this.scheduledConvergence.values()].map(async (scheduled) => (await scheduled).dispose()));
@@ -661,6 +696,7 @@ export class SupervisorDaemon {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
     const failures: unknown[] = [];
+    try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     const captureSync = (operation: () => void): void => {
       try { operation(); } catch (error) { failures.push(error); }
     };
@@ -694,6 +730,55 @@ export class SupervisorDaemon {
     if (failures.length > 0) {
       throw new AggregateError(failures, "Supervisor handoff cleanup did not complete cleanly.");
     }
+  }
+
+  /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
+  private async startSupervisedDelivery(entryId: string): Promise<void> {
+    if (this.handoffScheduled || !this.supervisedDelivery || !this.providerPort?.runRoomTurn) return;
+    const entry = await this.store.getEntry(entryId);
+    const handle = this.liveHandles.get(entryId);
+    const binding = await this.workerBindings.get(entryId);
+    if (!entry || !handle || !binding) return;
+    const credential = await this.workerBindings.credentialFor(binding);
+    if (!credential) return;
+    const agent = {
+      agentId: entryId,
+      roomId: binding.room_id,
+      apiUrl: binding.api_url,
+      agentSessionId: binding.agent_session_id,
+      bearer: credential,
+      handle,
+      executionGenerationId: binding.execution_generation_id,
+    };
+    if (!await this.isExactSupervisedDeliveryAuthority({
+      agentId: agent.agentId, roomId: agent.roomId, agentSessionId: agent.agentSessionId,
+      bearer: agent.bearer, workAttemptId: agent.handle.workAttemptId,
+      executionGenerationId: agent.executionGenerationId,
+    })) return;
+    void this.supervisedDelivery.poll(agent).catch(() => undefined);
+  }
+
+  /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
+  private async isExactSupervisedDeliveryAuthority(authority: SupervisedDeliveryAuthority): Promise<boolean> {
+    if (this.handoffScheduled) return false;
+    try { await this.singleton.assertCurrent(); } catch { return false; }
+    const entry = await this.store.getEntry(authority.agentId);
+    const handle = this.liveHandles.get(authority.agentId);
+    if (!entry || !handle
+      || entry.id !== authority.agentId
+      || entry.room_id !== authority.roomId
+      || entry.work_attempt_id !== authority.workAttemptId
+      || entry.provider_ref?.work_attempt_id !== authority.workAttemptId
+      || entry.provider_ref.execution_generation_id !== authority.executionGenerationId
+      || handle.workAttemptId !== authority.workAttemptId) return false;
+    const binding = await this.workerBindings.get(authority.agentId);
+    if (!binding
+      || binding.entry_id !== authority.agentId
+      || binding.room_id !== authority.roomId
+      || binding.work_attempt_id !== authority.workAttemptId
+      || binding.execution_generation_id !== authority.executionGenerationId
+      || binding.agent_session_id !== authority.agentSessionId) return false;
+    return (await this.workerBindings.credentialFor(binding)) === authority.bearer;
   }
 
   private status() {
@@ -1859,6 +1944,7 @@ export class SupervisorDaemon {
     }, this.nativeHeartbeatIntervalMs);
     heartbeat.unref();
     this.liveDisposers.set(entryId, [disposeExit, disposeStream, () => clearInterval(heartbeat)]);
+    void this.startSupervisedDelivery(entryId).catch(() => undefined);
   }
 
   private async stageWorkerBindingAfterResume(
@@ -2249,6 +2335,7 @@ export class SupervisorDaemon {
     if (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable") {
       await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
     }
+    void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
 
@@ -2287,7 +2374,9 @@ export class SupervisorDaemon {
   private async installWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; daemon_generation: number }): Promise<{ status: "installed" | "stale" }> {
     return this.serializeEntryTick(input.entry_id, async () => {
       if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
-      return { status: await this.workerBindings.installCredential(input) ? "installed" : "stale" };
+      const installed = await this.workerBindings.installCredential(input);
+      if (installed) void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
+      return { status: installed ? "installed" : "stale" };
     });
   }
 

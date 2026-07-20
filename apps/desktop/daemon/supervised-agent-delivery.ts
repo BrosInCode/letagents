@@ -4,13 +4,17 @@ import { SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, t
 export type SupervisedIngressAgent = {
   agentId: string;
   roomId: string;
+  /** Bound worker API origin; never inferred from a persisted credential. */
+  apiUrl: string;
+  agentSessionId: string;
   bearer: string;
   handle: ProviderActionHandle;
   /** Exact daemon generation that owns this room worker binding. */
   executionGenerationId: string;
 };
 
-export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent, "agentId" | "roomId" | "executionGenerationId"> & {
+/** The bearer is intentionally memory-only and must never be persisted or logged. */
+export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent, "agentId" | "roomId" | "agentSessionId" | "bearer" | "executionGenerationId"> & {
   workAttemptId: string;
 };
 export type SupervisedAuthorityRevalidator = (authority: SupervisedDeliveryAuthority) => Promise<boolean> | boolean;
@@ -21,8 +25,8 @@ export type SupervisedPollResponse = {
 };
 
 export interface SupervisedDeliveryHttp {
-  poll(input: { roomId: string; bearer: string; afterMessageId: string | null; signal: AbortSignal }): Promise<SupervisedPollResponse>;
-  publish(input: { roomId: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<void>;
+  poll(input: { roomId: string; apiUrl: string; bearer: string; afterMessageId: string | null; signal: AbortSignal }): Promise<SupervisedPollResponse>;
+  publish(input: { roomId: string; apiUrl: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<void>;
 }
 
 /**
@@ -74,7 +78,7 @@ export class SupervisedAgentDelivery {
     try {
       if (!await this.hasAuthority(agent, controller)) return;
       const cursor = await this.inbox.cursor(agent.agentId);
-      const response = await this.http.poll({ roomId: agent.roomId, bearer: agent.bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal });
+      const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal });
       if (!await this.hasAuthority(agent, controller)) return;
       const messages = activatedMessages(response.messages ?? []);
       await this.inbox.ingestPoll({
@@ -90,12 +94,20 @@ export class SupervisedAgentDelivery {
     }
   }
 
-  async retry(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
-    if (!await this.hasAuthority(agent)) return;
+  retry(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
+    const controller = new AbortController();
+    return this.track(controller, this.retryOperation(agent, sourceMessageId, controller));
+  }
+
+  private async retryOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
+    if (!await this.hasAuthority(agent, controller)) return;
     const receipts = await this.inbox.receipts(agent.agentId);
+    if (!await this.hasAuthority(agent, controller)) return;
     const item = receipts.find((receipt) => receipt.source_message_id === sourceMessageId && receipt.state === "blocked");
     if (!item) throw new Error("The blocked room delivery is no longer available for this exact agent.");
+    if (!await this.hasAuthority(agent, controller)) return;
     await this.inbox.retryBlocked(item.inbox_item_id);
+    if (!await this.hasAuthority(agent, controller)) return;
     await this.pump(agent);
   }
 
@@ -161,6 +173,8 @@ export class SupervisedAgentDelivery {
       const outcome = result.outcome === "reply" && result.text?.trim()
         ? JSON.stringify({ kind: "reply", text: result.text.trim() })
         : result.outcome === "no_reply" ? JSON.stringify({ kind: "no_reply" }) : null;
+      if (outcome) await this.inbox.checkpointTerminalOutcome(item.inbox_item_id, outcome);
+      if (!await this.hasAuthority(agent, controller)) return;
       await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
       if (result.outcome === "no_reply") {
         if (!await this.hasAuthority(agent, controller)) return;
@@ -198,7 +212,7 @@ export class SupervisedAgentDelivery {
     const relayAbort = () => controller.abort();
     parent.signal.addEventListener("abort", relayAbort, { once: true });
     try {
-      await this.track(controller, this.http.publish({ roomId: agent.roomId, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
+      await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
       return this.hasAuthority(agent, parent);
     } finally { parent.signal.removeEventListener("abort", relayAbort); }
   }
@@ -208,6 +222,8 @@ export class SupervisedAgentDelivery {
     const allowed = await this.revalidateAuthority({
       agentId: agent.agentId,
       roomId: agent.roomId,
+      agentSessionId: agent.agentSessionId,
+      bearer: agent.bearer,
       workAttemptId: agent.handle.workAttemptId,
       executionGenerationId: agent.executionGenerationId,
     });

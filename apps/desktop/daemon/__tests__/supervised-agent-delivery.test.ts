@@ -5,11 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { ProviderActionPort } from "../provider-action-port.js";
+import { SupervisorDaemon } from "../main.js";
 import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 
 const agent = {
-  agentId: "stone", roomId: "room", bearer: "memory", executionGenerationId: "generation-1",
+  agentId: "stone", roomId: "room", apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1",
   handle: { workAttemptId: "attempt", providerContinuationId: "thread", pid: 1, observedState: "working" as const },
 };
 const currentAuthority = async () => true;
@@ -81,6 +82,43 @@ test("handoff fences an in-flight ingress poll and drains it before returning", 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("SupervisorDaemon stop fences and drains its production-owned delivery before releasing stores", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-delivery-drain-"));
+  try {
+    const entered = deferred<void>(); const release = deferred<{ messages: Array<Record<string, unknown>> }>(); let aborted = false;
+    const daemon = new SupervisorDaemon({
+      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.sqlite"), auditPath: join(root, "audit.log"),
+      attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+    }, "darwin", provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), false, 60_000, undefined, {}, {
+      poll: ({ signal }) => new Promise((resolve) => {
+        entered.resolve(); signal.addEventListener("abort", () => { aborted = true; }, { once: true }); release.promise.then(resolve);
+      }),
+      publish: async () => { throw new Error("must not publish"); },
+    });
+    const internals = daemon as unknown as {
+      putManifestEntry(entry: Record<string, unknown>): Promise<void>;
+      startSupervisedDelivery(entryId: string): Promise<void>;
+      liveHandles: Map<string, typeof agent.handle>;
+      workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+    };
+    await daemon.start();
+    await internals.putManifestEntry({
+      id: "stone", room_id: "room", display_name: "Stone", provider: "codex", model: null, charter: "supervised test", desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
+      created_by: "test", created_at: new Date().toISOString(), work_attempt_id: "attempt",
+      provider_ref: { work_attempt_id: "attempt", provider_continuation_id: "thread", provider_connection: null, execution_generation_id: "generation-1" },
+    });
+    internals.liveHandles.set("stone", agent.handle);
+    await internals.workerBindings.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "generation-1", agent_session_id: "session-1", agent_session_token: "memory", api_url: "https://letagents.test" });
+    void internals.startSupervisedDelivery("stone"); await entered.promise;
+    let stopped = false; const stopping = daemon.stop().then(() => { stopped = true; });
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(aborted, true, "stop fences the live delivery before closing worker storage");
+    assert.equal(stopped, false, "stop waits for the in-flight poll to settle");
+    release.resolve({ messages: [] });
+    await stopping;
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("handoff during a provider turn drains it and prevents post-turn publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-turn-drain-"));
   try {
@@ -126,7 +164,23 @@ test("a stale generation after a provider await cannot publish or acknowledge", 
     const pump = delivery.pump(agent); await entered.promise; current = false; release.resolve({ turnId: "turn", outcome: "reply", text: "late" }); await pump;
     assert.equal(published, 0);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching");
-    assert.deepEqual(seen.at(-1), { agentId: "stone", roomId: "room", workAttemptId: "attempt", executionGenerationId: "generation-1" });
+    assert.deepEqual(seen.at(-1), { agentId: "stone", roomId: "room", agentSessionId: "session-1", bearer: "memory", workAttemptId: "attempt", executionGenerationId: "generation-1" });
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("handoff tracks a retry paused after its receipt read and leaves the blocked head unchanged", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-drain-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
+    await store.transition(item.inbox_item_id, "blocked", { last_error: "manual retry" });
+    const entered = deferred<void>(); const release = deferred<void>(); const receipts = store.receipts.bind(store);
+    (store as unknown as { receipts(agentId: string): ReturnType<typeof store.receipts> }).receipts = async (agentId) => { entered.resolve(); await release.promise; return receipts(agentId); };
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("must not run"); }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+    const retry = delivery.retry(agent, "1"); await entered.promise;
+    const drain = delivery.fenceAndDrain(); release.resolve();
+    await drain; await retry;
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "blocked");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -137,6 +191,20 @@ test("startup recovery republishes a durable publishing outcome without rerunnin
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
     await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn", outcome: JSON.stringify({ kind: "reply", text: "durable" }) });
     await store.transition(item.inbox_item_id, "publishing");
+    let turns = 0; const published: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; throw new Error("provider must not rerun"); }), { poll: async () => ({}), publish: async ({ clientMessageId }) => { published.push(clientMessageId); } }, currentAuthority);
+    await delivery.pump(agent);
+    assert.equal(turns, 0); assert.deepEqual(published, [item.reply_client_message_id]);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("startup recovery treats a dispatching durable terminal outcome as republish-only", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-dispatch-recovery-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
+    await store.checkpointTerminalOutcome(item.inbox_item_id, JSON.stringify({ kind: "reply", text: "durable" }));
     let turns = 0; const published: string[] = [];
     const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; throw new Error("provider must not rerun"); }), { poll: async () => ({}), publish: async ({ clientMessageId }) => { published.push(clientMessageId); } }, currentAuthority);
     await delivery.pump(agent);
