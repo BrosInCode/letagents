@@ -153,6 +153,7 @@
         :pending-attachment-drafts="threadPendingAttachmentDrafts"
         :has-older-replies="activeThreadHasOlder"
         :loading-older-replies="loadingOlderThreadReplies"
+        :reveal-message-id="threadRevealTargetId"
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
         :task-reference-ids="taskReferenceIds"
@@ -267,6 +268,7 @@ const emit = defineEmits<{
   "open-task": [taskId: string];
   "retry-delivery": [agentId: string, sourceMessageId: string];
   "reveal-message": [messageId: string];
+  "message-reveal-unavailable": [messageId: string];
   "dismiss-event-preview": [messageId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
@@ -286,6 +288,8 @@ const taskReferenceIds = computed<ReadonlySet<string>>(() =>
 );
 const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
+const pendingThreadRevealId = ref<string | null>(null);
+const threadRevealTargetId = ref<string | null>(null);
 const replyTarget = ref<RoomReplyTarget | null>(null);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const threadLayoutElement = ref<HTMLElement | null>(null);
@@ -439,6 +443,8 @@ function clearReplyTarget(): void {
 function closeThread(): void {
   messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
   activeThreadParentId.value = null;
+  pendingThreadRevealId.value = null;
+  threadRevealTargetId.value = null;
   clearThreadAttachmentDrafts();
   void nextTick(() => {
     threadReturnFocusElement.value?.focus({ preventScroll: true });
@@ -549,10 +555,29 @@ async function loadThread(threadRootId: string): Promise<void> {
     fetchedThreadRoot.value = applyThreadSummaryOverride(page.root);
     fetchedThreadReplies.value = page.replies;
     fetchedThreadHasOlder.value = page.hasOlder;
+    await revealPendingThreadMessage(threadRootId);
     const lastMessageId = page.replies.at(-1)?.id || page.root.id;
     await markThreadRead(threadRootId, lastMessageId, roomIdentifier, messageNamespace);
   } catch {
     // Keep the already loaded room messages usable if the thread endpoint is unavailable.
+  }
+}
+
+async function revealPendingThreadMessage(threadRootId: string): Promise<void> {
+  const targetId = pendingThreadRevealId.value;
+  if (!targetId || activeThreadParentId.value !== threadRootId) return;
+  for (let page = 0; page <= 5; page += 1) {
+    if (fetchedThreadRoot.value?.id === targetId || fetchedThreadReplies.value.some((reply) => reply.id === targetId)) {
+      pendingThreadRevealId.value = null;
+      threadRevealTargetId.value = targetId;
+      return;
+    }
+    if (!activeThreadHasOlder.value) break;
+    await loadOlderThreadReplies();
+  }
+  if (pendingThreadRevealId.value === targetId) {
+    pendingThreadRevealId.value = null;
+    emit("message-reveal-unavailable", targetId);
   }
 }
 
@@ -675,6 +700,8 @@ function jumpToMessage(messageId: string): void {
     threadMessagesWithThreadOverrides.value,
   );
   if (destination.kind === "thread") {
+    pendingThreadRevealId.value = messageId;
+    threadRevealTargetId.value = null;
     openThread(destination.threadRootId);
     return;
   }

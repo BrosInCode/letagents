@@ -24,11 +24,13 @@ describe("durable room delivery UI contracts", () => {
     assert.equal(roomAgentDeliveryGroup(state("connected", "empty", "idle") as never), "listening");
     assert.equal(roomAgentDeliveryGroup(state("connected", "queued", "responding") as never), "responding");
     assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "idle") as never), "attention");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "responding") as never), "attention");
     assert.equal(roomAgentDeliveryGroup(state("connected", "waiting_for_desktop_credentials", "idle") as never), "attention");
     assert.equal(roomAgentDeliveryGroup(state("reconnecting", "queued", "responding") as never), "disconnected");
     assert.equal(roomAgentDeliveryGroup(state("disconnected", "queued", "responding") as never), "disconnected");
     assert.equal(roomAgentDeliverySummary((state("connected", "waiting_for_desktop_credentials", "idle") as never).roomAgentState), "Waiting for desktop credential handoff");
     assert.equal(roomAgentDeliverySummary((state("reconnecting", "queued", "idle") as never).roomAgentState), "Reconnecting");
+    assert.equal(roomAgentDeliverySummary((state("connected", "blocked", "responding") as never).roomAgentState), "Delivery needs attention");
   });
 
   it("deduplicates only matching projected legacy roster rows and retains mixed rollout rows", async () => {
@@ -57,6 +59,20 @@ describe("durable room delivery UI contracts", () => {
       { kind: "thread", threadRootId: "root" },
     );
     assert.deepEqual(roomMessageRevealDestination("unloaded", [], []), { kind: "history" });
+  });
+
+  it("retains a cross-thread target through bounded backfill before panel highlight", async () => {
+    const [chat, panel] = await Promise.all([
+      source("src/components/desktop/content/RoomChatView.vue"),
+      source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),
+    ]);
+    assert.match(chat, /pendingThreadRevealId\.value = messageId/);
+    assert.match(chat, /await revealPendingThreadMessage\(threadRootId\)/);
+    assert.match(chat, /for \(let page = 0; page <= 5; page \+= 1\)/);
+    assert.match(chat, /threadRevealTargetId\.value = targetId/);
+    assert.match(chat, /emit\("message-reveal-unavailable", targetId\)/);
+    assert.match(panel, /revealMessageId/);
+    assert.match(panel, /jumpToThreadMessageReference\(messageId\)/);
   });
 
   it("carries grouped receipts, disabled retry capability, and reveal events across chat surfaces", async () => {
