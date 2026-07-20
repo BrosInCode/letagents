@@ -191,9 +191,11 @@ test("successful polling cycles release backoff listeners instead of accumulatin
 
 test("fence aborts a pending error backoff and releases its listener", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-backoff-drain-"));
+  let store: SupervisedAgentInboxStore | null = null;
+  let delivery: SupervisedAgentDelivery | null = null;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+    store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
       poll: async () => { throw new Error("outage"); },
       publish: async () => { throw new Error("must not publish"); },
     }, currentAuthority);
@@ -206,8 +208,14 @@ test("fence aborts a pending error backoff and releases its listener", async () 
     await delivery.fenceAndDrain();
     assert.ok(Date.now() - started < 100, "fence should not wait for the 250ms backoff timer");
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
-    await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // This test intentionally starts an endless outage loop. Keep its cleanup
+    // independent of assertion success so a test failure cannot retain Node's
+    // worker process through its timer and SQLite handle.
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("rebind waits for an old provider turn, recovers its interrupted FIFO head, then processes it and the next item", async () => {
