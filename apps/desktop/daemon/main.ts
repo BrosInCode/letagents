@@ -744,37 +744,54 @@ export class SupervisorDaemon {
     const agent = {
       agentId: entryId,
       roomId: binding.room_id,
+      provider: entry.provider,
       apiUrl: binding.api_url,
       agentSessionId: binding.agent_session_id,
       bearer: credential,
       handle,
       executionGenerationId: binding.execution_generation_id,
+      daemonGeneration: this.singleton.currentGeneration,
     };
     if (!await this.isExactSupervisedDeliveryAuthority({
-      agentId: agent.agentId, roomId: agent.roomId, agentSessionId: agent.agentSessionId,
-      bearer: agent.bearer, workAttemptId: agent.handle.workAttemptId,
+      agentId: agent.agentId, roomId: agent.roomId, provider: agent.provider,
+      apiUrl: agent.apiUrl, agentSessionId: agent.agentSessionId, bearer: agent.bearer,
+      handle: agent.handle, workAttemptId: agent.handle.workAttemptId,
       executionGenerationId: agent.executionGenerationId,
+      daemonGeneration: agent.daemonGeneration,
+      providerContinuationId: agent.handle.providerContinuationId,
+      pid: agent.handle.pid,
     })) return;
-    void this.supervisedDelivery.poll(agent).catch(() => undefined);
+    // Rebinding replaces the prior loop only after it has been cancelled and
+    // joined. The new loop pumps durable work before its first long poll.
+    void this.supervisedDelivery.refresh(agent).catch(() => undefined);
   }
 
   /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
   private async isExactSupervisedDeliveryAuthority(authority: SupervisedDeliveryAuthority): Promise<boolean> {
     if (this.handoffScheduled) return false;
     try { await this.singleton.assertCurrent(); } catch { return false; }
+    if (authority.daemonGeneration !== this.singleton.currentGeneration) return false;
     const entry = await this.store.getEntry(authority.agentId);
     const handle = this.liveHandles.get(authority.agentId);
     if (!entry || !handle
       || entry.id !== authority.agentId
       || entry.room_id !== authority.roomId
+      || entry.desired_state !== "running"
+      || entry.condition !== "none"
+      || entry.provider !== authority.provider
       || entry.work_attempt_id !== authority.workAttemptId
       || entry.provider_ref?.work_attempt_id !== authority.workAttemptId
-      || entry.provider_ref.execution_generation_id !== authority.executionGenerationId
-      || handle.workAttemptId !== authority.workAttemptId) return false;
+      || entry.provider_ref?.execution_generation_id !== authority.executionGenerationId
+      || entry.provider_ref?.provider_continuation_id !== authority.providerContinuationId
+      || handle !== authority.handle
+      || handle.workAttemptId !== authority.workAttemptId
+      || handle.providerContinuationId !== authority.providerContinuationId
+      || handle.pid !== authority.pid) return false;
     const binding = await this.workerBindings.get(authority.agentId);
     if (!binding
       || binding.entry_id !== authority.agentId
       || binding.room_id !== authority.roomId
+      || binding.api_url !== authority.apiUrl
       || binding.work_attempt_id !== authority.workAttemptId
       || binding.execution_generation_id !== authority.executionGenerationId
       || binding.agent_session_id !== authority.agentSessionId) return false;
@@ -950,7 +967,10 @@ export class SupervisorDaemon {
       this.manifestGeneration = next.generation;
       return updated;
     });
-    if (desiredState !== "running") this.clearRecoveryConvergence(id);
+    if (desiredState !== "running") {
+      this.clearRecoveryConvergence(id);
+      void this.supervisedDelivery?.stop(id).catch(() => undefined);
+    }
     this.requestConvergence(id);
     return updated;
   }
@@ -987,7 +1007,10 @@ export class SupervisorDaemon {
       return { applied: true, entry: updated };
     });
     if (result.applied) {
-      if (desiredState !== "running") this.clearRecoveryConvergence(id);
+      if (desiredState !== "running") {
+        this.clearRecoveryConvergence(id);
+        void this.supervisedDelivery?.stop(id).catch(() => undefined);
+      }
       this.requestConvergence(id);
     }
     return result;
@@ -2484,6 +2507,7 @@ export class SupervisorDaemon {
 
   private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, executionGenerationId: string, _terminalBinding: LiveBindingIdentity | undefined, terminal: ProviderActionTerminal): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
+    void this.supervisedDelivery?.stop(entryId).catch(() => undefined);
     this.pendingResumeBindings.delete(entryId);
     this.liveHandles.delete(entryId);
     this.liveBindingIdentities.delete(entryId);

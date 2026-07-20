@@ -10,7 +10,7 @@ import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 
 const agent = {
-  agentId: "stone", roomId: "room", apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1",
+  agentId: "stone", roomId: "room", provider: "codex", apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
   handle: { workAttemptId: "attempt", providerContinuationId: "thread", pid: 1, observedState: "working" as const },
 };
 const currentAuthority = async () => true;
@@ -23,6 +23,14 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for delivery progress.");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
@@ -78,6 +86,76 @@ test("handoff fences an in-flight ingress poll and drains it before returning", 
     await delivery.fenceAndDrain(); await poll;
     assert.equal(aborted, true);
     assert.equal((await store.receipts(agent.agentId)).length, 0, "a fenced poll cannot ingest after its await");
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the supervised runtime continuously polls and delivers a later activation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-loop-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const secondPoll = deferred<void>(); let polls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
+      poll: ({ signal }) => {
+        polls += 1;
+        if (polls === 1) return Promise.resolve({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] });
+        if (polls === 2) {
+          secondPoll.resolve();
+          return Promise.resolve({ last_observed_message_id: "2", messages: [{ id: "2", activation: { for_current_agent: {} } }] });
+        }
+        return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority, 0);
+    void delivery.start(agent); await secondPoll.promise;
+    await waitFor(() => polls >= 3);
+    await delivery.fenceAndDrain();
+    assert.equal(polls >= 2, true);
+    assert.equal((await store.receipts(agent.agentId)).length, 2);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the supervised runtime backs off after a poll error and resumes intake", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-loop-retry-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let polls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
+      poll: ({ signal }) => {
+        polls += 1;
+        if (polls === 1) return Promise.reject(new Error("temporary poll failure"));
+        if (polls === 2) return Promise.resolve({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] });
+        return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority, 0);
+    void delivery.start(agent);
+    await waitFor(() => polls >= 3);
+    await delivery.fenceAndDrain();
+    assert.equal((await store.receipts(agent.agentId)).length, 1);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("startup recovery publishes durable work before a hanging first poll settles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-startup-pump-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
+    await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn", outcome: JSON.stringify({ kind: "reply", text: "durable" }) });
+    await store.transition(item.inbox_item_id, "publishing");
+    const pollEntered = deferred<void>(); let published = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("provider must not rerun"); }), {
+      poll: ({ signal }) => new Promise((resolve) => {
+        pollEntered.resolve(); signal.addEventListener("abort", () => resolve({}), { once: true });
+      }),
+      publish: async () => { published += 1; },
+    }, currentAuthority);
+    void delivery.start(agent);
+    await waitFor(() => published === 1);
+    await pollEntered.promise;
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+    await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -169,9 +247,36 @@ test("a stale generation after a provider await cannot publish or acknowledge", 
     const pump = delivery.pump(agent); await entered.promise; current = false; release.resolve({ turnId: "turn", outcome: "reply", text: "late" }); await pump;
     assert.equal(published, 0);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching");
-    assert.deepEqual(seen.at(-1), { agentId: "stone", roomId: "room", agentSessionId: "session-1", bearer: "memory", workAttemptId: "attempt", executionGenerationId: "generation-1" });
+    assert.deepEqual(seen.at(-1), {
+      agentId: "stone", roomId: "room", provider: "codex", apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory",
+      workAttemptId: "attempt", executionGenerationId: "generation-1", daemonGeneration: 1,
+      providerContinuationId: "thread", pid: 1, handle: agent.handle,
+    });
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a desired stop, API-origin rotation, or handle replacement after a provider await cannot publish", async () => {
+  for (const stale of ["desired-stop", "api-origin", "handle-replacement"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `letagents-delivery-${stale}-`));
+    try {
+      const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+      const entered = deferred<void>(); const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+      let desiredRunning = true; let currentApiUrl = agent.apiUrl; let currentHandle = agent.handle; let published = 0;
+      const delivery = new SupervisedAgentDelivery(store, provider(async () => { entered.resolve(); return release.promise; }), {
+        poll: async () => ({}), publish: async () => { published += 1; },
+      }, async (authority) => desiredRunning && authority.apiUrl === currentApiUrl && authority.handle === currentHandle);
+      await delivery.pump(agent); await ingest(store);
+      const pump = delivery.pump(agent); await entered.promise;
+      if (stale === "desired-stop") desiredRunning = false;
+      if (stale === "api-origin") currentApiUrl = "https://rotated-origin.test";
+      if (stale === "handle-replacement") currentHandle = { ...agent.handle, pid: 2 };
+      release.resolve({ turnId: "turn", outcome: "reply", text: "late" }); await pump;
+      assert.equal(published, 0, stale);
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", stale);
+      await store.close();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test("handoff tracks a retry paused after its receipt read and leaves the blocked head unchanged", async () => {
