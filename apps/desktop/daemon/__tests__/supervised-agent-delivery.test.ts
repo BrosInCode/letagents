@@ -84,9 +84,10 @@ test("handoff fences an in-flight ingress poll and drains it before returning", 
 
 test("SupervisorDaemon stop fences and drains its production-owned delivery before releasing stores", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-delivery-drain-"));
+  let daemon: SupervisorDaemon | null = null;
   try {
     const entered = deferred<void>(); const release = deferred<{ messages: Array<Record<string, unknown>> }>(); let aborted = false;
-    const daemon = new SupervisorDaemon({
+    daemon = new SupervisorDaemon({
       lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
     }, "darwin", provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), false, 60_000, undefined, {}, {
@@ -116,7 +117,11 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
     assert.equal(stopped, false, "stop waits for the in-flight poll to settle");
     release.resolve({ messages: [] });
     await stopping;
-  } finally { await rm(root, { recursive: true, force: true }); }
+    daemon = null;
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("handoff during a provider turn drains it and prevents post-turn publication", async () => {
