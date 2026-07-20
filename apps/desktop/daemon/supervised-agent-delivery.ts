@@ -33,6 +33,12 @@ export interface SupervisedDeliveryHttp {
   publish(input: { roomId: string; apiUrl: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<void>;
 }
 
+export type SupervisedPollWait = (delayMs: number, signal: AbortSignal) => Promise<void>;
+
+const SUCCESSFUL_POLL_PACE_MS = 25;
+const POLL_ERROR_BACKOFF_BASE_MS = 250;
+const POLL_ERROR_BACKOFF_CAP_MS = 30_000;
+
 /**
  * The daemon-owned delivery loop. It intentionally knows no owner credential
  * and no mention grammar: a worker-authenticated poll is the sole activation
@@ -56,6 +62,7 @@ export class SupervisedAgentDelivery {
     private readonly revalidateAuthority: SupervisedAuthorityRevalidator,
     private readonly retryDelayMs = 50,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    private readonly waitForPollDelay: SupervisedPollWait = abortablePollDelay,
   ) {}
 
   fence(): void {
@@ -112,12 +119,18 @@ export class SupervisedAgentDelivery {
   private async pollLoop(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     // Recovery must not wait for a potentially hours-long first network poll.
     await this.pump(agent);
+    let consecutivePollErrors = 0;
     while (await this.hasAuthority(agent, controller)) {
-      try { await this.pollOnce(agent, controller); } catch {
-        // The durable queue remains recoverable; retry only after a bounded
-        // delay so failed/empty responses cannot busy-spin the daemon.
+      try {
+        await this.pollOnce(agent, controller);
+        consecutivePollErrors = 0;
+      } catch {
+        consecutivePollErrors += 1;
       }
-      if (!await this.waitForRetry(controller)) return;
+      const delayMs = consecutivePollErrors
+        ? pollErrorBackoffMs(consecutivePollErrors)
+        : SUCCESSFUL_POLL_PACE_MS;
+      if (!await this.waitForNextPoll(controller, delayMs)) return;
     }
   }
 
@@ -132,14 +145,9 @@ export class SupervisedAgentDelivery {
     return this.track(controller, this.pollOperation(agent, controller)).finally(() => parent?.signal.removeEventListener("abort", relayAbort));
   }
 
-  private async waitForRetry(controller: AbortController): Promise<boolean> {
+  private async waitForNextPoll(controller: AbortController, delayMs: number): Promise<boolean> {
     if (controller.signal.aborted || this.fenced) return false;
-    await new Promise<void>((resolve) => {
-      // The normal unit-test retry delay is zero. Keep the live loop bounded
-      // anyway: a failed/empty long-poll must never become a CPU spin.
-      const timer = setTimeout(resolve, Math.max(25, this.retryDelayMs));
-      controller.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
-    });
+    await this.waitForPollDelay(delayMs, controller.signal);
     return !controller.signal.aborted && !this.fenced;
   }
 
@@ -342,4 +350,30 @@ function persistedReplyText(outcome: string | null): string | null {
     const parsed = JSON.parse(outcome) as { kind?: unknown; text?: unknown };
     return parsed.kind === "reply" && typeof parsed.text === "string" && parsed.text.trim() ? parsed.text : null;
   } catch { return null; }
+}
+
+function pollErrorBackoffMs(consecutiveErrors: number): number {
+  const exponent = Math.max(0, Math.min(30, consecutiveErrors - 1));
+  return Math.min(POLL_ERROR_BACKOFF_CAP_MS, POLL_ERROR_BACKOFF_BASE_MS * (2 ** exponent));
+}
+
+/** An abortable delay that releases its signal listener on either completion path. */
+function abortablePollDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) { resolve(); return; }
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+    // An abort between the first check and listener registration is still
+    // observed, and uses the same cleanup path as a completed timer.
+    if (signal.aborted) finish();
+  });
 }

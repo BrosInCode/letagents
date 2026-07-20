@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,6 +135,67 @@ test("the supervised runtime backs off after a poll error and resumes intake", a
     await waitFor(() => polls >= 3);
     await delivery.fenceAndDrain();
     assert.equal((await store.receipts(agent.agentId)).length, 1);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("poll-error backoff grows, caps, and resets after a healthy poll", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-backoff-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const delays: number[] = []; let polls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      poll: ({ signal }) => {
+        polls += 1;
+        if (polls <= 8 || polls === 10) return Promise.reject(new Error("outage"));
+        if (polls === 9) return Promise.resolve({});
+        return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
+      },
+      publish: async () => { throw new Error("must not publish"); },
+    }, currentAuthority, 50, undefined, async (delayMs) => { delays.push(delayMs); });
+    void delivery.start(agent);
+    await waitFor(() => polls >= 11);
+    await delivery.fenceAndDrain();
+    assert.deepEqual(delays, [250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 25, 250]);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("successful polling cycles release backoff listeners instead of accumulating them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-poll-listeners-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let polls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      poll: async () => { polls += 1; return {}; },
+      publish: async () => { throw new Error("must not publish"); },
+    }, async () => polls < 15);
+    const internals = delivery as unknown as { loopControllers: Map<string, AbortController>; loops: Map<string, Promise<void>> };
+    void delivery.start(agent);
+    const controller = internals.loopControllers.get(agent.agentId)!;
+    await waitFor(() => !internals.loops.has(agent.agentId));
+    assert.equal(polls, 15);
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("fence aborts a pending error backoff and releases its listener", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-backoff-drain-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      poll: async () => { throw new Error("outage"); },
+      publish: async () => { throw new Error("must not publish"); },
+    }, currentAuthority);
+    const internals = delivery as unknown as { loopControllers: Map<string, AbortController> };
+    void delivery.start(agent);
+    const controller = internals.loopControllers.get(agent.agentId)!;
+    await waitFor(() => getEventListeners(controller.signal, "abort").length === 1);
+    const started = Date.now();
+    await delivery.fenceAndDrain();
+    assert.ok(Date.now() - started < 100, "fence should not wait for the 250ms backoff timer");
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
