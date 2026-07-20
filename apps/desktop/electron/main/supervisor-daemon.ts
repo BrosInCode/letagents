@@ -90,6 +90,17 @@ type WireEntry = {
     recorded_at: string;
     updated_at: string;
   } | null;
+  room_agent_state?: {
+    connection: { state: string; observed_at: string | null; detail: string | null };
+    inbox: { state: string; pending_count: number; blocked_by_message_id: string | null; detail: string | null };
+    turn: { state: string; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
+    task: { state: string; task_id: string | null; title: string | null };
+  } | null;
+  delivery_receipts?: Array<{
+    inbox_item_id: string; source_message_id: string; state: string; attempt_count: number;
+    provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; updated_at: string;
+    timeline?: Array<{ phase: string; observed_at: string; detail: string | null }>;
+  }>;
 };
 type WireActivityEvent = {
   observed_at: string;
@@ -770,6 +781,46 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
     lastTerminal: entry.reconciliation?.last_terminal ?? null,
     activity: (entry.activity ?? []).map(mapActivity),
+    roomAgentState: entry.room_agent_state ? {
+      connection: {
+        state: entry.room_agent_state.connection.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["connection"]["state"],
+        observedAt: entry.room_agent_state.connection.observed_at,
+        detail: entry.room_agent_state.connection.detail,
+      },
+      inbox: {
+        state: entry.room_agent_state.inbox.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["inbox"]["state"],
+        pendingCount: entry.room_agent_state.inbox.pending_count,
+        blockedByMessageId: entry.room_agent_state.inbox.blocked_by_message_id,
+        detail: entry.room_agent_state.inbox.detail,
+      },
+      turn: {
+        state: entry.room_agent_state.turn.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["turn"]["state"],
+        inboxItemId: entry.room_agent_state.turn.inbox_item_id,
+        sourceMessageId: entry.room_agent_state.turn.source_message_id,
+        providerTurnId: entry.room_agent_state.turn.provider_turn_id,
+        detail: entry.room_agent_state.turn.detail,
+      },
+      task: {
+        state: entry.room_agent_state.task.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["task"]["state"],
+        taskId: entry.room_agent_state.task.task_id,
+        title: entry.room_agent_state.task.title,
+      },
+    } : null,
+    deliveryReceipts: (entry.delivery_receipts ?? []).map((receipt) => ({
+      inboxItemId: receipt.inbox_item_id,
+      sourceMessageId: receipt.source_message_id,
+      state: receipt.state as NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["state"],
+      attemptCount: receipt.attempt_count,
+      providerTurnId: receipt.provider_turn_id,
+      blockedByMessageId: receipt.blocked_by_message_id,
+      error: receipt.error,
+      updatedAt: receipt.updated_at,
+      timeline: (receipt.timeline ?? []).map((event) => ({
+        phase: event.phase as NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"][number]["phase"],
+        observedAt: event.observed_at,
+        detail: event.detail,
+      })),
+    })),
     turnControl: entry.turn_control ? {
       actionId: entry.turn_control.action_id,
       workAttemptId: entry.turn_control.work_attempt_id,
