@@ -39,18 +39,26 @@ function toolHandler(
 }
 
 function withAuthEnv<T>(
-  values: { bearer?: string | undefined; owner?: string | undefined; apiUrl?: string | null },
+  values: {
+    bearer?: string | undefined;
+    owner?: string | undefined;
+    apiUrl?: string | null;
+    boundedTurns?: string | undefined;
+  },
   callback: () => T | Promise<T>,
 ): Promise<T> | T {
   const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
   const previousOwner = process.env.LETAGENTS_TOKEN;
   const previousApiUrl = process.env.LETAGENTS_API_URL;
+  const previousBoundedTurns = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
   if (values.bearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
   else process.env.LETAGENTS_AGENT_SESSION_BEARER = values.bearer;
   if (values.owner === undefined) delete process.env.LETAGENTS_TOKEN;
   else process.env.LETAGENTS_TOKEN = values.owner;
   if (values.apiUrl === null) delete process.env.LETAGENTS_API_URL;
   else if (values.apiUrl !== undefined) process.env.LETAGENTS_API_URL = values.apiUrl;
+  if (values.boundedTurns === undefined) delete process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
+  else process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS = values.boundedTurns;
   return Promise.resolve(callback()).finally(() => {
     if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
     else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
@@ -58,6 +66,8 @@ function withAuthEnv<T>(
     else process.env.LETAGENTS_TOKEN = previousOwner;
     if (previousApiUrl === undefined) delete process.env.LETAGENTS_API_URL;
     else process.env.LETAGENTS_API_URL = previousApiUrl;
+    if (previousBoundedTurns === undefined) delete process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
+    else process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS = previousBoundedTurns;
   });
 }
 
@@ -197,6 +207,42 @@ test("worker bearer mode disables local Codex session orchestration", async () =
       message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
     });
   });
+});
+
+test("supervised bounded turns refuse wait_for_messages before any local or network work", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "1" }, async () => {
+    globalThis.fetch = async () => assert.fail("bounded wait guard must run before fetch");
+    const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+    const result = await wait({ room_id: "room_supervised", after_message_id: "msg_1" });
+    assert.deepEqual(JSON.parse(result.content[0]!.text), {
+      success: false,
+      error: "supervised_bounded_delivery",
+      message: "wait_for_messages is disabled because supervised room delivery is owned by the desktop daemon.",
+    });
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("ordinary worker bearer mode retains wait_for_messages when bounded delivery is off", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "0" }, async () => {
+    const requests: string[] = [];
+    globalThis.fetch = async (url) => {
+      const requestUrl = String(url);
+      requests.push(requestUrl);
+      if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
+      if (requestUrl.includes("/messages/poll")) {
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+    };
+    const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+    const result = await wait({ room_id: "room_ordinary", after_message_id: "msg_1", timeout: 1 });
+    assert.match(result.content[0]!.text, /messages/);
+    assert.ok(requests.some((url) => url.includes("/rooms/room_ordinary/messages/poll")));
+  });
+  globalThis.fetch = originalFetch;
 });
 
 test("worker bearer startup binds its configured room locally for omitted-room tools", async () => {
