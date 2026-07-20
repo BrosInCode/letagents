@@ -877,6 +877,18 @@ applyV6Shape(database: DatabaseSync): void {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS supervised_agent_inbox_head
       ON supervised_agent_inbox(agent_id, fifo_sequence);
+    -- Additive v6 journal: phase facts are append-only and survive a daemon
+    -- restart. It does not alter the canonical inbox state machine.
+    CREATE TABLE IF NOT EXISTS supervised_agent_inbox_events (
+      inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+      transition_key TEXT NOT NULL,
+      phase TEXT NOT NULL CHECK (phase IN ('received','queued','turn_started','turn_finished','publish_started','published','no_reply','retry_scheduled','blocked')),
+      observed_at TEXT NOT NULL,
+      detail TEXT,
+      PRIMARY KEY(inbox_item_id, transition_key)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS supervised_agent_inbox_events_timeline
+      ON supervised_agent_inbox_events(inbox_item_id, observed_at, transition_key);
     CREATE TABLE IF NOT EXISTS supervised_agent_ingress_cursors (
       agent_id TEXT PRIMARY KEY,
       room_id TEXT NOT NULL,
@@ -899,6 +911,7 @@ validateV6Shape(database: DatabaseSync): void {
   const canonical: Record<string, string> = {
     worker_session_bindings: `CREATE TABLE worker_session_bindings (entry_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,work_attempt_id TEXT NOT NULL,execution_generation_id TEXT NOT NULL,agent_session_id TEXT NOT NULL,credential_ref TEXT NOT NULL,api_url TEXT NOT NULL,room_cursor TEXT,last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0),last_observed_at_ms INTEGER NOT NULL CHECK(last_observed_at_ms >= 0),binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),updated_at TEXT NOT NULL) STRICT`,
     supervised_agent_inbox: `CREATE TABLE supervised_agent_inbox (inbox_item_id TEXT PRIMARY KEY,agent_id TEXT NOT NULL,room_id TEXT NOT NULL,source_message_id TEXT NOT NULL,source_message_json TEXT NOT NULL,activation_json TEXT NOT NULL,fifo_sequence INTEGER NOT NULL CHECK(fifo_sequence > 0),state TEXT NOT NULL CHECK(state IN ('pending','dispatching','awaiting_result','publishing','retryable','blocked','acknowledged','acknowledged_no_reply')),attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),action_id TEXT NOT NULL,reply_client_message_id TEXT NOT NULL,provider_turn_id TEXT,outcome TEXT,last_error TEXT,blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),next_attempt_at_ms INTEGER,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,acknowledged_at TEXT,UNIQUE(agent_id,source_message_id),UNIQUE(agent_id,fifo_sequence)) STRICT`,
+    supervised_agent_inbox_events: `CREATE TABLE supervised_agent_inbox_events (inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,transition_key TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','publish_started','published','no_reply','retry_scheduled','blocked')),observed_at TEXT NOT NULL,detail TEXT,PRIMARY KEY(inbox_item_id,transition_key)) STRICT`,
     supervised_agent_ingress_cursors: `CREATE TABLE supervised_agent_ingress_cursors (agent_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,last_observed_message_id TEXT,updated_at TEXT NOT NULL) STRICT`,
     supervised_worker_sessions: `CREATE TABLE supervised_worker_sessions (agent_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,agent_session_id TEXT NOT NULL,execution_generation_id TEXT NOT NULL,credential_ref TEXT NOT NULL,expires_at TEXT,updated_at TEXT NOT NULL) STRICT`,
     worker_binding_publications: `CREATE TABLE worker_binding_publications (reservation_id TEXT PRIMARY KEY,entry_id TEXT NOT NULL,binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),execution_generation_id TEXT NOT NULL,agent_session_id TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence > 0),observed_at TEXT NOT NULL,observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),state TEXT NOT NULL CHECK(state IN ('reserved','accepted','failed')),created_at TEXT NOT NULL,finalized_at TEXT,UNIQUE(entry_id,sequence)) STRICT`,
@@ -913,6 +926,7 @@ validateV6Shape(database: DatabaseSync): void {
   const required: Record<string, string[]> = {
     worker_session_bindings: ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "credential_ref", "api_url", "room_cursor", "last_sequence", "last_observed_at_ms", "binding_epoch", "updated_at"],
     supervised_agent_inbox: ["inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "fifo_sequence", "state", "attempt_count", "action_id", "reply_client_message_id", "provider_turn_id", "outcome", "last_error", "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at"],
+    supervised_agent_inbox_events: ["inbox_item_id", "transition_key", "phase", "observed_at", "detail"],
     supervised_agent_ingress_cursors: ["agent_id", "room_id", "last_observed_message_id", "updated_at"],
     supervised_worker_sessions: ["agent_id", "room_id", "agent_session_id", "execution_generation_id", "credential_ref", "expires_at", "updated_at"],
   };
@@ -936,6 +950,7 @@ validateV6Shape(database: DatabaseSync): void {
     worker_binding_publications_current: { table: "worker_binding_publications", unique: 0, columns: ["entry_id", "binding_epoch", "sequence"] },
     worker_generation_verifications_current: { table: "worker_generation_verifications", unique: 0, columns: ["entry_id", "binding_epoch", "sequence"] },
     supervised_agent_inbox_head: { table: "supervised_agent_inbox", unique: 0, columns: ["agent_id", "fifo_sequence"] },
+    supervised_agent_inbox_events_timeline: { table: "supervised_agent_inbox_events", unique: 0, columns: ["inbox_item_id", "observed_at", "transition_key"] },
   };
   for (const [name, expected] of Object.entries(indexes)) {
     const listed = (database.prepare(`PRAGMA index_list(${expected.table})`).all() as Row[]).find((row) => row.name === name);

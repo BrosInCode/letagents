@@ -310,6 +310,7 @@ export interface DesktopApi {
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
     resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
+    retryRoomDelivery: (input: import("./agents.js").DesktopSupervisorRoomDeliveryRetryInput) => Promise<void>;
     controlTurn: (input: DesktopSupervisorTurnControlInput) => Promise<DesktopSupervisorTurnControlResult>;
     resolveTurnControl: (input: DesktopSupervisorTurnControlResolutionInput) => Promise<DesktopSupervisorManifestEntry>;
     readAttempt: (id: string) => Promise<DesktopSupervisorAttemptDetail>;

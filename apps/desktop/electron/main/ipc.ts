@@ -1030,6 +1030,13 @@ export function registerDesktopIpcHandlers(
     },
   );
   targetIpcMain.handle(
+    "desktop:supervisor:retry-room-delivery",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomDeliveryRetryInput): Promise<void> => {
+      if (isDesktopSmokeCheck()) throw new Error("Room delivery retry is unavailable in the desktop smoke environment.");
+      await supervisorDaemonClient.retryRoomDelivery(input);
+    },
+  );
+  targetIpcMain.handle(
     "desktop:supervisor:control-turn",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlInput) =>
       isDesktopSmokeCheck() ? desktopSmokeControlTurn(input) : supervisorDaemonClient.controlTurn(input),

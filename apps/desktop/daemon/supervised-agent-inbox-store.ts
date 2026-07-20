@@ -15,6 +15,12 @@ export type SupervisedInboxItem = {
   next_attempt_at_ms: number | null; created_at: string; updated_at: string; acknowledged_at: string | null;
 };
 export type SupervisedInboxReceipt = SupervisedInboxItem & { receipt_state: SupervisedInboxReceiptState };
+export type SupervisedInboxEvent = {
+  phase: "received" | "queued" | "turn_started" | "turn_finished" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked";
+  observed_at: string;
+  detail: string | null;
+};
+export type SupervisedInboxReceiptWithTimeline = SupervisedInboxReceipt & { timeline: SupervisedInboxEvent[] };
 type Row = Record<string, unknown>;
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
 const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply"]);
@@ -65,6 +71,8 @@ export class SupervisedAgentInboxStore {
           (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
           VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
           inboxItemId, input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), sequence, actionId, replyId, timestamp, timestamp);
+        this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
+        this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
         created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
       }
       const timestamp = this.now();
@@ -107,7 +115,10 @@ export class SupervisedAgentInboxStore {
       run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
         next, attempts, valueOrCurrent(patch, "provider_turn_id", item.provider_turn_id), valueOrCurrent(patch, "outcome", item.outcome), valueOrCurrent(patch, "last_error", item.last_error),
         valueOrCurrent(patch, "blocked_by_inbox_item_id", item.blocked_by_inbox_item_id), valueOrCurrent(patch, "next_attempt_at_ms", item.next_attempt_at_ms), timestamp, acknowledged, inboxItemId);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      const event = phaseForTransition(next);
+      if (event) this.recordEvent(database, inboxItemId, `${event}:${updated.attempt_count}`, event, timestamp, updated.last_error);
+      return updated;
     }));
   }
   async claimHead(agentId: string): Promise<SupervisedInboxItem | null> {
@@ -119,7 +130,9 @@ export class SupervisedAgentInboxStore {
       this.assertCurrentHead(database, item);
       const timestamp = this.now();
       run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',attempt_count=attempt_count+1,updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+      const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+      this.recordEvent(database, updated.inbox_item_id, `turn_started:${updated.attempt_count}`, "turn_started", timestamp, null);
+      return updated;
     }));
   }
   /** Persist provider terminal evidence before advancing out of dispatching. */
@@ -130,7 +143,9 @@ export class SupervisedAgentInboxStore {
       const item = rowToItem(current);
       if (item.state !== "dispatching" && item.state !== "awaiting_result") throw new Error("Provider terminal evidence may only be checkpointed while delivery is in-flight.");
       this.assertCurrentHead(database, item);
-      run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, this.now(), inboxItemId);
+      const timestamp = this.now();
+      run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, `turn_finished:${item.attempt_count}`, "turn_finished", timestamp, null);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
@@ -175,22 +190,26 @@ export class SupervisedAgentInboxStore {
         const timestamp = this.now();
         run(database.prepare("UPDATE supervised_agent_inbox SET state=?,last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"),
           next, error, timestamp, finalStates.has(next) ? timestamp : null, item.inbox_item_id);
-        recovered.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row));
+        const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+        const phase = phaseForTransition(next);
+        if (phase) this.recordEvent(database, updated.inbox_item_id, `recovery:${phase}:${updated.attempt_count}`, phase, timestamp, error);
+        recovered.push(updated);
       }
       return recovered;
     }));
   }
-  async receipts(agentId: string): Promise<SupervisedInboxReceipt[]> {
+  async receipts(agentId: string): Promise<SupervisedInboxReceiptWithTimeline[]> {
     return this.read(async (database) => {
       const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence").all(agentId) as Row[];
       const head = rows.find((row) => !finalStates.has(String(row.state) as SupervisedInboxState));
       const firstBlocked = head && String(head.state) === "blocked" ? head : undefined;
       return rows.map((row) => {
         const item = rowToItem(row);
+        const timeline = this.events(database, item.inbox_item_id);
         if (firstBlocked && item.fifo_sequence > Number(firstBlocked.fifo_sequence) && !finalStates.has(item.state)) {
-          return { ...item, receipt_state: "queued_behind_blocked" as const, blocked_by_inbox_item_id: String(firstBlocked.inbox_item_id) };
+          return { ...item, timeline, receipt_state: "queued_behind_blocked" as const, blocked_by_inbox_item_id: String(firstBlocked.inbox_item_id) };
         }
-        return { ...item, receipt_state: item.state };
+        return { ...item, timeline, receipt_state: item.state };
       });
     });
   }
@@ -213,6 +232,24 @@ export class SupervisedAgentInboxStore {
     const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
   }
+  private recordEvent(database: DatabaseSync, inboxItemId: string, transitionKey: string, phase: SupervisedInboxEvent["phase"], observedAt: string, detail: string | null): void {
+    run(database.prepare("INSERT OR IGNORE INTO supervised_agent_inbox_events(inbox_item_id,transition_key,phase,observed_at,detail) VALUES (?,?,?,?,?)"), inboxItemId, transitionKey, phase, observedAt, detail);
+  }
+  private events(database: DatabaseSync, inboxItemId: string): SupervisedInboxEvent[] {
+    return (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY observed_at,transition_key").all(inboxItemId) as Row[]).map((row) => ({
+      phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail),
+    }));
+  }
+}
+
+function phaseForTransition(state: SupervisedInboxState): SupervisedInboxEvent["phase"] | null {
+  if (state === "publishing") return "publish_started";
+  if (state === "acknowledged") return "published";
+  if (state === "acknowledged_no_reply") return "no_reply";
+  if (state === "retryable") return "retry_scheduled";
+  if (state === "blocked") return "blocked";
+  if (state === "pending") return "queued";
+  return null;
 }
 
 function isNewerCursor(candidate: string, current: string | null): boolean {

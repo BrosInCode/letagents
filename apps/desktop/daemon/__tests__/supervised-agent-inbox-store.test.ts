@@ -90,6 +90,23 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
   } finally { await env.cleanup(); }
 });
 
+test("delivery timeline records causal phases durably across a daemon restart", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-20T12:00:00.000Z");
+    const [item] = await store.ingestPoll({ agent_id: "timeline", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    await store.claimHead("timeline");
+    await store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind: "reply", text: "durable" }));
+    await store.transition(item!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn" });
+    await store.transition(item!.inbox_item_id, "publishing");
+    await store.close();
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    const receipt = (await reopened.receipts("timeline"))[0]!;
+    assert.deepEqual(receipt.timeline.map((event) => event.phase), ["received", "queued", "turn_started", "turn_finished", "publish_started"]);
+    assert.equal(receipt.timeline.every((event) => event.observed_at === "2026-07-20T12:00:00.000Z"), true);
+    await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
 test("ingress cannot silently change an agent room and a non-head cannot block", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);

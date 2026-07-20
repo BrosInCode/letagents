@@ -519,6 +519,16 @@ export interface DesktopSupervisorTurnControlInput {
   correction?: string | null;
 }
 
+/** Renderer-safe exact identity tuple for retrying one blocked room receipt. */
+export interface DesktopSupervisorRoomDeliveryRetryInput {
+  entryId: string;
+  roomId: string;
+  sourceMessageId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  agentSessionId: string;
+}
+
 export interface DesktopSupervisorTurnControlResult {
   entryId: string;
   workAttemptId: string;
