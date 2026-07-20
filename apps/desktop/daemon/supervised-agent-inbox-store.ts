@@ -1,0 +1,136 @@
+import { randomUUID } from "node:crypto";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
+
+import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+
+export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply";
+export type SupervisedInboxReceiptState = SupervisedInboxState | "queued_behind_blocked";
+export type InboxActivation = Record<string, unknown>;
+export type IngressMessage = { source_message_id: string; source_message: unknown; activation: InboxActivation };
+export type SupervisedInboxItem = {
+  inbox_item_id: string; agent_id: string; room_id: string; source_message_id: string;
+  source_message: unknown; activation: InboxActivation; fifo_sequence: number; state: SupervisedInboxState;
+  attempt_count: number; action_id: string; reply_client_message_id: string; provider_turn_id: string | null;
+  outcome: string | null; last_error: string | null; blocked_by_inbox_item_id: string | null;
+  next_attempt_at_ms: number | null; created_at: string; updated_at: string; acknowledged_at: string | null;
+};
+export type SupervisedInboxReceipt = SupervisedInboxItem & { receipt_state: SupervisedInboxReceiptState };
+type Row = Record<string, unknown>;
+function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
+const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply"]);
+const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInboxState[]>> = {
+  pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "retryable", "blocked"],
+  awaiting_result: ["publishing", "acknowledged_no_reply", "retryable", "blocked"], publishing: ["acknowledged", "retryable", "blocked"],
+  retryable: ["pending", "blocked"], blocked: ["pending"], acknowledged: [], acknowledged_no_reply: [],
+};
+
+/** Durable, provider-neutral room delivery queue. It owns neither polling nor turns. */
+export class SupervisedAgentInboxStore {
+  private database: DatabaseSync | null = null;
+  private initializing: Promise<DatabaseSync> | null = null;
+  private writes: Promise<void> = Promise.resolve();
+  private closed = false;
+
+  constructor(private readonly databasePath: string, private readonly now: () => string = () => new Date().toISOString()) {}
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.writes.catch(() => undefined);
+    await this.initializing?.catch(() => undefined);
+    this.database?.close(); this.database = null; this.initializing = null;
+  }
+
+  /** One transaction: idempotently insert activated messages and persist the poll cursor. */
+  async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; messages: readonly IngressMessage[] }): Promise<SupervisedInboxItem[]> {
+    this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      let sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value);
+      const created: SupervisedInboxItem[] = [];
+      for (const message of input.messages) {
+        this.require(message.source_message_id, "source_message_id");
+        const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND source_message_id=?").get(input.agent_id, message.source_message_id) as Row | undefined;
+        if (existing) { created.push(rowToItem(existing)); continue; }
+        sequence += 1;
+        const timestamp = this.now(); const inboxItemId = randomUUID();
+        const actionId = `supervised-room:${input.agent_id}:${message.source_message_id}:action:v1`;
+        const replyId = `supervised-room:${input.agent_id}:${message.source_message_id}:reply:v1`;
+        run(database.prepare(`INSERT INTO supervised_agent_inbox
+          (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+          VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
+          inboxItemId, input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), sequence, actionId, replyId, timestamp, timestamp);
+        created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
+      }
+      const timestamp = this.now();
+      run(database.prepare(`INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)
+        ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,last_observed_message_id=COALESCE(excluded.last_observed_message_id, supervised_agent_ingress_cursors.last_observed_message_id),updated_at=excluded.updated_at`), input.agent_id, input.room_id, input.last_observed_message_id, timestamp);
+      return created;
+    }));
+  }
+
+  async cursor(agentId: string): Promise<{ agent_id: string; room_id: string; last_observed_message_id: string | null; updated_at: string } | null> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT * FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(agentId) as Row | undefined;
+      return row ? { agent_id: String(row.agent_id), room_id: String(row.room_id), last_observed_message_id: row.last_observed_message_id === null ? null : String(row.last_observed_message_id), updated_at: String(row.updated_at) } : null;
+    });
+  }
+
+  async head(agentId: string): Promise<SupervisedInboxItem | null> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      return row ? rowToItem(row) : null;
+    });
+  }
+  async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
+    return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
+  }
+  async transition(inboxItemId: string, next: SupervisedInboxState, patch: Partial<Pick<SupervisedInboxItem, "provider_turn_id" | "outcome" | "last_error" | "next_attempt_at_ms" | "blocked_by_inbox_item_id">> = {}): Promise<SupervisedInboxItem> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
+      const item = rowToItem(current);
+      if (!transitions[item.state].includes(next)) throw new Error(`Invalid supervised inbox transition: ${item.state} -> ${next}.`);
+      const attempts = next === "dispatching" ? item.attempt_count + 1 : item.attempt_count;
+      const timestamp = this.now(); const acknowledged = finalStates.has(next) ? timestamp : null;
+      run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
+        next, attempts, valueOrCurrent(patch, "provider_turn_id", item.provider_turn_id), valueOrCurrent(patch, "outcome", item.outcome), valueOrCurrent(patch, "last_error", item.last_error),
+        valueOrCurrent(patch, "blocked_by_inbox_item_id", item.blocked_by_inbox_item_id), valueOrCurrent(patch, "next_attempt_at_ms", item.next_attempt_at_ms), timestamp, acknowledged, inboxItemId);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
+  async retryBlocked(inboxItemId: string): Promise<SupervisedInboxItem> { return this.transition(inboxItemId, "pending", { blocked_by_inbox_item_id: null, next_attempt_at_ms: null }); }
+  async receipts(agentId: string): Promise<SupervisedInboxReceipt[]> {
+    return this.read(async (database) => {
+      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence").all(agentId) as Row[];
+      const firstBlocked = rows.find((row) => String(row.state) === "blocked");
+      return rows.map((row) => {
+        const item = rowToItem(row);
+        if (firstBlocked && item.fifo_sequence > Number(firstBlocked.fifo_sequence) && !finalStates.has(item.state)) {
+          return { ...item, receipt_state: "queued_behind_blocked" as const, blocked_by_inbox_item_id: String(firstBlocked.inbox_item_id) };
+        }
+        return { ...item, receipt_state: item.state };
+      });
+    });
+  }
+
+  private async read<T>(operation: (database: DatabaseSync) => Promise<T> | T): Promise<T> { return operation(await this.getDatabase()); }
+  private async exclusive<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> {
+    let release!: () => void; const prior = this.writes; this.writes = new Promise<void>((resolve) => { release = resolve; });
+    await prior; try { return await operation(await this.getDatabase()); } finally { release(); }
+  }
+  private transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
+  private async getDatabase(): Promise<DatabaseSync> {
+    if (this.closed) throw new Error("Supervised inbox store is closed.");
+    if (this.database) return this.database;
+    if (!this.initializing) this.initializing = openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)).then((database) => { this.database = database; return database; });
+    return this.initializing;
+  }
+  private require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }
+}
+
+function rowToItem(row: Row): SupervisedInboxItem {
+  return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
+}
+
+function valueOrCurrent<T extends object, K extends keyof T>(patch: T, key: K, current: T[K]): T[K] {
+  return Object.hasOwn(patch, key) ? patch[key] : current;
+}
