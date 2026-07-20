@@ -371,12 +371,13 @@ export class SupervisedAgentDelivery {
         // merely persisted inbox item must never be projected as responding.
         setActive("responding");
       } });
-      const turnController = new AbortController();
-      const relayAbort = () => turnController.abort();
-      controller.signal.addEventListener("abort", relayAbort, { once: true });
-      let result;
-      try { result = turn && await this.track(turnController, turn); }
-      finally { controller.signal.removeEventListener("abort", relayAbort); }
+      // Native provider turns are intentionally not cancelable by the daemon:
+      // a handoff must retire our authority, not kill a user's Codex process.
+      // Do not put this promise in the drain group. Instead, race its result
+      // with retirement so stop/handoff can return after network/DB work is
+      // drained. The attached late-result handler consumes the promise but has
+      // no path back into this delivery continuation after retirement.
+      const result = turn && await this.awaitProviderResultOrRetirement(turn, controller);
       if (!result) throw new Error("Provider does not support bounded room turns.");
       if (!await this.hasAuthority(agent, controller)) return;
       const outcome = result.outcome === "reply" && result.text?.trim()
@@ -429,6 +430,31 @@ export class SupervisedAgentDelivery {
       await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
       return this.hasAuthority(agent, parent);
     } finally { parent.signal.removeEventListener("abort", relayAbort); }
+  }
+
+  private awaitProviderResultOrRetirement<T>(providerTurn: Promise<T>, controller: AbortController): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: (value: T) => void, value: T) => {
+        if (settled) return;
+        settled = true;
+        controller.signal.removeEventListener("abort", retire);
+        callback(value);
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        controller.signal.removeEventListener("abort", retire);
+        reject(error);
+      };
+      const retire = () => fail(new AuthorityLostError());
+      if (controller.signal.aborted) { retire(); return; }
+      controller.signal.addEventListener("abort", retire, { once: true });
+      // These handlers remain attached after retirement, so a late provider
+      // rejection is observed and cannot become an unhandled process-level
+      // rejection. `finish` is a no-op once retirement won the race.
+      void providerTurn.then((result) => finish(resolve, result), fail);
+    });
   }
 
   private async hasAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {

@@ -473,6 +473,63 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
   }
 });
 
+test("SupervisorDaemon stop detaches an unresolved provider turn without retaining the daemon", async () => {
+  // Keep the Unix-socket path below macOS's short sockaddr_un limit.
+  const root = await mkdtemp(join(tmpdir(), "la-sud-"));
+  let daemon: SupervisorDaemon | null = null;
+  const late = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+  try {
+    const entered = deferred<void>(); let published = 0; let providerStops = 0;
+    const port = provider(async (_handle, _request, options) => {
+      await options?.markDispatched?.(); entered.resolve(); return late.promise;
+    });
+    (port as unknown as { stop: ProviderActionPort["stop"] }).stop = async () => {
+      providerStops += 1;
+      return { endedAt: "", exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: null };
+    };
+    const paths = {
+      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.sqlite"), auditPath: join(root, "audit.log"),
+      attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+    };
+    daemon = new SupervisorDaemon(paths, "darwin", port, false, 60_000, undefined, {}, {
+      poll: async () => ({}), publish: async () => { published += 1; },
+    });
+    const internals = daemon as unknown as {
+      putManifestEntry(entry: Record<string, unknown>): Promise<void>;
+      liveHandles: Map<string, typeof agent.handle>;
+      workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+      supervisedInbox: SupervisedAgentInboxStore;
+      supervisedDelivery: SupervisedAgentDelivery;
+    };
+    await daemon.start();
+    await internals.putManifestEntry({
+      id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: agent.provider, model: null, charter: "test", desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
+      created_by: "test", created_at: new Date().toISOString(), work_attempt_id: agent.handle.workAttemptId,
+      provider_ref: { work_attempt_id: agent.handle.workAttemptId, provider_continuation_id: agent.handle.providerContinuationId, provider_connection: null, execution_generation_id: agent.executionGenerationId },
+    });
+    internals.liveHandles.set(agent.agentId, agent.handle);
+    await internals.workerBindings.bind({ entry_id: agent.agentId, room_id: agent.roomId, work_attempt_id: agent.handle.workAttemptId, execution_generation_id: agent.executionGenerationId, agent_session_id: agent.agentSessionId, agent_session_token: agent.bearer, api_url: agent.apiUrl });
+    await internals.supervisedDelivery.pump(agent); await ingest(internals.supervisedInbox);
+    void internals.supervisedDelivery.pump(agent); await entered.promise;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        daemon.stop(),
+        new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("daemon stop did not retire the provider await within one second")), 1_000); }),
+      ]);
+      daemon = null;
+    } finally { if (timeout) clearTimeout(timeout); }
+    assert.equal(providerStops, 0);
+    late.resolve({ turnId: "late", outcome: "reply", text: "must not publish" });
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(published, 0, "late provider output is fenced after daemon return");
+  } finally {
+    late.resolve({ turnId: "cleanup", outcome: "reply", text: "cleanup" });
+    await daemon?.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("handoff during a provider turn drains it and prevents post-turn publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-turn-drain-"));
   try {
@@ -487,6 +544,61 @@ test("handoff during a provider turn drains it and prevents post-turn publicatio
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("handoff retires an unresolved provider turn without stopping it, and late settlement cannot commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-unresolved-turn-"));
+  let store: SupervisedAgentInboxStore | null = null;
+  let delivery: SupervisedAgentDelivery | null = null;
+  let late: ReturnType<typeof deferred<{ turnId: string; outcome: "reply"; text: string }>> | null = null;
+  try {
+    store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const entered = deferred<void>(); late = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+    let providerStops = 0; let published = 0;
+    const port = provider(async (_handle, _request, options) => {
+      await options?.markDispatched?.(); entered.resolve(); return late!.promise;
+    });
+    (port as unknown as { stop: ProviderActionPort["stop"] }).stop = async () => {
+      providerStops += 1;
+      return { endedAt: "", exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: null };
+    };
+    delivery = new SupervisedAgentDelivery(store, port, {
+      poll: async () => ({}), publish: async () => { published += 1; },
+    }, currentAuthority);
+    await delivery.pump(agent); await ingest(store);
+    const pump = delivery.pump(agent); await entered.promise;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        delivery.fenceAndDrain(),
+        new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("handoff did not retire the provider await within one second")), 1_000); }),
+      ]);
+    } finally { if (timeout) clearTimeout(timeout); }
+    assert.equal(providerStops, 0, "retirement never stops or interrupts the provider process");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", "the in-flight result remains durably ambiguous");
+    late.resolve({ turnId: "late", outcome: "reply", text: "must not publish" });
+    await pump;
+    await Promise.resolve();
+    assert.equal(published, 0, "a late provider resolution cannot publish after authority retirement");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", "a late result cannot checkpoint or acknowledge");
+    await store.close(); store = null;
+    let resumedTurns = 0;
+    const reopened = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const successor = new SupervisedAgentDelivery(reopened, provider(async () => {
+      resumedTurns += 1;
+      throw new Error("an ambiguous dispatch must not rerun automatically");
+    }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+    await successor.pump(agent);
+    assert.equal(resumedTurns, 0);
+    assert.equal((await reopened.receipts(agent.agentId))[0]?.state, "blocked", "the successor normalizes the detached dispatch as recoverable blocked work");
+    await successor.fenceAndDrain();
+    await reopened.close();
+  } finally {
+    late?.resolve({ turnId: "cleanup", outcome: "reply", text: "cleanup" });
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("handoff during publication aborts and drains the publication without acknowledgement", async () => {
@@ -593,14 +705,15 @@ test("retry acknowledges durable scheduling without waiting for a long provider 
 test("daemon socket retry accepts only the exact blocked binding and leaves other rows isolated", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-socket-"));
   let daemon: SupervisorDaemon | null = null;
+  let release: ReturnType<typeof deferred<{ turnId: string; outcome: "no_reply"; text: null }>> | null = null;
   try {
-    const entered = deferred<void>(); const release = deferred<{ turnId: string; outcome: "no_reply"; text: null }>();
+    const entered = deferred<void>(); release = deferred<{ turnId: string; outcome: "no_reply"; text: null }>();
     const paths = {
       lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
     };
     daemon = new SupervisorDaemon(paths, "darwin", provider(async (_handle, _request, options) => {
-      await options?.markDispatched?.(); entered.resolve(); return release.promise;
+      await options?.markDispatched?.(); entered.resolve(); return release!.promise;
     }), false, 60_000, undefined, {}, {
       poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
       publish: async () => { throw new Error("no-reply must not publish"); },
@@ -646,6 +759,15 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
     const accepted = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", exact);
     assert.equal(accepted.ok, true, accepted.error);
     await entered.promise;
+    const activeReceipt = (await internals.supervisedInbox.receipts("stone"))[0]!;
+    const activeProjection = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{
+      id: string;
+      room_agent_state?: { turn: { state: string; inbox_item_id: string | null; source_message_id: string | null } } | null;
+    }>;
+    const activeTurn = activeProjection.find((entry) => entry.id === "stone")?.room_agent_state?.turn;
+    assert.equal(activeTurn?.state, "responding", "only the live markDispatched edge projects an active responding turn");
+    assert.equal(activeTurn?.inbox_item_id, activeReceipt.inbox_item_id);
+    assert.equal(activeTurn?.source_message_id, "msg_1");
     const duplicate = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", exact);
     assert.equal(duplicate.ok, false, "a dispatching row is not retryable again");
     const listed = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{ id: string; delivery_receipts?: Array<{ state: string; source_message_id: string }> }>;
@@ -664,12 +786,27 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
     await internals.workerBindings.unbind("other");
     const missingCredential = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", { ...exact, entry_id: "other", room_id: "other-room", work_attempt_id: identities.other.attempt, execution_generation_id: identities.other.execution, agent_session_id: identities.other.session });
     assert.equal(missingCredential.ok, false, "missing binding/credential rejects");
+    const waitingCredentials = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{
+      id: string; room_agent_state?: { inbox: { state: string } } | null;
+    }>;
+    assert.equal(waitingCredentials.find((entry) => entry.id === "other")?.room_agent_state?.inbox.state, "waiting_for_desktop_credentials");
     await internals.workerBindings.bind({ entry_id: "other", room_id: "other-room", work_attempt_id: identities.other.attempt, execution_generation_id: identities.other.execution, agent_session_id: identities.other.session, agent_session_token: "other-token", api_url: "https://letagents.test" });
+    const otherHead = (await internals.supervisedInbox.receipts("other"))[0]!;
+    await internals.supervisedInbox.retryBlocked(otherHead.inbox_item_id);
+    await internals.supervisedInbox.claimHead("other");
+    await internals.supervisedInbox.transition(otherHead.inbox_item_id, "awaiting_result", { provider_turn_id: "other-turn" });
+    await internals.supervisedInbox.transition(otherHead.inbox_item_id, "publishing", { outcome: JSON.stringify({ kind: "reply", text: "durable" }) });
+    const publishingProjection = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{ id: string; delivery_receipts?: Array<{ state: string }> }>;
+    assert.equal(publishingProjection.find((entry) => entry.id === "other")?.delivery_receipts?.[0]?.state, "publishing");
+    await internals.supervisedInbox.transition(otherHead.inbox_item_id, "retryable", { last_error: "publish transport failed" });
+    const retryableProjection = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{ id: string; delivery_receipts?: Array<{ state: string }> }>;
+    assert.equal(retryableProjection.find((entry) => entry.id === "other")?.delivery_receipts?.[0]?.state, "retryable");
     await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: "other", desired_state: "stopped" });
     const stopped = await daemonRequest(paths.socketPath, "supervisor.retry_room_delivery", { ...exact, entry_id: "other", room_id: "other-room", work_attempt_id: identities.other.attempt, execution_generation_id: identities.other.execution, agent_session_id: identities.other.session });
     assert.equal(stopped.ok, false, "desired non-running rejects before retry");
     await daemon.stop(); daemon = null;
   } finally {
+    release?.resolve({ turnId: "cleanup", outcome: "no_reply", text: null });
     await daemon?.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
