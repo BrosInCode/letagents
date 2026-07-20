@@ -33,6 +33,7 @@
           :task-reference-ids="taskReferenceIds"
           :search-active="entry.message.id === activeSearchMessageId"
           :animate-arrival="arrivingMessageIds.has(entry.message.id)"
+          :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
@@ -41,6 +42,7 @@
           @open-agent="$emit('open-agent', $event)"
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
         />
       </template>
 
@@ -173,6 +175,7 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubActivityAvailable: boolean;
@@ -188,6 +191,7 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "quote-reply": [messageId: string];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
   "quote-selection": [messageId: string, text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];

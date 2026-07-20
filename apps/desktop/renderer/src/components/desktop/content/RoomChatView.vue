@@ -32,6 +32,7 @@
           :thread-messages="threadMessagesWithThreadOverrides"
           :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
+          :delivery-receipts-by-message="deliveryReceiptsByMessage"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
           :github-activity-available="githubEventsAvailable"
@@ -47,6 +48,7 @@
           @quote-selection="quoteSelectedText"
           @open-github-event="emit('open-github-event', $event)"
           @open-task="emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
           @scroll-position="emit('scroll-position', $event)"
         />
 
@@ -152,6 +154,8 @@
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
         :task-reference-ids="taskReferenceIds"
+        :delivery-receipts-by-message="deliveryReceiptsByMessage"
+        @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
         @close="closeThread"
         @open-image="openImageViewer"
         @open-agent="openAgentModal"
@@ -217,6 +221,7 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
   composerEventPreviews: ComposerEventPreview[];
@@ -254,6 +259,7 @@ const emit = defineEmits<{
   "open-github-event": [url: string];
   "open-events": [];
   "open-task": [taskId: string];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
   "dismiss-event-preview": [messageId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,

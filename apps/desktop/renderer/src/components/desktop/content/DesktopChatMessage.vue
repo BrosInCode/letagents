@@ -119,6 +119,22 @@
         />
       </div>
 
+      <ul v-if="deliveryReceipts.length" class="room-message-delivery-receipts" aria-label="Agent delivery status">
+        <li v-for="receipt in deliveryReceipts" :key="receipt.agentId" :data-state="receipt.state">
+          <span aria-hidden="true">{{ receiptIcon(receipt.state) }}</span>
+          <span>{{ receiptLabel(receipt) }}</span>
+          <button
+            v-if="receipt.state === 'queued_behind_blocked' && receipt.blockedByMessageId"
+            type="button"
+            class="room-message-delivery-link"
+            @click="$emit('scroll-to-message', receipt.blockedByMessageId)"
+          >
+            View earlier message
+          </button>
+          <button v-if="receipt.state === 'blocked'" type="button" :aria-label="`Retry delivery for ${receipt.agentName}`" @click="$emit('retry-delivery', receipt.agentId, message.id)">Retry</button>
+        </li>
+      </ul>
+
       <button
         v-if="context === 'timeline' && threadIndicatorVisible"
         class="room-thread-marker"
@@ -245,8 +261,10 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>;
 }>(), {
   context: "timeline",
+  deliveryReceipts: () => [],
 });
 
 const emit = defineEmits<{
@@ -259,7 +277,18 @@ const emit = defineEmits<{
   "open-task": [taskId: string];
   "quote-selection": [messageId: string, text: string];
   "jump-to-thread-root": [messageId: string];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
 }>();
+
+function receiptIcon(state: string): string { return state === "blocked" ? "!" : state === "awaiting_result" || state === "dispatching" ? "↗" : state === "acknowledged_no_reply" ? "✓" : "•"; }
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null }): string {
+  if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
+  if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
+  if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
+  if (receipt.state === "blocked") return `${receipt.agentName} needs attention`;
+  if (receipt.state === "queued_behind_blocked") return `Waiting — ${receipt.agentName} needs attention on ${receipt.blockedByMessageId || "an earlier message"}`;
+  return `Waiting for ${receipt.agentName}`;
+}
 
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
