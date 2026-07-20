@@ -117,6 +117,20 @@ test("causal event journal is idempotent when an ingress replay shares a constan
   } finally { await env.cleanup(); }
 });
 
+test("retry attempts retain distinct causal phases while replaying one transition adds none", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-20T12:00:00.000Z");
+    const [item] = await store.ingestPoll({ agent_id: "attempts", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    await store.claimHead("attempts");
+    await store.transition(item!.inbox_item_id, "retryable", { last_error: "retry" });
+    await store.transition(item!.inbox_item_id, "pending");
+    await store.claimHead("attempts");
+    const phases = (await store.receipts("attempts"))[0]!.timeline.map((event) => event.phase);
+    assert.deepEqual(phases, ["received", "queued", "turn_started", "retry_scheduled", "queued", "turn_started"]);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("ingress cannot silently change an agent room and a non-head cannot block", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);
