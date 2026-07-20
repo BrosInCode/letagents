@@ -180,6 +180,7 @@ test("successful polling cycles release backoff listeners instead of accumulatin
     }, async () => polls < 15);
     const internals = delivery as unknown as { loopControllers: Map<string, AbortController>; loops: Map<string, Promise<void>> };
     void delivery.start(agent);
+    await waitFor(() => internals.loops.has(agent.agentId));
     const controller = internals.loopControllers.get(agent.agentId)!;
     await waitFor(() => !internals.loops.has(agent.agentId));
     assert.equal(polls, 15);
@@ -198,6 +199,7 @@ test("fence aborts a pending error backoff and releases its listener", async () 
     }, currentAuthority);
     const internals = delivery as unknown as { loopControllers: Map<string, AbortController> };
     void delivery.start(agent);
+    await waitFor(() => internals.loopControllers.has(agent.agentId));
     const controller = internals.loopControllers.get(agent.agentId)!;
     await waitFor(() => getEventListeners(controller.signal, "abort").length === 1);
     const started = Date.now();
@@ -324,6 +326,36 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
     assert.equal(internals.loopEpochs.get(agent.agentId), 2, "the live loop belongs to the latest refresh epoch");
     assert.equal((await store.receipts(agent.agentId)).every((item) => item.state === "acknowledged_no_reply"), true);
     await delivery.fenceAndDrain();
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an external stop invalidates a refresh reservation still waiting on drain", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-stop-epoch-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>();
+    const ingest = store.ingestPoll.bind(store);
+    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+      ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
+    };
+    let polls = 0; let turns = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      turns += 1;
+      return { turnId: "unexpected", outcome: "no_reply", text: null };
+    }), {
+      poll: async () => { polls += 1; return { messages: [{ id: "1", activation: { for_current_agent: {} } }] }; },
+      publish: async () => { throw new Error("must not publish"); },
+    }, currentAuthority);
+    await delivery.start(agent); await ingestEntered.promise;
+    const refresh = delivery.refresh({ ...agent, executionGenerationId: "generation-successor", handle: { ...agent.handle, pid: 2 } });
+    const stop = delivery.stop(agent.agentId);
+    releaseIngest.resolve();
+    await Promise.all([refresh, stop]);
+    const internals = delivery as unknown as { loops: Map<string, Promise<void>> };
+    assert.equal(polls, 1);
+    assert.equal(turns, 0);
+    assert.equal(internals.loops.has(agent.agentId), false);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

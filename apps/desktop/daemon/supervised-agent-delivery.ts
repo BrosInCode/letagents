@@ -94,13 +94,21 @@ export class SupervisedAgentDelivery {
   }
 
   /** Starts the daemon-owned long-poll loop and normalizes persisted work first. */
-  start(agent: SupervisedIngressAgent, expectedEpoch = this.currentRefreshEpoch(agent.agentId)): Promise<void> {
+  async start(agent: SupervisedIngressAgent, expectedEpoch = this.currentRefreshEpoch(agent.agentId)): Promise<void> {
     const existingLoop = this.loops.get(agent.agentId);
     if (this.fenced || this.stoppingAgents.has(agent.agentId) || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) return Promise.resolve();
     if (existingLoop && this.loopEpochs.get(agent.agentId) === expectedEpoch) return Promise.resolve();
     // refresh() drains a prior epoch before reaching start(). If an old loop is
     // still registered, it cannot be mistaken for this epoch's successor.
     if (existingLoop) return Promise.resolve();
+    // The authority can change while a coalesced drain is settling. Verify the
+    // exact route immediately before installation, then re-check the reserved
+    // epoch after that await so a newer rebind or external stop wins.
+    if (!await this.hasAuthority(agent)
+      || this.fenced
+      || this.stoppingAgents.has(agent.agentId)
+      || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)
+      || this.loops.has(agent.agentId)) return;
     const controller = new AbortController();
     this.loopControllers.set(agent.agentId, controller);
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pollLoop(agent, controller)));
@@ -123,7 +131,7 @@ export class SupervisedAgentDelivery {
   /** Stop one stale binding before a rebind starts its successor loop. */
   async refresh(agent: SupervisedIngressAgent): Promise<void> {
     const refreshEpoch = this.nextRefreshEpoch(agent.agentId);
-    await this.stop(agent.agentId);
+    await this.stopForRefresh(agent.agentId);
     // Multiple callers may share one drain. Only the most recent binding may
     // install the successor after it settles; stale refresh continuations are
     // deliberately no-ops instead of stealing the active loop slot.
@@ -134,6 +142,13 @@ export class SupervisedAgentDelivery {
 
   /** Cancel and join a removed or superseded agent without fencing other workers. */
   stop(agentId: string): Promise<void> {
+    // A stop requested outside refresh invalidates any context that was merely
+    // waiting on the shared drain; it must not later install a stale loop.
+    this.nextRefreshEpoch(agentId);
+    return this.stopForRefresh(agentId);
+  }
+
+  private stopForRefresh(agentId: string): Promise<void> {
     const prior = this.stoppingOperations.get(agentId);
     if (prior) return prior;
     this.stoppingAgents.add(agentId);
