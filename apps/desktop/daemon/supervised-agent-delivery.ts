@@ -251,7 +251,9 @@ export class SupervisedAgentDelivery {
   }
 
   retry(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
-    if (this.fenced || this.stoppingAgents.has(agent.agentId)) return Promise.resolve();
+    if (this.fenced || this.stoppingAgents.has(agent.agentId)) {
+      return Promise.reject(new Error("The room delivery binding changed before retry could start."));
+    }
     const controller = new AbortController();
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.retryOperation(agent, sourceMessageId, controller)));
     const retries = this.retries.get(agent.agentId) ?? new Set<Promise<void>>();
@@ -275,15 +277,33 @@ export class SupervisedAgentDelivery {
   }
 
   private async retryOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
-    if (!await this.hasAuthority(agent, controller)) return;
+    if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
     const receipts = await this.inbox.receipts(agent.agentId);
-    if (!await this.hasAuthority(agent, controller)) return;
+    if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
     const item = receipts.find((receipt) => receipt.source_message_id === sourceMessageId && receipt.state === "blocked");
     if (!item) throw new Error("The blocked room delivery is no longer available for this exact agent.");
-    if (!await this.hasAuthority(agent, controller)) return;
+    if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
     await this.inbox.retryBlocked(item.inbox_item_id);
-    if (!await this.hasAuthority(agent, controller)) return;
-    await this.pump(agent);
+    // The row is now truthfully pending; if authority changed during the
+    // durable transition, reject the stale control request rather than claim
+    // it began provider work. The successor will recover this pending head.
+    if (!await this.hasAuthority(agent, controller)) {
+      throw new Error("The room delivery binding changed before retry could start.");
+    }
+    // The control RPC acknowledges the durable blocked -> pending transition
+    // and installation of tracked work, never the provider turn itself. A
+    // Codex turn can outlive Electron's control-RPC timeout by minutes.
+    if (!this.schedulePump(agent)) {
+      throw new Error("The room delivery binding changed before retry could start.");
+    }
+  }
+
+  private schedulePump(agent: SupervisedIngressAgent): boolean {
+    if (this.fenced || this.stoppingAgents.has(agent.agentId)) return false;
+    // pump() registers its controller and operation before its first await, so
+    // handoff/refresh still drains this work even though the RPC returns now.
+    void this.pump(agent).catch(() => undefined);
+    return !this.fenced && !this.stoppingAgents.has(agent.agentId);
   }
 
   pump(agent: SupervisedIngressAgent): Promise<void> {

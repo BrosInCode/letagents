@@ -1551,7 +1551,7 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
     const refreshed = supervisorEntries.value.find((candidate) => candidate.id === agentId);
     const receipt = refreshed?.deliveryReceipts?.find((candidate) => candidate.sourceMessageId === sourceMessageId);
     pushActionToast(
-      receipt?.state === "blocked" ? "Delivery still needs attention." : "Delivery retry completed.",
+      receipt?.state === "blocked" ? "Delivery still needs attention." : "Delivery retry started.",
       receipt?.state === "blocked" ? "error" : "success",
       5_000,
     );

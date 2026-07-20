@@ -14,12 +14,6 @@ import type {
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorRoomDeliveryRetryInput,
-  DesktopRoomAgentConnectionState,
-  DesktopRoomAgentInboxState,
-  DesktopRoomAgentTurnState,
-  DesktopRoomAgentTaskState,
-  DesktopRoomAgentReceiptState,
-  DesktopRoomAgentCausalEvent,
   DesktopSupervisorTurnControlInput,
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
@@ -385,6 +379,9 @@ export class SupervisorDaemonClient {
   /** This call deliberately accepts only a renderer-safe exact identity tuple. */
   async retryRoomDelivery(input: DesktopSupervisorRoomDeliveryRetryInput): Promise<void> {
     const status = await this.ensureRunning();
+    if (!status.capabilities.roomDeliveryRetry) {
+      throw new Error("This supervisor does not support room delivery retry.");
+    }
     await this.request<{ accepted: boolean }>("supervisor.retry_room_delivery", {
       entry_id: input.entryId,
       room_id: input.roomId,
@@ -768,7 +765,13 @@ function booleanField(value: unknown, key: string): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Reflect.get(value, key) === true;
 }
 
-function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
+/**
+ * The daemon socket is a process boundary, not a typed function call.  Keep
+ * the causal projection deliberately fail-closed: it is ephemeral UI state,
+ * so a malformed row must never make the desktop accept a partly-coerced
+ * delivery identity (or crash while rendering the manifest).
+ */
+export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
   const activeWorkerBinding = entry.worker_binding ?? null;
   const workerBinding = activeWorkerBinding ?? entry.last_worker_binding ?? null;
   return {
@@ -807,46 +810,8 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
     lastTerminal: entry.reconciliation?.last_terminal ?? null,
     activity: (entry.activity ?? []).map(mapActivity),
-    roomAgentState: entry.room_agent_state ? {
-      connection: {
-        state: normalizeRoomConnectionState(entry.room_agent_state.connection.state),
-        observedAt: entry.room_agent_state.connection.observed_at,
-        detail: entry.room_agent_state.connection.detail,
-      },
-      inbox: {
-        state: normalizeRoomInboxState(entry.room_agent_state.inbox.state),
-        pendingCount: entry.room_agent_state.inbox.pending_count,
-        blockedByMessageId: entry.room_agent_state.inbox.blocked_by_message_id,
-        detail: entry.room_agent_state.inbox.detail,
-      },
-      turn: {
-        state: normalizeRoomTurnState(entry.room_agent_state.turn.state),
-        inboxItemId: entry.room_agent_state.turn.inbox_item_id,
-        sourceMessageId: entry.room_agent_state.turn.source_message_id,
-        providerTurnId: entry.room_agent_state.turn.provider_turn_id,
-        detail: entry.room_agent_state.turn.detail,
-      },
-      task: {
-        state: normalizeRoomTaskState(entry.room_agent_state.task.state),
-        taskId: entry.room_agent_state.task.task_id,
-        title: entry.room_agent_state.task.title,
-      },
-    } : null,
-    deliveryReceipts: (entry.delivery_receipts ?? []).map((receipt) => ({
-      inboxItemId: receipt.inbox_item_id,
-      sourceMessageId: receipt.source_message_id,
-      state: normalizeRoomReceiptState(receipt.state),
-      attemptCount: receipt.attempt_count,
-      providerTurnId: receipt.provider_turn_id,
-      blockedByMessageId: receipt.blocked_by_message_id,
-      error: receipt.error,
-      updatedAt: receipt.updated_at,
-      timeline: (receipt.timeline ?? []).map((event) => ({
-        phase: normalizeRoomCausalPhase(event.phase),
-        observedAt: event.observed_at,
-        detail: event.detail,
-      })),
-    })),
+    roomAgentState: projectRoomAgentState(entry.room_agent_state),
+    deliveryReceipts: projectDeliveryReceipts(entry.delivery_receipts),
     turnControl: entry.turn_control ? {
       actionId: entry.turn_control.action_id,
       workAttemptId: entry.turn_control.work_attempt_id,
@@ -864,23 +829,91 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
   };
 }
 
-function normalizeRoomConnectionState(value: string): DesktopRoomAgentConnectionState {
-  return value === "connected" || value === "reconnecting" || value === "disconnected" ? value : "disconnected";
+type UnknownRecord = Record<string, unknown>;
+
+function record(value: unknown): UnknownRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : null;
 }
-function normalizeRoomInboxState(value: string): DesktopRoomAgentInboxState {
-  return value === "empty" || value === "queued" || value === "blocked" || value === "waiting_for_desktop_credentials" ? value : "empty";
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
-function normalizeRoomTurnState(value: string): DesktopRoomAgentTurnState {
-  return value === "idle" || value === "dispatching" || value === "responding" || value === "publishing" || value === "retrying" || value === "failed" ? value : "idle";
+
+function nullableString(value: unknown): string | null | undefined {
+  return value === null || typeof value === "string" ? value : undefined;
 }
-function normalizeRoomTaskState(value: string): DesktopRoomAgentTaskState {
-  return value === "none" || value === "assigned" || value === "working" || value === "blocked" ? value : "none";
+
+function nullableNonEmptyString(value: unknown): string | null | undefined {
+  return value === null || (typeof value === "string" && value.trim().length > 0) ? value : undefined;
 }
-function normalizeRoomReceiptState(value: string): DesktopRoomAgentReceiptState {
-  return value === "queued" || value === "dispatching" || value === "awaiting_result" || value === "publishing" || value === "acknowledged" || value === "acknowledged_no_reply" || value === "retryable" || value === "blocked" || value === "queued_behind_blocked" ? value : "queued";
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T | null {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? value as T : null;
 }
-function normalizeRoomCausalPhase(value: string): DesktopRoomAgentCausalEvent["phase"] {
-  return value === "received" || value === "queued" || value === "turn_started" || value === "turn_finished" || value === "publish_started" || value === "published" || value === "no_reply" || value === "retry_scheduled" || value === "blocked" ? value : "queued";
+
+function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["roomAgentState"] {
+  const root = record(value);
+  if (!root) return null;
+  const connection = record(root.connection);
+  const inbox = record(root.inbox);
+  const turn = record(root.turn);
+  const task = record(root.task);
+  if (!connection || !inbox || !turn || !task) return null;
+
+  const connectionState = enumValue(connection.state, ["connected", "reconnecting", "disconnected"] as const);
+  const inboxState = enumValue(inbox.state, ["empty", "queued", "blocked", "waiting_for_desktop_credentials"] as const);
+  const turnState = enumValue(turn.state, ["idle", "dispatching", "responding", "publishing", "retrying", "failed"] as const);
+  const taskState = enumValue(task.state, ["none", "assigned", "working", "blocked"] as const);
+  const observedAt = nullableNonEmptyString(connection.observed_at);
+  const connectionDetail = nullableString(connection.detail);
+  const blockedByMessageId = nullableNonEmptyString(inbox.blocked_by_message_id);
+  const inboxDetail = nullableString(inbox.detail);
+  const inboxItemId = nullableNonEmptyString(turn.inbox_item_id);
+  const sourceMessageId = nullableNonEmptyString(turn.source_message_id);
+  const providerTurnId = nullableNonEmptyString(turn.provider_turn_id);
+  const turnDetail = nullableString(turn.detail);
+  const taskId = nullableNonEmptyString(task.task_id);
+  const title = nullableString(task.title);
+  if (!connectionState || !inboxState || !turnState || !taskState
+    || observedAt === undefined || connectionDetail === undefined || blockedByMessageId === undefined || inboxDetail === undefined
+    || inboxItemId === undefined || sourceMessageId === undefined || providerTurnId === undefined || turnDetail === undefined
+    || taskId === undefined || title === undefined
+    || typeof inbox.pending_count !== "number" || !Number.isFinite(inbox.pending_count) || !Number.isInteger(inbox.pending_count) || inbox.pending_count < 0) return null;
+  return {
+    connection: { state: connectionState, observedAt, detail: connectionDetail },
+    inbox: { state: inboxState, pendingCount: inbox.pending_count, blockedByMessageId, detail: inboxDetail },
+    turn: { state: turnState, inboxItemId, sourceMessageId, providerTurnId, detail: turnDetail },
+    task: { state: taskState, taskId, title },
+  };
+}
+
+function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry["deliveryReceipts"] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const receipt = record(candidate);
+    if (!receipt) return [];
+    const inboxItemId = nonEmptyString(receipt.inbox_item_id);
+    const sourceMessageId = nonEmptyString(receipt.source_message_id);
+    const state = enumValue(receipt.state, ["queued", "dispatching", "awaiting_result", "publishing", "acknowledged", "acknowledged_no_reply", "retryable", "blocked", "queued_behind_blocked"] as const);
+    const providerTurnId = nullableNonEmptyString(receipt.provider_turn_id);
+    const blockedByMessageId = nullableNonEmptyString(receipt.blocked_by_message_id);
+    const error = nullableString(receipt.error);
+    const updatedAt = nonEmptyString(receipt.updated_at);
+    if (!inboxItemId || !sourceMessageId || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || !updatedAt
+      || typeof receipt.attempt_count !== "number" || !Number.isFinite(receipt.attempt_count) || !Number.isInteger(receipt.attempt_count) || receipt.attempt_count < 0
+      || !Array.isArray(receipt.timeline)) return [];
+    const timeline: NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"] = [];
+    for (const event of receipt.timeline) {
+      const value = record(event);
+      if (!value) return [];
+      const phase = enumValue(value.phase, ["received", "queued", "turn_started", "turn_finished", "publish_started", "published", "no_reply", "retry_scheduled", "blocked"] as const);
+      const observedAt = nonEmptyString(value.observed_at);
+      const detail = nullableString(value.detail);
+      if (!phase || !observedAt || detail === undefined) return [];
+      timeline.push({ phase, observedAt, detail });
+    }
+    return [{ inboxItemId, sourceMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, updatedAt, timeline }];
+  });
 }
 
 function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
