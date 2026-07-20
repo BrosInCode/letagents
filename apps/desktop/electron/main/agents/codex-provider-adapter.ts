@@ -493,9 +493,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
    */
   async controlExactTurn(
     providerHandle: ProviderHandle,
-    options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> },
+    options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal },
   ): Promise<{ outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null }> {
     const handle = this.requireHandle(providerHandle);
+    const assertAttached = () => {
+      if (options.detachSignal?.aborted) throw new Error("Codex exact turn control observation detached.");
+    };
+    assertAttached();
     const expected = options.targetTurnId?.trim() || null;
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
@@ -504,6 +508,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (read.thread?.id !== handle.providerContinuationId) {
       throw new ProviderTurnControlError("Codex exact turn control resolved a different continuation thread.", "uncertain");
     }
+    assertAttached();
     const turn = expected
       ? read.thread?.turns?.find((candidate) => candidate.id === expected)
       : read.thread?.turns?.at(-1);
@@ -514,13 +519,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const turnId = turn.id?.trim();
     const status = typeof turn.status === "string" ? turn.status : turn.status?.status;
     if (!turnId || !status) throw new ProviderTurnControlError("Codex exact turn control found an unknown target state.", "uncertain");
+    // Discovery itself is durable fencing. Even a completed latest turn must
+    // be recorded before returning, otherwise a crash can later rediscover a
+    // newer unrelated latest turn while the cutover still says "prepared".
+    await options.checkpointTargetTurn(turnId);
+    assertAttached();
     if (/^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(status))) {
       return { outcome: "terminal", targetTurnId: turnId };
     }
     if (!isActiveCodexTurnStatus(status)) throw new ProviderTurnControlError("Codex exact turn control found an unknown target state.", "uncertain");
-    await options.checkpointTargetTurn(turnId);
     // This is deliberately the final callback boundary before native I/O.
     await options.markDispatched();
+    assertAttached();
     const dispatchRead = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
       includeTurns: true,
@@ -533,8 +543,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (!isActiveCodexTurnStatus(dispatchStatus)) {
       throw new ProviderTurnControlError("Codex exact turn control found an unknown target state after dispatch.", "uncertain");
     }
+    assertAttached();
     await handle.client.request("turn/interrupt", { threadId: handle.providerContinuationId, turnId });
-    await this.waitForTurnBoundary(handle, turnId);
+    await this.waitForTurnBoundary(handle, turnId, options.detachSignal);
     handle.state = "idle";
     return { outcome: "interrupt_dispatched", targetTurnId: turnId };
   }
@@ -1015,9 +1026,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private async waitForTurnBoundary(handle: CodexProviderHandle, turnId: string): Promise<void> {
+  private async waitForTurnBoundary(handle: CodexProviderHandle, turnId: string, detachSignal?: AbortSignal): Promise<void> {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
+      if (detachSignal?.aborted) throw new Error("Codex exact turn control observation detached.");
       const read = await handle.client.request<ThreadReadResult>("thread/read", {
         threadId: handle.providerContinuationId,
         includeTurns: true,

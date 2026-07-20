@@ -13,7 +13,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_PROTOCOL_VERSION } from "../types.js";
 
 const agent = {
-  agentId: "stone", roomId: "room", provider: "codex", apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
+  agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
   handle: { workAttemptId: "attempt", providerContinuationId: "thread", pid: 1, observedState: "working" as const },
 };
 const currentAuthority = async () => true;
@@ -44,6 +44,23 @@ test("Codex daemon delivery refuses legacy mcp_polling ingress", async () => {
   );
   try {
     await delivery.poll({ ...agent, deliveryMode: "mcp_polling" });
+    assert.equal(polls, 0);
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex daemon delivery treats an absent mode as historical mcp_polling", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let polls = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+    poll: async () => { polls += 1; return {}; }, publish: async () => {},
+  }, currentAuthority);
+  try {
+    const { deliveryMode: _deliveryMode, ...historicalAgent } = agent;
+    await delivery.poll(historicalAgent);
     assert.equal(polls, 0);
   } finally {
     await store.close();
@@ -477,6 +494,7 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
     await daemon.start();
     await internals.putManifestEntry({
       id: "stone", room_id: "room", display_name: "Stone", provider: "codex", model: null, charter: "supervised test", desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
+      delivery_mode: "daemon_inbox",
       created_by: "test", created_at: new Date().toISOString(), work_attempt_id: "attempt",
       provider_ref: { work_attempt_id: "attempt", provider_continuation_id: "thread", provider_connection: null, execution_generation_id: "generation-1" },
     });
@@ -527,6 +545,7 @@ test("SupervisorDaemon stop detaches an unresolved provider turn without retaini
     await daemon.start();
     await internals.putManifestEntry({
       id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: agent.provider, model: null, charter: "test", desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
+      delivery_mode: "daemon_inbox",
       created_by: "test", created_at: new Date().toISOString(), work_attempt_id: agent.handle.workAttemptId,
       provider_ref: { work_attempt_id: agent.handle.workAttemptId, provider_continuation_id: agent.handle.providerContinuationId, provider_connection: null, execution_generation_id: agent.executionGenerationId },
     });
@@ -797,7 +816,7 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
       const identity = identities[id];
       const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
         id, room_id: id === "stone" ? "room" : "other-room", display_name: id, provider: "codex", model: null, charter: "test",
-        desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null, created_by: "test", created_at: new Date().toISOString(), work_attempt_id: identity.attempt,
+        desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null, delivery_mode: "daemon_inbox", created_by: "test", created_at: new Date().toISOString(), work_attempt_id: identity.attempt,
         provider_ref: { work_attempt_id: identity.attempt, provider_continuation_id: `${id}-thread`, provider_connection: null, execution_generation_id: identity.execution },
       } });
       assert.equal(put.ok, true, put.error);

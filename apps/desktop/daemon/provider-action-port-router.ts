@@ -32,7 +32,7 @@ export type NativeProviderAdapter = {
   poke(handle: NativeHandle, message: string): Promise<void>;
   controlTurn(handle: NativeHandle, correction?: string | null, options?: { checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
   inspectTurn?(handle: NativeHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
-  controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> }): Promise<ProviderExactTurnControlResult>;
+  controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
@@ -136,7 +136,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return adapter.inspectTurn(remembered.handle, turnId);
   }
 
-  async controlExactTurn(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void> }): Promise<ProviderExactTurnControlResult> {
+  async controlExactTurn(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult> {
     const remembered = this.required(handle);
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.controlExactTurn) throw new Error(`Provider '${remembered.provider}' does not support exact turn control.`);

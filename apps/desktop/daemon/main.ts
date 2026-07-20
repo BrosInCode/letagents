@@ -102,6 +102,7 @@ export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState"
 };
 
 class ReplacementListenerInstallError extends Error {}
+class DeliveryCutoverObservationDetached extends Error {}
 
 function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
   const method = event.method.trim();
@@ -415,6 +416,7 @@ export class SupervisorDaemon {
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
   private readonly turnControlRequests = new Map<string, Promise<DaemonTurnControlResult>>();
   private readonly deliveryCutoverRequests = new Map<string, Promise<void>>();
+  private readonly deliveryCutoverControllers = new Map<string, AbortController>();
   private readonly turnControlActiveEntries = new Set<string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
@@ -679,6 +681,11 @@ export class SupervisorDaemon {
   }
 
   async stop(): Promise<void> {
+    // Stop is final for this daemon instance. Fence late delivery/cutover
+    // continuations before awaiting any drain so they cannot retain a socket
+    // or SQLite handle after the caller has observed shutdown.
+    this.handoffScheduled = true;
+    await this.fenceAndDrainDeliveryCutovers();
     await this.supervisedDelivery?.fenceAndDrain();
     for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
     this.recoveryTimers.clear();
@@ -713,6 +720,7 @@ export class SupervisorDaemon {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
     const failures: unknown[] = [];
+    try { await this.fenceAndDrainDeliveryCutovers(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     const captureSync = (operation: () => void): void => {
       try { operation(); } catch (error) { failures.push(error); }
@@ -850,8 +858,11 @@ export class SupervisorDaemon {
   private startDeliveryCutover(entryId: string): Promise<void> {
     const existing = this.deliveryCutoverRequests.get(entryId);
     if (existing) return existing;
-    const operation = this.driveDeliveryCutover(entryId).finally(() => {
+    const controller = new AbortController();
+    this.deliveryCutoverControllers.set(entryId, controller);
+    const operation = this.driveDeliveryCutover(entryId, controller.signal).finally(() => {
       if (this.deliveryCutoverRequests.get(entryId) === operation) this.deliveryCutoverRequests.delete(entryId);
+      if (this.deliveryCutoverControllers.get(entryId) === controller) this.deliveryCutoverControllers.delete(entryId);
     });
     this.deliveryCutoverRequests.set(entryId, operation);
     return operation;
@@ -863,9 +874,10 @@ export class SupervisorDaemon {
    * inspect "latest" as a replacement target, and once native dispatch is
    * recorded an active/unknown result is deliberately left gated.
    */
-  private async driveDeliveryCutover(entryId: string): Promise<void> {
+  private async driveDeliveryCutover(entryId: string, detachSignal: AbortSignal): Promise<void> {
     if (this.handoffScheduled || !this.providerPort?.controlExactTurn) return;
     let entry = await this.store.getEntry(entryId);
+    this.assertDeliveryCutoverObservation(detachSignal);
     const handle = this.liveHandles.get(entryId);
     if (!entry || !handle
       || entry.provider !== "codex"
@@ -883,7 +895,9 @@ export class SupervisorDaemon {
       provider_continuation_id: entry.provider_ref.provider_continuation_id,
     };
     if (!entry.delivery_cutover) {
+      this.assertDeliveryCutoverObservation(detachSignal);
       entry = await this.updateManifestEntry(entryId, (current) => {
+        this.assertDeliveryCutoverObservation(detachSignal);
         if (current.provider !== "codex" || (current.delivery_mode ?? "mcp_polling") !== "mcp_polling"
           || current.work_attempt_id !== identity.work_attempt_id
           || current.provider_ref?.execution_generation_id !== identity.execution_generation_id
@@ -891,6 +905,7 @@ export class SupervisorDaemon {
         const cutover: DaemonDeliveryCutover = { ...identity, provider_turn_id: null, phase: "prepared", error: null, updated_at: new Date().toISOString() };
         return { ...current, delivery_cutover: cutover };
       });
+      this.assertDeliveryCutoverObservation(detachSignal);
     }
     const cutover = entry.delivery_cutover;
     if (!cutover
@@ -901,23 +916,26 @@ export class SupervisorDaemon {
 
     if (cutover.phase === "dispatching") {
       if (!cutover.provider_turn_id || !this.providerPort.inspectTurn) {
-        await this.markDeliveryCutoverUncertain(entryId, identity, "native interrupt dispatch is ambiguous without an exact turn id");
+        await this.markDeliveryCutoverUncertain(entryId, identity, "native interrupt dispatch is ambiguous without an exact turn id", detachSignal);
         return;
       }
-      const state = await this.providerPort.inspectTurn(handle, cutover.provider_turn_id).catch(() => "unknown" as const);
+      const state = await this.observeDeliveryCutover(detachSignal, this.providerPort.inspectTurn(handle, cutover.provider_turn_id)).catch(() => "unknown" as const);
+      this.assertDeliveryCutoverObservation(detachSignal);
       if (state === "terminal") {
-        await this.completeDeliveryCutover(entryId, identity);
+        await this.completeDeliveryCutover(entryId, identity, detachSignal);
       } else {
-        await this.markDeliveryCutoverUncertain(entryId, identity, `native interrupt dispatch is ambiguous; exact turn remains ${state}`);
+        await this.markDeliveryCutoverUncertain(entryId, identity, `native interrupt dispatch is ambiguous; exact turn remains ${state}`, detachSignal);
       }
       return;
     }
 
     try {
-      const result = await this.providerPort.controlExactTurn(handle, {
+      const result = await this.observeDeliveryCutover(detachSignal, this.providerPort.controlExactTurn(handle, {
         targetTurnId: cutover.provider_turn_id,
         checkpointTargetTurn: async (turnId) => {
+          this.assertDeliveryCutoverObservation(detachSignal);
           await this.updateManifestEntry(entryId, (current) => {
+            this.assertDeliveryCutoverObservation(detachSignal);
             const currentCutover = current.delivery_cutover;
             if (!currentCutover
               || current.delivery_mode !== "mcp_polling"
@@ -930,9 +948,12 @@ export class SupervisorDaemon {
             }
             return { ...current, delivery_cutover: { ...currentCutover, provider_turn_id: turnId, updated_at: new Date().toISOString() } };
           });
+          this.assertDeliveryCutoverObservation(detachSignal);
         },
         markDispatched: async () => {
+          this.assertDeliveryCutoverObservation(detachSignal);
           await this.updateManifestEntry(entryId, (current) => {
+            this.assertDeliveryCutoverObservation(detachSignal);
             const currentCutover = current.delivery_cutover;
             if (!currentCutover
               || current.delivery_mode !== "mcp_polling"
@@ -945,30 +966,37 @@ export class SupervisorDaemon {
             }
             return { ...current, delivery_cutover: { ...currentCutover, phase: "dispatching", updated_at: new Date().toISOString() } };
           });
+          this.assertDeliveryCutoverObservation(detachSignal);
         },
-      });
+        detachSignal,
+      }));
+      this.assertDeliveryCutoverObservation(detachSignal);
       // A no-active/terminal inspection is a completion fact. An adapter's
       // interrupt acknowledgement is not: independently re-inspect exactly
       // the persisted target before allowing daemon ingress.
       if (result.outcome === "no_active" || result.outcome === "terminal") {
-        await this.completeDeliveryCutover(entryId, identity);
+        await this.completeDeliveryCutover(entryId, identity, detachSignal);
       } else if (result.outcome === "interrupt_dispatched") {
         const targetTurnId = cutover.provider_turn_id ?? result.targetTurnId;
         if (!targetTurnId || !this.providerPort.inspectTurn) {
-          await this.markDeliveryCutoverUncertain(entryId, identity, "native interrupt was acknowledged without exact terminal inspection");
+          await this.markDeliveryCutoverUncertain(entryId, identity, "native interrupt was acknowledged without exact terminal inspection", detachSignal);
           return;
         }
-        const state = await this.providerPort.inspectTurn(handle, targetTurnId).catch(() => "unknown" as const);
-        if (state === "terminal") await this.completeDeliveryCutover(entryId, identity);
-        else await this.markDeliveryCutoverUncertain(entryId, identity, `native interrupt was acknowledged but exact turn remains ${state}`);
+        const state = await this.observeDeliveryCutover(detachSignal, this.providerPort.inspectTurn(handle, targetTurnId)).catch(() => "unknown" as const);
+        this.assertDeliveryCutoverObservation(detachSignal);
+        if (state === "terminal") await this.completeDeliveryCutover(entryId, identity, detachSignal);
+        else await this.markDeliveryCutoverUncertain(entryId, identity, `native interrupt was acknowledged but exact turn remains ${state}`, detachSignal);
       }
     } catch (error) {
-      await this.markDeliveryCutoverUncertain(entryId, identity, error instanceof Error ? error.message : "exact legacy turn control failed");
+      if (error instanceof DeliveryCutoverObservationDetached) return;
+      await this.markDeliveryCutoverUncertain(entryId, identity, error instanceof Error ? error.message : "exact legacy turn control failed", detachSignal);
     }
   }
 
-  private async completeDeliveryCutover(entryId: string, identity: Omit<DaemonDeliveryCutover, "provider_turn_id" | "phase" | "updated_at">): Promise<void> {
+  private async completeDeliveryCutover(entryId: string, identity: Omit<DaemonDeliveryCutover, "provider_turn_id" | "phase" | "updated_at">, detachSignal: AbortSignal): Promise<void> {
+    this.assertDeliveryCutoverObservation(detachSignal);
     const completed = await this.updateManifestEntry(entryId, (current) => {
+      this.assertDeliveryCutoverObservation(detachSignal);
       const cutover = current.delivery_cutover;
       if (current.delivery_mode !== "mcp_polling"
         || !cutover
@@ -988,6 +1016,7 @@ export class SupervisorDaemon {
           : {}),
       };
     });
+    this.assertDeliveryCutoverObservation(detachSignal);
     if (completed.delivery_mode === "daemon_inbox") {
       // This coordinator is still coalesced until its finally runs. Defer the
       // first inbox start one tick so it cannot mistake the cutover operation
@@ -997,8 +1026,10 @@ export class SupervisorDaemon {
     }
   }
 
-  private async markDeliveryCutoverUncertain(entryId: string, identity: Omit<DaemonDeliveryCutover, "provider_turn_id" | "phase" | "updated_at">, detail: string): Promise<void> {
+  private async markDeliveryCutoverUncertain(entryId: string, identity: Omit<DaemonDeliveryCutover, "provider_turn_id" | "phase" | "updated_at">, detail: string, detachSignal: AbortSignal): Promise<void> {
+    this.assertDeliveryCutoverObservation(detachSignal);
     await this.updateManifestEntry(entryId, (current) => {
+      this.assertDeliveryCutoverObservation(detachSignal);
       const cutover = current.delivery_cutover;
       if (current.delivery_mode !== "mcp_polling"
         || !cutover
@@ -1025,6 +1056,39 @@ export class SupervisorDaemon {
         delivery_cutover: { ...cutover, phase: "uncertain", error: safeDetail, updated_at: observedAt },
         activity: [...(current.activity ?? []), activity].slice(-200),
       };
+    });
+    this.assertDeliveryCutoverObservation(detachSignal);
+  }
+
+  /** Retirement detaches local observation only; it never signals the provider. */
+  private async fenceAndDrainDeliveryCutovers(): Promise<void> {
+    for (const controller of this.deliveryCutoverControllers.values()) controller.abort();
+    await Promise.allSettled([...this.deliveryCutoverRequests.values()]);
+  }
+
+  private assertDeliveryCutoverObservation(detachSignal: AbortSignal): void {
+    if (detachSignal.aborted || this.handoffScheduled) throw new DeliveryCutoverObservationDetached();
+  }
+
+  private observeDeliveryCutover<T>(detachSignal: AbortSignal, operation: Promise<T>): Promise<T> {
+    this.assertDeliveryCutoverObservation(detachSignal);
+    return new Promise<T>((resolve, reject) => {
+      const detach = () => {
+        detachSignal.removeEventListener("abort", detach);
+        reject(new DeliveryCutoverObservationDetached());
+      };
+      detachSignal.addEventListener("abort", detach, { once: true });
+      void operation.then(
+        (value) => {
+          detachSignal.removeEventListener("abort", detach);
+          if (detachSignal.aborted || this.handoffScheduled) reject(new DeliveryCutoverObservationDetached());
+          else resolve(value);
+        },
+        (error) => {
+          detachSignal.removeEventListener("abort", detach);
+          reject(error);
+        },
+      );
     });
   }
 
@@ -2452,10 +2516,16 @@ export class SupervisorDaemon {
     const entry = await this.store.getEntry(entryId);
     if (!entry) return;
     // A daemon-inbox worker deliberately completes one bounded native turn at
-    // a time. That terminal turn boundary is an idle reusable thread, not a
-    // terminal provider deployment.
+    // a time. During the one-way legacy Codex cutover, the old polling turn
+    // has the same reusable-thread meaning: it is the handoff boundary, never
+    // evidence that the app-server deployment died.
     const daemonInbox = entry.delivery_mode === "daemon_inbox";
-    const effectiveLifecycle = daemonInbox && observedLifecycle === "terminal" ? "idle" : observedLifecycle;
+    const legacyCodexCutover = entry.provider === "codex"
+      && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
+      && entry.desired_state === "running";
+    const effectiveLifecycle = (daemonInbox || legacyCodexCutover) && observedLifecycle === "terminal"
+      ? "idle"
+      : observedLifecycle;
     const addressedWaitResult = observedLifecycle === "idle"
       && isCorrelatedNonemptyWaitResult(event, entry.activity ?? []);
     // A terminal native failure is sticky for the installed execution. Late
@@ -2512,6 +2582,12 @@ export class SupervisorDaemon {
     const liveBinding = this.liveBindingIdentities.get(entryId);
     if (liveBinding?.executionGenerationId === entry.provider_ref?.execution_generation_id) {
       await this.publishNativeActivity(entryId, sanitizedEvent.method, lifecycle === "working" && !quietlyPolling ? "working" : "idle", event.observedAt).catch(() => undefined);
+    }
+    if (legacyCodexCutover && observedLifecycle === "terminal") {
+      // The exact control adapter will checkpoint this now-terminal legacy
+      // turn and atomically hand ingress to daemon_inbox without replacing
+      // the PID, thread, continuation, work attempt, or generation.
+      void this.startDeliveryCutover(entryId).catch(() => undefined);
     }
     if ((lifecycle === "failed" || lifecycle === "terminal")
       && this.liveHandles.get(entryId) === handle
