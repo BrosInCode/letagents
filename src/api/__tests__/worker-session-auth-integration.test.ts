@@ -715,6 +715,43 @@ test(
 );
 
 test(
+  "worker-authenticated message polls attach activation metadata for direct and broadcast delivery",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    if (!addMessage) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const { room, worker } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    await addMessage(room.id, "Human", "@OwlSolar please investigate this");
+    await addMessage(room.id, "Human", "@everyone please confirm receipt");
+
+    const response = await invoke(
+      handlers.get.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/"),
+      requestWithDeliveryHeaders(worker, {
+        params: { 0: room.id },
+        query: { timeout: "1000" },
+      }),
+    );
+
+    assert.equal(response.statusCode, 200, JSON.stringify(response.body));
+    const messages = (response.body as {
+      messages?: Array<{ text?: string; activation?: { for_current_agent?: { decision?: string; reason?: string } } }>;
+    }).messages ?? [];
+    assert.deepEqual(
+      messages.map((message) => message.activation?.for_current_agent),
+      [
+        { decision: "activate", reason: "explicit_mention", addressed: true },
+        { decision: "activate", reason: "broadcast", addressed: true },
+      ],
+    );
+  },
+);
+
+test(
   "a re-registering agent instance resumes its previous display name",
   {
     concurrency: false,

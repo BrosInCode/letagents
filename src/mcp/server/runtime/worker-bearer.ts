@@ -1,4 +1,5 @@
 export const LETAGENTS_AGENT_SESSION_BEARER_ENV = "LETAGENTS_AGENT_SESSION_BEARER";
+export const LETAGENTS_SUPERVISED_BOUNDED_TURNS_ENV = "LETAGENTS_SUPERVISED_BOUNDED_TURNS";
 
 export type WorkerBearerRuntime =
   | { mode: "owner" }
@@ -77,4 +78,22 @@ export function workerModeDisabledToolResult(
     };
   }
   return null;
+}
+
+/**
+ * Supervised room delivery belongs to the desktop daemon. A bounded provider
+ * turn must never recreate the permanent MCP polling loop, even if its prompt
+ * asks it to do so.
+ */
+export function supervisedBoundedDeliveryDisabledToolResult(
+  toolName = "wait_for_messages",
+): Record<string, unknown> | null {
+  if (process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
+    return null;
+  }
+  return {
+    success: false,
+    error: "supervised_bounded_delivery",
+    message: `${toolName} is disabled because supervised room delivery is owned by the desktop daemon.`,
+  };
 }
