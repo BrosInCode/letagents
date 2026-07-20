@@ -347,6 +347,9 @@ export class SupervisedAgentDelivery {
         actionId: item.action_id,
       }, { markDispatched: async () => {
         if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+        // This callback is the provider's exact dispatch edge. A queued or
+        // merely persisted inbox item must never be projected as responding.
+        setActive("responding");
       } });
       const turnController = new AbortController();
       const relayAbort = () => turnController.abort();
@@ -355,7 +358,6 @@ export class SupervisedAgentDelivery {
       try { result = turn && await this.track(turnController, turn); }
       finally { controller.signal.removeEventListener("abort", relayAbort); }
       if (!result) throw new Error("Provider does not support bounded room turns.");
-      setActive("responding");
       if (!await this.hasAuthority(agent, controller)) return;
       const outcome = result.outcome === "reply" && result.text?.trim()
         ? JSON.stringify({ kind: "reply", text: result.text.trim() })
