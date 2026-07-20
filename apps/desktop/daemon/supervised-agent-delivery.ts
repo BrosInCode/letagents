@@ -91,6 +91,14 @@ export class SupervisedAgentDelivery {
 
   private async deliver(agent: SupervisedIngressAgent, item: SupervisedInboxItem): Promise<void> {
     try {
+      const persistedReply = persistedReplyText(item.outcome);
+      if (persistedReply) {
+        await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: item.outcome });
+        await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: item.outcome });
+        await this.http.publish({ roomId: agent.roomId, bearer: agent.bearer, text: persistedReply, clientMessageId: item.reply_client_message_id, signal: new AbortController().signal });
+        await this.inbox.transition(item.inbox_item_id, "acknowledged");
+        return;
+      }
       const result = await this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
@@ -105,7 +113,10 @@ export class SupervisedAgentDelivery {
       }
       const text = result.text?.trim();
       if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
-      await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: "reply" });
+      // The terminal payload is checkpointed before the external publication.
+      // A crash after this point retries the same client id without rerunning Codex.
+      const outcome = JSON.stringify({ kind: "reply", text });
+      await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
       await this.http.publish({ roomId: agent.roomId, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: new AbortController().signal });
       await this.inbox.transition(item.inbox_item_id, "acknowledged");
     } catch (error) {
@@ -139,3 +150,11 @@ function activatedMessages(messages: readonly Record<string, unknown>[]): Ingres
 }
 
 function stringOrNull(value: unknown): string | null { return typeof value === "string" && value.trim() ? value : null; }
+
+function persistedReplyText(outcome: string | null): string | null {
+  if (!outcome) return null;
+  try {
+    const parsed = JSON.parse(outcome) as { kind?: unknown; text?: unknown };
+    return parsed.kind === "reply" && typeof parsed.text === "string" && parsed.text.trim() ? parsed.text : null;
+  } catch { return null; }
+}
