@@ -41,9 +41,15 @@ export class SupervisedAgentInboxStore {
   }
 
   /** One transaction: idempotently insert activated messages and persist the poll cursor. */
-  async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; messages: readonly IngressMessage[] }): Promise<SupervisedInboxItem[]> {
+  async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; expected_cursor?: string | null; messages: readonly IngressMessage[] }): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
+      const cursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
+      const currentCursor = cursor?.last_observed_message_id === null || cursor?.last_observed_message_id === undefined ? null : String(cursor.last_observed_message_id);
+      if (input.expected_cursor !== undefined && input.expected_cursor !== currentCursor) {
+        throw new Error("Supervised inbox ingress cursor changed before this poll could commit.");
+      }
+      if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
       let sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value);
       const created: SupervisedInboxItem[] = [];
       for (const message of input.messages) {
@@ -61,8 +67,10 @@ export class SupervisedAgentInboxStore {
         created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
       }
       const timestamp = this.now();
+      const nextCursor = input.last_observed_message_id === null || !isNewerCursor(input.last_observed_message_id, currentCursor)
+        ? currentCursor : input.last_observed_message_id;
       run(database.prepare(`INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)
-        ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,last_observed_message_id=COALESCE(excluded.last_observed_message_id, supervised_agent_ingress_cursors.last_observed_message_id),updated_at=excluded.updated_at`), input.agent_id, input.room_id, input.last_observed_message_id, timestamp);
+        ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,last_observed_message_id=excluded.last_observed_message_id,updated_at=excluded.updated_at`), input.agent_id, input.room_id, nextCursor, timestamp);
       return created;
     }));
   }
@@ -89,12 +97,25 @@ export class SupervisedAgentInboxStore {
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (!transitions[item.state].includes(next)) throw new Error(`Invalid supervised inbox transition: ${item.state} -> ${next}.`);
+      if (next === "dispatching") this.assertHeadClaim(database, item);
       const attempts = next === "dispatching" ? item.attempt_count + 1 : item.attempt_count;
       const timestamp = this.now(); const acknowledged = finalStates.has(next) ? timestamp : null;
       run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
         next, attempts, valueOrCurrent(patch, "provider_turn_id", item.provider_turn_id), valueOrCurrent(patch, "outcome", item.outcome), valueOrCurrent(patch, "last_error", item.last_error),
         valueOrCurrent(patch, "blocked_by_inbox_item_id", item.blocked_by_inbox_item_id), valueOrCurrent(patch, "next_attempt_at_ms", item.next_attempt_at_ms), timestamp, acknowledged, inboxItemId);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
+  async claimHead(agentId: string): Promise<SupervisedInboxItem | null> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      if (!row) return null;
+      const item = rowToItem(row);
+      if (item.state !== "pending") return null;
+      this.assertHeadClaim(database, item);
+      const timestamp = this.now();
+      run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',attempt_count=attempt_count+1,updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
     }));
   }
   async retryBlocked(inboxItemId: string): Promise<SupervisedInboxItem> { return this.transition(inboxItemId, "pending", { blocked_by_inbox_item_id: null, next_attempt_at_ms: null }); }
@@ -125,6 +146,18 @@ export class SupervisedAgentInboxStore {
     return this.initializing;
   }
   private require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }
+  private requireNumericCursor(cursor: string): void { if (!/^(?:msg_)?\d+$/.test(cursor)) throw new Error("Supervised inbox cursor must be a numeric room message id."); }
+  private assertHeadClaim(database: DatabaseSync, item: SupervisedInboxItem): void {
+    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
+    if (!head || String(head.inbox_item_id) !== item.inbox_item_id || item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
+  }
+}
+
+function isNewerCursor(candidate: string, current: string | null): boolean {
+  if (current === null) return true;
+  const numeric = (value: string) => value.startsWith("msg_") ? value.slice(4) : value;
+  const candidateNumber = BigInt(numeric(candidate)); const currentNumber = BigInt(numeric(current));
+  return candidateNumber > currentNumber;
 }
 
 function rowToItem(row: Row): SupervisedInboxItem {
