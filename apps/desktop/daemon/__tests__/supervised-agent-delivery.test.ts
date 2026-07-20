@@ -34,6 +34,14 @@ async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
   }
 }
 
+async function waitForAsync(check: () => Promise<boolean>, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!await check()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for asynchronous delivery progress.");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
   await ingest(store, id);
   return (await store.claimHead(agent.agentId))!;
@@ -196,6 +204,67 @@ test("fence aborts a pending error backoff and releases its listener", async () 
     await delivery.fenceAndDrain();
     assert.ok(Date.now() - started < 100, "fence should not wait for the 250ms backoff timer");
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("rebind waits for an old provider turn, recovers its interrupted FIFO head, then processes it and the next item", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rebind-drain-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const entered = deferred<void>(); const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+    let turns = 0; let published = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      turns += 1;
+      if (turns === 1) { entered.resolve(); return release.promise; }
+      return { turnId: `turn:${turns}`, outcome: "no_reply", text: null };
+    }), {
+      poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
+      publish: async () => { published += 1; },
+    }, currentAuthority);
+    await delivery.pump(agent);
+    await ingest(store, "1"); await ingest(store, "2");
+    const oldPump = delivery.pump(agent); await entered.promise;
+    const successor = {
+      ...agent,
+      bearer: "rotated-memory-only-token",
+      executionGenerationId: "generation-2",
+      handle: { ...agent.handle, pid: 2 },
+    };
+    let refreshed = false;
+    const refresh = delivery.refresh(successor).then(() => { refreshed = true; });
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(refreshed, false, "successor must not overlap the old non-abortable provider turn");
+    release.resolve({ turnId: "turn:1", outcome: "reply", text: "late" });
+    await refresh; await oldPump;
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "blocked");
+    assert.equal(published, 0, "the stale provider reply is never published");
+    await delivery.retry(successor, "1");
+    await waitForAsync(async () => (await store.receipts(agent.agentId)).every((item) => item.state === "acknowledged_no_reply"));
+    assert.equal(turns, 3, "the explicit recovery processes the blocked head before the next FIFO item");
+    await delivery.fenceAndDrain();
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a credential-only rebind clears recovery ownership for the successor context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-credential-rebind-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let normalizations = 0;
+    const normalize = store.normalizeStartupRecovery.bind(store);
+    (store as unknown as { normalizeStartupRecovery(agentId: string): Promise<void> }).normalizeStartupRecovery = async (agentId) => {
+      normalizations += 1;
+      await normalize(agentId);
+    };
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
+      publish: async () => { throw new Error("must not publish"); },
+    }, currentAuthority);
+    await delivery.pump(agent);
+    await delivery.refresh({ ...agent, bearer: "new-memory-only-token" });
+    await waitFor(() => normalizations === 2);
+    await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -50,9 +50,13 @@ export class SupervisedAgentDelivery {
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
   private readonly pumpControllers = new Map<string, AbortController>();
+  private readonly retries = new Map<string, Set<Promise<void>>>();
+  private readonly retryControllers = new Map<string, Set<AbortController>>();
   private readonly controllers = new Set<AbortController>();
   private readonly inFlight = new Set<Promise<unknown>>();
-  private readonly startupRecovered = new Set<string>();
+  private readonly startupRecovered = new Map<string, string>();
+  private readonly handleContextIds = new WeakMap<object, number>();
+  private nextHandleContextId = 1;
   private fenced = false;
 
   constructor(
@@ -113,7 +117,17 @@ export class SupervisedAgentDelivery {
     this.polling.get(agentId)?.abort();
     this.pumpControllers.get(agentId)?.abort();
     this.loopControllers.get(agentId)?.abort();
-    await Promise.allSettled([this.loops.get(agentId)].filter(Boolean) as Promise<void>[]);
+    for (const controller of this.retryControllers.get(agentId) ?? []) controller.abort();
+    // A poll can have started a detached pump, and a provider turn does not
+    // necessarily honor abort. Join all agent-scoped work before its successor
+    // can observe or claim this inbox.
+    await Promise.allSettled([
+      this.loops.get(agentId),
+      this.pumping.get(agentId),
+      this.polling.get(agentId),
+      ...(this.retries.get(agentId) ?? []),
+    ].filter(Boolean) as Promise<void>[]);
+    this.startupRecovered.delete(agentId);
   }
 
   private async pollLoop(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
@@ -173,7 +187,18 @@ export class SupervisedAgentDelivery {
 
   retry(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
     const controller = new AbortController();
-    return this.track(controller, this.retryOperation(agent, sourceMessageId, controller));
+    const operation = this.track(controller, this.retryOperation(agent, sourceMessageId, controller));
+    const retries = this.retries.get(agent.agentId) ?? new Set<Promise<void>>();
+    const controllers = this.retryControllers.get(agent.agentId) ?? new Set<AbortController>();
+    retries.add(operation); controllers.add(controller);
+    this.retries.set(agent.agentId, retries); this.retryControllers.set(agent.agentId, controllers);
+    const cleanup = () => {
+      retries.delete(operation); controllers.delete(controller);
+      if (this.retries.get(agent.agentId) === retries && retries.size === 0) this.retries.delete(agent.agentId);
+      if (this.retryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.retryControllers.delete(agent.agentId);
+    };
+    void operation.then(cleanup, cleanup);
+    return operation;
   }
 
   private async retryOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
@@ -207,10 +232,11 @@ export class SupervisedAgentDelivery {
   private async pumpOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     try {
       if (!await this.hasAuthority(agent, controller)) return;
-      if (!this.startupRecovered.has(agent.agentId)) {
+      const recoveryContext = this.recoveryContext(agent);
+      if (this.startupRecovered.get(agent.agentId) !== recoveryContext) {
         await this.inbox.normalizeStartupRecovery(agent.agentId);
         if (!await this.hasAuthority(agent, controller)) return;
-        this.startupRecovered.add(agent.agentId);
+        this.startupRecovered.set(agent.agentId, recoveryContext);
       }
       for (;;) {
         if (!await this.hasAuthority(agent, controller)) return;
@@ -316,6 +342,19 @@ export class SupervisedAgentDelivery {
       handle: agent.handle,
     });
     return allowed && !this.fenced && !controller?.signal.aborted;
+  }
+
+  private recoveryContext(agent: SupervisedIngressAgent): string {
+    let handleId = this.handleContextIds.get(agent.handle);
+    if (!handleId) {
+      handleId = this.nextHandleContextId++;
+      this.handleContextIds.set(agent.handle, handleId);
+    }
+    return [
+      agent.daemonGeneration, agent.executionGenerationId, agent.roomId, agent.apiUrl,
+      agent.agentSessionId, agent.handle.workAttemptId, agent.handle.providerContinuationId,
+      agent.handle.pid, handleId,
+    ].join("\u0000");
   }
 
   private track<T>(controller: AbortController, operation: Promise<T>): Promise<T> {
