@@ -334,6 +334,7 @@ import {
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
+import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
@@ -444,7 +445,8 @@ const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
-const deliveryRetryingKeys = ref<ReadonlySet<string>>(new Set());
+const deliveryRetryCoordinator = createRoomDeliveryRetryCoordinator();
+const deliveryRetryingKeys = deliveryRetryCoordinator.retryingKeys;
 const deliveryRetryNegotiated = ref(false);
 const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
 const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
@@ -1530,36 +1532,38 @@ function openAddAgentModal(): void {
 }
 
 async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): Promise<void> {
-  const retryKey = `${agentId}:${sourceMessageId}`;
-  if (!deliveryRetryAvailable.value || deliveryRetryingKeys.value.has(retryKey)) return;
+  if (!deliveryRetryAvailable.value) return;
   const entry = supervisorEntries.value.find((candidate) => candidate.id === agentId);
   if (!entry?.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
     pushActionToast("This delivery binding changed. Refresh the room before retrying.", "error", 6_000);
     return;
   }
-  deliveryRetryingKeys.value = new Set([...deliveryRetryingKeys.value, retryKey]);
-  try {
+  const { workAttemptId, executionGenerationId, agentSessionId } = entry;
+  const result = await deliveryRetryCoordinator.run({ agentId, sourceMessageId }, async () => {
     await desktopIpc.supervisor!.retryRoomDelivery({
       entryId: entry.id,
       roomId: props.room.identifier,
       sourceMessageId,
-      workAttemptId: entry.workAttemptId,
-      executionGenerationId: entry.executionGenerationId,
-      agentSessionId: entry.agentSessionId,
+      workAttemptId,
+      executionGenerationId,
+      agentSessionId,
     });
     await refreshManagedAgentSessions();
     const refreshed = supervisorEntries.value.find((candidate) => candidate.id === agentId);
-    const receipt = refreshed?.deliveryReceipts?.find((candidate) => candidate.sourceMessageId === sourceMessageId);
-    pushActionToast(
-      receipt?.state === "blocked" ? "Delivery still needs attention." : "Delivery retry started.",
-      receipt?.state === "blocked" ? "error" : "success",
-      5_000,
-    );
-  } catch (error) {
-    pushActionToast(error instanceof Error ? error.message : "Could not retry room delivery.", "error", 7_000);
-  } finally {
-    const next = new Set(deliveryRetryingKeys.value); next.delete(retryKey); deliveryRetryingKeys.value = next;
+    return refreshed?.deliveryReceipts?.find((candidate) => candidate.sourceMessageId === sourceMessageId);
+  });
+  if (!result.started) return;
+  if (!result.ok) {
+    pushActionToast(result.error instanceof Error ? result.error.message : "Could not retry room delivery.", "error", 7_000);
+    return;
   }
+  pushActionToast(
+    result.value?.state === "blocked"
+      ? "Delivery still needs attention."
+      : "Delivery retry accepted. The agent is resuming delivery.",
+    result.value?.state === "blocked" ? "error" : "success",
+    5_000,
+  );
 }
 
 async function revealRoomMessage(messageId: string): Promise<void> {
