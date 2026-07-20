@@ -123,6 +123,52 @@ export class SupervisedAgentInboxStore {
     }));
   }
   async retryBlocked(inboxItemId: string): Promise<SupervisedInboxItem> { return this.transition(inboxItemId, "pending", { blocked_by_inbox_item_id: null, next_attempt_at_ms: null }); }
+  /**
+   * Normalize work interrupted by a daemon crash before a new runtime is
+   * allowed to pump it. A persisted reply is authoritative terminal evidence:
+   * it may be published again with its stable client id, but must never invoke
+   * the provider again. Everything else that was in-flight is ambiguous and
+   * remains visible as blocked rather than being accidentally acknowledged.
+   */
+  async normalizeStartupRecovery(agentId: string): Promise<SupervisedInboxItem[]> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply') ORDER BY fifo_sequence").all(agentId) as Row[];
+      const recovered: SupervisedInboxItem[] = [];
+      for (const row of rows) {
+        const item = rowToItem(row);
+        const terminal = persistedTerminalOutcome(item.outcome);
+        let next: SupervisedInboxState | null = null;
+        let error: string | null = item.last_error;
+        if (item.state === "dispatching") {
+          next = "blocked";
+          error = "Daemon restarted while provider dispatch was in-flight; terminal outcome is ambiguous.";
+        } else if (item.state === "awaiting_result" || item.state === "publishing" || item.state === "retryable") {
+          if (terminal?.kind === "reply") {
+            // Republish only: delivery sees the durable outcome before it can
+            // consider runRoomTurn, so a recovered provider turn is impossible.
+            next = "pending";
+            error = item.state === "publishing"
+              ? "Daemon restarted during publication; retrying the durable reply."
+              : item.state === "retryable"
+                ? "Retrying the durable reply after a recoverable failure."
+                : "Daemon restarted after a durable provider reply; publishing it."
+          } else if (terminal?.kind === "no_reply") {
+            next = "acknowledged_no_reply";
+            error = null;
+          } else {
+            next = "blocked";
+            error = "Daemon restarted without authoritative terminal or publication evidence; acknowledgement is unsafe.";
+          }
+        }
+        if (!next) continue;
+        const timestamp = this.now();
+        run(database.prepare("UPDATE supervised_agent_inbox SET state=?,last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"),
+          next, error, timestamp, finalStates.has(next) ? timestamp : null, item.inbox_item_id);
+        recovered.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row));
+      }
+      return recovered;
+    }));
+  }
   async receipts(agentId: string): Promise<SupervisedInboxReceipt[]> {
     return this.read(async (database) => {
       const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence").all(agentId) as Row[];
@@ -171,4 +217,13 @@ function rowToItem(row: Row): SupervisedInboxItem {
 
 function valueOrCurrent<T extends object, K extends keyof T>(patch: T, key: K, current: T[K]): T[K] {
   return Object.hasOwn(patch, key) ? patch[key] : current;
+}
+
+function persistedTerminalOutcome(outcome: string | null): { kind: "reply"; text: string } | { kind: "no_reply" } | null {
+  if (!outcome) return null;
+  try {
+    const parsed = JSON.parse(outcome) as { kind?: unknown; text?: unknown };
+    if (parsed.kind === "reply" && typeof parsed.text === "string" && parsed.text.trim()) return { kind: "reply", text: parsed.text };
+    return parsed.kind === "no_reply" ? { kind: "no_reply" } : null;
+  } catch { return null; }
 }
