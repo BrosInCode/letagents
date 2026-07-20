@@ -6,11 +6,33 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { DaemonStateSchema } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervised-inbox-"));
   return { root, database: join(root, "daemon-state.sqlite"), legacy: join(root, "legacy.json"), cleanup: () => rm(root, { recursive: true, force: true }) };
+}
+
+async function prepareSecretBearingV5(env: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+  const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
+  await initial.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: "one-shot", api_url: "https://letagents.test" });
+  await initial.close();
+  const db = new DatabaseSync(env.database);
+  db.exec(`DROP INDEX worker_session_binding_authority;
+    ALTER TABLE worker_session_bindings RENAME TO worker_session_bindings_v6_source;
+    CREATE TABLE worker_session_bindings (
+      entry_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, work_attempt_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL, agent_session_id TEXT NOT NULL, agent_session_token TEXT NOT NULL,
+      api_url TEXT NOT NULL, room_cursor TEXT, last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+      last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0), binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1), updated_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO worker_session_bindings SELECT entry_id,room_id,work_attempt_id,execution_generation_id,agent_session_id,'old-persisted-secret',api_url,room_cursor,last_sequence,last_observed_at_ms,binding_epoch,updated_at FROM worker_session_bindings_v6_source;
+    DROP TABLE worker_session_bindings_v6_source;
+    CREATE UNIQUE INDEX worker_session_binding_authority ON worker_session_bindings(entry_id,binding_epoch,execution_generation_id,agent_session_id);
+    UPDATE manifest_metadata SET schema_version=5 WHERE singleton=1;
+    PRAGMA user_version=5;`);
+  db.close();
 }
 
 test("poll ingestion advances its cursor atomically, deduplicates replay, and retains FIFO", async () => {
@@ -102,24 +124,7 @@ test("worker session secrets are memory-only and must be re-delivered after reop
 
 test("v5 binding migration removes the persisted credential column and requires re-delivery", async () => {
   const env = await fixture(); try {
-    const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
-    await initial.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "run", agent_session_id: "session", agent_session_token: "one-shot", api_url: "https://letagents.test" });
-    await initial.close();
-    const db = new DatabaseSync(env.database);
-    db.exec(`DROP INDEX worker_session_binding_authority;
-      ALTER TABLE worker_session_bindings RENAME TO worker_session_bindings_v6_source;
-      CREATE TABLE worker_session_bindings (
-        entry_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, work_attempt_id TEXT NOT NULL,
-        execution_generation_id TEXT NOT NULL, agent_session_id TEXT NOT NULL, agent_session_token TEXT NOT NULL,
-        api_url TEXT NOT NULL, room_cursor TEXT, last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
-        last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0), binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1), updated_at TEXT NOT NULL
-      ) STRICT;
-      INSERT INTO worker_session_bindings SELECT entry_id,room_id,work_attempt_id,execution_generation_id,agent_session_id,'old-persisted-secret',api_url,room_cursor,last_sequence,last_observed_at_ms,binding_epoch,updated_at FROM worker_session_bindings_v6_source;
-      DROP TABLE worker_session_bindings_v6_source;
-      CREATE UNIQUE INDEX worker_session_binding_authority ON worker_session_bindings(entry_id,binding_epoch,execution_generation_id,agent_session_id);
-      UPDATE manifest_metadata SET schema_version=5 WHERE singleton=1;
-      PRAGMA user_version=5;`);
-    db.close();
+    await prepareSecretBearingV5(env);
     const migrated = new WorkerBindingStore(env.legacy, undefined, env.database);
     const binding = await migrated.get("stone");
     assert.ok(binding); assert.equal(await migrated.credentialFor(binding), null);
@@ -128,6 +133,34 @@ test("v5 binding migration removes the persisted credential column and requires 
     const columns = inspection.prepare("PRAGMA table_xinfo(worker_session_bindings)").all() as Array<{ name: string }>;
     assert.equal(columns.some((column) => column.name === "agent_session_token"), false);
     inspection.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a post-COMMIT v6 scrub interruption leaves a durable marker that a reopen completes", async () => {
+  const env = await fixture(); try {
+    await prepareSecretBearingV5(env);
+    const interrupted = new DatabaseSync(env.database);
+    assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
+    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+    assert.equal((interrupted.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
+    interrupted.close();
+    const reopened = new DatabaseSync(env.database);
+    new DaemonStateSchema().createSchema(reopened);
+    assert.equal(reopened.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get(), undefined);
+    reopened.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a pending v6 scrub failure rejects reopen and retains its marker", async () => {
+  const env = await fixture(); try {
+    await prepareSecretBearingV5(env);
+    const interrupted = new DatabaseSync(env.database);
+    assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
+    interrupted.close();
+    const reopened = new DatabaseSync(env.database);
+    assert.throws(() => new DaemonStateSchema(undefined, undefined, () => { throw new Error("scrub unavailable"); }).createSchema(reopened), /scrub unavailable/);
+    assert.equal((reopened.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
+    reopened.close();
   } finally { await env.cleanup(); }
 });
 
