@@ -735,18 +735,27 @@ test("detached deployment identity survives lane-owner full writes and restart",
   }
 });
 
-test("v6 repair adds bounded delivery columns without shifting an exact persisted turn id", async () => {
+test("v6 repair adds bounded delivery columns without shifting exact turn or cutover identities", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try {
     const seeded: DaemonManifestEntry = {
       ...entry,
       delivery_mode: "daemon_inbox",
+      delivery_cutover: {
+        work_attempt_id: "attempt_1",
+        execution_generation_id: "run_1",
+        provider_continuation_id: "thread_1",
+        provider_turn_id: "turn_cutover_exact",
+        phase: "uncertain",
+        error: "exact turn state unknown",
+        updated_at: "2026-07-19T00:02:03.000Z",
+      },
       turn_control: { ...entry.turn_control!, provider_turn_id: "turn_legacy_poll" },
     };
     await store.write(0, [seeded]);
     const database = (store as unknown as { database: DatabaseSync }).database;
-    database.exec("ALTER TABLE agent_configurations DROP COLUMN delivery_mode; ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id");
+    database.exec("ALTER TABLE agent_configurations DROP COLUMN delivery_mode; ALTER TABLE agent_configurations DROP COLUMN delivery_cutover_json; ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id");
     await store.close();
 
     const repaired = new ManifestStore(env.databasePath);
@@ -756,9 +765,19 @@ test("v6 repair adds bounded delivery columns without shifting an exact persiste
     assert.equal(restored.turn_control?.provider_turn_id, undefined, "missing v6 extension does not shift booleans into the turn id");
     assert.equal(restored.turn_control?.has_correction, true);
     assert.equal(restored.turn_control?.status, "completed");
+    assert.equal(restored.delivery_cutover, undefined);
     await repaired.replaceEntry(loaded.generation, {
       ...restored,
       delivery_mode: "daemon_inbox",
+      delivery_cutover: {
+        work_attempt_id: "attempt_1",
+        execution_generation_id: "run_1",
+        provider_continuation_id: "thread_1",
+        provider_turn_id: "turn_repaired_cutover",
+        phase: "prepared",
+        error: null,
+        updated_at: "2026-07-19T00:02:04.000Z",
+      },
       turn_control: { ...restored.turn_control!, provider_turn_id: "turn_repaired_exact" },
     });
     const roundTrip = await repaired.load();
@@ -766,6 +785,15 @@ test("v6 repair adds bounded delivery columns without shifting an exact persiste
     assert.equal(roundTrip.entries[0]?.turn_control?.provider_turn_id, "turn_repaired_exact");
     assert.equal(roundTrip.entries[0]?.turn_control?.has_correction, true);
     assert.equal(roundTrip.entries[0]?.turn_control?.status, "completed");
+    assert.deepEqual(roundTrip.entries[0]?.delivery_cutover, {
+      work_attempt_id: "attempt_1",
+      execution_generation_id: "run_1",
+      provider_continuation_id: "thread_1",
+      provider_turn_id: "turn_repaired_cutover",
+      phase: "prepared",
+      error: null,
+      updated_at: "2026-07-19T00:02:04.000Z",
+    });
     await repaired.close();
   } finally {
     await store.close();

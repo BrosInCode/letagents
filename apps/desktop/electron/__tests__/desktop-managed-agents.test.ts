@@ -3610,6 +3610,7 @@ test("turn interrupts keep desktop-event workers reusable unless shutdown is req
   assert.equal(codexSessionStatusAfterTurnInterrupt("desktop_events", true, false), "running");
   assert.equal(codexSessionStatusAfterTurnInterrupt("desktop_events", false, false), "unknown");
   assert.equal(codexSessionStatusAfterTurnInterrupt("desktop_events", true, true), "interrupted");
+  assert.equal(codexSessionStatusAfterTurnInterrupt("daemon_inbox", true, false), "running");
   assert.equal(codexSessionStatusAfterTurnInterrupt("mcp_polling", true, false), "interrupted");
 });
 
@@ -3651,6 +3652,7 @@ test("desktop-event session monitors stay active while agents wait for events", 
   assert.equal(shouldStopCodexSessionMonitor("desktop_events", "running", true), false);
   assert.equal(shouldStopCodexSessionMonitor("desktop_events", "failed", true), true);
   assert.equal(shouldStopCodexSessionMonitor("desktop_events", "completed", false), true);
+  assert.equal(shouldStopCodexSessionMonitor("daemon_inbox", "completed", true), false);
   assert.equal(shouldStopCodexSessionMonitor("mcp_polling", "completed", true), true);
 });
 

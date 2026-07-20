@@ -148,6 +148,7 @@ createSchema(database: DatabaseSync): void {
       charter TEXT NOT NULL,
       permission_profile_id TEXT,
       delivery_mode TEXT NOT NULL DEFAULT 'mcp_polling' CHECK (delivery_mode IN ('mcp_polling','desktop_events','daemon_inbox')),
+      delivery_cutover_json TEXT,
       provider_launch_policy_present INTEGER NOT NULL CHECK (provider_launch_policy_present IN (0, 1)),
       provider_launch_policy_undefined INTEGER NOT NULL CHECK (provider_launch_policy_undefined IN (0, 1)),
       provider_launch_policy_json TEXT
@@ -548,6 +549,7 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
   const needsLegacyPresenceRepair = this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")
     && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
   const needsBoundedDeliveryRepair = !this.tableColumns(database, "agent_configurations").has("delivery_mode")
+    || !this.tableColumns(database, "agent_configurations").has("delivery_cutover_json")
     || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id");
   try {
     this.validateV2Shape(database);
@@ -585,6 +587,9 @@ private applyBoundedDeliveryV6Shape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "agent_configurations").has("delivery_mode")) {
     database.exec("ALTER TABLE agent_configurations ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'mcp_polling' CHECK (delivery_mode IN ('mcp_polling','desktop_events','daemon_inbox'))");
   }
+  if (!this.tableColumns(database, "agent_configurations").has("delivery_cutover_json")) {
+    database.exec("ALTER TABLE agent_configurations ADD COLUMN delivery_cutover_json TEXT");
+  }
   if (!this.tableColumns(database, "turn_control_journals").has("provider_turn_id")) {
     database.exec("ALTER TABLE turn_control_journals ADD COLUMN provider_turn_id TEXT");
   }
@@ -593,6 +598,7 @@ private applyBoundedDeliveryV6Shape(database: DatabaseSync): void {
 private validateBoundedDeliveryV6Shape(database: DatabaseSync): void {
   const columns = this.tableColumns(database, "agent_configurations");
   if (!columns.has("delivery_mode")) throw new Error("Daemon state v6 delivery_mode is missing.");
+  if (!columns.has("delivery_cutover_json")) throw new Error("Daemon state v6 delivery_cutover_json is missing.");
   const invalid = database.prepare("SELECT 1 FROM agent_configurations WHERE delivery_mode NOT IN ('mcp_polling','desktop_events','daemon_inbox') LIMIT 1").get();
   if (invalid) throw new Error("Daemon state v6 delivery_mode is invalid.");
   if (!this.tableColumns(database, "turn_control_journals").has("provider_turn_id")) {

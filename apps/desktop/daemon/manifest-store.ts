@@ -103,7 +103,7 @@ export class ManifestStore {
       SELECT
         i.agent_id, i.created_by, i.created_at,
         p.display_name, m.room_id,
-        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode,
+        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode, c.delivery_cutover_json,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,
         d.deployment_id, d.run_id, d.observed_state,
@@ -180,7 +180,7 @@ export class ManifestStore {
       SELECT
         i.agent_id, i.created_by, i.created_at,
         p.display_name, m.room_id,
-        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode,
+        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode, c.delivery_cutover_json,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,
         d.deployment_id, d.run_id, d.observed_state,
@@ -498,10 +498,10 @@ export class ManifestStore {
     const policyUndefined = policyPresent && configuration.provider_launch_policy === undefined;
     run(database.prepare(`
       INSERT INTO agent_configurations(
-        agent_id, provider, model, charter, permission_profile_id, delivery_mode,
+        agent_id, provider, model, charter, permission_profile_id, delivery_mode, delivery_cutover_json,
         provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.charter, configuration.permission_profile_id, configuration.delivery_mode ?? "mcp_polling", Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.charter, configuration.permission_profile_id, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 
@@ -679,7 +679,7 @@ export class ManifestStore {
       identity: { agent_id: agentId, created_by: String(row.created_by), created_at: String(row.created_at) },
       profile: { agent_id: agentId, display_name: String(row.display_name) },
       membership: { agent_id: agentId, room_id: String(row.room_id) },
-      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
+      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(row.delivery_cutover_json === null ? {} : { delivery_cutover: parseJson(row.delivery_cutover_json) }), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
       launch_intent: { agent_id: agentId, desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"], ...(bool(row.source_repo_path_present) ? { source_repo_path: nullableString(row.source_repo_path) } : {}) },
       runtime_deployment: runtime,
       lifecycle: { agent_id: agentId, condition: String(row.condition) as DaemonManifestEntry["condition"], ...(bool(row.last_error_present) ? { last_error: nullableString(row.last_error) } : {}) },

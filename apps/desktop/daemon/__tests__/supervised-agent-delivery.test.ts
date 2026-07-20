@@ -29,6 +29,28 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+test("Codex daemon delivery refuses legacy mcp_polling ingress", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let polls = 0;
+  const delivery = new SupervisedAgentDelivery(
+    store,
+    provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })),
+    {
+      poll: async () => { polls += 1; return {}; },
+      publish: async () => {},
+    },
+    currentAuthority,
+  );
+  try {
+    await delivery.poll({ ...agent, deliveryMode: "mcp_polling" });
+    assert.equal(polls, 0);
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {

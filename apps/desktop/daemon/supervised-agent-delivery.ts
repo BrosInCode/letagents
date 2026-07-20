@@ -5,6 +5,8 @@ export type SupervisedIngressAgent = {
   agentId: string;
   roomId: string;
   provider: string;
+  /** Codex daemon ingress is legal only after the durable cutover commits. */
+  deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   /** Bound worker API origin; never inferred from a persisted credential. */
   apiUrl: string;
   agentSessionId: string;
@@ -92,13 +94,14 @@ export class SupervisedAgentDelivery {
   }
 
   poll(agent: SupervisedIngressAgent): Promise<void> {
+    if (!this.daemonIngressAllowed(agent)) return Promise.resolve();
     return this.pollOnce(agent);
   }
 
   /** Starts the daemon-owned long-poll loop and normalizes persisted work first. */
   async start(agent: SupervisedIngressAgent, expectedEpoch = this.currentRefreshEpoch(agent.agentId)): Promise<void> {
     const existingLoop = this.loops.get(agent.agentId);
-    if (this.fenced || this.stoppingAgents.has(agent.agentId) || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) return Promise.resolve();
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) return Promise.resolve();
     if (existingLoop && this.loopEpochs.get(agent.agentId) === expectedEpoch) return Promise.resolve();
     // refresh() drains a prior epoch before reaching start(). If an old loop is
     // still registered, it cannot be mistaken for this epoch's successor.
@@ -251,7 +254,7 @@ export class SupervisedAgentDelivery {
   }
 
   retry(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
-    if (this.fenced || this.stoppingAgents.has(agent.agentId)) {
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId)) {
       return Promise.reject(new Error("The room delivery binding changed before retry could start."));
     }
     const controller = new AbortController();
@@ -307,7 +310,7 @@ export class SupervisedAgentDelivery {
   }
 
   pump(agent: SupervisedIngressAgent): Promise<void> {
-    if (this.fenced || this.stoppingAgents.has(agent.agentId) || this.pumping.has(agent.agentId)) return Promise.resolve();
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || this.pumping.has(agent.agentId)) return Promise.resolve();
     const controller = new AbortController();
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pumpOperation(agent, controller)));
     this.pumping.set(agent.agentId, operation);
@@ -482,7 +485,7 @@ export class SupervisedAgentDelivery {
   }
 
   private async hasAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
-    if (this.fenced || this.stoppingAgents.has(agent.agentId) || controller?.signal.aborted) return false;
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || controller?.signal.aborted) return false;
     const allowed = await this.revalidateAuthority({
       agentId: agent.agentId,
       roomId: agent.roomId,
@@ -511,6 +514,12 @@ export class SupervisedAgentDelivery {
       agent.agentSessionId, agent.handle.workAttemptId, agent.handle.providerContinuationId,
       agent.handle.pid, handleId,
     ].join("\u0000");
+  }
+
+  private daemonIngressAllowed(agent: SupervisedIngressAgent): boolean {
+    // Older non-Codex adapters retain their established mcp-polling path. New
+    // Codex delivery must present the committed daemon_inbox ownership fact.
+    return agent.provider !== "codex" || agent.deliveryMode === undefined || agent.deliveryMode === "daemon_inbox";
   }
 
   private currentRefreshEpoch(agentId: string): number { return this.refreshEpochs.get(agentId) ?? 0; }

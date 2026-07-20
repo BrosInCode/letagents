@@ -84,6 +84,7 @@ export function projectDaemonManifestEntry(entry: DaemonManifestEntry): DaemonMa
       charter: entry.charter,
       permission_profile_id: entry.permission_profile_id,
       ...(Object.hasOwn(entry, "delivery_mode") ? { delivery_mode: entry.delivery_mode } : {}),
+      ...(Object.hasOwn(entry, "delivery_cutover") ? { delivery_cutover: entry.delivery_cutover } : {}),
       ...(Object.hasOwn(entry, "provider_launch_policy") ? { provider_launch_policy: entry.provider_launch_policy } : {}),
     },
     launch_intent: {
@@ -179,6 +180,7 @@ export function composeDaemonManifestEntry(projection: DaemonManifestDomainProje
     condition: lifecycle.condition,
     permission_profile_id: configuration.permission_profile_id,
     ...(Object.hasOwn(configuration, "delivery_mode") ? { delivery_mode: configuration.delivery_mode } : {}),
+    ...(Object.hasOwn(configuration, "delivery_cutover") ? { delivery_cutover: configuration.delivery_cutover } : {}),
     created_by: identity.created_by,
     created_at: identity.created_at,
     ...(Object.hasOwn(lifecycle, "last_error") ? { last_error: lifecycle.last_error } : {}),
