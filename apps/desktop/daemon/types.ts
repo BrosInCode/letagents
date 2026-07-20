@@ -87,12 +87,27 @@ export type DaemonAgentConfiguration = {
   permission_profile_id: string | null;
   /** Explicit inbox owner; never infer daemon delivery from native policy. */
   delivery_mode?: DaemonAgentDeliveryMode;
+  /** Present only while a legacy Codex polling turn is being fenced. */
+  delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */
 export type DaemonAgentDeliveryMode = "mcp_polling" | "desktop_events" | "daemon_inbox";
+
+/** Durable one-way handoff from legacy polling to daemon-owned ingress. */
+export type DaemonDeliveryCutover = {
+  work_attempt_id: string;
+  execution_generation_id: string;
+  provider_continuation_id: string;
+  /** Null only before the one permitted active-turn discovery completes. */
+  provider_turn_id: string | null;
+  phase: "prepared" | "dispatching" | "uncertain";
+  /** Redacted operator-facing reason when the handoff remains fenced. */
+  error?: string | null;
+  updated_at: string;
+};
 
 /** Requested launch/control state. This is intent, not agent identity or observed runtime. */
 export type DaemonAgentLaunchIntent = {
@@ -205,6 +220,7 @@ export type DaemonManifestEntry = {
   last_error?: string | null;
   permission_profile_id: string | null;
   delivery_mode?: DaemonAgentDeliveryMode;
+  delivery_cutover?: DaemonDeliveryCutover | null;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
