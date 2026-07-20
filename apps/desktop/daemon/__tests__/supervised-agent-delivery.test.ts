@@ -541,8 +541,32 @@ test("handoff tracks a retry paused after its receipt read and leaves the blocke
     const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("must not run"); }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
     const retry = delivery.retry(agent, "1"); await entered.promise;
     const drain = delivery.fenceAndDrain(); release.resolve();
-    await drain; await retry;
+    await drain; await assert.rejects(retry, (error: unknown) => error instanceof Error);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "blocked");
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("retry acknowledges durable scheduling without waiting for a long provider turn, and duplicate retry is fenced", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-ack-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.transition(item.inbox_item_id, "blocked", { last_error: "manual retry" });
+    const entered = deferred<void>(); const release = deferred<{ turnId: string; outcome: "no_reply"; text: null }>();
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.markDispatched?.();
+      entered.resolve();
+      return release.promise;
+    }), { poll: async () => ({}), publish: async () => { throw new Error("no-reply must not publish"); } }, currentAuthority);
+    const started = delivery.retry(agent, "1");
+    await started;
+    await entered.promise;
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", "the request returned after durable scheduling, while provider work remains live");
+    await assert.rejects(() => delivery.retry(agent, "1"), /blocked room delivery is no longer available/i);
+    release.resolve({ turnId: "turn", outcome: "no_reply", text: null });
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
+    await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

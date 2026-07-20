@@ -12,6 +12,7 @@ import {
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
   type DaemonHandoffDiagnostic,
   type DaemonProcessIdentity,
+  mapEntry,
   SupervisorDaemonClient,
   onSupervisorActivity,
   publishSupervisorActivity,
@@ -23,6 +24,25 @@ const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../da
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
 const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
+
+function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
+  return {
+    id: "agent_1", room_id: "room_1", display_name: "Aster", provider: "codex", model: null, charter: "help",
+    desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
+    created_by: "user", created_at: "2026-01-01T00:00:00.000Z",
+    room_agent_state: {
+      connection: { state: "connected", observed_at: "2026-01-01T00:00:00.000Z", detail: null },
+      inbox: { state: "blocked", pending_count: 2, blocked_by_message_id: "msg_1", detail: null },
+      turn: { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null },
+      task: { state: "none", task_id: null, title: null },
+    },
+    delivery_receipts: [{
+      inbox_item_id: "inbox_1", source_message_id: "msg_1", state: "blocked", attempt_count: 3,
+      provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
+      timeline: [{ phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+    }],
+  };
+}
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-electron-supervisor-"));
@@ -57,6 +77,7 @@ async function startWireDaemon(
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
+  const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
   let handoffPrepared = false;
   const server = createServer((socket) => {
     let buffer = "";
@@ -65,11 +86,12 @@ async function startWireDaemon(
       buffer += chunk;
       if (!buffer.includes("\n")) return;
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as { id: string; method: string; params?: Record<string, any> };
+      requests.push({ method: request.method, params: request.params });
       if (unresponsiveAfterPrepare && handoffPrepared && (request.method === "daemon.negotiate" || request.method === "daemon.status")) return;
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
@@ -137,6 +159,8 @@ async function startWireDaemon(
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         entry.activity.push(request.params!.event);
         result = entry;
+      } else if (request.method === "supervisor.retry_room_delivery") {
+        result = { accepted: true };
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -148,7 +172,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries };
+  return { server, entries, requests };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -242,6 +266,60 @@ test("local supervisor activity subscribers receive only the canonical redacted 
   } finally {
     unsubscribe();
     (supervisorDaemonClient as unknown as { appendActivity: typeof originalAppend }).appendActivity = originalAppend;
+  }
+});
+
+test("causal manifest projection accepts a fully valid room state and receipt timeline", () => {
+  const projected = mapEntry(wireEntryWithCausalProjection());
+  assert.equal(projected.roomAgentState?.connection.state, "connected");
+  assert.equal(projected.roomAgentState?.inbox.pendingCount, 2);
+  assert.deepEqual(projected.deliveryReceipts, [{
+    inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
+    providerTurnId: null, blockedByMessageId: null, error: "failed", updatedAt: "2026-01-01T00:00:00.000Z",
+    timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+  }]);
+});
+
+test("causal manifest projection drops malformed nested state and malformed receipt rows without coercion", () => {
+  const malformed = wireEntryWithCausalProjection() as unknown as {
+    room_agent_state: unknown; delivery_receipts: unknown;
+  };
+  malformed.room_agent_state = {
+    connection: { state: "connected", observed_at: 7, detail: null },
+    inbox: { state: "blocked", pending_count: -1, blocked_by_message_id: null, detail: null },
+    turn: { state: "responding", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null },
+    task: { state: "none", task_id: null, title: null },
+  };
+  malformed.delivery_receipts = [
+    { inbox_item_id: "", source_message_id: "msg_1", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_2", source_message_id: "msg_2", state: "blocked", attempt_count: Number.NaN, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_3", source_message_id: "msg_3", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [{ phase: "invented", observed_at: "now", detail: null }] },
+    null,
+  ];
+  const projected = mapEntry(malformed as unknown as Parameters<typeof mapEntry>[0]);
+  assert.equal(projected.roomAgentState, null);
+  assert.deepEqual(projected.deliveryReceipts, []);
+});
+
+test("room delivery retry is capability-negotiated and carries the exact current daemon generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 37);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    await client.retryRoomDelivery({
+      entryId: "agent_1", roomId: "room_1", sourceMessageId: "msg_1", workAttemptId: "attempt_1",
+      executionGenerationId: "execution_1", agentSessionId: "session_1",
+    });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.retry_room_delivery")?.params, {
+      entry_id: "agent_1", room_id: "room_1", source_message_id: "msg_1", work_attempt_id: "attempt_1",
+      execution_generation_id: "execution_1", agent_session_id: "session_1", daemon_generation: 37,
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
   }
 });
 

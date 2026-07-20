@@ -92,7 +92,7 @@ describe("durable room delivery UI contracts", () => {
       assert.match(content, /delivery-receipts/);
     }
     assert.match(shell, /desktopIpc\.supervisor\?\.retryRoomDelivery/);
-    assert.match(shell, /Delivery retry completed/);
+    assert.match(shell, /Delivery retry started/);
     assert.match(message, /:disabled="!deliveryRecoveryAvailable \|\| retryingReceipt/);
     assert.match(message, /Retry will be available when delivery recovery is connected/);
     assert.match(message, /scroll-to-message', receipt\.blockedByMessageId/);
