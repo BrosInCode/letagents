@@ -19,6 +19,7 @@ import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActi
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
+import { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
@@ -370,6 +371,8 @@ export class SupervisorDaemon {
   private readonly provisioner: WorkspaceProvisioner;
   private readonly gitCommand: GitCommand;
   private readonly workerBindings: WorkerBindingStore;
+  /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
+  private readonly supervisedInbox: SupervisedAgentInboxStore;
   private readonly socket: DaemonControlSocket;
   private readonly reconciliationTicks = new Map<string, Promise<void>>();
   private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
@@ -430,6 +433,7 @@ export class SupervisorDaemon {
       (commit) => this.fenceDaemonCommit(commit),
       paths.manifestPath,
     );
+    this.supervisedInbox = new SupervisedAgentInboxStore(paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`);
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
       await this.singleton.assertCurrent();
       const isLifecycleRequest = request.method === "daemon.negotiate"
@@ -636,6 +640,7 @@ export class SupervisorDaemon {
     await this.store.close();
     await this.durability.close();
     await this.workerBindings.close();
+    await this.supervisedInbox.close();
   }
 
   /**
@@ -681,6 +686,7 @@ export class SupervisorDaemon {
     await cleanup(() => this.store.close());
     await cleanup(() => this.durability.close());
     await cleanup(() => this.workerBindings.close());
+    await cleanup(() => this.supervisedInbox.close());
     // Existing convergence/provider callbacks are generation-fenced below.
     // Do not await them: a wedged native transport must not block an upgrade.
     this.convergenceRequests.clear();
