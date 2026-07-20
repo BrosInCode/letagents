@@ -235,6 +235,7 @@ const props = defineProps<{
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   hasOlderReplies: boolean;
   loadingOlderReplies: boolean;
+  revealMessageId?: string | null;
   searchQuery: string;
   activeSearchMessageId: string | null;
   taskReferenceIds: ReadonlySet<string>;
@@ -305,6 +306,16 @@ const mentionOpen = computed(() => mentionQuery.value !== null && mentionCandida
 const mentionCandidates = computed(() => {
   return roomMentionCandidates(props.participants, mentionQuery.value);
 });
+
+watch(
+  () => [props.revealMessageId, props.parent.id, props.replies.map((reply) => reply.id).join("|")] as const,
+  ([messageId]) => {
+    if (!messageId) return;
+    if (messageId !== props.parent.id && !props.replies.some((reply) => reply.id === messageId)) return;
+    void nextTick(() => jumpToThreadMessageReference(messageId));
+  },
+  { flush: "post", immediate: true },
+);
 
 watch(
   () => props.parent.id,

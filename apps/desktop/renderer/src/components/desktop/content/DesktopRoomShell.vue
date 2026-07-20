@@ -128,6 +128,7 @@
       @open-permission-detail="openComposerPermissionDetail"
       @retry-delivery="retryRoomAgentDelivery"
       @reveal-message="revealRoomMessage"
+      @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
       @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"

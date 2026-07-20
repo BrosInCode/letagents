@@ -34,7 +34,7 @@ export function roomAgentDeliverySummary(
   if (state.inbox.state === "waiting_for_desktop_credentials") return "Waiting for desktop credential handoff";
   if (state.connection.state === "reconnecting") return "Reconnecting";
   if (state.connection.state === "disconnected") return "Disconnected";
-  if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "Responding to a room message";
   if (state.inbox.state === "blocked" || state.turn.state === "failed") return "Delivery needs attention";
+  if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "Responding to a room message";
   return "Connected · Listening";
 }
