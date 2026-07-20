@@ -523,6 +523,45 @@ test("Codex room-turn recovery rejects missing and unknown exact turns as ambigu
   await assert.rejects(adapter.recoverRoomTurn!(handle, { inboxItemId: "unknown", providerTurnId: "turn-unknown" }), /unknown exact turn state/);
 });
 
+test("Codex retirement detaches only its waiter so a successor recovers the same exact turn", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  let status = "inProgress";
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: "turn-retired" } } as T;
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-retired", status, items: [{ type: "agentMessage", phase: "final", text: "successor reply" }] }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const controller = new AbortController();
+  const old = adapter.runRoomTurn!(handle, { inboxItemId: "old", actionId: "old", sourceMessage: {}, activation: {} }, {
+    beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {}, detachSignal: controller.signal,
+  });
+  await flush(); controller.abort();
+  await assert.rejects(old, /observation detached/);
+  const successor = adapter.recoverRoomTurn!(handle, { inboxItemId: "successor", providerTurnId: "turn-retired" });
+  await flush(); status = "completed";
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-retired" } });
+  assert.deepEqual(await successor, { turnId: "turn-retired", outcome: "reply", text: "successor reply" });
+  assert.equal(handle.pid, 4100); assert.equal(handle.providerContinuationId, "thread-1");
+  assert.equal(client.requests.filter((request) => request.method === "turn/interrupt").length, 0);
+});
+
+test("Codex caches a terminal racing observer detach for successor recovery", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  let status = "inProgress";
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-race", status, items: [{ type: "agentMessage", phase: "final", text: "raced" }] }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const controller = new AbortController();
+  const old = adapter.recoverRoomTurn!(handle, { inboxItemId: "old-race", providerTurnId: "turn-race" }, { detachSignal: controller.signal });
+  await flush(); controller.abort(); await assert.rejects(old, /observation detached/);
+  status = "completed";
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-race" } });
+  assert.deepEqual(await adapter.recoverRoomTurn!(handle, { inboxItemId: "next-race", providerTurnId: "turn-race" }), { turnId: "turn-race", outcome: "reply", text: "raced" });
+});
+
 test("Codex supervised launch passes only its daemon generation binding to the MCP child", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

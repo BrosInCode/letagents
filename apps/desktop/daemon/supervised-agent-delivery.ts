@@ -366,7 +366,7 @@ export class SupervisedAgentDelivery {
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
           providerTurnId: item.provider_turn_id!,
-        })
+        }, { detachSignal: controller.signal })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
@@ -390,7 +390,7 @@ export class SupervisedAgentDelivery {
         await this.inbox.checkpointTurnStarted(item.inbox_item_id, turnId);
         // Only an acknowledged exact provider turn is projected responding.
         setActive("responding");
-      } });
+      }, detachSignal: controller.signal });
       // Native provider turns are intentionally not cancelable by the daemon:
       // a handoff must retire our authority, not kill a user's Codex process.
       // Do not put this promise in the drain group. Instead, race its result

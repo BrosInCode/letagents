@@ -96,11 +96,13 @@ export interface ProviderActionPort {
     beforeNativeDispatch?: () => Promise<void>;
     /** Durable exact turn checkpoint; completes after turn/start returns and before terminal observation. */
     checkpointTurnStarted?: (turnId: string) => Promise<void>;
+    /** Detach this local observation without interrupting the native turn. */
+    detachSignal?: AbortSignal;
     /** @deprecated compatibility alias; new providers must use beforeNativeDispatch. */
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderRoomTurnResult>;
   /** Recover only this persisted native turn; implementations must never call turn/start. */
-  recoverRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest): Promise<ProviderRoomTurnResult>;
+  recoverRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;
