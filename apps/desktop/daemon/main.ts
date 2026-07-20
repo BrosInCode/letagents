@@ -19,7 +19,7 @@ import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActi
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
-import { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
+import { SupervisedAgentInboxStore, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
@@ -487,6 +487,19 @@ export class SupervisorDaemon {
         return { accepted: true, generation: this.singleton.currentGeneration };
       }
       if (request.method === "manifest.list") return this.entriesWithDerivedLiveness((await this.store.load()).entries);
+      if (request.method === "supervisor.retry_room_delivery") {
+        const params = this.paramsRecord(request.params);
+        await this.retryRoomDelivery({
+          entryId: String(params.entry_id ?? ""),
+          roomId: String(params.room_id ?? ""),
+          sourceMessageId: String(params.source_message_id ?? ""),
+          workAttemptId: String(params.work_attempt_id ?? ""),
+          executionGenerationId: String(params.execution_generation_id ?? ""),
+          agentSessionId: String(params.agent_session_id ?? ""),
+          daemonGeneration: Number(params.daemon_generation ?? NaN),
+        });
+        return { accepted: true };
+      }
       if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
       if (request.method === "manifest.set_desired_state") {
         const params = this.paramsRecord(request.params);
@@ -730,6 +743,55 @@ export class SupervisorDaemon {
     if (failures.length > 0) {
       throw new AggregateError(failures, "Supervisor handoff cleanup did not complete cleanly.");
     }
+  }
+
+  /**
+   * Retries one known blocked receipt. Every identity in the renderer request
+   * is compared with the currently-owned runtime before the in-memory bearer
+   * is read, so a historical binding cannot reanimate a replacement worker.
+   */
+  private async retryRoomDelivery(input: {
+    entryId: string; roomId: string; sourceMessageId: string; workAttemptId: string;
+    executionGenerationId: string; agentSessionId: string; daemonGeneration: number;
+  }): Promise<void> {
+    for (const [field, value] of Object.entries(input)) {
+      if ((typeof value === "string" && !value.trim()) || (field === "daemonGeneration" && !Number.isSafeInteger(value))) {
+        throw new Error(`Exact room delivery retry ${field} is required.`);
+      }
+    }
+    if (!this.supervisedDelivery || !this.providerPort?.runRoomTurn) {
+      throw new Error("This supervisor does not support room delivery retry.");
+    }
+    if (input.daemonGeneration !== this.singleton.currentGeneration) {
+      throw new Error("The supervisor generation changed; refresh before retrying.");
+    }
+    const entry = await this.store.getEntry(input.entryId);
+    const handle = this.liveHandles.get(input.entryId);
+    const binding = await this.workerBindings.get(input.entryId);
+    if (!entry || !handle || !binding
+      || entry.room_id !== input.roomId
+      || entry.work_attempt_id !== input.workAttemptId
+      || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
+      || binding.room_id !== input.roomId
+      || binding.work_attempt_id !== input.workAttemptId
+      || binding.execution_generation_id !== input.executionGenerationId
+      || binding.agent_session_id !== input.agentSessionId) {
+      throw new Error("The room delivery binding is stale; refresh before retrying.");
+    }
+    const credential = await this.workerBindings.credentialFor(binding);
+    if (!credential) throw new Error("Waiting for desktop credential handoff before retrying delivery.");
+    const agent = {
+      agentId: entry.id, roomId: binding.room_id, provider: entry.provider, apiUrl: binding.api_url,
+      agentSessionId: binding.agent_session_id, bearer: credential, handle,
+      executionGenerationId: binding.execution_generation_id, daemonGeneration: this.singleton.currentGeneration,
+    };
+    if (!await this.isExactSupervisedDeliveryAuthority({
+      agentId: agent.agentId, roomId: agent.roomId, provider: agent.provider, apiUrl: agent.apiUrl,
+      agentSessionId: agent.agentSessionId, bearer: agent.bearer, handle: agent.handle,
+      workAttemptId: agent.handle.workAttemptId, executionGenerationId: agent.executionGenerationId,
+      daemonGeneration: agent.daemonGeneration, providerContinuationId: agent.handle.providerContinuationId, pid: agent.handle.pid,
+    })) throw new Error("The room delivery binding is no longer current; refresh before retrying.");
+    await this.supervisedDelivery.retry(agent, input.sourceMessageId);
   }
 
   /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
@@ -1578,6 +1640,28 @@ export class SupervisorDaemon {
           detail: entry.workplace_liveness?.detail ?? "supervised worker session bound",
         }
       : entry.workplace_liveness;
+    const receipts = await this.supervisedInbox.receipts(entry.id);
+    const credential = bindingMatchesCurrentGeneration && binding
+      ? await this.workerBindings.credentialFor(binding)
+      : null;
+    const deliveryReceipts = projectDeliveryReceipts(receipts);
+    const nonfinal = receipts.filter((receipt) => receipt.state !== "acknowledged" && receipt.state !== "acknowledged_no_reply");
+    const head = nonfinal[0] ?? null;
+    const blocked = receipts.find((receipt) => receipt.receipt_state === "blocked") ?? null;
+    const hasCurrentBinding = Boolean(bindingMatchesCurrentGeneration && binding);
+    const connection = hasCurrentBinding
+      ? { state: "connected" as const, observed_at: binding!.updated_at, detail: "supervised worker session bound" }
+      : entry.desired_state === "running" && ["starting", "recovering"].includes(entry.observed_state)
+        ? { state: "reconnecting" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: "Awaiting the current worker binding." }
+        : { state: "disconnected" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: "No current supervised worker binding." };
+    const inbox = !hasCurrentBinding || !credential
+      ? { state: "waiting_for_desktop_credentials" as const, pending_count: nonfinal.length, blocked_by_message_id: blocked?.source_message_id ?? null, detail: hasCurrentBinding ? "Desktop credentials have not been handed to this daemon." : "A current worker binding is required before delivery can start." }
+      : blocked
+        ? { state: "blocked" as const, pending_count: nonfinal.length, blocked_by_message_id: blocked.source_message_id, detail: blocked.last_error ?? "An earlier delivery needs attention." }
+        : nonfinal.length
+          ? { state: "queued" as const, pending_count: nonfinal.length, blocked_by_message_id: null, detail: "Room delivery is queued." }
+          : { state: "empty" as const, pending_count: 0, blocked_by_message_id: null, detail: null };
+    const turn = projectDeliveryTurn(head);
     return {
       ...entry,
       workplace_liveness: derive(
@@ -1596,6 +1680,13 @@ export class SupervisorDaemon {
         execution_generation_id: binding.execution_generation_id,
         updated_at: binding.updated_at,
       } : null,
+      room_agent_state: {
+        connection,
+        inbox,
+        turn,
+        task: { state: "none", task_id: null, title: null },
+      },
+      delivery_receipts: deliveryReceipts,
     };
   }
 
@@ -2952,6 +3043,41 @@ export class SupervisorDaemon {
       await this.transitionOnce(entryId, observedState, condition, `convergence scheduler failure: ${message}`, actor, undefined, "coordination_escalation");
     }));
   }
+}
+
+function projectDeliveryReceipts(receipts: readonly SupervisedInboxReceiptWithTimeline[]): DaemonManifestEntryView["delivery_receipts"] {
+  const sourceMessageByInboxId = new Map(receipts.map((receipt) => [receipt.inbox_item_id, receipt.source_message_id]));
+  return receipts.map((receipt) => ({
+    inbox_item_id: receipt.inbox_item_id,
+    source_message_id: receipt.source_message_id,
+    state: receipt.receipt_state,
+    attempt_count: receipt.attempt_count,
+    provider_turn_id: receipt.provider_turn_id,
+    // Inbox ids are daemon-private. The projection exposes only the public
+    // source message id needed by the renderer's "view earlier message" link.
+    blocked_by_message_id: receipt.blocked_by_inbox_item_id
+      ? sourceMessageByInboxId.get(receipt.blocked_by_inbox_item_id) ?? null
+      : null,
+    error: receipt.last_error,
+    updated_at: receipt.updated_at,
+    timeline: receipt.timeline,
+  }));
+}
+
+function projectDeliveryTurn(head: SupervisedInboxReceiptWithTimeline | null): NonNullable<DaemonManifestEntryView["room_agent_state"]>["turn"] {
+  if (!head) return { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null };
+  const state = head.state === "dispatching" ? "dispatching"
+    : head.state === "awaiting_result" ? "responding"
+      : head.state === "publishing" ? "publishing"
+        : head.state === "retryable" ? "retrying"
+          : head.state === "blocked" ? "failed" : "idle";
+  return {
+    state,
+    inbox_item_id: head.inbox_item_id,
+    source_message_id: head.source_message_id,
+    provider_turn_id: head.provider_turn_id,
+    detail: head.last_error,
+  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -106,7 +106,8 @@
       :presence="roomPresence"
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
-      :delivery-recovery-available="roomAgentDeliveryRecoveryAvailable"
+      :delivery-recovery-available="deliveryRetryAvailable"
+      :delivery-retry-busy="deliveryRetryingSourceMessageId !== null"
       :revealed-message-id="revealedMessageId"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
@@ -445,6 +446,8 @@ const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
+const deliveryRetryingSourceMessageId = ref<string | null>(null);
+const deliveryRetryAvailable = computed(() => typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
 const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
 const inboxLoading = ref(false);
 const inboxLoadingOlder = ref(false);
@@ -1524,10 +1527,30 @@ function openAddAgentModal(): void {
   addAgentModalOpen.value = true;
 }
 
-function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): void {
-  // Deliberately emit intent only. There is no daemon retry endpoint yet, so
-  // this must not optimistically mutate a receipt or claim a retry succeeded.
-  emit("retry-room-agent-delivery", { agentId, sourceMessageId });
+async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): Promise<void> {
+  if (!deliveryRetryAvailable.value || deliveryRetryingSourceMessageId.value) return;
+  const entry = supervisorEntries.value.find((candidate) => candidate.id === agentId);
+  if (!entry?.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
+    pushActionToast("This delivery binding changed. Refresh the room before retrying.", "error", 6_000);
+    return;
+  }
+  deliveryRetryingSourceMessageId.value = sourceMessageId;
+  try {
+    await desktopIpc.supervisor!.retryRoomDelivery({
+      entryId: entry.id,
+      roomId: props.room.identifier,
+      sourceMessageId,
+      workAttemptId: entry.workAttemptId,
+      executionGenerationId: entry.executionGenerationId,
+      agentSessionId: entry.agentSessionId,
+    });
+    await refreshManagedAgentSessions();
+    pushActionToast("Delivery retry started.", "success", 4_000);
+  } catch (error) {
+    pushActionToast(error instanceof Error ? error.message : "Could not retry room delivery.", "error", 7_000);
+  } finally {
+    deliveryRetryingSourceMessageId.value = null;
+  }
 }
 
 async function revealRoomMessage(messageId: string): Promise<void> {

@@ -56,6 +56,7 @@
         :test-id="`room-thread-message-${parent.id}`"
         :delivery-receipts="deliveryReceiptsByMessage[parent.id] || []"
         :delivery-recovery-available="deliveryRecoveryAvailable"
+        :delivery-retry-busy="deliveryRetryBusy"
         @quote-reply="quoteInThread(parent)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
         @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -92,6 +93,7 @@
           :test-id="`room-thread-reply-${reply.id}`"
           :delivery-receipts="deliveryReceiptsByMessage[reply.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
+          :delivery-retry-busy="deliveryRetryBusy"
           @quote-reply="quoteInThread(reply)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
           @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -241,6 +243,7 @@ const props = defineProps<{
   taskReferenceIds: ReadonlySet<string>;
   deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
+  deliveryRetryBusy?: boolean;
 }>();
 
 const emit = defineEmits<{

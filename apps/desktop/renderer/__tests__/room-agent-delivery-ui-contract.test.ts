@@ -91,7 +91,8 @@ describe("durable room delivery UI contracts", () => {
     for (const content of [shell, chat, viewport, thread]) {
       assert.match(content, /delivery-receipts/);
     }
-    assert.match(app, /room-agent-delivery-recovery-available="false"/);
+    assert.match(shell, /desktopIpc\.supervisor\?\.retryRoomDelivery/);
+    assert.match(shell, /Delivery retry started/);
     assert.match(message, /:disabled="!deliveryRecoveryAvailable"/);
     assert.match(message, /Retry will be available when delivery recovery is connected/);
     assert.match(message, /scroll-to-message', receipt\.blockedByMessageId/);

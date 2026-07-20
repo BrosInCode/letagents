@@ -13,6 +13,13 @@ import type {
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorRoomDeliveryRetryInput,
+  DesktopRoomAgentConnectionState,
+  DesktopRoomAgentInboxState,
+  DesktopRoomAgentTurnState,
+  DesktopRoomAgentTaskState,
+  DesktopRoomAgentReceiptState,
+  DesktopRoomAgentCausalEvent,
   DesktopSupervisorTurnControlInput,
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
@@ -24,7 +31,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.26";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.27";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -373,6 +380,20 @@ export class SupervisorDaemonClient {
   async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
+  }
+
+  /** This call deliberately accepts only a renderer-safe exact identity tuple. */
+  async retryRoomDelivery(input: DesktopSupervisorRoomDeliveryRetryInput): Promise<void> {
+    const status = await this.ensureRunning();
+    await this.request<{ accepted: boolean }>("supervisor.retry_room_delivery", {
+      entry_id: input.entryId,
+      room_id: input.roomId,
+      source_message_id: input.sourceMessageId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      agent_session_id: input.agentSessionId,
+      daemon_generation: status.generation,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
   }
 
   async compareAndSetDesiredState(
@@ -783,25 +804,25 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     activity: (entry.activity ?? []).map(mapActivity),
     roomAgentState: entry.room_agent_state ? {
       connection: {
-        state: entry.room_agent_state.connection.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["connection"]["state"],
+        state: normalizeRoomConnectionState(entry.room_agent_state.connection.state),
         observedAt: entry.room_agent_state.connection.observed_at,
         detail: entry.room_agent_state.connection.detail,
       },
       inbox: {
-        state: entry.room_agent_state.inbox.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["inbox"]["state"],
+        state: normalizeRoomInboxState(entry.room_agent_state.inbox.state),
         pendingCount: entry.room_agent_state.inbox.pending_count,
         blockedByMessageId: entry.room_agent_state.inbox.blocked_by_message_id,
         detail: entry.room_agent_state.inbox.detail,
       },
       turn: {
-        state: entry.room_agent_state.turn.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["turn"]["state"],
+        state: normalizeRoomTurnState(entry.room_agent_state.turn.state),
         inboxItemId: entry.room_agent_state.turn.inbox_item_id,
         sourceMessageId: entry.room_agent_state.turn.source_message_id,
         providerTurnId: entry.room_agent_state.turn.provider_turn_id,
         detail: entry.room_agent_state.turn.detail,
       },
       task: {
-        state: entry.room_agent_state.task.state as NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["task"]["state"],
+        state: normalizeRoomTaskState(entry.room_agent_state.task.state),
         taskId: entry.room_agent_state.task.task_id,
         title: entry.room_agent_state.task.title,
       },
@@ -809,14 +830,14 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     deliveryReceipts: (entry.delivery_receipts ?? []).map((receipt) => ({
       inboxItemId: receipt.inbox_item_id,
       sourceMessageId: receipt.source_message_id,
-      state: receipt.state as NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["state"],
+      state: normalizeRoomReceiptState(receipt.state),
       attemptCount: receipt.attempt_count,
       providerTurnId: receipt.provider_turn_id,
       blockedByMessageId: receipt.blocked_by_message_id,
       error: receipt.error,
       updatedAt: receipt.updated_at,
       timeline: (receipt.timeline ?? []).map((event) => ({
-        phase: event.phase as NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"][number]["phase"],
+        phase: normalizeRoomCausalPhase(event.phase),
         observedAt: event.observed_at,
         detail: event.detail,
       })),
@@ -836,6 +857,25 @@ function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
       updatedAt: entry.turn_control.updated_at,
     } : null,
   };
+}
+
+function normalizeRoomConnectionState(value: string): DesktopRoomAgentConnectionState {
+  return value === "connected" || value === "reconnecting" || value === "disconnected" ? value : "disconnected";
+}
+function normalizeRoomInboxState(value: string): DesktopRoomAgentInboxState {
+  return value === "empty" || value === "queued" || value === "blocked" || value === "waiting_for_desktop_credentials" ? value : "empty";
+}
+function normalizeRoomTurnState(value: string): DesktopRoomAgentTurnState {
+  return value === "idle" || value === "dispatching" || value === "responding" || value === "publishing" || value === "retrying" || value === "failed" ? value : "idle";
+}
+function normalizeRoomTaskState(value: string): DesktopRoomAgentTaskState {
+  return value === "none" || value === "assigned" || value === "working" || value === "blocked" ? value : "none";
+}
+function normalizeRoomReceiptState(value: string): DesktopRoomAgentReceiptState {
+  return value === "queued" || value === "dispatching" || value === "awaiting_result" || value === "publishing" || value === "acknowledged" || value === "acknowledged_no_reply" || value === "retryable" || value === "blocked" || value === "queued_behind_blocked" ? value : "queued";
+}
+function normalizeRoomCausalPhase(value: string): DesktopRoomAgentCausalEvent["phase"] {
+  return value === "received" || value === "queued" || value === "turn_started" || value === "turn_finished" || value === "publish_started" || value === "published" || value === "no_reply" || value === "retry_scheduled" || value === "blocked" ? value : "queued";
 }
 
 function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
