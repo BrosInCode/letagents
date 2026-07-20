@@ -84,6 +84,11 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
       calls.push(`${provider}:control:${handle.workAttemptId}:${correction ?? "stop"}`);
       return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
     },
+    async runRoomTurn(handle, request, options) {
+      await options?.markDispatched?.();
+      calls.push(`${provider}:room-turn:${handle.workAttemptId}:${request.inboxItemId}`);
+      return { turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "bounded reply" };
+    },
     async stop(handle): Promise<ProviderActionTerminal> {
       calls.push(`${provider}:stop:${handle.workAttemptId}`);
       return { endedAt: "2026-07-15T00:00:00.000Z", exitCode: 0, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: handle.providerContinuationId };
@@ -149,11 +154,20 @@ test("provider router selects the native adapter by manifest provider and fences
   assert.deepEqual(await router.controlTurn(resumed, "redirect", { actionId: "control-claude" }), {
     capability: "native_interrupt", interrupted: true, resumed: true, state: "working",
   });
+  let dispatchPersisted = false;
+  assert.deepEqual(await router.runRoomTurn(resumed, {
+    inboxItemId: "inbox-1", sourceMessage: { id: "msg-1", text: "hello" },
+    activation: { for_current_agent: true }, actionId: "room-action-1",
+  }, { markDispatched: async () => { dispatchPersisted = true; } }), {
+    turnId: "turn:inbox-1", outcome: "reply", text: "bounded reply",
+  });
+  assert.equal(dispatchPersisted, true);
   assert.deepEqual(calls, [
     "claude-code:spawn:claude-attempt",
     "claude-code:resume:claude-attempt",
     "claude-code:poke:claude-attempt:continue",
     "claude-code:control:claude-attempt:redirect",
+    "claude-code:room-turn:claude-attempt:inbox-1",
   ]);
 
   await assert.rejects(
