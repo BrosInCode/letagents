@@ -14,6 +14,7 @@ import type {
   DesktopReasoningSession,
   DesktopRoomInfo,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorActivityEvent,
   RepoStatus,
   RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
@@ -349,7 +350,8 @@ export function supervisedAgentWorkIndicators(
     .flatMap((entry) => {
       const latest = [...entry.activity]
         .sort((left, right) => right.sequence - left.sequence)
-        .find((event) => event.status === "working" || event.status === "reviewing");
+        .find((event) => isHumanVisibleSupervisorActivity(event)
+          && (event.status === "working" || event.status === "reviewing"));
       if (!latest) return [];
       const boundPresence = entry.agentSessionId
         ? presence.find((candidate) => candidate.agentSessionId === entry.agentSessionId)
@@ -365,6 +367,16 @@ export function supervisedAgentWorkIndicators(
       }];
     })
     .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+}
+
+/** Provider transport/account notifications remain in diagnostics, but they
+ * are not evidence that an agent is doing work for the room. */
+export function isHumanVisibleSupervisorActivity(
+  event: Pick<DesktopSupervisorActivityEvent, "kind" | "method">,
+): boolean {
+  const method = event.method.trim().toLowerCase();
+  if (method === "account/ratelimits/updated" || method === "account/ratelimitsupdated") return false;
+  return event.kind !== "usage" && event.kind !== "provider_event";
 }
 
 /**
