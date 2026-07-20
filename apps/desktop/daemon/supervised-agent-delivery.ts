@@ -4,6 +4,7 @@ import { SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, t
 export type SupervisedIngressAgent = {
   agentId: string;
   roomId: string;
+  provider: string;
   /** Bound worker API origin; never inferred from a persisted credential. */
   apiUrl: string;
   agentSessionId: string;
@@ -11,11 +12,14 @@ export type SupervisedIngressAgent = {
   handle: ProviderActionHandle;
   /** Exact daemon generation that owns this room worker binding. */
   executionGenerationId: string;
+  daemonGeneration: number;
 };
 
 /** The bearer is intentionally memory-only and must never be persisted or logged. */
-export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent, "agentId" | "roomId" | "agentSessionId" | "bearer" | "executionGenerationId"> & {
+export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent, "agentId" | "roomId" | "provider" | "apiUrl" | "agentSessionId" | "bearer" | "executionGenerationId" | "daemonGeneration" | "handle"> & {
   workAttemptId: string;
+  providerContinuationId: string | null;
+  pid: number | null;
 };
 export type SupervisedAuthorityRevalidator = (authority: SupervisedDeliveryAuthority) => Promise<boolean> | boolean;
 
@@ -36,7 +40,10 @@ export interface SupervisedDeliveryHttp {
  */
 export class SupervisedAgentDelivery {
   private readonly polling = new Map<string, AbortController>();
+  private readonly loops = new Map<string, Promise<void>>();
+  private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
+  private readonly pumpControllers = new Map<string, AbortController>();
   private readonly controllers = new Set<AbortController>();
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly startupRecovered = new Set<string>();
@@ -66,12 +73,74 @@ export class SupervisedAgentDelivery {
   }
 
   poll(agent: SupervisedIngressAgent): Promise<void> {
+    return this.pollOnce(agent);
+  }
+
+  /** Starts the daemon-owned long-poll loop and normalizes persisted work first. */
+  start(agent: SupervisedIngressAgent): Promise<void> {
+    if (this.fenced || this.loops.has(agent.agentId)) return Promise.resolve();
+    const controller = new AbortController();
+    this.loopControllers.set(agent.agentId, controller);
+    const operation = this.track(controller, this.pollLoop(agent, controller));
+    this.loops.set(agent.agentId, operation);
+    void operation.then(() => {
+      if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
+      if (this.loopControllers.get(agent.agentId) === controller) this.loopControllers.delete(agent.agentId);
+    }, () => {
+      if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
+      if (this.loopControllers.get(agent.agentId) === controller) this.loopControllers.delete(agent.agentId);
+    });
+    // The loop itself is tracked by fenceAndDrain(); callers only need to know
+    // that it was installed, not wait for the worker's lifetime.
+    return Promise.resolve();
+  }
+
+  /** Stop one stale binding before a rebind starts its successor loop. */
+  async refresh(agent: SupervisedIngressAgent): Promise<void> {
+    await this.stop(agent.agentId);
+    if (!this.fenced) await this.start(agent);
+  }
+
+  /** Cancel and join a removed or superseded agent without fencing other workers. */
+  async stop(agentId: string): Promise<void> {
+    this.polling.get(agentId)?.abort();
+    this.pumpControllers.get(agentId)?.abort();
+    this.loopControllers.get(agentId)?.abort();
+    await Promise.allSettled([this.loops.get(agentId)].filter(Boolean) as Promise<void>[]);
+  }
+
+  private async pollLoop(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
+    // Recovery must not wait for a potentially hours-long first network poll.
+    await this.pump(agent);
+    while (await this.hasAuthority(agent, controller)) {
+      try { await this.pollOnce(agent, controller); } catch {
+        // The durable queue remains recoverable; retry only after a bounded
+        // delay so failed/empty responses cannot busy-spin the daemon.
+      }
+      if (!await this.waitForRetry(controller)) return;
+    }
+  }
+
+  private pollOnce(agent: SupervisedIngressAgent, parent?: AbortController): Promise<void> {
     if (this.fenced) return Promise.resolve();
     const prior = this.polling.get(agent.agentId);
     if (prior) return Promise.resolve();
     const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    parent?.signal.addEventListener("abort", relayAbort, { once: true });
     this.polling.set(agent.agentId, controller);
-    return this.track(controller, this.pollOperation(agent, controller));
+    return this.track(controller, this.pollOperation(agent, controller)).finally(() => parent?.signal.removeEventListener("abort", relayAbort));
+  }
+
+  private async waitForRetry(controller: AbortController): Promise<boolean> {
+    if (controller.signal.aborted || this.fenced) return false;
+    await new Promise<void>((resolve) => {
+      // The normal unit-test retry delay is zero. Keep the live loop bounded
+      // anyway: a failed/empty long-poll must never become a CPU spin.
+      const timer = setTimeout(resolve, Math.max(25, this.retryDelayMs));
+      controller.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+    return !controller.signal.aborted && !this.fenced;
   }
 
   private async pollOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
@@ -116,10 +185,13 @@ export class SupervisedAgentDelivery {
     const controller = new AbortController();
     const operation = this.track(controller, this.pumpOperation(agent, controller));
     this.pumping.set(agent.agentId, operation);
+    this.pumpControllers.set(agent.agentId, controller);
     void operation.then(() => {
       if (this.pumping.get(agent.agentId) === operation) this.pumping.delete(agent.agentId);
+      if (this.pumpControllers.get(agent.agentId) === controller) this.pumpControllers.delete(agent.agentId);
     }, () => {
       if (this.pumping.get(agent.agentId) === operation) this.pumping.delete(agent.agentId);
+      if (this.pumpControllers.get(agent.agentId) === controller) this.pumpControllers.delete(agent.agentId);
     });
     return operation;
   }
@@ -150,6 +222,7 @@ export class SupervisedAgentDelivery {
         if (!await this.hasAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: item.outcome });
         if (!await this.publish(agent, item, persistedReply, controller)) return;
+        if (!await this.hasAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged");
         return;
       }
@@ -187,6 +260,7 @@ export class SupervisedAgentDelivery {
       // A crash after this point retries the same client id without rerunning Codex.
       await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
       if (!await this.publish(agent, item, text, controller)) return;
+      if (!await this.hasAuthority(agent, controller)) return;
       await this.inbox.transition(item.inbox_item_id, "acknowledged");
     } catch (error) {
       if (error instanceof AuthorityLostError || this.fenced || controller.signal.aborted) return;
@@ -222,10 +296,16 @@ export class SupervisedAgentDelivery {
     const allowed = await this.revalidateAuthority({
       agentId: agent.agentId,
       roomId: agent.roomId,
+      apiUrl: agent.apiUrl,
+      provider: agent.provider,
       agentSessionId: agent.agentSessionId,
       bearer: agent.bearer,
       workAttemptId: agent.handle.workAttemptId,
       executionGenerationId: agent.executionGenerationId,
+      daemonGeneration: agent.daemonGeneration,
+      providerContinuationId: agent.handle.providerContinuationId,
+      pid: agent.handle.pid,
+      handle: agent.handle,
     });
     return allowed && !this.fenced && !controller?.signal.aborted;
   }
