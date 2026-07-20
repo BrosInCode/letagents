@@ -106,6 +106,8 @@
       :presence="roomPresence"
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
+      :delivery-recovery-available="roomAgentDeliveryRecoveryAvailable"
+      :revealed-message-id="revealedMessageId"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
       :resolving-permission-ids="resolvingComposerPermissionIds"
@@ -125,6 +127,7 @@
       @open-add-agent="openAddAgentModal"
       @open-permission-detail="openComposerPermissionDetail"
       @retry-delivery="retryRoomAgentDelivery"
+      @reveal-message="revealRoomMessage"
       @resolve-permission="resolveComposerPermission"
       @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
@@ -404,6 +407,8 @@ const props = defineProps<{
   durableProjectRootPath?: string | null;
   homePath?: string | null;
   workers: WorkerSnapshot[];
+  /** Wave 2 replaces this capability seam with the daemon retry control. */
+  roomAgentDeliveryRecoveryAvailable?: boolean;
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
 }>();
@@ -424,6 +429,7 @@ const emit = defineEmits<{
   "add-agent-open-request-consumed": [];
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
+  "message-reveal-unavailable": [messageId: string];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -431,6 +437,7 @@ const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
 const activeTab = ref<RoomTabId>(readRoomActiveTab(props.room.identifier));
 const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
+const revealedMessageId = ref<string | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
@@ -537,6 +544,7 @@ const {
   sendRoomMessage,
   discardAttachment,
   loadOlderMessages,
+  revealMessage,
 } = useDesktopRoomMessages({
   room: roomRef,
   messages: messagesRef,
@@ -1519,6 +1527,18 @@ function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): void 
   // Deliberately emit intent only. There is no daemon retry endpoint yet, so
   // this must not optimistically mutate a receipt or claim a retry succeeded.
   emit("retry-room-agent-delivery", { agentId, sourceMessageId });
+}
+
+async function revealRoomMessage(messageId: string): Promise<void> {
+  const revealed = await revealMessage(messageId);
+  if (!revealed) {
+    emit("message-reveal-unavailable", messageId);
+    return;
+  }
+  // Repeated links to the same message need a new reactive edge.
+  revealedMessageId.value = null;
+  await nextTick();
+  revealedMessageId.value = messageId;
 }
 
 function refreshManagedAgentSessions(): Promise<void> {
