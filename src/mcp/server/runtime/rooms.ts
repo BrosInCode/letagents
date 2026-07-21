@@ -434,7 +434,14 @@ function bindWorkerRoomFromContext(): { room: RoomState; source: string } | null
 
 export async function autoJoinFromContext(): Promise<void> {
   try {
-    if (requireValidWorkerBearerRuntime().mode === "worker") {
+    const workerRuntime = requireValidWorkerBearerRuntime();
+    if (workerRuntime.mode === "supervised") {
+      // The exact room is daemon-owned context, not ambient repository or
+      // persisted MCP state. Do not bind a potentially unrelated local room.
+      console.error("ℹ️ Daemon-supervised bounded turn leaves room selection to its exact supervisor context.");
+      return;
+    }
+    if (workerRuntime.mode === "worker") {
       const bound = bindWorkerRoomFromContext();
       if (bound) {
         console.error(`🏠 Bound worker bearer to room '${bound.room.room_id}' (from ${bound.source}; no join/create request).`);

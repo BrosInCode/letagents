@@ -13,14 +13,21 @@ const {
   requireValidWorkerBearerRuntime,
   WorkerBearerRuntimeConfigurationError,
 } = await import("../server/runtime/worker-bearer.js");
-const { ApiError, apiCall, setOwnerAuthStoreLoaderForTest } = await import("../server/runtime/api.js");
+const {
+  ApiError,
+  SupervisedWorkerCredentialError,
+  apiCall,
+  setOwnerAuthStoreLoaderForTest,
+  setSupervisedCredentialBorrowerForTest,
+} = await import("../server/runtime/api.js");
 const { agentSessionCredentials } = await import("../server/runtime/agent-sessions.js");
 const { registerAgentSessionTools } = await import("../server/tools/agent-sessions.js");
 const {
   getCurrentRoomPayload,
   setRoomInspectionOwnerAuthStoreLoaderForTest,
 } = await import("../server/tools/rooms/inspection-tools.js");
-const { rememberRoom, toRoomState } = await import("../server/runtime/room-state.js");
+const roomState = await import("../server/runtime/room-state.js");
+const { rememberRoom, toRoomState } = roomState;
 const { autoJoinFromContext } = await import("../server/runtime/rooms.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
@@ -114,6 +121,74 @@ test("worker bearer mode rejects dual owner credentials before an API request", 
     await assert.rejects(() => apiCall("/rooms/room_1/messages"), WorkerBearerRuntimeConfigurationError);
   });
   globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised calls borrow the current credential for every request and ignore owner auth", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    const borrowed = ["rotated-worker-one", "rotated-worker-two"];
+    const observed: string[] = [];
+    setOwnerAuthStoreLoaderForTest(async () => assert.fail("bounded supervised calls must not load owner auth"));
+    setSupervisedCredentialBorrowerForTest(async () => {
+      const credential = borrowed.shift();
+      assert.ok(credential, "each request borrows exactly once");
+      return { state: "available", credential };
+    });
+    try {
+      globalThis.fetch = async (_url, init) => {
+        observed.push(new Headers(init?.headers).get("authorization") || "");
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      };
+      await apiCall("/rooms/room_1/messages");
+      await apiCall("/rooms/room_1/messages");
+      assert.deepEqual(observed, ["Bearer rotated-worker-one", "Bearer rotated-worker-two"]);
+    } finally {
+      setSupervisedCredentialBorrowerForTest(null);
+      setOwnerAuthStoreLoaderForTest(null);
+    }
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised calls fail closed before fetch for deferred, stale, or absent context", async () => {
+  const originalFetch = globalThis.fetch;
+  for (const result of [
+    { state: "deferred", code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" } as const,
+    { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" } as const,
+  ]) {
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      globalThis.fetch = async () => assert.fail("unavailable supervised credentials must fail before fetch");
+      setOwnerAuthStoreLoaderForTest(async () => assert.fail("unavailable supervised credentials must not read owner auth"));
+      setSupervisedCredentialBorrowerForTest(async () => result);
+      try {
+        await assert.rejects(() => apiCall("/rooms/room_1/messages"), (error: unknown) =>
+          error instanceof SupervisedWorkerCredentialError && error.code === result.code,
+        );
+      } finally {
+        setSupervisedCredentialBorrowerForTest(null);
+        setOwnerAuthStoreLoaderForTest(null);
+      }
+    });
+  }
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    globalThis.fetch = async () => assert.fail("missing supervised context must fail before fetch");
+    setOwnerAuthStoreLoaderForTest(async () => assert.fail("missing supervised context must not read owner auth"));
+    try {
+      await assert.rejects(() => apiCall("/rooms/room_1/messages"), SupervisedWorkerCredentialError);
+    } finally {
+      setOwnerAuthStoreLoaderForTest(null);
+    }
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised turns reject a fixed bearer instead of bypassing daemon rotation", async () => {
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "1" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), {
+      mode: "invalid",
+      error: "Daemon-supervised bounded turns refuse LETAGENTS_AGENT_SESSION_BEARER; credentials must be borrowed from the exact supervisor generation.",
+    });
+  });
 });
 
 test("blank worker bearer does not activate worker mode", async () => {
@@ -211,7 +286,7 @@ test("worker bearer mode disables local Codex session orchestration", async () =
 
 test("supervised bounded turns refuse wait_for_messages before any local or network work", async () => {
   const originalFetch = globalThis.fetch;
-  await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "1" }, async () => {
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
     globalThis.fetch = async () => assert.fail("bounded wait guard must run before fetch");
     const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
     const result = await wait({ room_id: "room_supervised", after_message_id: "msg_1" });
@@ -222,6 +297,42 @@ test("supervised bounded turns refuse wait_for_messages before any local or netw
     });
   });
   globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised turns disable owner onboarding before any local owner access", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    globalThis.fetch = async () => assert.fail("bounded onboarding guard must run before fetch");
+    const startDeviceAuth = toolHandler(registerDeviceAuthTools, "start_device_auth");
+    const result = await startDeviceAuth({});
+    assert.deepEqual(JSON.parse(result.content[0]!.text), {
+      success: false,
+      error: "supervised_bounded_mode",
+      message: "This owner-auth onboarding tool is disabled during a daemon-supervised bounded turn.",
+    });
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised auto-join never replaces the current room from ambient repository context", async () => {
+  const originalCwd = process.cwd();
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-bounded-autojoin-"));
+  try {
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "ambient-room" }));
+    process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+    process.chdir(tempDir);
+    rememberRoom(toRoomState({ room_id: "exact-supervisor-room", joined_via: "join_room", is_local: true }));
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      await autoJoinFromContext();
+      assert.equal(roomState.currentRoom?.room_id, "exact-supervisor-room");
+    });
+  } finally {
+    process.chdir(originalCwd);
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("ordinary worker bearer mode retains wait_for_messages when bounded delivery is off", async () => {

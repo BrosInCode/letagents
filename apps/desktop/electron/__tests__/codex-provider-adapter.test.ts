@@ -675,6 +675,37 @@ test("Codex supervised launch passes only its daemon generation binding to the M
   }]);
 });
 
+test("Codex resumed bounded launch supplies only the exact non-secret worker route to the MCP bridge", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    deliveryMode: "daemon_inbox",
+    supervisorEntryId: "manifest_exact",
+    supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact",
+    supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_1" },
+  }));
+  assert.deepEqual(harness.launchOptions[0]?.options.env, {
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "manifest_exact",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+    LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent_session_exact",
+    LETAGENTS_SUPERVISOR_ROOM_ID: "focus_37",
+    LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "LanternSparrow",
+  });
+  assert.deepEqual(harness.supervisorBridgeContexts[0]?.context, {
+    entry_id: "manifest_exact",
+    room_id: "focus_37",
+    work_attempt_id: spawnRequest().workAttemptId,
+    execution_generation_id: "execution_exact",
+    agent_session_id: "agent_session_exact",
+    agent_display_name: "LanternSparrow",
+  });
+  assert.doesNotMatch(JSON.stringify(harness.launchOptions[0]), /session-secret|authorization|bearer/i);
+});
+
 test("Codex supervised launch fails closed before app-server start when bridge coordinates are partial", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

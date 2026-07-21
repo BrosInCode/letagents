@@ -122,7 +122,8 @@ export function registerAgentSessionTools(server: McpServer): void {
 
       const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
       const apiRoomId = cloudRoomId || targetRoomId;
-      if (requireValidWorkerBearerRuntime().mode === "worker") {
+      const workerRuntime = requireValidWorkerBearerRuntime();
+      if (workerRuntime.mode === "worker" || workerRuntime.mode === "supervised") {
         // The supplied bearer is issued for an existing server-side agent
         // session. Do not call the owner-only registration endpoint or write
         // any session credential to local storage.
@@ -134,10 +135,13 @@ export function registerAgentSessionTools(server: McpServer): void {
               text: JSON.stringify(
                 {
                   success: true,
-                  worker_bearer_mode: true,
+                  worker_bearer_mode: workerRuntime.mode === "worker",
+                  supervised_bounded_mode: workerRuntime.mode === "supervised",
                   agent_session: toPublicAgentSession(agentSession),
                   agent_session_id: agentSession.session_id,
-                  use_agent_session_id: "This local worker-bearer session marker may be passed to room tools. The supplied bearer remains the only server credential.",
+                  use_agent_session_id: workerRuntime.mode === "worker"
+                    ? "This local worker-bearer session marker may be passed to room tools. The supplied bearer remains the only server credential."
+                    : "This exact daemon-supervised agent_session_id may be passed to room tools. The credential remains daemon-private.",
                 },
                 null,
                 2

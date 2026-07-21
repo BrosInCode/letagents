@@ -82,10 +82,12 @@ export {
 export { roomScopedApiCall } from "./runtime/room-api.js";
 export {
   borrowSupervisedWorkerCredential,
+  borrowCurrentSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
   checkpointSupervisedWorkerCursor,
   isRetryableSupervisorBridgeError,
   scheduleSupervisedWorkerCursorCheckpoint,
+  resolveCurrentSupervisedWorkerSession,
 } from "./runtime/supervisor-bridge.js";
 export {
   autoJoinFromContext,
