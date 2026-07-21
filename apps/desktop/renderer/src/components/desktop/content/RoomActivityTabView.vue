@@ -570,8 +570,7 @@ function truthfulTone(agent: DesktopSupervisorManifestEntry): string { return ro
 function truthfulLabel(agent: DesktopSupervisorManifestEntry): string { return supervisedAgentDisplayLabel(agent.displayName, agent.id); }
 function truthfulSummary(agent: DesktopSupervisorManifestEntry): string { return roomAgentDeliverySummary(agent.roomAgentState!); }
 function canReconnect(agent: DesktopSupervisorManifestEntry): boolean {
-  return agent.provider === "codex"
-    && agent.deliveryMode === "daemon_inbox"
+  return agent.deliveryMode === "daemon_inbox"
     && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials";
 }
 function selectLegacyAgent(key: string): void { selectedTruthfulId.value = null; selectedLiveKey.value = key; }

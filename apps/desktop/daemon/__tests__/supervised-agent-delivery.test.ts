@@ -190,6 +190,68 @@ test("bootstrap is one-time and a successor resumes its persisted cursor instead
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a retiring generation commits its observed bootstrap tail before a successor can poll", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bootstrap-fence-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let authority = true;
+    const first = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      latest: async () => { authority = false; return { messages: [{ id: "50" }] }; },
+      poll: async () => { throw new Error("retired generation must not poll"); },
+      publish: async () => {},
+    }, async () => authority, 0);
+    await first.poll(agent);
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "50");
+    const after: Array<string | null> = [];
+    const successor = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
+      latest: async () => ({ messages: [{ id: "999" }] }),
+      poll: async ({ afterMessageId }) => {
+        after.push(afterMessageId);
+        return { messages: [{ id: "51", activation: { for_current_agent: { decision: "activate" } } }] };
+      },
+      publish: async () => {},
+    }, currentAuthority, 0);
+    await successor.poll({ ...agent, daemonGeneration: 2, bearer: "successor" });
+    assert.deepEqual(after, ["50"], "the successor inherits the predecessor boundary rather than re-tailing at 999");
+    await first.fenceAndDrain(); await successor.fenceAndDrain(); await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("silent messages advance the cursor but never enter FIFO, and paginated poll pages drain once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-silent-pages-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "10" });
+    const after: Array<string | null> = [];
+    const turns: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      turns.push((request.sourceMessage as { id: string }).id);
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+    }), {
+      poll: async ({ afterMessageId }) => {
+        after.push(afterMessageId);
+        if (afterMessageId === "10") return { has_more: true, messages: [
+          { id: "11", activation: { for_current_agent: { decision: "silent" } } },
+          { id: "12", activation: { for_current_agent: { decision: "activate", reason: "mention" } } },
+        ] };
+        if (afterMessageId === "12") return { has_more: false, messages: [
+          { id: "13", activation: { for_current_agent: { decision: "unaddressed" } } },
+          { id: "14", activation: { for_current_agent: { decision: "activate", reason: "everyone" } } },
+        ] };
+        return { messages: [] };
+      },
+      publish: async () => {},
+    }, currentAuthority, 0);
+    await delivery.poll(agent);
+    await delivery.poll(agent);
+    assert.deepEqual(after, ["10", "12"]);
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "14");
+    assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.source_message_id), ["12", "14"]);
+    assert.deepEqual(turns, ["12", "14"]);
+    await delivery.fenceAndDrain(); await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a publish retry reuses the persisted terminal reply without rerunning the turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-"));
   try {

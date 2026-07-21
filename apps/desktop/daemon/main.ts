@@ -80,6 +80,14 @@ function hostGrantApiOrigin(value: string): string {
   return url.origin;
 }
 
+function lastRoomMessageId(messages: readonly Record<string, unknown>[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const id = messages[index]?.id;
+    if (typeof id === "string" && id.trim()) return id;
+  }
+  return null;
+}
+
 /** The daemon talks to the room API only through the live worker bearer. */
 const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   async poll(input) {
@@ -520,6 +528,8 @@ export class SupervisorDaemon {
   private readonly pendingResumeBindings = new Map<string, PendingResumeBinding>();
   /** Installed by the desktop over the local socket; intentionally never serialized. */
   private readonly hostGrants = new Map<string, InstalledHostGrant>();
+  /** Initial-tail reads are authority-bearing admission operations. */
+  private readonly bootstrapOperations = new Set<Promise<unknown>>();
   private readonly nowMs: () => number;
   private readonly setRecoveryTimeout: typeof setTimeout;
   private readonly clearRecoveryTimeout: typeof clearTimeout;
@@ -532,7 +542,7 @@ export class SupervisorDaemon {
   private resolveHandoffCompletion!: () => void;
   private rejectHandoffCompletion!: (error: unknown) => void;
 
-  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp) {
+  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp) {
     this.handoffCompletion = new Promise<void>((resolve, reject) => {
       this.resolveHandoffCompletion = resolve;
       this.rejectHandoffCompletion = reject;
@@ -720,6 +730,13 @@ export class SupervisorDaemon {
           grant_expires_at: String(params.grant_expires_at ?? ""),
           daemon_generation: Number(params.daemon_generation ?? NaN),
         });
+      }
+      if (request.method === "supervisor.bootstrap_room_ingress") {
+        const params = this.paramsRecord(request.params);
+        return this.trackBootstrap(this.bootstrapRoomIngress({
+          entry_id: String(params.entry_id ?? ""),
+          daemon_generation: Number(params.daemon_generation ?? NaN),
+        }));
       }
       if (request.method === "supervisor.borrow_worker_credential") {
         const params = this.paramsRecord(request.params);
@@ -1261,6 +1278,11 @@ export class SupervisorDaemon {
   private async prepareHandoff(): Promise<void> {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
+    // A bootstrap that already read tail N must commit N before lock/socket
+    // release. Otherwise a successor could establish a later tail and skip a
+    // message that raced this handoff. New bootstrap requests are rejected by
+    // the public fence above; this only drains operations admitted before it.
+    await Promise.allSettled([...this.bootstrapOperations]);
     // Retire secret custody synchronously with the public handoff fence. The
     // dispatch preflight then proves every native return is journaled before
     // the acknowledgement can authorize Electron to replace this daemon.
@@ -1276,6 +1298,13 @@ export class SupervisorDaemon {
         (error) => this.rejectHandoffCompletion(error),
       );
     }, 25).unref();
+  }
+
+  private trackBootstrap<T>(operation: Promise<T>): Promise<T> {
+    this.bootstrapOperations.add(operation);
+    const clear = () => this.bootstrapOperations.delete(operation);
+    void operation.then(clear, clear);
+    return operation;
   }
 
   private paramsRecord(value: unknown): Record<string, unknown> {
@@ -3638,6 +3667,45 @@ export class SupervisorDaemon {
       }
       this.requestConvergence(entry.id);
       return { status: "installed" };
+    });
+  }
+
+  /**
+   * Establish the first daemon-inbox cursor while the entry is still paused.
+   * This is deliberately before provider start/reachability: a fresh agent
+   * must not be advertised and then have its initial tail move past a message
+   * already addressed to it. The cursor is durable even if this generation
+   * loses authority after the HTTP read, so a successor resumes this exact
+   * boundary instead of reading a newer tail and skipping the intervening
+   * message.
+   */
+  private async bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number }): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
+    return this.serializeEntryTick(input.entry_id, async () => {
+      if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
+      const entry = await this.store.getEntry(input.entry_id);
+      if (!entry || !this.requiresHostGrant(entry) || entry.desired_state !== "paused") return { status: "stale", last_observed_message_id: null };
+      const existing = await this.supervisedInbox.cursor(entry.id);
+      if (existing) return { status: "existing", last_observed_message_id: existing.last_observed_message_id };
+      const grant = this.currentHostGrant(entry);
+      const latest = this.supervisedDeliveryHttp.latest;
+      if (!grant || !latest) throw new Error("A supervised room tail reader is required before activation.");
+      const minted = await this.supervisorGrantHttp.createWorkerSession({
+        apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+        grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
+        // Same logical worker identity as the later live binding. The bearer
+        // is held only for this request and is never persisted or exposed.
+        agentInstanceId: `daemon:${entry.id}`,
+      });
+      const tail = await latest({ roomId: entry.room_id, apiUrl: grant.apiUrl, bearer: minted.bearer, signal: new AbortController().signal });
+      // Do not re-check singleton authority before this durable write. Once a
+      // generation observed tail N, every successor must inherit N rather
+      // than advancing the initial boundary beyond a message that raced it.
+      const tailId = lastRoomMessageId(tail.messages ?? []);
+      const result = await this.supervisedInbox.bootstrapCursor({
+        agent_id: entry.id, room_id: entry.room_id, last_observed_message_id: tailId,
+      });
+      if (!result.created) return { status: "existing", last_observed_message_id: result.last_observed_message_id };
+      return { status: "bootstrapped", last_observed_message_id: tailId };
     });
   }
 
