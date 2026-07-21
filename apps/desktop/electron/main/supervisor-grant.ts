@@ -29,6 +29,7 @@ type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: stri
 type StoredGrantRegistry = { version: 3; grants: Record<string, StoredGrant> };
 const MANUAL_GRANT_KEY = "__manual__";
 const registryMutationTails = new Map<string, Promise<void>>();
+const agentLifecycleTails = new Map<string, Promise<void>>();
 
 export type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
 
@@ -140,6 +141,24 @@ async function withRegistryMutation<T>(mutation: () => Promise<T>): Promise<T> {
     release();
     await current;
     if (registryMutationTails.get(path) === current) registryMutationTails.delete(path);
+  }
+}
+
+/** Serialize cache validation and provisioning for one canonical agent entry. */
+async function withAgentGrantLifecycle<T>(agentKey: string, lifecycle: () => Promise<T>): Promise<T> {
+  const key = `${storePath()}\u0000${agentKey}`;
+  const previous = agentLifecycleTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const current = previous.catch(() => {}).then(() => gate);
+  agentLifecycleTails.set(key, current);
+  await previous.catch(() => {});
+  try {
+    return await lifecycle();
+  } finally {
+    release();
+    await current;
+    if (agentLifecycleTails.get(key) === current) agentLifecycleTails.delete(key);
   }
 }
 
@@ -268,6 +287,39 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
   });
 }
 
+async function removeDesktopSupervisorGrantForAgentIfCurrent(agentKey: string, grantId: string): Promise<void> {
+  await withRegistryMutation(async () => {
+    const registry = await readRegistry();
+    if (!registry || registry.grants[agentKey]?.grantId !== grantId) return;
+    delete registry.grants[agentKey];
+    await writeRegistry(registry);
+  });
+}
+
+function reusableDesktopSupervisorGrant(input: {
+  existing: Awaited<ReturnType<typeof readDesktopSupervisorGrantForAgent>>;
+  agentKey: string;
+  entryId: string;
+  hostId: string;
+  installationId: string;
+  allowedRoomIds: string[];
+}): boolean {
+  const { existing } = input;
+  if (!existing || existing.entryId !== input.entryId) return false;
+  const metadata = existing.metadata;
+  if (metadata.hostId !== input.hostId || metadata.installationId !== input.installationId) return false;
+  if (!Number.isFinite(new Date(metadata.expiresAt).getTime())
+    || new Date(metadata.expiresAt).getTime() <= Date.now()) return false;
+  if (metadata.allowedAgentKeys.length !== 1) return false;
+  try {
+    if (canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== input.agentKey) return false;
+  } catch {
+    return false;
+  }
+  const coveredRooms = new Set(metadata.allowedRoomIds);
+  return input.allowedRoomIds.every((roomId) => coveredRooms.has(roomId));
+}
+
 /** Backward-compatible main-process storage name. */
 export async function storeDesktopSupervisorGrantForAgent(input: {
   agentKey: string;
@@ -300,41 +352,56 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   }
   const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
   const entryId = input.entryId.trim();
-  const installationId = desktopSupervisorGrantInstallationId(input.hostId, entryId);
-  const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
-  if (existing && existing.entryId === entryId) {
-    return { ...existing, entryId };
-  }
-
+  const hostId = input.hostId.trim();
+  const installationId = desktopSupervisorGrantInstallationId(hostId, entryId);
+  const allowedRoomIds = [...new Set(input.allowedRoomIds.map((roomId) => roomId.trim()).filter(Boolean))];
   const request = options.apiFetch ?? apiFetch;
-  const response = await request<SupervisorGrantApiResponse>("/supervisor-host-grants", {
-    method: "POST",
-    body: JSON.stringify({
-      host_id: input.hostId,
-      installation_id: installationId,
-      allowed_room_ids: input.allowedRoomIds,
-      allowed_agent_keys: [agentKey],
-      ttl_ms: input.ttlMs,
-    }),
-  });
-  const metadata = toMetadata(response);
-  try {
-    if (metadata.installationId !== installationId || metadata.allowedAgentKeys.length !== 1
-      || canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== agentKey) {
-      throw new Error("The provisioned desktop grant was not scoped to the requested agent entry.");
+  return withAgentGrantLifecycle(agentKey, async () => {
+    const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
+    if (existing && reusableDesktopSupervisorGrant({
+      existing, agentKey, entryId, hostId, installationId, allowedRoomIds,
+    })) {
+      return {
+        metadata: existing.metadata,
+        token: existing.token,
+        entryId,
+        lastInstalledDaemonGeneration: existing.lastInstalledDaemonGeneration,
+      };
     }
-    await replaceDesktopSupervisorGrantForAgent({
-      agentKey, metadata, token: response.supervisor_grant, entryId,
-      lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
-    }, { storage });
-    return {
-      metadata, token: response.supervisor_grant, entryId,
-      lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
-    };
-  } catch (error) {
-    await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
-    throw error;
-  }
+    if (existing) {
+      await request(`/supervisor-host-grants/${encodeURIComponent(existing.metadata.grantId)}`, { method: "DELETE" });
+      await removeDesktopSupervisorGrantForAgentIfCurrent(agentKey, existing.metadata.grantId);
+    }
+
+    const response = await request<SupervisorGrantApiResponse>("/supervisor-host-grants", {
+      method: "POST",
+      body: JSON.stringify({
+        host_id: hostId,
+        installation_id: installationId,
+        allowed_room_ids: allowedRoomIds,
+        allowed_agent_keys: [agentKey],
+        ttl_ms: input.ttlMs,
+      }),
+    });
+    const metadata = toMetadata(response);
+    try {
+      if (metadata.installationId !== installationId || metadata.allowedAgentKeys.length !== 1
+        || canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== agentKey) {
+        throw new Error("The provisioned desktop grant was not scoped to the requested agent entry.");
+      }
+      await replaceDesktopSupervisorGrantForAgent({
+        agentKey, metadata, token: response.supervisor_grant, entryId,
+        lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+      }, { storage });
+      return {
+        metadata, token: response.supervisor_grant, entryId,
+        lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+      };
+    } catch (error) {
+      await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+      throw error;
+    }
+  });
 }
 
 export async function clearDesktopSupervisorGrant(): Promise<void> {
