@@ -84,6 +84,16 @@ test("app restart same daemon generation reinstalls idempotently without a hando
   assert.equal(h.events.some((event) => event.includes("provision")), false);
 });
 
+test("Reconnect repairs only the exact credential binding and does not restart the provider", async () => {
+  const h = harness();
+  h.grants.set("owner/supervised_launch_1234567", { metadata: metadata("owner/supervised_launch_1234567"), token: "secret_same", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 7 });
+  await h.coordinator.reconnectEntry(entry());
+  assert.equal(h.events.filter((event) => event === "install:7").length, 1);
+  assert.equal(h.events.some((event) => event.startsWith("create:")), false);
+  assert.equal(h.events.some((event) => event.startsWith("provision:")), false);
+  assert.equal(entry().providerPid, 4242, "Reconnect retains the existing provider runtime/continuation.");
+});
+
 test("restart recovery repairs a lowercase mapping before provisioning and installing", async () => {
   const h = harness();
   const exactKey = "EmmyMay/desktop-codex-canonical";

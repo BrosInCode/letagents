@@ -46,6 +46,30 @@ export class SupervisedAgentInboxStore {
     this.database?.close(); this.database = null; this.initializing = null;
   }
 
+  /**
+   * Install the initial room boundary exactly once. A fresh agent must begin
+   * at the current tail, while an existing cursor (including a null cursor for
+   * an initially empty room) is durable handoff/restart progress and wins.
+   */
+  async bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<{ agent_id: string; room_id: string; last_observed_message_id: string | null; created: boolean }> {
+    this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
+    if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const existing = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
+      if (existing) {
+        if (String(existing.room_id) !== input.room_id) throw new Error("Supervised inbox ingress room changed for the exact agent identity.");
+        return {
+          agent_id: input.agent_id,
+          room_id: input.room_id,
+          last_observed_message_id: existing.last_observed_message_id === null ? null : String(existing.last_observed_message_id),
+          created: false,
+        };
+      }
+      run(database.prepare("INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)"), input.agent_id, input.room_id, input.last_observed_message_id, this.now());
+      return { agent_id: input.agent_id, room_id: input.room_id, last_observed_message_id: input.last_observed_message_id, created: true };
+    }));
+  }
+
   /** One transaction: idempotently insert activated messages and persist the poll cursor. */
   async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; expected_cursor?: string | null; messages: readonly IngressMessage[] }): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");

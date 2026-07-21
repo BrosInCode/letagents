@@ -27,11 +27,18 @@ export type SupervisedAuthorityRevalidator = (authority: SupervisedDeliveryAutho
 
 export type SupervisedPollResponse = {
   messages?: Array<Record<string, unknown>>;
-  last_observed_message_id?: string | null;
+  /** REST poll pagination fact. The response deliberately has no MCP cursor. */
+  has_more?: boolean;
 };
 
 export interface SupervisedDeliveryHttp {
   poll(input: { roomId: string; apiUrl: string; bearer: string; afterMessageId: string | null; signal: AbortSignal }): Promise<SupervisedPollResponse>;
+  /**
+   * Read the room tail before the first ever daemon cursor is installed. This
+   * is intentionally a separate REST history read: an uninitialised poll
+   * means "from the beginning", which must never become a new agent's inbox.
+   */
+  latest?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ messages?: Array<Record<string, unknown>> }>;
   publish(input: { roomId: string; apiUrl: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<void>;
 }
 
@@ -233,7 +240,26 @@ export class SupervisedAgentDelivery {
   private async pollOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     try {
       if (!await this.hasAuthority(agent, controller)) return;
-      const cursor = await this.inbox.cursor(agent.agentId);
+      let cursor = await this.inbox.cursor(agent.agentId);
+      if (!cursor) {
+        // New identity: establish a durable boundary at the current tail.
+        // The transaction only creates the cursor if one is still absent, so
+        // another exact-generation recovery cannot move it backwards. A
+        // message that races after this read remains after the cursor and is
+        // picked up by the normal poll; history before the read is skipped.
+        // Legacy in-memory test adapters predate the REST tail operation and
+        // model an empty room. Real daemon ingress always supplies `latest`
+        // (see productionSupervisedDeliveryHttp); it is the only production
+        // path allowed to establish this boundary.
+        const tail = this.http.latest
+          ? await this.http.latest({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, signal: controller.signal })
+          : { messages: [] as Array<Record<string, unknown>> };
+        if (!await this.hasAuthority(agent, controller)) return;
+        const tailId = lastMessageId(tail.messages ?? []);
+        await this.inbox.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: tailId });
+        cursor = await this.inbox.cursor(agent.agentId);
+        if (!cursor || !await this.hasAuthority(agent, controller)) return;
+      }
       const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal });
       if (!await this.hasAuthority(agent, controller)) return;
       const messages = activatedMessages(response.messages ?? []);
@@ -241,7 +267,11 @@ export class SupervisedAgentDelivery {
         agent_id: agent.agentId,
         room_id: agent.roomId,
         expected_cursor: cursor?.last_observed_message_id ?? null,
-        last_observed_message_id: stringOrNull(response.last_observed_message_id),
+        // REST poll returns no last_observed_message_id. Every returned
+        // message still advances the durable cursor, including silent and
+        // unaddressed messages, so they remain observed context without
+        // becoming paid model work.
+        last_observed_message_id: lastMessageId(response.messages ?? []),
         messages,
       });
       // Ingest can be deliberately slow. Do not create detached delivery work
@@ -561,12 +591,24 @@ function activatedMessages(messages: readonly Record<string, unknown>[]): Ingres
       ? (activation as Record<string, unknown>).for_current_agent
       : null;
     const id = stringOrNull(message.id);
-    if (!id || !current || typeof current !== "object" || Array.isArray(current)) return [];
+    // This is the server's routing decision. Do not infer activation from
+    // mention-looking text and do not enqueue `silent`/`unaddressed`/unknown
+    // decisions: they are observed solely by cursor progress.
+    if (!id || !current || typeof current !== "object" || Array.isArray(current)
+      || (current as Record<string, unknown>).decision !== "activate") return [];
     return [{ source_message_id: id, source_message: message, activation: current as InboxActivation }];
   });
 }
 
 function stringOrNull(value: unknown): string | null { return typeof value === "string" && value.trim() ? value : null; }
+
+function lastMessageId(messages: readonly Record<string, unknown>[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const id = stringOrNull(messages[index]?.id);
+    if (id) return id;
+  }
+  return null;
+}
 
 function persistedReplyText(outcome: string | null): string | null {
   if (!outcome) return null;
