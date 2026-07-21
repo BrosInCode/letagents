@@ -2,7 +2,7 @@ import type { Express, Response } from "express";
 
 import {
   advanceSupervisorHostGrantGeneration,
-  createRoomAgentSession,
+  createOrRotateSupervisorWorkerSession,
   createSupervisorHostGrant,
   endRoomAgentSession,
   getAgentIdentityByCanonicalKey,
@@ -159,7 +159,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       res.status(409).json({ error: "Host handoff lost its generation fence." });
       return;
     }
-    res.json({ grant_id: advanced.grant_id, generation: advanced.current_generation });
+    res.json({ ...advanced.grant, supervisor_grant: advanced.token });
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions", async (req: AuthenticatedRequest, res) => {
@@ -176,6 +176,11 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     const body = req.body as Record<string, unknown>;
     const roomId = typeof body.room_id === "string" ? body.room_id.trim() : "";
     const agentKey = typeof body.agent_key === "string" ? body.agent_key.trim() : "";
+    const agentInstanceId = typeof body.agent_instance_id === "string" ? body.agent_instance_id.trim().slice(0, 255) : "";
+    if (!agentInstanceId) {
+      res.status(400).json({ error: "agent_instance_id is required for an idempotent supervisor worker session." });
+      return;
+    }
     if (!grant.allowed_room_ids.includes(roomId) || !grant.allowed_agent_keys.includes(agentKey)) {
       res.status(403).json({ error: "Grant does not authorize that room and agent identity." });
       return;
@@ -188,18 +193,25 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     const displayName = typeof body.display_name === "string" && body.display_name.trim() ? body.display_name.trim().slice(0, 64) : agent.display_name;
     const ideLabel = typeof body.ide_label === "string" && body.ide_label.trim() ? body.ide_label.trim().slice(0, 64) : "Supervisor worker";
     try {
-      const session = await createRoomAgentSession({
+      const created = await createOrRotateSupervisorWorkerSession({
         room_id: roomId, session_kind: "worker", runtime: typeof body.runtime === "string" ? body.runtime.slice(0, 64) : "supervisor",
         registration_liveness: { host_id: grant.host_id, host_kind: "supervisor", host_label: grant.installation_id },
         repo_branch: typeof body.repo_branch === "string" ? body.repo_branch.slice(0, 255) : null,
         actor_label: buildAgentActorLabel({ display_name: displayName, owner_label: agent.owner_label, ide_label: ideLabel }),
-        agent_key: agent.canonical_key, agent_instance_id: typeof body.agent_instance_id === "string" ? body.agent_instance_id.slice(0, 255) : null,
+        agent_key: agent.canonical_key, agent_instance_id: agentInstanceId,
         display_name: displayName, owner_account_id: grant.owner_account_id, owner_label: agent.owner_label, ide_label: ideLabel,
         supervisor_grant_id: grant.grant_id, worker_bearer_expires_at: cappedExpiry(grant.expires_at),
         supervisor_grant_fence: fence(grant),
       });
       // Never hand the supervisor an owner-capable session token.
-      res.status(201).json({ ...session, session_token: undefined });
+      res.status(201).json({
+        ...created.session,
+        session_token: undefined,
+        worker_bearer_id: created.bearer.bearer_id,
+        worker_bearer_expires_at: created.bearer.expires_at,
+        worker_bearer_generation: created.bearer.generation,
+        worker_bearer_capabilities: created.bearer.capabilities,
+      });
     } catch (error) {
       respondWithInternalError(res, "POST /supervisor-host-grants/:grantId/worker-sessions", error, "Worker session could not be minted.");
     }
