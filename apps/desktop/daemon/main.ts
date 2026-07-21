@@ -8,7 +8,7 @@ import { DaemonControlSocket } from "./control-socket.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { WorkDurabilityStore } from "./durability-store.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
-import { ManifestStore } from "./manifest-store.js";
+import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
 import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionSpawn, ProviderActionStreamEvent, ProviderActionTerminal, ProviderTurnControlResult } from "./provider-action-port.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
@@ -498,6 +498,8 @@ export class SupervisorDaemon {
   private readonly providerCallbacks = new Set<Promise<void>>();
   /** Handoff drains only dispatches that crossed the native-effect boundary. */
   private readonly providerDispatchReservations = new Set<Promise<void>>();
+  /** Fatal returned-handle cleanup failure permanently blocks authority release. */
+  private fatalProviderDispatchError: unknown = null;
   private readonly activeProviderDispatches = new Map<symbol, {
     entryId: string; executionGenerationId: string; daemonGeneration: number;
   }>();
@@ -517,6 +519,7 @@ export class SupervisorDaemon {
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private handoffScheduled = false;
+  private handoffTeardownScheduled = false;
   /** Resolves only once this daemon has relinquished every authority surface. */
   private readonly handoffCompletion: Promise<void>;
   private resolveHandoffCompletion!: () => void;
@@ -579,7 +582,7 @@ export class SupervisorDaemon {
       if (request.method === "daemon.negotiate") return this.status();
       if (request.method === "daemon.status") return this.status();
       if (request.method === "daemon.prepare_handoff") {
-        this.scheduleHandoff();
+        await this.prepareHandoff();
         return { accepted: true, generation: this.singleton.currentGeneration };
       }
       if (request.method === "manifest.list") return this.entriesWithDerivedLiveness((await this.store.load()).entries);
@@ -840,7 +843,9 @@ export class SupervisorDaemon {
     // Remote grant/capability waits remain freely cancellable, but once a
     // native provider dispatch begins its exact returned identity must be
     // persisted before the shared stores are closed for successor attach.
+    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
     await Promise.all([...this.providerDispatchReservations]);
+    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) captureSync(dispose);
     this.liveDisposers.clear();
     // Complete every local cleanup step even if one fails. The process-level
@@ -1246,12 +1251,18 @@ export class SupervisorDaemon {
     };
   }
 
-  private scheduleHandoff(): void {
-    if (this.handoffScheduled) return;
-    this.handoffScheduled = true;
+  private async prepareHandoff(): Promise<void> {
+    if (this.handoffTeardownScheduled) return;
+    if (!this.handoffScheduled) this.handoffScheduled = true;
     // Retire secret custody synchronously with the public handoff fence. The
-    // delayed teardown exists only to flush the socket acknowledgement.
+    // dispatch preflight then proves every native return is journaled before
+    // the acknowledgement can authorize Electron to replace this daemon.
     this.hostGrants.clear();
+    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
+    await Promise.all([...this.providerDispatchReservations]);
+    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
+    this.handoffTeardownScheduled = true;
+    // Delayed teardown exists only to flush the successful socket reply.
     setTimeout(() => {
       void this.stopForHandoff().then(
         () => this.resolveHandoffCompletion(),
@@ -2157,20 +2168,29 @@ export class SupervisorDaemon {
     return next;
   }
 
-  private reserveProviderDispatch(entryId: string, executionGenerationId: string): { token: symbol; release: () => void } {
+  private reserveProviderDispatch(entryId: string, executionGenerationId: string): { token: symbol; release: (error?: unknown) => void } {
     const token = Symbol(`provider-dispatch:${entryId}`);
     let release!: () => void;
-    const reservation = new Promise<void>((resolve) => { release = resolve; });
+    let reject!: (error: unknown) => void;
+    const reservation = new Promise<void>((resolve, rejectReservation) => { release = resolve; reject = rejectReservation; });
+    // stopForHandoff awaits the original rejected promise. Outside handoff,
+    // keep a rejection observed so an injected persistence+stop failure does
+    // not become a process-level unhandled rejection.
+    void reservation.catch(() => undefined);
     this.providerDispatchReservations.add(reservation);
     this.activeProviderDispatches.set(token, {
       entryId, executionGenerationId, daemonGeneration: this.singleton.currentGeneration,
     });
     return {
       token,
-      release: () => {
+      release: (error) => {
         this.activeProviderDispatches.delete(token);
         this.providerDispatchReservations.delete(reservation);
-        release();
+        if (error === undefined) release();
+        else {
+          this.fatalProviderDispatchError ??= error;
+          reject(error);
+        }
       },
     };
   }
@@ -2199,15 +2219,36 @@ export class SupervisorDaemon {
     await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, executionGenerationId);
   }
 
+  /** Stop and record the real terminal for a returned handle that could not be journaled. */
+  private async fenceUnpersistedReturnedProvider(
+    attempt: Awaited<ReturnType<WorkDurabilityStore["getAttempt"]>>,
+    executionGenerationId: string,
+    generation: number,
+    handle: ProviderActionHandle,
+  ): Promise<void> {
+    const terminal = await this.providerPort!.stop(handle, {
+      actionId: `manifest:unjournaled-dispatch-fence:${executionGenerationId}`,
+    });
+    await this.durability.recordTerminal(attempt.work_attempt_id, executionGenerationId, {
+      ...this.terminalPayload(terminal, "daemon-provider"), generation, actor: "daemon-provider",
+    });
+    await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, executionGenerationId);
+  }
+
   /** A real handle returned after Pause/Stop won the race; fence that exact process. */
   private async fenceReturnedProviderAfterControl(
     entryId: string,
     handle: ProviderActionHandle,
     executionGenerationId: string,
     generation: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    // A control request bumps the epoch before it queues its durable manifest
+    // mutation. Drain that queue so the exact desired state, not a stale
+    // pre-control row, decides whether this returned provider must be stopped.
+    await this.serializeManifestMutation(async () => undefined);
     const current = await this.store.getEntry(entryId);
-    if (!current || current.desired_state === "running") return;
+    if (!current || current.desired_state === "running") return false;
+    await this.supervisedDelivery?.stop(entryId).catch(() => undefined);
     await this.transition(entryId, "stopping", current.condition, `desired state changed to ${current.desired_state} during provider dispatch`, "daemon-convergence");
     const terminal = await this.providerPort!.stop(handle, {
       actionId: `manifest:${entryId}:${current.desired_state}:dispatch-fence:${generation}`,
@@ -2229,13 +2270,28 @@ export class SupervisorDaemon {
       }
     }
     await this.observeProviderExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle);
+    return true;
+  }
+
+  private async revalidateReturnedProviderControl(
+    entryId: string,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+    generation: number,
+    expectedEpoch: number,
+  ): Promise<"current" | "fenced" | "handoff"> {
+    if (this.handoffScheduled) return "handoff";
+    if (this.currentEntryControlEpoch(entryId) === expectedEpoch) return "current";
+    return await this.fenceReturnedProviderAfterControl(entryId, handle, executionGenerationId, generation)
+      ? "fenced"
+      : this.handoffScheduled ? "handoff" : "current";
   }
 
   private async convergeManifestEntry(entryId: string): Promise<void> {
     if (this.handoffScheduled || !this.providerPort) return;
     let entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
     if (!entry) return;
-    const launchControlEpoch = this.currentEntryControlEpoch(entryId);
+    let launchControlEpoch = this.currentEntryControlEpoch(entryId);
     if (!this.providerPort) throw new Error(`No daemon provider port is available for ${entry.provider}.`);
 
     if (entry.desired_state === "running") {
@@ -2382,6 +2438,8 @@ export class SupervisorDaemon {
         ...(devMcpServerEntryPath && entry.provider === "codex" ? { devMcpServerEntryPath } : {}),
       };
       let providerPersisted = false;
+      let providerDispatched = false;
+      let unpersistedReturnedProviderFenced = false;
       try {
         if (mintedAuthorization) {
           mintedHostSession = await this.recordMintedHostWorkerSession(entry, execution.execution_generation_id, mintedAuthorization);
@@ -2393,35 +2451,108 @@ export class SupervisorDaemon {
           return;
         }
         const dispatchReservation = this.reserveProviderDispatch(entry.id, execution.execution_generation_id);
-        let currentAfterDispatch: DaemonManifestEntry | null = null;
+        let fatalReservationError: unknown;
         try {
-          handle = resumed
-            ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
-            : await this.providerPort.spawn(spawn);
-          currentAfterDispatch = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-          if (this.handoffScheduled) {
-            await this.persistReturnedProviderForHandoff(
+          try {
+            handle = resumed
+              ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
+              : await this.providerPort.spawn(spawn);
+            providerDispatched = true;
+            await this.persistDispatchedProvider(
               dispatchReservation.token, entry.id, handle, execution.execution_generation_id,
             );
-          } else {
-            await this.persistProviderHandle(entry.id, handle, execution.execution_generation_id);
+            providerPersisted = true;
+            await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
+            if (this.handoffScheduled) {
+              // The successor attaches this exact durable continuation. Do not
+              // signal it or register callbacks owned by the retiring daemon.
+              return;
+            }
+            let control = await this.revalidateReturnedProviderControl(
+              entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
+            );
+            if (control === "handoff" || control === "fenced") return;
+            launchControlEpoch = this.currentEntryControlEpoch(entry.id);
+            // installProviderHandle has its own async listener-registration
+            // boundaries. The synchronous guard prevents it from starting room
+            // delivery if Pause/Stop/handoff wins during those awaits.
+            if (this.handoffScheduled) return;
+            await this.installProviderHandle(
+              entry.id,
+              handle,
+              execution.execution_generation_id,
+              () => !mintedHostSession
+                && !this.handoffScheduled
+                && this.currentEntryControlEpoch(entryId) === launchControlEpoch,
+            );
+            if (this.handoffScheduled) return;
+            control = await this.revalidateReturnedProviderControl(
+              entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
+            );
+            if (control === "handoff" || control === "fenced") return;
+            launchControlEpoch = this.currentEntryControlEpoch(entry.id);
+
+            if (mintedHostSession) {
+              control = await this.revalidateReturnedProviderControl(
+                entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
+              );
+              if (control === "handoff" || control === "fenced") return;
+              launchControlEpoch = this.currentEntryControlEpoch(entry.id);
+              try {
+                await this.bindMintedHostWorkerSession(
+                  entry.id,
+                  mintedHostSession,
+                  () => !this.handoffScheduled && this.currentEntryControlEpoch(entryId) === launchControlEpoch,
+                );
+              } catch (error) {
+                if (this.handoffScheduled) return;
+                control = await this.revalidateReturnedProviderControl(
+                  entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
+                );
+                if (control === "handoff" || control === "fenced") return;
+                await this.transition(
+                  entry.id,
+                  "recovering",
+                  "coordination_blocked",
+                  "Provider is running; waiting for desktop credential handoff.",
+                  "daemon-convergence",
+                );
+                return;
+              }
+              if (this.handoffScheduled) return;
+              control = await this.revalidateReturnedProviderControl(
+                entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
+              );
+              if (control === "handoff" || control === "fenced") return;
+              launchControlEpoch = this.currentEntryControlEpoch(entry.id);
+            }
+
+            // Last guard before terminal/bootstrap state and delivery logic
+            // continue outside this native dispatch reservation.
+            control = await this.revalidateReturnedProviderControl(
+              entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
+            );
+            if (control === "handoff" || control === "fenced") return;
+            launchControlEpoch = this.currentEntryControlEpoch(entry.id);
+          } catch (error) {
+            if (providerDispatched && !providerPersisted && handle) {
+              try {
+                await this.fenceUnpersistedReturnedProvider(
+                  attempt, execution.execution_generation_id, generationNumber, handle,
+                );
+                unpersistedReturnedProviderFenced = true;
+              } catch (cleanupError) {
+                fatalReservationError = cleanupError;
+                throw new AggregateError([error, cleanupError], "Returned provider could not be journaled or exactly fenced.");
+              }
+            }
+            throw error;
           }
-          providerPersisted = true;
-          await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
-          if (this.handoffScheduled) {
-            // The successor attaches this exact durable continuation. Do not
-            // signal it or register callbacks owned by the retiring daemon.
-            return;
-          }
-          await this.installProviderHandle(entry.id, handle, execution.execution_generation_id);
         } finally {
-          dispatchReservation.release();
-        }
-        if (!currentAfterDispatch) {
-          await this.fenceReturnedProviderAfterControl(entry.id, handle, execution.execution_generation_id, generationNumber);
-          return;
+          dispatchReservation.release(fatalReservationError);
         }
       } catch (error) {
+        if (providerPersisted && this.handoffScheduled) return;
         // Once the provider reference is durable, do not convert a local
         // post-spawn bookkeeping/credential issue into a terminal execution.
         // The exact provider remains the recovery target; no stop, restart,
@@ -2436,6 +2567,11 @@ export class SupervisorDaemon {
           );
           return;
         }
+        // A native handle that actually returned is never an "unlaunched"
+        // generation. Persistence normally cannot fail here because the
+        // active reservation falls back through the retirement gate, but an
+        // unexpected fault must still avoid fabricating terminal evidence.
+        if (providerDispatched || unpersistedReturnedProviderFenced) throw error;
         const terminal = this.terminalPayload({
           endedAt: new Date().toISOString(), exitCode: null, signal: null,
           terminalCause: "protocol_error", providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
@@ -2449,23 +2585,6 @@ export class SupervisorDaemon {
           throw new Error(`Provider launch failed (${launchMessage}) and durable cleanup failed (${cleanupMessage}).`, { cause: error });
         }
         throw error;
-      }
-      if (mintedHostSession) {
-        try {
-          // The handle is now persisted and installed. A binding failure is a
-          // credential handoff failure, not a provider failure: retain this
-          // exact process/thread and let a later install rotate/rebind it.
-          await this.bindMintedHostWorkerSession(entry.id, mintedHostSession);
-        } catch {
-          await this.transition(
-            entry.id,
-            "recovering",
-            "coordination_blocked",
-            "Provider is running; waiting for desktop credential handoff.",
-            "daemon-convergence",
-          );
-          return;
-        }
       }
       if (["failed", "stopped"].includes(handle.observedState)
         || (handle.observedState === "idle" && entry.delivery_mode !== "daemon_inbox")) {
@@ -2649,6 +2768,29 @@ export class SupervisorDaemon {
   }
 
   /**
+   * Select normal or retirement persistence while the exact native dispatch
+   * reservation is live. If handoff wins the normal commit fence, retry only
+   * through the narrow retirement gate before releasing the reservation.
+   */
+  private async persistDispatchedProvider(
+    token: symbol,
+    entryId: string,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+  ): Promise<void> {
+    if (this.handoffScheduled) {
+      await this.persistReturnedProviderForHandoff(token, entryId, handle, executionGenerationId);
+      return;
+    }
+    try {
+      await this.persistProviderHandle(entryId, handle, executionGenerationId);
+    } catch (error) {
+      if (!this.handoffScheduled || !(error instanceof DaemonFenceLostError)) throw error;
+      await this.persistReturnedProviderForHandoff(token, entryId, handle, executionGenerationId);
+    }
+  }
+
+  /**
    * The sole mutation admitted after prepare_handoff: finish journaling a
    * native dispatch that began while this exact daemon generation owned the
    * singleton. The reservation is deleted before authority/store release.
@@ -2667,35 +2809,59 @@ export class SupervisorDaemon {
       || reservation.daemonGeneration !== this.singleton.currentGeneration) {
       throw new DaemonFenceLostError("Retiring provider dispatch reservation is no longer exact.");
     }
-    await this.singleton.assertCurrent();
-    const current = await this.store.getEntry(entryId);
-    if (!current || current.work_attempt_id !== handle.workAttemptId) {
-      throw new DaemonFenceLostError("Retiring provider dispatch no longer matches the durable work attempt.");
-    }
-    const updated: DaemonManifestEntry = {
-      ...current,
-      run_id: executionGenerationId,
-      deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
-      provider_ref: {
-        work_attempt_id: handle.workAttemptId,
-        provider_continuation_id: handle.providerContinuationId,
-        provider_connection: handle.providerConnection ?? null,
-        execution_generation_id: executionGenerationId,
-      },
-    };
-    const next = await this.store.replaceEntry(this.manifestGeneration, updated, (commit) => this.serializeManifestCommit(async () => {
-      const active = this.activeProviderDispatches.get(token);
-      if (!this.handoffScheduled || active !== reservation
-        || active.daemonGeneration !== this.singleton.currentGeneration) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await this.singleton.assertCurrent();
+      const activeBeforeRead = this.activeProviderDispatches.get(token);
+      if (!this.handoffScheduled || activeBeforeRead !== reservation
+        || activeBeforeRead.daemonGeneration !== this.singleton.currentGeneration) {
         throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
       }
-      await this.singleton.assertCurrent();
-      await commit();
-    }));
-    this.manifestGeneration = next.generation;
+      const snapshot = await this.store.load();
+      const current = snapshot.entries.find((candidate) => candidate.id === entryId);
+      if (!current || current.work_attempt_id !== handle.workAttemptId) {
+        throw new DaemonFenceLostError("Retiring provider dispatch no longer matches the durable work attempt.");
+      }
+      if (current.provider_ref?.execution_generation_id === executionGenerationId
+        && current.provider_ref.provider_continuation_id === handle.providerContinuationId) {
+        this.manifestGeneration = snapshot.generation;
+        return;
+      }
+      const updated: DaemonManifestEntry = {
+        ...current,
+        run_id: executionGenerationId,
+        deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
+        provider_ref: {
+          work_attempt_id: handle.workAttemptId,
+          provider_continuation_id: handle.providerContinuationId,
+          provider_connection: handle.providerConnection ?? null,
+          execution_generation_id: executionGenerationId,
+        },
+      };
+      try {
+        const next = await this.store.replaceEntry(snapshot.generation, updated, (commit) => this.serializeManifestCommit(async () => {
+          const active = this.activeProviderDispatches.get(token);
+          if (!this.handoffScheduled || active !== reservation
+            || active.daemonGeneration !== this.singleton.currentGeneration) {
+            throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
+          }
+          await this.singleton.assertCurrent();
+          await commit();
+        }));
+        this.manifestGeneration = next.generation;
+        return;
+      } catch (error) {
+        if (!(error instanceof ManifestConflictError)) throw error;
+      }
+    }
+    throw new DaemonFenceLostError("Retiring provider dispatch persistence could not converge on the latest manifest generation.");
   }
 
-  private async installProviderHandle(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): Promise<void> {
+  private async installProviderHandle(
+    entryId: string,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+    mayStartDelivery: () => boolean = () => true,
+  ): Promise<void> {
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveHandles.set(entryId, handle);
     const binding = await this.workerBindings.get(entryId);
@@ -2748,7 +2914,7 @@ export class SupervisorDaemon {
     }, this.nativeHeartbeatIntervalMs);
     heartbeat.unref();
     this.liveDisposers.set(entryId, [disposeExit, disposeStream, () => clearInterval(heartbeat)]);
-    void this.startSupervisedDelivery(entryId).catch(() => undefined);
+    if (mayStartDelivery()) void this.startSupervisedDelivery(entryId).catch(() => undefined);
   }
 
   private async stageWorkerBindingAfterResume(
@@ -3081,7 +3247,10 @@ export class SupervisorDaemon {
     return this.serializeEntryTick(input.entry_id, () => this.bindWorkerSessionLocked(input));
   }
 
-  private async bindWorkerSessionLocked(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; credential_ref?: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
+  private async bindWorkerSessionLocked(
+    input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; credential_ref?: string; api_url: string },
+    mayPublish: () => boolean = () => true,
+  ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
     if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
@@ -3154,10 +3323,10 @@ export class SupervisorDaemon {
         },
       };
     });
-    if (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable") {
+    if (mayPublish() && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
       await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
     }
-    void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
+    if (mayPublish()) void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
 
@@ -3383,14 +3552,14 @@ export class SupervisorDaemon {
   /** Provider identity has already been persisted when this binds the raw bearer. */
   private async bindMintedHostWorkerSession(entryId: string, session: {
     agentSessionId: string; bearer: string; bearerId: string; apiUrl: string; executionGenerationId: string;
-  }): Promise<void> {
+  }, mayPublish: () => boolean = () => true): Promise<void> {
     const entry = await this.store.getEntry(entryId);
     if (!entry || !entry.work_attempt_id || !entry.provider_ref || entry.provider_ref.execution_generation_id !== session.executionGenerationId || !this.currentHostGrant(entry)) return;
     await this.bindWorkerSessionLocked({
       entry_id: entry.id, room_id: entry.room_id, work_attempt_id: entry.work_attempt_id,
       execution_generation_id: session.executionGenerationId, agent_session_id: session.agentSessionId,
       agent_session_token: session.bearer, credential_ref: session.bearerId, api_url: session.apiUrl,
-    });
+    }, mayPublish);
   }
 
   /** Desktop-only local RPC. The host grant itself is never copied to SQLite, activity, or manifests. */
