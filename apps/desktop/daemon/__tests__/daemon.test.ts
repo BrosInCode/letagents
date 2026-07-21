@@ -818,6 +818,91 @@ test("daemon keeps empty wait results idle across the real stream handler and re
   }
 });
 
+test("daemon restart without Electron credential delivery retains inbox work and projects a safe waiting state", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.sqlite"), attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root, workerBindingsPath: join(env.root, "worker-bindings.json"),
+  };
+  const id = "credentialless_restart";
+  const workAttemptId = "attempt-credentialless";
+  const executionGenerationId = "generation-credentialless";
+  const credential = "memory-only-restart-credential";
+  const first = new SupervisorDaemon(paths, "darwin");
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    const firstInternals = first as unknown as {
+      putManifestEntry(entry: Record<string, unknown>): Promise<void>;
+      workerBindings: WorkerBindingStore;
+      supervisedInbox: import("../supervised-agent-inbox-store.js").SupervisedAgentInboxStore;
+    };
+    await firstInternals.putManifestEntry({
+      ...entry,
+      id,
+      room_id: "focus_restart",
+      provider: "codex",
+      delivery_mode: "daemon_inbox",
+      observed_state: "working",
+      work_attempt_id: workAttemptId,
+      provider_ref: {
+        work_attempt_id: workAttemptId,
+        provider_continuation_id: "thread-credentialless",
+        provider_connection: { kind: "codex_app_server", url: "ws://127.0.0.1:65534", pid: 44661, processIdentity: "fixture:44661" },
+        execution_generation_id: executionGenerationId,
+      },
+    });
+    await firstInternals.workerBindings.bind({
+      entry_id: id,
+      room_id: "focus_restart",
+      work_attempt_id: workAttemptId,
+      execution_generation_id: executionGenerationId,
+      agent_session_id: "agent_session_restart",
+      agent_session_token: credential,
+      api_url: "https://letagents.test",
+    });
+    await firstInternals.supervisedInbox.ingestPoll({
+      agent_id: id,
+      room_id: "focus_restart",
+      last_observed_message_id: "42",
+      messages: [
+        { source_message_id: "41", source_message: { id: "41", text: "queued before restart" }, activation: { decision: "activate" } },
+        { source_message_id: "42", source_message: { id: "42", text: "also queued" }, activation: { decision: "activate" } },
+      ],
+    });
+    const before = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+    assert.equal(before.room_agent_state?.inbox.state, "queued");
+    assert.equal(before.room_agent_state?.inbox.pending_count, 2);
+    await first.stop();
+
+    second = new SupervisorDaemon(paths, "darwin");
+    await second.start();
+    const status = await daemonRequest(paths.socketPath, "daemon.status");
+    assert.equal(status.ok, true, status.error);
+    const after = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0]!;
+    assert.equal(after.room_agent_state?.inbox.state, "waiting_for_desktop_credentials");
+    assert.equal(after.room_agent_state?.inbox.pending_count, 2, "restart preserves both durable FIFO items");
+    assert.deepEqual(after.delivery_receipts?.map((receipt) => [receipt.source_message_id, receipt.state]), [
+      ["41", "pending"],
+      ["42", "pending"],
+    ]);
+    assert.equal(after.room_agent_state?.turn.state, "idle", "missing credentials cannot invent an active provider turn");
+    const secondInternals = second as unknown as { workerBindings: WorkerBindingStore };
+    const persistedBinding = await secondInternals.workerBindings.get(id);
+    assert.ok(persistedBinding, "public exact binding metadata survives restart");
+    assert.equal(await secondInternals.workerBindings.credentialFor(persistedBinding), null,
+      "the successor cannot recover the retired daemon's memory-only bearer");
+    const raw = await readFile(paths.manifestPath);
+    assert.equal(raw.includes(Buffer.from(credential)), false, "the missing bearer was never serialized beside the retained inbox");
+  } finally {
+    await second?.stop().catch(() => undefined);
+    await first.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("direct manifest convergence shares the per-entry reconciliation lane", async () => {
   const env = await fixture();
   const paths = {
@@ -4714,6 +4799,10 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await eventually(async () => nativeRequests.some((request) => request.body.method === "item/toolCall/started"), "daemon-supervised stream HTTP publication");
     const workingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(workingProjection.observed_state, "working", "real Codex tool work restores the active projection");
+    const diagnosticProjection = workingProjection as DaemonManifestEntryView;
+    assert.deepEqual(diagnosticProjection.delivery_receipts, [], "raw provider notifications remain diagnostics, not room deliveries");
+    assert.equal(diagnosticProjection.room_agent_state?.turn.state, "idle", "diagnostic provider work cannot invent an inbox turn");
+    assert.equal(diagnosticProjection.native_liveness?.state, "active", "the native presence axis still truthfully reflects provider work");
     const published = nativeRequests.find((request) => request.body.method === "item/toolCall/started")!;
     assert.equal(published.headers.authorization, undefined, "daemon never persists or sends owner/optional bearer authority");
     assert.equal(published.body.agent_session_id, "agent_session_exact");
@@ -4761,6 +4850,14 @@ test("generation handoff reattaches the same provider and publishes its supervis
       detail: "replacement daemon awaiting exact persisted bind",
       observed_at: new Date().toISOString(),
     });
+    const replacementDaemonGeneration = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const retiredCredential = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
+      entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
+      work_attempt_id: workAttemptId, execution_generation_id: executionGenerationId,
+      daemon_generation: replacementDaemonGeneration, api_url: apiUrl,
+    });
+    assert.deepEqual(retiredCredential.result, { status: "deferred" },
+      "the replacement retains the exact public route but cannot borrow the retired daemon's credential");
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
       entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
       work_attempt_id: workAttemptId, execution_generation_id: executionGenerationId,
@@ -4769,6 +4866,9 @@ test("generation handoff reattaches the same provider and publishes its supervis
     const after = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(after.provider_ref?.provider_connection?.pid, originalPid);
     assert.equal(after.provider_ref?.provider_continuation_id, continuation);
+    assert.equal(after.work_attempt_id, workAttemptId);
+    assert.equal(after.provider_ref?.execution_generation_id, executionGenerationId,
+      "handoff reattaches the same live execution generation instead of minting a replacement");
     assert.equal((after as DaemonManifestEntryView).worker_binding?.agent_session_id, "agent_session_exact", "daemon handoff preserves the public exact-session projection");
     assert.equal(after.workplace_liveness?.state, "reachable", "idempotent persisted bind restores workplace reachability after daemon replacement");
     sequence = 0; // A freshly attached adapter has a fresh local counter.
@@ -4778,6 +4878,10 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(after.activity?.at(-1)?.sequence, 6);
     const withReattachedStream = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(withReattachedStream.activity?.at(-1)?.sequence, 7, "daemon preserves global activity ordering across adapter counter reset");
+    assert.equal(withReattachedStream.observed_state, "idle", "a completion notification truthfully returns native presence to idle");
+    assert.equal(withReattachedStream.native_liveness?.state, "idle");
+    assert.deepEqual((withReattachedStream as DaemonManifestEntryView).delivery_receipts, [],
+      "provider completion diagnostics cannot fabricate a delivery receipt after handoff");
     const firstPublished = nativeRequests.find((request) => request.body.method === "item/toolCall/started")!;
     const reattachedPublished = nativeRequests.find((request) => request.body.method === "item/completed")!;
     assert.ok(reattachedPublished.body.sequence > firstPublished.body.sequence, "durable publisher sequence survives daemon generation handoff");

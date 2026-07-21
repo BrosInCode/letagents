@@ -158,6 +158,159 @@ test("handoff fences an in-flight ingress poll and drains it before returning", 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("messages arriving during handoff replay from the durable cursor exactly once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-handoff-replay-"));
+  let firstStore: SupervisedAgentInboxStore | null = null;
+  let successorStore: SupervisedAgentInboxStore | null = null;
+  let firstDelivery: SupervisedAgentDelivery | null = null;
+  let successorDelivery: SupervisedAgentDelivery | null = null;
+  try {
+    const databasePath = join(root, "daemon.sqlite");
+    firstStore = new SupervisedAgentInboxStore(databasePath);
+    const handoffPollEntered = deferred<void>();
+    let oldPolls = 0;
+    firstDelivery = new SupervisedAgentDelivery(firstStore, provider(async (_handle, request) => ({
+      turnId: `old:${request.inboxItemId}`, outcome: "no_reply", text: null,
+    })), {
+      poll: ({ afterMessageId, signal }) => {
+        oldPolls += 1;
+        if (oldPolls === 1) {
+          assert.equal(afterMessageId, null);
+          return Promise.resolve({
+            last_observed_message_id: "1",
+            messages: [{ id: "1", text: "before handoff", activation: { for_current_agent: { decision: "activate" } } }],
+          });
+        }
+        assert.equal(afterMessageId, "1");
+        handoffPollEntered.resolve();
+        return new Promise((resolve) => signal.addEventListener("abort", () => resolve({
+          last_observed_message_id: "3",
+          messages: [
+            { id: "2", text: "during handoff", activation: { for_current_agent: { decision: "activate" } } },
+            { id: "3", text: "also during handoff", activation: { for_current_agent: { decision: "activate" } } },
+          ],
+        }), { once: true }));
+      },
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0);
+
+    await firstDelivery.poll(agent);
+    const retiringPoll = firstDelivery.poll(agent);
+    await handoffPollEntered.promise;
+    await firstDelivery.fenceAndDrain();
+    await retiringPoll;
+    assert.equal((await firstStore.cursor(agent.agentId))?.last_observed_message_id, "1");
+    assert.deepEqual((await firstStore.receipts(agent.agentId)).map((receipt) => receipt.source_message_id), ["1"]);
+    await firstStore.close();
+    firstStore = null;
+
+    successorStore = new SupervisedAgentInboxStore(databasePath);
+    const replayedAfter: Array<string | null> = [];
+    let successorTurns = 0;
+    successorDelivery = new SupervisedAgentDelivery(successorStore, provider(async (_handle, request) => {
+      successorTurns += 1;
+      return { turnId: `successor:${request.inboxItemId}`, outcome: "no_reply", text: null };
+    }), {
+      poll: async ({ afterMessageId }) => {
+        replayedAfter.push(afterMessageId);
+        return {
+          last_observed_message_id: "3",
+          messages: [
+            { id: "2", text: "during handoff", activation: { for_current_agent: { decision: "activate" } } },
+            { id: "3", text: "also during handoff", activation: { for_current_agent: { decision: "activate" } } },
+          ],
+        };
+      },
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0);
+    const successorAgent = { ...agent, bearer: "successor-memory-token", daemonGeneration: 2 };
+    await successorDelivery.poll(successorAgent);
+    await successorDelivery.poll(successorAgent);
+    const receipts = await successorStore.receipts(agent.agentId);
+    assert.deepEqual(replayedAfter, ["1", "3"], "the successor resumes at the predecessor cursor, then advances monotonically");
+    assert.deepEqual(receipts.map((receipt) => receipt.source_message_id), ["1", "2", "3"]);
+    assert.equal(receipts.every((receipt) => receipt.state === "acknowledged_no_reply"), true);
+    assert.equal(successorTurns, 2, "server replay is deduplicated before provider delivery");
+  } finally {
+    await successorDelivery?.fenceAndDrain().catch(() => undefined);
+    await firstDelivery?.fenceAndDrain().catch(() => undefined);
+    await successorStore?.close().catch(() => undefined);
+    await firstStore?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("@everyone delivery is per-agent and one blocked FIFO cannot stall another Codex worker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-everyone-isolation-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const firstBlockedTurn = deferred<{ turnId: string; outcome: "no_reply"; text: null }>();
+  const blockedTurnEntered = deferred<void>();
+  const agents = {
+    blocked: {
+      ...agent, agentId: "blocked", agentSessionId: "session-blocked", bearer: "token-blocked",
+      handle: { ...agent.handle, workAttemptId: "attempt-blocked", providerContinuationId: "thread-blocked", pid: 11 },
+      executionGenerationId: "generation-blocked",
+    },
+    healthy: {
+      ...agent, agentId: "healthy", agentSessionId: "session-healthy", bearer: "token-healthy",
+      handle: { ...agent.handle, workAttemptId: "attempt-healthy", providerContinuationId: "thread-healthy", pid: 22 },
+      executionGenerationId: "generation-healthy",
+    },
+  };
+  const pollCounts = new Map<string, number>();
+  let blockedTurns = 0;
+  let healthyTurns = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (handle, request) => {
+    if (handle === agents.blocked.handle) {
+      blockedTurns += 1;
+      if (blockedTurns === 1) {
+        blockedTurnEntered.resolve();
+        return firstBlockedTurn.promise;
+      }
+      throw new Error(`blocked agent failure ${request.inboxItemId}`);
+    }
+    healthyTurns += 1;
+    return { turnId: `healthy:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    poll: async ({ bearer, afterMessageId }) => {
+      const count = (pollCounts.get(bearer) ?? 0) + 1;
+      pollCounts.set(bearer, count);
+      assert.equal(afterMessageId, count === 1 ? null : "1");
+      return {
+        last_observed_message_id: String(count),
+        messages: [{
+          id: String(count), text: `@everyone broadcast ${count}`,
+          activation: { for_current_agent: { decision: "activate", reason: "everyone" } },
+        }],
+      };
+    },
+    publish: async () => { throw new Error("no-reply delivery must not publish"); },
+  }, currentAuthority, 0, async () => {});
+  try {
+    const blockedFirst = delivery.poll(agents.blocked);
+    await blockedTurnEntered.promise;
+    await delivery.poll(agents.healthy);
+    assert.equal((await store.receipts(agents.healthy.agentId))[0]?.state, "acknowledged_no_reply",
+      "the healthy worker completes while the other provider turn is still blocked");
+    firstBlockedTurn.reject(new Error("blocked worker failed"));
+    await blockedFirst;
+    assert.equal((await store.receipts(agents.blocked.agentId))[0]?.state, "blocked");
+
+    await Promise.all([delivery.poll(agents.blocked), delivery.poll(agents.healthy)]);
+    const blockedReceipts = await store.receipts(agents.blocked.agentId);
+    const healthyReceipts = await store.receipts(agents.healthy.agentId);
+    assert.deepEqual(blockedReceipts.map((receipt) => receipt.receipt_state), ["blocked", "queued_behind_blocked"]);
+    assert.deepEqual(healthyReceipts.map((receipt) => receipt.state), ["acknowledged_no_reply", "acknowledged_no_reply"]);
+    assert.equal(blockedTurns, 3, "the blocked agent exhausts only its own bounded retry budget");
+    assert.equal(healthyTurns, 2, "each @everyone activation independently reaches the healthy Codex worker");
+  } finally {
+    firstBlockedTurn.resolve({ turnId: "cleanup", outcome: "no_reply", text: null });
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the supervised runtime continuously polls and delivers a later activation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-loop-"));
   try {
