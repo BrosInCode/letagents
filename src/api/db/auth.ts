@@ -344,6 +344,19 @@ export interface SupervisorGrantFence {
   token_version: number;
 }
 
+export class SupervisorGrantFenceStaleError extends Error {
+  readonly code = "supervisor_grant_fence_stale";
+
+  constructor() {
+    super("Supervisor grant fence is stale.");
+    this.name = "SupervisorGrantFenceStaleError";
+  }
+}
+
+export function isSupervisorGrantFenceStaleError(error: unknown): error is SupervisorGrantFenceStaleError {
+  return error instanceof SupervisorGrantFenceStaleError;
+}
+
 export async function assertSupervisorGrantFenceTx(tx: any, fence: SupervisorGrantFence): Promise<boolean> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${fence.grant_id}`}, 0))`);
   const [grant] = await tx.select({ grant_id: supervisor_host_grants.grant_id }).from(supervisor_host_grants).where(and(
@@ -706,10 +719,10 @@ export async function createOrRotateSupervisorWorkerSession(
 
   return db.transaction(async (tx) => {
     if (!(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
-      throw new Error("Supervisor grant fence is stale.");
+      throw new SupervisorGrantFenceStaleError();
     }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${input.supervisor_grant_id}:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
-    const [existing] = await tx.select()
+    const existing = await tx.select()
       .from(room_agent_sessions)
       .where(and(
         eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
@@ -719,10 +732,36 @@ export async function createOrRotateSupervisorWorkerSession(
         eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
         isNull(room_agent_sessions.ended_at),
       ))
-      .orderBy(desc(room_agent_sessions.last_seen_at))
-      .limit(1);
-    const session = existing
-      ? await rotateRoomAgentSessionTx(tx, existing as RoomAgentSessionRow, { ...input, agent_instance_id: instanceId })
+      .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id));
+    const retained = existing[0] ?? null;
+    const duplicateSessionIds = existing.slice(1).map((row: RoomAgentSessionRow) => row.session_id);
+    if (duplicateSessionIds.length > 0) {
+      const now = new Date().toISOString();
+      await tx.update(room_agent_sessions)
+        .set({ ended_at: now, updated_at: now, last_seen_at: now })
+        .where(and(
+          inArray(room_agent_sessions.session_id, duplicateSessionIds),
+          isNull(room_agent_sessions.ended_at),
+        ));
+      await tx.update(room_agent_session_bearers)
+        .set({ revoked_at: now })
+        .where(and(
+          inArray(room_agent_session_bearers.session_id, duplicateSessionIds),
+          isNull(room_agent_session_bearers.revoked_at),
+        ));
+      await tx.update(room_agent_delivery_sessions)
+        .set({
+          active_connection_count: 0,
+          last_disconnected_at: now,
+          reconnect_grace_expires_at: now,
+          updated_at: now,
+        })
+        .where(inArray(room_agent_delivery_sessions.agent_session_id, duplicateSessionIds));
+      await tx.delete(room_agent_presence)
+        .where(inArray(room_agent_presence.agent_session_id, duplicateSessionIds));
+    }
+    const session = retained
+      ? await rotateRoomAgentSessionTx(tx, retained as RoomAgentSessionRow, { ...input, agent_instance_id: instanceId })
       : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId });
     if (!session.worker_bearer) throw new Error("Worker bearer mode is not enabled.");
     const [bearer] = await tx.select().from(room_agent_session_bearers).where(and(
