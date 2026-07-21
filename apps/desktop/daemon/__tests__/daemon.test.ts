@@ -4718,6 +4718,28 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(heartbeatProjection.workplace_liveness?.state, "reachable", "fresh exact wait authority outranks the old manifest bind timestamp");
     assert.equal(heartbeatProjection.workplace_liveness?.observed_at, heartbeatProjection.worker_binding?.updated_at);
     await eventually(async () => nativeRequests.some((request) => request.body.method === "native_harness.bound"), "initial daemon worker binding activity");
+    const initialBindingPublication = nativeRequests.find((request) => request.body.method === "native_harness.bound")!;
+    assert.equal(initialBindingPublication.headers.authorization, "Bearer session-secret");
+    assert.equal(initialBindingPublication.body.agent_session_id, undefined);
+    assert.equal(initialBindingPublication.body.agent_session_token, undefined,
+      "the scoped bearer travels only in the Authorization header");
+    await first.transition(
+      "supervised_handoff",
+      "recovering",
+      "coordination_blocked",
+      "Provider is running; waiting for desktop credential handoff.",
+      "test-stale-handoff-latch",
+    );
+    const recoveryPublication = first as unknown as {
+      publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean>;
+    };
+    assert.equal(await recoveryPublication.publishNativeActivity("supervised_handoff", "diagnostic/recover-bearer", "idle"), true);
+    const recoveredFromStaleHandoff = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(recoveredFromStaleHandoff.condition, "none");
+    assert.equal(recoveredFromStaleHandoff.observed_state, "working");
+    assert.equal(recoveredFromStaleHandoff.last_error, null);
+    assert.equal(recoveredFromStaleHandoff.workplace_liveness?.detail, "scoped worker bearer verified");
+    assert.ok(recoveredFromStaleHandoff.ready_reached_at);
     const manifestAfterFirstBind = await new ManifestStore(paths.manifestPath).load();
     const workplaceObservedAtAfterFirstBind = manifestAfterFirstBind.entries
       .find((candidate) => candidate.id === "supervised_handoff")?.workplace_liveness?.observed_at;
@@ -4807,9 +4829,9 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(diagnosticProjection.room_agent_state?.turn.state, "idle", "diagnostic provider work cannot invent an inbox turn");
     assert.equal(diagnosticProjection.native_liveness?.state, "active", "the native presence axis still truthfully reflects provider work");
     const published = nativeRequests.find((request) => request.body.method === "item/toolCall/started")!;
-    assert.equal(published.headers.authorization, undefined, "daemon never persists or sends owner/optional bearer authority");
-    assert.equal(published.body.agent_session_id, "agent_session_exact");
-    assert.equal(published.body.agent_session_token, "session-secret");
+    assert.equal(published.headers.authorization, "Bearer session-secret", "daemon sends only the scoped worker bearer");
+    assert.equal(published.body.agent_session_id, undefined);
+    assert.equal(published.body.agent_session_token, undefined);
     assert.equal(published.body.status, "working");
     assert.equal(typeof published.body.sequence, "number");
     assert.ok(published.body.sequence > 0);

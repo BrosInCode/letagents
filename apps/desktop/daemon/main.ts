@@ -3013,10 +3013,8 @@ export class SupervisorDaemon {
       const endpoint = `${binding.api_url}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(binding.agent_session_id)}/native-activity`;
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
         body: JSON.stringify({
-          agent_session_id: binding.agent_session_id,
-          agent_session_token: credential,
           observed_at,
           sequence,
           method,
@@ -3760,10 +3758,8 @@ export class SupervisorDaemon {
       const endpoint = `${binding.api_url}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(binding.agent_session_id)}/native-activity`;
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
         body: JSON.stringify({
-          agent_session_id: binding.agent_session_id,
-          agent_session_token: credential,
           observed_at,
           sequence,
           method: safeMethod,
@@ -3777,6 +3773,38 @@ export class SupervisorDaemon {
     });
     if (!publication) return false;
     if (!publication.accepted) throw new Error("Native activity endpoint rejected a stale daemon observation.");
+    const verifiedBinding = await this.workerBindings.get(entryId);
+    if (verifiedBinding
+      && verifiedBinding.room_id === currentBinding.room_id
+      && verifiedBinding.work_attempt_id === currentBinding.work_attempt_id
+      && verifiedBinding.execution_generation_id === currentBinding.execution_generation_id
+      && verifiedBinding.agent_session_id === currentBinding.agent_session_id) {
+      // A successful scoped-bearer write is stronger evidence than the stale
+      // launch-time credential-handoff latch. This also heals agents that were
+      // blocked while an older server still rejected worker bearers.
+      await this.updateManifestEntry(entryId, (current) => {
+        const recoversCredentialHandoff = current.desired_state === "running"
+          && current.condition === "coordination_blocked"
+          && current.last_error === "Provider is running; waiting for desktop credential handoff."
+          && current.room_id === verifiedBinding.room_id
+          && current.work_attempt_id === verifiedBinding.work_attempt_id
+          && current.provider_ref?.execution_generation_id === verifiedBinding.execution_generation_id;
+        if (!recoversCredentialHandoff) return current;
+        const confirmedAt = publication.observed_at;
+        return {
+          ...current,
+          observed_state: "working",
+          condition: "none",
+          last_error: null,
+          ready_reached_at: resolveReadyReachedAt(current, true, confirmedAt),
+          workplace_liveness: {
+            state: "reachable",
+            observed_at: confirmedAt,
+            detail: "scoped worker bearer verified",
+          },
+        };
+      });
+    }
     return true;
   }
 
