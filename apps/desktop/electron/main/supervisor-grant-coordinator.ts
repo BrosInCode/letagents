@@ -194,7 +194,7 @@ export class SupervisorGrantCoordinator {
    * choice rather than an accidental side effect of "Reconnect".
    */
   async reconnectEntry(entry: DesktopSupervisorManifestEntry): Promise<void> {
-    if (entry.provider !== "codex" || entry.deliveryMode !== "daemon_inbox") {
+    if (entry.deliveryMode !== "daemon_inbox") {
       throw new Error("This supervised provider does not support credential reconnection.");
     }
     const status = await this.daemon.ensureRunning();
@@ -297,6 +297,13 @@ export class SupervisorGrantCoordinator {
       expiresAt: grant.metadata.expiresAt,
     });
     if (installed !== "installed") throw new Error("Background agent management changed generation before the host grant could be installed.");
+    // Fresh launches are paused at this point. Establish the immutable first
+    // inbox boundary before Electron activates provider ownership. For an
+    // existing/recovered cursor this is a no-op and cannot move it forward.
+    if (entry.desiredState === "paused" && entry.deliveryMode === "daemon_inbox") {
+      const bootstrapped = await this.daemon.bootstrapRoomIngress(entry.id, daemonGeneration);
+      if (bootstrapped === "stale") throw new Error("Background agent management changed generation before room delivery could be initialized.");
+    }
     // Only a confirmed exact-generation socket install advances the durable
     // marker. This write contains encrypted storage only; the renderer and
     // manifest never see the bearer.

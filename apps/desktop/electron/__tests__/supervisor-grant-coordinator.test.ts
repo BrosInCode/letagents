@@ -34,6 +34,10 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
       assert.equal(input.supervisorGrant.includes("secret"), true);
       return "installed" as const;
     },
+    async bootstrapRoomIngress(entryId: string, daemonGeneration: number) {
+      events.push(`bootstrap:${entryId}:${daemonGeneration}`);
+      return "bootstrapped" as const;
+    },
   };
   const operations: SupervisorGrantCoordinatorOperations = {
     async resolveIdentity(input) { events.push(`identity:${input.entryId}`); return `owner/${input.entryId}`; },
@@ -62,7 +66,7 @@ test("fresh Codex launch provisions before paused claim, installs before activat
   });
   assert.equal(result.entry.desiredState, "paused");
   assert.deepEqual(h.events, [
-    "ensure", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "replace:7",
+    "ensure", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
   ]);
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
 });

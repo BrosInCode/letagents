@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.34";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.35";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -535,6 +535,17 @@ export class SupervisorDaemonClient {
       daemon_generation: input.daemonGeneration,
     });
     return result.status === "installed" ? "installed" : "stale";
+  }
+
+  /** Establish a paused entry's first durable room boundary before activation. */
+  async bootstrapRoomIngress(entryId: string, daemonGeneration: number): Promise<"bootstrapped" | "existing" | "stale"> {
+    const status = await this.ensureRunning();
+    if (status.generation !== daemonGeneration) return "stale";
+    const result = await this.request<{ status?: unknown }>("supervisor.bootstrap_room_ingress", {
+      entry_id: entryId,
+      daemon_generation: daemonGeneration,
+    });
+    return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
   }
 
   private async ensureRunningOnce(): Promise<DesktopSupervisorDaemonStatus> {

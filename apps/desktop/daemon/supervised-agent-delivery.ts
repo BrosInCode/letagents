@@ -254,8 +254,10 @@ export class SupervisedAgentDelivery {
         const tail = this.http.latest
           ? await this.http.latest({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, signal: controller.signal })
           : { messages: [] as Array<Record<string, unknown>> };
-        if (!await this.hasAuthority(agent, controller)) return;
         const tailId = lastMessageId(tail.messages ?? []);
+        // A retiring generation that successfully observed tail N must commit
+        // N before yielding. Otherwise its successor might re-read a newer
+        // tail and silently skip a message that raced the handoff.
         await this.inbox.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: tailId });
         cursor = await this.inbox.cursor(agent.agentId);
         if (!cursor || !await this.hasAuthority(agent, controller)) return;
