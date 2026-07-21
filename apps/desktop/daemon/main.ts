@@ -40,7 +40,7 @@ type RecoveryClock = {
 };
 export interface SupervisorGrantHttp {
   createWorkerSession(input: {
-    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string; signal?: AbortSignal;
   }): Promise<{ sessionId: string; bearer: string; bearerId: string; expiresAt: string | null }>;
   renewHostGrant?(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
@@ -58,6 +58,11 @@ type InstalledHostGrant = {
   grantGeneration: number; apiUrl: string; daemonGeneration: number;
   hostId: string; installationId: string; expiresAt: string;
 };
+type BootstrapOperation = {
+  controller: AbortController;
+  phase: "observing" | "committing";
+  operation: Promise<unknown>;
+};
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
@@ -66,6 +71,10 @@ const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const WORKER_BEARER_ROTATION_LEAD_MS = 60_000;
 const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
 const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
+// Electron's ordinary control-socket request times out at 3s. Keep the
+// admission boundary inside that window: after Electron gives up, a late
+// first-tail write would be both surprising and hard to surface to the user.
+const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 2_500;
 
 function supervisedRoomPath(roomId: string): string {
   return roomId.split("/").map(encodeURIComponent).join("/");
@@ -90,6 +99,7 @@ function lastRoomMessageId(messages: readonly Record<string, unknown>[]): string
 
 /** The daemon talks to the room API only through the live worker bearer. */
 const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
+  admissionOwnsInitialCursor: true,
   async poll(input) {
     const query = new URLSearchParams({ timeout: String(DEFAULT_ROOM_POLL_MAX_MS) });
     if (input.afterMessageId) query.set("after", input.afterMessageId);
@@ -124,6 +134,7 @@ const productionSupervisorGrantHttp: SupervisorGrantHttp = {
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
       body: JSON.stringify({ generation: input.grantGeneration, room_id: input.roomId, agent_key: input.agentKey, agent_instance_id: input.agentInstanceId, runtime: "supervisor" }),
+      signal: input.signal,
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session mint");
     const body = await response.json() as Record<string, unknown>;
@@ -529,7 +540,7 @@ export class SupervisorDaemon {
   /** Installed by the desktop over the local socket; intentionally never serialized. */
   private readonly hostGrants = new Map<string, InstalledHostGrant>();
   /** Initial-tail reads are authority-bearing admission operations. */
-  private readonly bootstrapOperations = new Set<Promise<unknown>>();
+  private readonly bootstrapOperations = new Set<BootstrapOperation>();
   private readonly nowMs: () => number;
   private readonly setRecoveryTimeout: typeof setTimeout;
   private readonly clearRecoveryTimeout: typeof clearTimeout;
@@ -729,14 +740,15 @@ export class SupervisorDaemon {
           host_id: String(params.host_id ?? ""), installation_id: String(params.installation_id ?? ""),
           grant_expires_at: String(params.grant_expires_at ?? ""),
           daemon_generation: Number(params.daemon_generation ?? NaN),
+          credential_only: params.credential_only === true,
         });
       }
       if (request.method === "supervisor.bootstrap_room_ingress") {
         const params = this.paramsRecord(request.params);
-        return this.trackBootstrap(this.bootstrapRoomIngress({
+        return this.beginBootstrap(this.bootstrapRoomIngress.bind(this), {
           entry_id: String(params.entry_id ?? ""),
           daemon_generation: Number(params.daemon_generation ?? NaN),
-        }));
+        });
       }
       if (request.method === "supervisor.borrow_worker_credential") {
         const params = this.paramsRecord(request.params);
@@ -1282,7 +1294,10 @@ export class SupervisorDaemon {
     // release. Otherwise a successor could establish a later tail and skip a
     // message that raced this handoff. New bootstrap requests are rejected by
     // the public fence above; this only drains operations admitted before it.
-    await Promise.allSettled([...this.bootstrapOperations]);
+    for (const bootstrap of this.bootstrapOperations) {
+      if (bootstrap.phase === "observing") bootstrap.controller.abort();
+    }
+    await Promise.allSettled([...this.bootstrapOperations].map((bootstrap) => bootstrap.operation));
     // Retire secret custody synchronously with the public handoff fence. The
     // dispatch preflight then proves every native return is journaled before
     // the acknowledgement can authorize Electron to replace this daemon.
@@ -1300,11 +1315,15 @@ export class SupervisorDaemon {
     }, 25).unref();
   }
 
-  private trackBootstrap<T>(operation: Promise<T>): Promise<T> {
+  private beginBootstrap<T>(run: (input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation) => Promise<T>, input: { entry_id: string; daemon_generation: number }): Promise<T> {
+    const controller = new AbortController();
+    const operation: BootstrapOperation = { controller, phase: "observing", operation: Promise.resolve() };
+    const result = run(input, operation);
+    operation.operation = result;
     this.bootstrapOperations.add(operation);
     const clear = () => this.bootstrapOperations.delete(operation);
-    void operation.then(clear, clear);
-    return operation;
+    void result.then(clear, clear);
+    return result;
   }
 
   private paramsRecord(value: unknown): Record<string, unknown> {
@@ -3604,8 +3623,8 @@ export class SupervisorDaemon {
   private async installHostGrant(input: {
     entry_id: string; room_id: string; agent_key: string; grant_id: string; supervisor_grant: string;
     grant_generation: number; api_url: string; daemon_generation: number;
-    host_id: string; installation_id: string; grant_expires_at: string;
-  }): Promise<{ status: "installed" | "stale"; agent_session_id?: string }> {
+    host_id: string; installation_id: string; grant_expires_at: string; credential_only?: boolean;
+  }): Promise<{ status: "installed" | "stale" | "provider_unavailable"; agent_session_id?: string }> {
     return this.serializeEntryTick(input.entry_id, async () => {
       for (const field of ["entry_id", "room_id", "agent_key", "grant_id", "supervisor_grant", "api_url", "host_id", "installation_id", "grant_expires_at"] as const) {
         if (!input[field].trim()) throw new Error(`Host grant ${field} is required.`);
@@ -3623,7 +3642,8 @@ export class SupervisorDaemon {
       if (currentGrant?.grantId === input.grant_id
         && (currentGrant.grantGeneration > input.grant_generation
           || (currentGrant.grantGeneration === input.grant_generation
-            && Date.parse(currentGrant.expiresAt) >= inputExpiry))) {
+            && Date.parse(currentGrant.expiresAt) >= inputExpiry))
+        && !input.credential_only) {
         // Electron may still hold the pre-renewal safeStorage value. It may
         // confirm installation, but must never roll the daemon's newer
         // memory-only token/expiry backwards in the same generation.
@@ -3636,13 +3656,20 @@ export class SupervisorDaemon {
         daemonGeneration: input.daemon_generation, hostId: input.host_id,
         installationId: input.installation_id, expiresAt: input.grant_expires_at,
       };
-      this.hostGrants.set(entry.id, grant);
       // Recovery must not signal, restart, or migrate a live provider. It only
       // rotates the worker bearer against the persisted exact generation.
       const live = this.liveHandles.get(entry.id);
-      if (entry.provider_ref && entry.work_attempt_id && live
+      const hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
         && live.workAttemptId === entry.work_attempt_id
-        && live.providerContinuationId === entry.provider_ref.provider_continuation_id) {
+        && live.providerContinuationId === entry.provider_ref.provider_continuation_id);
+      if (input.credential_only && !hasExactLiveProvider) {
+        // Do not retain a new reconnect grant when there is nothing exact to
+        // bind it to. A later unrelated reconciliation must not turn this
+        // rejected reconnect into a launch.
+        return { status: "provider_unavailable" };
+      }
+      this.hostGrants.set(entry.id, grant);
+      if (hasExactLiveProvider && entry.provider_ref && entry.work_attempt_id && live) {
         const attempt = await this.durability.getAttempt(entry.work_attempt_id);
         if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {
           this.revokeHostGrantIfCurrent(entry.id, grant);
@@ -3660,6 +3687,13 @@ export class SupervisorDaemon {
             return { status: "installed", agent_session_id: minted.agentSessionId };
           }
         }
+      }
+      if (input.credential_only) {
+        // Reconnect is deliberately not recovery. It may rebind an exact live
+        // provider generation, but it must never request convergence, resume,
+        // spawn, stop, signal, or alter desired state when that handle is gone.
+        this.revokeHostGrantIfCurrent(entry.id, grant);
+        return { status: "provider_unavailable" };
       }
       if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {
         this.revokeHostGrantIfCurrent(entry.id, grant);
@@ -3679,7 +3713,7 @@ export class SupervisorDaemon {
    * boundary instead of reading a newer tail and skipping the intervening
    * message.
    */
-  private async bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number }): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
+  private async bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
     return this.serializeEntryTick(input.entry_id, async () => {
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
       const entry = await this.store.getEntry(input.entry_id);
@@ -3689,18 +3723,30 @@ export class SupervisorDaemon {
       const grant = this.currentHostGrant(entry);
       const latest = this.supervisedDeliveryHttp.latest;
       if (!grant || !latest) throw new Error("A supervised room tail reader is required before activation.");
-      const minted = await this.supervisorGrantHttp.createWorkerSession({
-        apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
-        grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
-        // Same logical worker identity as the later live binding. The bearer
-        // is held only for this request and is never persisted or exposed.
-        agentInstanceId: `daemon:${entry.id}`,
-      });
-      const tail = await latest({ roomId: entry.room_id, apiUrl: grant.apiUrl, bearer: minted.bearer, signal: new AbortController().signal });
+      const timeout = setTimeout(() => {
+        if (operation.phase === "observing") operation.controller.abort();
+      }, BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS);
+      timeout.unref();
+      let minted: Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>;
+      let tail: { messages?: Array<Record<string, unknown>> };
+      try {
+        minted = await this.supervisorGrantHttp.createWorkerSession({
+          apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+          grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
+          agentInstanceId: `daemon:${entry.id}`,
+          signal: operation.controller.signal,
+        });
+        if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
+        tail = await latest({ roomId: entry.room_id, apiUrl: grant.apiUrl, bearer: minted.bearer, signal: operation.controller.signal });
+        if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
+      } finally {
+        clearTimeout(timeout);
+      }
       // Do not re-check singleton authority before this durable write. Once a
       // generation observed tail N, every successor must inherit N rather
       // than advancing the initial boundary beyond a message that raced it.
       const tailId = lastRoomMessageId(tail.messages ?? []);
+      operation.phase = "committing";
       const result = await this.supervisedInbox.bootstrapCursor({
         agent_id: entry.id, room_id: entry.room_id, last_observed_message_id: tailId,
       });

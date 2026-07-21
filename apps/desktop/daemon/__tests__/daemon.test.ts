@@ -19,6 +19,7 @@ import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
@@ -3208,6 +3209,181 @@ test("prepare_handoff fences a mutation admitted before an asynchronous request 
     }
   } finally {
     releaseMutation();
+    await env.cleanup();
+  }
+});
+
+test("credential-only reconnect rejects a missing exact provider without retaining a grant or converging", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  const calls = { spawn: 0, resume: 0, stop: 0, converge: 0 };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { calls.spawn += 1; throw new Error("reconnect must not spawn"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { calls.resume += 1; throw new Error("reconnect must not resume"); }, poke: async () => {},
+    stop: async () => { calls.stop += 1; throw new Error("reconnect must not stop"); },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => { throw new Error("reconnect must not mint without an exact live provider"); },
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { hostGrants: Map<string, unknown>; requestConvergence: (entryId: string) => void };
+    internals.requestConvergence = () => { calls.converge += 1; };
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "credential_only_missing_provider", provider: "codex", delivery_mode: "daemon_inbox",
+      desired_state: "paused", observed_state: "absent",
+    } });
+    calls.converge = 0;
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const result = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "credential_only_missing_provider", room_id: entry.room_id, agent_key: "owner/agent",
+      grant_id: "grant-reconnect", supervisor_grant: "reconnect-secret", grant_generation: 1,
+      api_url: "https://letagents.example", host_id: "host-1", installation_id: "installation-1",
+      grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation, credential_only: true,
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.result, { status: "provider_unavailable" });
+    assert.equal(internals.hostGrants.has("credential_only_missing_provider"), false, "a rejected reconnect cannot become usable later");
+    assert.deepEqual(calls, { spawn: 0, resume: 0, stop: 0, converge: 0 });
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("handoff aborts a hung pre-observation room bootstrap without creating a cursor", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  let mintEntered!: () => void;
+  const mintStarted = new Promise<void>((resolve) => { mintEntered = resolve; });
+  let mintAborted = false;
+  let tailReads = 0;
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, {
+    latest: async () => { tailReads += 1; return { messages: [{ id: "must-not-observe" }] }; },
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async ({ signal }) => new Promise((_resolve, reject) => {
+      mintEntered();
+      signal?.addEventListener("abort", () => { mintAborted = true; reject(new Error("mint aborted by handoff")); }, { once: true });
+    }),
+  });
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "hung_room_bootstrap", provider: "codex", delivery_mode: "daemon_inbox",
+      desired_state: "paused", observed_state: "absent",
+    } });
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "hung_room_bootstrap", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-bootstrap",
+      supervisor_grant: "bootstrap-secret", grant_generation: 1, api_url: "https://letagents.example",
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation,
+    })).ok, true);
+    const bootstrap = daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", { entry_id: "hung_room_bootstrap", daemon_generation: generation });
+    await mintStarted;
+    const handoff = daemon.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    const rejected = await bootstrap;
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error ?? "", /aborted|cancelled/i);
+    await within(handoff, "hung bootstrap handoff", 1_000);
+    assert.equal(mintAborted, true);
+    assert.equal(tailReads, 0);
+    const reopened = new SupervisedAgentInboxStore(paths.manifestPath);
+    try {
+      assert.equal(await reopened.cursor("hung_room_bootstrap"), null);
+    } finally { await reopened.close(); }
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("handoff drains an observed room tail commit and the successor inherits that exact cursor", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  let commitEntered!: () => void;
+  const commitStarted = new Promise<void>((resolve) => { commitEntered = resolve; });
+  let releaseCommit!: () => void;
+  const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  let firstTailReads = 0;
+  const first = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, {
+    latest: async () => { firstTailReads += 1; return { messages: [{ id: "50" }] }; },
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => ({ sessionId: "first-session", bearer: "first-bearer", bearerId: "first-bearer-id", expiresAt: null }),
+  });
+  let successor: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    const firstInbox = (first as unknown as { supervisedInbox: SupervisedAgentInboxStore }).supervisedInbox;
+    const originalBootstrapCursor = firstInbox.bootstrapCursor.bind(firstInbox);
+    firstInbox.bootstrapCursor = async (input) => {
+      commitEntered();
+      await commitGate;
+      return originalBootstrapCursor(input);
+    };
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "observed_tail_commit", provider: "codex", delivery_mode: "daemon_inbox",
+      desired_state: "paused", observed_state: "absent",
+    } });
+    const firstGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "observed_tail_commit", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-first-tail",
+      supervisor_grant: "first-tail-secret", grant_generation: 1, api_url: "https://letagents.example",
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: firstGeneration,
+    })).ok, true);
+    const bootstrap = daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", { entry_id: "observed_tail_commit", daemon_generation: firstGeneration });
+    await commitStarted;
+    assert.equal(firstTailReads, 1);
+    let handoffComplete = false;
+    const handoff = first.waitForHandoff().then(() => { handoffComplete = true; });
+    // prepare_handoff intentionally does not acknowledge until it has drained
+    // the committing bootstrap operation, so leave this socket request pending
+    // while proving the lock is still held.
+    const prepare = daemonRequest(paths.socketPath, "daemon.prepare_handoff");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(handoffComplete, false, "authority remains with the observer until tail N is durable");
+    releaseCommit();
+    assert.equal((await prepare).ok, true);
+    const bootstrapped = await bootstrap;
+    assert.equal(bootstrapped.ok, true, bootstrapped.error);
+    assert.deepEqual(bootstrapped.result, { status: "bootstrapped", last_observed_message_id: "50" });
+    await within(handoff, "observed-tail commit handoff", 1_000);
+
+    let successorTailReads = 0;
+    successor = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, {
+      latest: async () => { successorTailReads += 1; return { messages: [{ id: "51" }] }; },
+      poll: async () => ({ messages: [] }), publish: async () => {},
+    }, {
+      createWorkerSession: async () => { throw new Error("successor must not mint before an existing cursor check"); },
+    });
+    await successor.start();
+    const successorGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const inherited = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+      entry_id: "observed_tail_commit", daemon_generation: successorGeneration,
+    });
+    assert.equal(inherited.ok, true, inherited.error);
+    assert.deepEqual(inherited.result, { status: "existing", last_observed_message_id: "50" });
+    assert.equal(successorTailReads, 0, "the successor must not move the already observed boundary");
+  } finally {
+    releaseCommit?.();
+    await successor?.stop().catch(() => undefined);
+    await first.stop().catch(() => undefined);
     await env.cleanup();
   }
 });

@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.35";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.36";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -515,7 +515,9 @@ export class SupervisorDaemonClient {
     installationId: string;
     expiresAt: string;
     apiUrl?: string;
-  }): Promise<"installed" | "stale"> {
+    /** Rebind only an already-live exact provider generation; never converge. */
+    credentialOnly?: boolean;
+  }): Promise<"installed" | "stale" | "provider_unavailable"> {
     if (!input.supervisorGrant.trim()) throw new Error("A supervised host grant is required.");
     const status = await this.ensureRunning();
     // Never let a request started against an old process install into its
@@ -533,8 +535,10 @@ export class SupervisorDaemonClient {
       grant_expires_at: input.expiresAt,
       api_url: input.apiUrl ?? apiUrl,
       daemon_generation: input.daemonGeneration,
+      credential_only: Boolean(input.credentialOnly),
     });
-    return result.status === "installed" ? "installed" : "stale";
+    if (result.status === "installed" || result.status === "provider_unavailable") return result.status;
+    return "stale";
   }
 
   /** Establish a paused entry's first durable room boundary before activation. */

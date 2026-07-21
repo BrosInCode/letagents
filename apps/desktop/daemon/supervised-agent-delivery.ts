@@ -32,6 +32,8 @@ export type SupervisedPollResponse = {
 };
 
 export interface SupervisedDeliveryHttp {
+  /** Production admission owns first-cursor creation before provider reachability. */
+  admissionOwnsInitialCursor?: boolean;
   poll(input: { roomId: string; apiUrl: string; bearer: string; afterMessageId: string | null; signal: AbortSignal }): Promise<SupervisedPollResponse>;
   /**
    * Read the room tail before the first ever daemon cursor is installed. This
@@ -242,6 +244,9 @@ export class SupervisedAgentDelivery {
       if (!await this.hasAuthority(agent, controller)) return;
       let cursor = await this.inbox.cursor(agent.agentId);
       if (!cursor) {
+        if (this.http.admissionOwnsInitialCursor) {
+          throw new Error("Room delivery is waiting for its admission cursor; provider delivery will not poll history.");
+        }
         // New identity: establish a durable boundary at the current tail.
         // The transaction only creates the cursor if one is still absent, so
         // another exact-generation recovery cannot move it backwards. A
@@ -255,9 +260,10 @@ export class SupervisedAgentDelivery {
           ? await this.http.latest({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, signal: controller.signal })
           : { messages: [] as Array<Record<string, unknown>> };
         const tailId = lastMessageId(tail.messages ?? []);
-        // A retiring generation that successfully observed tail N must commit
-        // N before yielding. Otherwise its successor might re-read a newer
-        // tail and silently skip a message that raced the handoff.
+        // Once this generation has observed tail N, N is the only safe first
+        // boundary. Commit it even if authority changed during the read: the
+        // successor must inherit N rather than re-tail later and skip the
+        // messages that raced this observation.
         await this.inbox.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: tailId });
         cursor = await this.inbox.cursor(agent.agentId);
         if (!cursor || !await this.hasAuthority(agent, controller)) return;
