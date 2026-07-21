@@ -242,7 +242,13 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     const body = req.body as { bearer_id?: unknown };
     const bearerId = typeof body.bearer_id === "string" ? body.bearer_id.trim() : "";
     if (!bearerId) { res.status(400).json({ error: "bearer_id is required." }); return; }
-    const rotated = await rotateRoomAgentSessionBearer({ bearer_id: bearerId, session_id: sessionId, supervisor_grant_id: grant.grant_id, supervisor_grant_fence: fence(grant), expires_at: cappedExpiry(grant.expires_at) });
+    let rotated;
+    try {
+      rotated = await rotateRoomAgentSessionBearer({ bearer_id: bearerId, session_id: sessionId, supervisor_grant_id: grant.grant_id, supervisor_grant_fence: fence(grant), expires_at: cappedExpiry(grant.expires_at) });
+    } catch (error) {
+      if (respondToStaleSupervisorGrantFence(res, error)) return;
+      throw error;
+    }
     if (!rotated) {
       res.status(403).json({ error: "Grant does not authorize that worker bearer." });
       return;
@@ -265,7 +271,13 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       res.status(403).json({ error: "Grant does not authorize that worker session." });
       return;
     }
-    const ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id, supervisor_grant_fence: fence(grant) });
+    let ended;
+    try {
+      ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id, supervisor_grant_fence: fence(grant) });
+    } catch (error) {
+      if (respondToStaleSupervisorGrantFence(res, error)) return;
+      throw error;
+    }
     res.json(ended);
   });
 
