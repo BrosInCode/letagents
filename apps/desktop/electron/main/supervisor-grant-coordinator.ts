@@ -198,17 +198,17 @@ export class SupervisorGrantCoordinator {
       throw new Error("This supervised provider does not support credential reconnection.");
     }
     const status = await this.daemon.ensureRunning();
-    await this.reconcileEntry(entry, status.generation);
+    await this.reconcileEntry(entry, status.generation, true);
   }
 
-  private async reconcileEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number): Promise<void> {
+  private async reconcileEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number, credentialOnly = false): Promise<void> {
     await this.serialize(entry.id, async () => {
       const agentKey = await this.operations.readEntryAgentKey(entry.id);
       if (!agentKey) {
         // Legacy entries can be recovered only from a durable mapping or by
         // creating a new explicit identity. Labels are never identity inputs.
         const created = await this.operations.resolveIdentity({ entryId: entry.id, displayName: entry.displayName }, { apiFetch: this.request });
-        await this.provisionAndInstall(entry, created, daemonGeneration, true);
+        await this.provisionAndInstall(entry, created, daemonGeneration, true, credentialOnly);
         return;
       }
       const stored = await this.operations.readGrant(agentKey);
@@ -221,7 +221,7 @@ export class SupervisorGrantCoordinator {
           { entryId: entry.id, displayName: entry.displayName },
           { apiFetch: this.request },
         );
-        await this.provisionAndInstall(entry, resolved, daemonGeneration, true);
+        await this.provisionAndInstall(entry, resolved, daemonGeneration, true, credentialOnly);
         return;
       }
       if (!Number.isFinite(new Date(stored.metadata.expiresAt).getTime())
@@ -229,27 +229,27 @@ export class SupervisorGrantCoordinator {
         // A daemon can rotate its short-lived worker bearer on its own while
         // this host grant remains current. Once host authority expires, only
         // Electron may recover it, before the next worker rotation wedges.
-        await this.provisionAndInstall(entry, agentKey, daemonGeneration, true);
+        await this.provisionAndInstall(entry, agentKey, daemonGeneration, true, credentialOnly);
         return;
       }
       if (stored.lastInstalledDaemonGeneration !== daemonGeneration) {
         const replacement = await this.handoffOrReprovision(entry, agentKey, stored, daemonGeneration);
-        await this.install(entry, agentKey, replacement, daemonGeneration);
+        await this.install(entry, agentKey, replacement, daemonGeneration, credentialOnly);
         return;
       }
       // Exact same daemon generation: reinstalling is safe/idempotent and
       // lets Electron recover from a lost in-memory daemon grant.
-      await this.install(entry, agentKey, stored, daemonGeneration);
+      await this.install(entry, agentKey, stored, daemonGeneration, credentialOnly);
     });
   }
 
-  private async provisionAndInstall(entry: DesktopSupervisorManifestEntry, agentKey: string, daemonGeneration: number, forceReprovision: boolean) {
+  private async provisionAndInstall(entry: DesktopSupervisorManifestEntry, agentKey: string, daemonGeneration: number, forceReprovision: boolean, credentialOnly = false) {
     const canonicalRoomId = await this.resolveRoomId(entry.roomId);
     const grant = await this.operations.provision({
       hostId: this.hostId(), entryId: entry.id, agentKey,
       roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision,
     }, { apiFetch: this.request });
-    await this.install(entry, agentKey, grant, daemonGeneration);
+    await this.install(entry, agentKey, grant, daemonGeneration, credentialOnly);
   }
 
   private async handoffOrReprovision(
@@ -288,6 +288,7 @@ export class SupervisorGrantCoordinator {
     agentKey: string,
     grant: { metadata: DesktopSupervisorGrantMetadata; token: string; entryId: string | null; lastInstalledDaemonGeneration: number | null },
     daemonGeneration: number,
+    credentialOnly = false,
   ): Promise<void> {
     const installed = await this.daemon.installHostGrant({
       entryId: entry.id, roomId: entry.roomId, agentKey,
@@ -295,7 +296,11 @@ export class SupervisorGrantCoordinator {
       grantGeneration: grant.metadata.generation, daemonGeneration,
       hostId: grant.metadata.hostId, installationId: grant.metadata.installationId,
       expiresAt: grant.metadata.expiresAt,
+      credentialOnly,
     });
+    if (installed === "provider_unavailable") {
+      throw new Error("The previous provider runtime is unavailable. Reconnect cannot start a replacement; create a new agent or explicitly recover it.");
+    }
     if (installed !== "installed") throw new Error("Background agent management changed generation before the host grant could be installed.");
     // Fresh launches are paused at this point. Establish the immutable first
     // inbox boundary before Electron activates provider ownership. For an

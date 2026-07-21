@@ -164,6 +164,27 @@ test("a fresh agent observes history at the tail, advances across silent message
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("production delivery never establishes a first cursor lazily after activation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-admission-cursor-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let tailReads = 0;
+    let polls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      admissionOwnsInitialCursor: true,
+      latest: async () => { tailReads += 1; return { messages: [{ id: "historical" }] }; },
+      poll: async () => { polls += 1; return { messages: [] }; },
+      publish: async () => {},
+    }, currentAuthority, 0);
+    await assert.rejects(delivery.poll(agent), /admission cursor/i);
+    assert.equal(tailReads, 0, "a running provider cannot move its own first-tail boundary");
+    assert.equal(polls, 0);
+    assert.equal(await store.cursor(agent.agentId), null);
+    await delivery.fenceAndDrain();
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("bootstrap is one-time and a successor resumes its persisted cursor instead of skipping handoff messages", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bootstrap-handoff-"));
   try {
