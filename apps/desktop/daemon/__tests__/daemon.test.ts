@@ -1298,19 +1298,22 @@ test("handoff during provider dispatch persists the exact handle for successor a
     } });
     await spawnStarted;
     const handoff = first.waitForHandoff();
-    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    const prepare = daemonRequest(paths.socketPath, "daemon.prepare_handoff");
     let handoffFinished = false;
     void handoff.then(() => { handoffFinished = true; });
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(handoffFinished, false, "handoff holds stores only after native dispatch has begun");
     releaseSpawn();
+    assert.equal((await prepare).ok, true);
     await within(handoff, "dispatch persistence handoff", 1_000);
     assert.equal(stops, 0, "handoff preserves the provider process");
     assert.equal(exitRegistrations, 0, "the retiring daemon registers no callbacks on the returned handle");
 
     second = new SupervisorDaemon(paths, "darwin", port, true);
     await second.start();
-    await eventually(async () => attaches === 1, "successor exact provider attach");
+    await eventually(async () => attaches === 1
+      && (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch") === returnedHandle,
+    "successor exact provider attach");
     const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
     const live = (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch");
@@ -1325,6 +1328,296 @@ test("handoff during provider dispatch persists the exact handle for successor a
   } finally {
     releaseSpawn?.();
     await second?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("handoff winning the normal post-dispatch commit falls back to exact retirement persistence", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const id = "handoff_during_provider_commit";
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: 55442, providerContinuationId: "handoff-commit-continuation", observedState: "working" as const };
+  let commitEntered!: () => void;
+  const commitStarted = new Promise<void>((resolve) => { commitEntered = resolve; });
+  let releaseCommit!: () => void;
+  const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  let gated = false;
+  let providerRefReplaceCalls = 0;
+  let handoffRequested = false;
+  let retirementConflictInjected = false;
+  let spawns = 0;
+  let attaches = 0;
+  let stops = 0;
+  let exitRegistrations = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawns += 1; return returnedHandle; },
+    attach: async (ref) => { attaches += 1; assert.equal(ref.providerContinuationId, returnedHandle.providerContinuationId); return returnedHandle; },
+    attachAction: async () => { throw new Error("successor must use exact durable provider ref"); },
+    resume: async () => { throw new Error("successor must attach"); }, poke: async () => {},
+    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: returnedHandle.providerContinuationId }; },
+    onExit: async () => { exitRegistrations += 1; return () => {}; }, onStream: async () => () => {},
+  };
+  const first = new SupervisorDaemon(paths, "darwin", port, true);
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    const store = (first as unknown as { store: ManifestStore }).store;
+    const originalReplace = store.replaceEntry.bind(store);
+    store.replaceEntry = async (expected, updated, fence) => {
+      const providerRefWrite = updated.provider_ref?.provider_continuation_id === returnedHandle.providerContinuationId;
+      if (providerRefWrite) providerRefReplaceCalls += 1;
+      if (!gated && providerRefWrite) {
+        gated = true;
+        commitEntered();
+        await commitGate;
+      }
+      if (providerRefReplaceCalls >= 2 && handoffRequested && !retirementConflictInjected && providerRefWrite) {
+        retirementConflictInjected = true;
+        const admitted = await store.getEntry(id);
+        assert(admitted);
+        await originalReplace(expected, { ...admitted, charter: `${admitted.charter} admitted-before-handoff` }, async (commit) => commit());
+        throw new ManifestConflictError("injected admitted mutation advanced the manifest generation");
+      }
+      return originalReplace(expected, updated, fence);
+    };
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    await commitStarted;
+    const handoff = first.waitForHandoff();
+    handoffRequested = true;
+    const prepare = daemonRequest(paths.socketPath, "daemon.prepare_handoff");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    releaseCommit();
+    assert.equal((await prepare).ok, true);
+    await within(handoff, "commit-boundary retirement persistence", 1_000);
+    assert.equal(stops, 0);
+    assert.equal(exitRegistrations, 0, "retiring daemon installs no callbacks after fallback persistence");
+
+    second = new SupervisorDaemon(paths, "darwin", port, true);
+    await second.start();
+    await eventually(async () => attaches === 1, "successor attach after normal commit lost to handoff");
+    const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: Array<{ execution_generation_id: string; terminal: unknown }> };
+    assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
+    assert.match(current.charter, /admitted-before-handoff/);
+    assert.equal(result.execution_generations.length, 1);
+    assert.equal(result.execution_generations[0]?.execution_generation_id, current.provider_ref?.execution_generation_id);
+    assert.equal(result.execution_generations[0]?.terminal, null);
+    assert.equal(spawns, 1);
+    assert.equal(stops, 0);
+  } finally {
+    releaseCommit?.();
+    await second?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("pause and stop at the normal post-dispatch commit fence the exact returned handle", async () => {
+  const runCase = async (desiredState: "paused" | "stopped") => {
+    const env = await fixture();
+    const id = `${desiredState}_during_provider_commit`;
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    };
+    const workspace = await provisionedWorkspace(env.root, id);
+    const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+    const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+    await durability.close();
+    const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: desiredState === "paused" ? 55443 : 55444, providerContinuationId: `${id}-continuation`, observedState: "working" as const };
+    let commitEntered!: () => void;
+    const commitStarted = new Promise<void>((resolve) => { commitEntered = resolve; });
+    let releaseCommit!: () => void;
+    const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+    let gated = false;
+    const stopped: typeof returnedHandle[] = [];
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+      spawn: async () => returnedHandle, attach: async () => { throw new Error("control fence uses the returned handle directly"); },
+      attachAction: async () => { throw new Error("control fence never infers the action"); }, resume: async () => { throw new Error("fresh launch"); }, poke: async () => {},
+      stop: async (handle) => { stopped.push(handle as typeof returnedHandle); return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
+      onExit: async () => () => {}, onStream: async () => () => {},
+    };
+    const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+    try {
+      await daemon.start();
+      const store = (daemon as unknown as { store: ManifestStore }).store;
+      const originalReplace = store.replaceEntry.bind(store);
+      store.replaceEntry = async (expected, updated, fence) => {
+        if (!gated && updated.provider_ref?.provider_continuation_id === returnedHandle.providerContinuationId) {
+          gated = true;
+          commitEntered();
+          await commitGate;
+        }
+        return originalReplace(expected, updated, fence);
+      };
+      await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry, id, provider: "claude-code", observed_state: "absent",
+        workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      } });
+      await commitStarted;
+      const control = daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: desiredState });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      releaseCommit();
+      assert.equal((await control).ok, true);
+      await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === desiredState, `${desiredState} commit fence`);
+      assert.deepEqual(stopped, [returnedHandle]);
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+      const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: Array<{ terminal: unknown }> };
+      assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
+      assert.equal(result.execution_generations.length, 1);
+      assert.notEqual(result.execution_generations[0]?.terminal, null);
+    } finally {
+      releaseCommit?.();
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  };
+  await runCase("paused");
+  await runCase("stopped");
+});
+
+test("fatal returned-handle journal and stop failure rejects handoff before acknowledgement without unhandled rejection", async () => {
+  const env = await fixture();
+  const id = "fatal_unjournaled_dispatch";
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: 55446, providerContinuationId: "fatal-unjournaled-continuation", observedState: "working" as const };
+  let stopEntered!: () => void;
+  const stopStarted = new Promise<void>((resolve) => { stopEntered = resolve; });
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => returnedHandle, attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("fresh launch"); }, poke: async () => {},
+    stop: async () => { stopEntered(); throw new Error("injected exact-stop failure"); },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    const store = (daemon as unknown as { store: ManifestStore }).store;
+    const originalReplace = store.replaceEntry.bind(store);
+    store.replaceEntry = async (expected, updated, fence) => {
+      if (updated.provider_ref?.provider_continuation_id === returnedHandle.providerContinuationId) {
+        throw new Error("injected provider journal failure");
+      }
+      return originalReplace(expected, updated, fence);
+    };
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    await stopStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+    const prepare = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
+    assert.equal(prepare.ok, false);
+    assert.match(prepare.error ?? "", /exact-stop failure|journaled or exactly fenced/i);
+    const status = await daemonRequest(paths.socketPath, "daemon.status");
+    assert.equal(status.ok, true, "failed preflight retains socket and singleton authority");
+    assert.equal(((status.result as { generation: number }).generation > 0), true);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("pause during post-install worker bind fences the exact provider before delivery starts", async () => {
+  const env = await fixture();
+  const id = "pause_during_post_install_bind";
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: 55445, providerContinuationId: "pause-bind-continuation", observedState: "working" as const };
+  let bindEntered!: () => void;
+  const bindStarted = new Promise<void>((resolve) => { bindEntered = resolve; });
+  let releaseBind!: () => void;
+  const bindGate = new Promise<void>((resolve) => { releaseBind = resolve; });
+  const stopped: typeof returnedHandle[] = [];
+  let deliveryStarts = 0;
+  let nativePublications = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => returnedHandle, attach: async () => { throw new Error("bind control fence uses the returned handle"); },
+    attachAction: async () => { throw new Error("bind control fence never infers the action"); }, resume: async () => { throw new Error("fresh launch"); }, poke: async () => {},
+    stop: async (handle) => { stopped.push(handle as typeof returnedHandle); return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => ({ sessionId: "pause-bind-session", bearer: "pause-bind-bearer", bearerId: "pause-bind-bearer-id", expiresAt: null }),
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      workerBindings: WorkerBindingStore;
+      publishNativeActivity: () => Promise<boolean>;
+      startSupervisedDelivery: (entryId: string) => Promise<void>;
+    };
+    const originalBind = internals.workerBindings.bind.bind(internals.workerBindings);
+    internals.workerBindings.bind = async (input) => {
+      bindEntered();
+      await bindGate;
+      return originalBind(input);
+    };
+    internals.publishNativeActivity = async () => { nativePublications += 1; return true; };
+    internals.startSupervisedDelivery = async () => { deliveryStarts += 1; };
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-pause-bind",
+      supervisor_grant: "pause-bind-parent", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    await bindStarted;
+    const pause = daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: "paused" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    releaseBind();
+    assert.equal((await pause).ok, true);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "paused", "post-bind pause fence");
+    assert.deepEqual(stopped, [returnedHandle]);
+    assert.equal(deliveryStarts, 0);
+    assert.equal(nativePublications, 0);
+    const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: Array<{ terminal: unknown }> };
+    assert.equal(result.execution_generations.length, 1);
+    assert.notEqual(result.execution_generations[0]?.terminal, null);
+  } finally {
+    releaseBind?.();
+    await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
