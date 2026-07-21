@@ -52,6 +52,7 @@ const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const LIVENESS_GRACE_MS = 30_000;
 const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
+const WORKER_BEARER_ROTATION_LEAD_MS = 60_000;
 
 function supervisedRoomPath(roomId: string): string {
   return roomId.split("/").map(encodeURIComponent).join("/");
@@ -2129,9 +2130,16 @@ export class SupervisorDaemon {
         if (this.requiresHostGrant(entry) && this.currentHostGrant(entry)) {
           const binding = await this.workerBindings.get(entry.id);
           const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-          if (!credential && entry.provider_ref?.execution_generation_id) {
-            const minted = await this.mintHostWorkerSession(entry, entry.provider_ref.execution_generation_id);
-            if (minted) await this.bindMintedHostWorkerSession(entry.id, minted);
+          const expiring = binding ? await this.hostWorkerBearerNeedsRotation(entry, binding) : false;
+          if ((!credential || expiring) && entry.provider_ref?.execution_generation_id) {
+            try {
+              const minted = await this.mintHostWorkerSession(entry, entry.provider_ref.execution_generation_id);
+              if (minted) await this.bindMintedHostWorkerSession(entry.id, minted);
+            } catch (error) {
+              // A still-live bearer remains usable until its deadline. Keep
+              // the exact provider and let the next heartbeat retry rotation.
+              if (!credential) throw error;
+            }
           }
         }
         if (entry.observed_state !== handle.observedState) {
@@ -2158,9 +2166,6 @@ export class SupervisorDaemon {
         );
         return;
       }
-      await this.transition(entry.id, entry.provider_ref ? "recovering" : "starting", "none", entry.provider_ref ? "recovering durable provider continuation" : "starting daemon-owned provider", "daemon-convergence");
-      const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
-      const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
       const priorBinding = entry.provider_ref ? await this.workerBindings.get(entry.id) : null;
       const resumeWorker = priorBinding
         && priorBinding.room_id === entry.room_id
@@ -2170,6 +2175,26 @@ export class SupervisorDaemon {
           roomCursor: priorBinding.room_cursor ?? null,
         }
         : null;
+      const ref = entry.provider_ref ? this.providerRef(entry) : null;
+      const mintedAuthorization = this.requiresHostGrant(entry)
+        ? await this.mintHostWorkerAuthorization(entry)
+        : null;
+      if (this.requiresHostGrant(entry) && !mintedAuthorization) return;
+      const capabilities = await this.providerPort.capabilities(attempt.work_attempt_id, entry.provider);
+      const resumed = Boolean(ref && capabilities.resume);
+      if (this.requiresHostGrant(entry)) {
+        const grant = this.currentHostGrant(entry);
+        if (!grant || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return;
+      }
+      // Every potentially long remote authorization/capability await is now
+      // complete. Only then may this daemon create a durable live generation.
+      await this.transition(entry.id, entry.provider_ref ? "recovering" : "starting", "none", entry.provider_ref ? "recovering durable provider continuation" : "starting daemon-owned provider", "daemon-convergence");
+      if (this.requiresHostGrant(entry)) {
+        const grant = this.currentHostGrant(entry);
+        if (!grant || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return;
+      }
+      const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
+      const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
       const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
       let mintedHostSession: Awaited<ReturnType<typeof this.mintHostWorkerSession>> = null;
       const spawn: ProviderActionSpawn = {
@@ -2187,17 +2212,13 @@ export class SupervisorDaemon {
         ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
         ...(devMcpServerEntryPath && entry.provider === "codex" ? { devMcpServerEntryPath } : {}),
       };
-      const ref = entry.provider_ref ? this.providerRef(entry) : null;
-      let resumed = false;
       let providerPersisted = false;
       try {
-        if (this.requiresHostGrant(entry)) {
-          mintedHostSession = await this.mintHostWorkerSession(entry, execution.execution_generation_id);
+        if (mintedAuthorization) {
+          mintedHostSession = await this.recordMintedHostWorkerSession(entry, execution.execution_generation_id, mintedAuthorization);
           if (!mintedHostSession) throw new Error("Waiting for desktop credential handoff.");
           Object.assign(spawn, { supervisorWorkerSession: { agentSessionId: mintedHostSession.agentSessionId, roomCursor: null } });
         }
-        const capabilities = await this.providerPort.capabilities(attempt.work_attempt_id, entry.provider);
-        resumed = Boolean(ref && capabilities.resume);
         handle = resumed
           ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
           : await this.providerPort.spawn(spawn);
@@ -2464,6 +2485,16 @@ export class SupervisorDaemon {
         if (this.liveBindingIdentities.get(entryId)?.executionGenerationId !== manifestEntry.provider_ref?.execution_generation_id) return;
         if (!["working", "idle"].includes(manifestEntry.observed_state)) return;
         if (!["working", "idle"].includes(current.observedState)) return;
+        if (this.requiresHostGrant(manifestEntry) && this.currentHostGrant(manifestEntry)) {
+          const binding = await this.workerBindings.get(entryId);
+          if (binding && await this.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
+            // The serialized convergence lane rotates the bearer against the
+            // existing generation and provider. No Electron reinstall is
+            // required while this daemon still owns the in-memory host grant.
+            this.requestConvergence(entryId);
+            return;
+          }
+        }
         const status = current.observedState === "idle" ? "idle" : "working";
         await this.publishNativeActivity(entryId, "native_harness.heartbeat", status);
       })().catch(() => undefined));
@@ -2893,6 +2924,21 @@ export class SupervisorDaemon {
     return grant;
   }
 
+  private async hostWorkerBearerNeedsRotation(entry: DaemonManifestEntry, binding: WorkerSessionBinding): Promise<boolean> {
+    const session = await this.workerBindings.supervisedWorkerSession(entry.id);
+    if (!session
+      || session.room_id !== entry.room_id
+      || session.agent_session_id !== binding.agent_session_id
+      || session.execution_generation_id !== binding.execution_generation_id) return false;
+    // Public metadata is committed before the private vault rebind. If the
+    // latter fails, the mismatch makes the next heartbeat remint instead of
+    // silently retaining the old credential forever.
+    if (session.credential_ref !== binding.credential_ref) return true;
+    if (!session.expires_at) return false;
+    const expiresAt = Date.parse(session.expires_at);
+    return Number.isFinite(expiresAt) && expiresAt <= this.nowMs() + WORKER_BEARER_ROTATION_LEAD_MS;
+  }
+
   private async ownsDaemonGeneration(expectedGeneration: number): Promise<boolean> {
     if (this.handoffScheduled) {
       this.hostGrants.clear();
@@ -2918,9 +2964,9 @@ export class SupervisorDaemon {
     if (this.hostGrants.get(entryId) === grant) this.hostGrants.delete(entryId);
   }
 
-  /** Mint only after a durable execution exists. The result stays local until the exact provider ref exists. */
-  private async mintHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string): Promise<{
-    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
+  /** Remote authorization happens before starting a durable provider generation. */
+  private async mintHostWorkerAuthorization(entry: DaemonManifestEntry): Promise<{
+    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string;
   } | null> {
     const grant = this.currentHostGrant(entry);
     if (!grant || !entry.work_attempt_id) return null;
@@ -2940,19 +2986,39 @@ export class SupervisorDaemon {
       return null;
     }
     const current = await this.store.getEntry(entry.id);
+    if (!current || current.work_attempt_id !== entry.work_attempt_id || !this.currentHostGrant(current)) return null;
+    return { agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, apiUrl: grant.apiUrl };
+  }
+
+  /** Bind public session metadata to the exact generation after it exists. */
+  private async recordMintedHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string, minted: {
+    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string;
+  }): Promise<{
+    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
+  } | null> {
+    const grant = this.currentHostGrant(entry);
+    if (!grant || !entry.work_attempt_id || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return null;
+    const current = await this.store.getEntry(entry.id);
     if (!current || !this.currentHostGrant(current)
       || current.work_attempt_id !== entry.work_attempt_id) return null;
     const attempt = await this.durability.getAttempt(entry.work_attempt_id);
     if (!attempt.execution_generations.some((candidate) => candidate.execution_generation_id === executionGenerationId && !candidate.terminal)) return null;
     await this.workerBindings.recordSupervisedWorkerSession({
-      agent_id: entry.id, room_id: entry.room_id, agent_session_id: minted.sessionId,
+      agent_id: entry.id, room_id: entry.room_id, agent_session_id: minted.agentSessionId,
       execution_generation_id: executionGenerationId, credential_ref: minted.bearerId, expires_at: minted.expiresAt,
     });
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) {
       this.revokeHostGrantIfCurrent(entry.id, grant);
       return null;
     }
-    return { agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, apiUrl: grant.apiUrl, executionGenerationId };
+    return { ...minted, executionGenerationId };
+  }
+
+  private async mintHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string): Promise<{
+    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
+  } | null> {
+    const minted = await this.mintHostWorkerAuthorization(entry);
+    return minted ? this.recordMintedHostWorkerSession(entry, executionGenerationId, minted) : null;
   }
 
   /** Provider identity has already been persisted when this binds the raw bearer. */

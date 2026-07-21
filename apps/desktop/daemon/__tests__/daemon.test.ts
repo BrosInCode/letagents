@@ -933,6 +933,160 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
   }
 });
 
+test("handoff during delayed host-grant mint creates no generation and the successor launches once", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "delayed_host_grant_handoff");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "delayed_host_grant_handoff", leaseId: "delayed_host_grant_handoff", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  let spawns = 0;
+  const handle = { workAttemptId: attempt.work_attempt_id, pid: 8812, providerContinuationId: "successor-host-grant-continuation", observedState: "working" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("pre-spawn recovery must launch one fresh provider"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  let mintEntered!: () => void;
+  const mintStarted = new Promise<void>((resolve) => { mintEntered = resolve; });
+  let releaseMint!: () => void;
+  const mintGate = new Promise<void>((resolve) => { releaseMint = resolve; });
+  const first = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintEntered();
+      await mintGate;
+      return { sessionId: "retired-session", bearer: "retired-bearer", bearerId: "retired-bearer-id", expiresAt: null };
+    },
+  });
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "delayed_host_grant_handoff", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    const firstGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "delayed_host_grant_handoff", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-delayed",
+      supervisor_grant: "first-grant", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: firstGeneration,
+    })).ok, true);
+    await mintStarted;
+    const beforeHandoff = (await daemonRequest(paths.socketPath, "attempt.read", { id: "delayed_host_grant_handoff" })).result as { execution_generations: unknown[] };
+    assert.equal(beforeHandoff.execution_generations.length, 0, "remote mint cannot expose an unowned durable generation");
+    const handoff = first.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    await within(handoff, "delayed mint daemon handoff", 1_000);
+
+    second = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+      poll: async () => ({ messages: [] }), publish: async () => {},
+    }, {
+      createWorkerSession: async () => ({ sessionId: "successor-session", bearer: "successor-bearer", bearerId: "successor-bearer-id", expiresAt: null }),
+    });
+    await second.start();
+    (second as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const secondGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "delayed_host_grant_handoff", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-delayed",
+      supervisor_grant: "second-grant", grant_generation: 2, api_url: "https://letagents.example", daemon_generation: secondGeneration,
+    })).ok, true);
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
+      return spawns === 1 && current?.provider_ref?.provider_continuation_id === handle.providerContinuationId;
+    }, "successor launch after retired pre-generation mint");
+    const recovered = (await daemonRequest(paths.socketPath, "attempt.read", { id: "delayed_host_grant_handoff" })).result as { execution_generations: Array<{ terminal: unknown }> };
+    assert.equal(recovered.execution_generations.length, 1);
+    assert.equal(recovered.execution_generations[0]?.terminal, null);
+    assert.equal(spawns, 1, "successor creates the only provider generation");
+    releaseMint();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const afterLateMint = (await daemonRequest(paths.socketPath, "attempt.read", { id: "delayed_host_grant_handoff" })).result as { execution_generations: unknown[] };
+    assert.equal(afterLateMint.execution_generations.length, 1);
+    assert.equal(spawns, 1, "late retired mint completion cannot create a generation or provider");
+  } finally {
+    releaseMint?.();
+    await second?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("a live daemon rotates an expiring host worker bearer without reinstalling the grant or restarting the provider", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "host_grant_expiry_rotation");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "host_grant_expiry_rotation", leaseId: "host_grant_expiry_rotation", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  let clock = Date.parse("2026-07-21T12:00:00.000Z");
+  let spawns = 0;
+  let mintCalls = 0;
+  const handle = { workAttemptId: attempt.work_attempt_id, pid: 9914, providerContinuationId: "rotating-host-grant-continuation", observedState: "working" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("bearer rotation must retain the live provider"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintCalls += 1;
+      return mintCalls === 1
+        ? { sessionId: "rotating-session", bearer: "first-rotating-bearer", bearerId: "first-rotating-bearer-id", expiresAt: new Date(clock + 120_000).toISOString() }
+        : { sessionId: "rotating-session", bearer: "second-rotating-bearer", bearerId: "second-rotating-bearer-id", expiresAt: new Date(clock + 3_600_000).toISOString() };
+    },
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { workerBindings: WorkerBindingStore; publishNativeActivity: () => Promise<boolean> };
+    internals.publishNativeActivity = async () => true;
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "host_grant_expiry_rotation", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "host_grant_expiry_rotation", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-rotation",
+      supervisor_grant: "rotation-grant", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+    })).ok, true);
+    let firstBinding: Awaited<ReturnType<WorkerBindingStore["get"]>> = null;
+    await eventually(async () => {
+      firstBinding = await internals.workerBindings.get("host_grant_expiry_rotation");
+      return firstBinding?.credential_ref === "first-rotating-bearer-id";
+    }, "initial host worker bearer binding");
+    assert(firstBinding);
+    assert.equal(await internals.workerBindings.credentialFor(firstBinding), "first-rotating-bearer");
+
+    clock += 61_000;
+    await eventually(async () => {
+      const current = await internals.workerBindings.get("host_grant_expiry_rotation");
+      return mintCalls === 2 && current?.credential_ref === "second-rotating-bearer-id";
+    }, "automatic host worker bearer rotation");
+    const rotated = await internals.workerBindings.get("host_grant_expiry_rotation");
+    assert(rotated);
+    assert.equal(await internals.workerBindings.credentialFor(rotated), "second-rotating-bearer");
+    const credentialVault = (internals.workerBindings as unknown as { credentials: Map<string, unknown> }).credentials;
+    assert.equal(credentialVault.has("first-rotating-bearer-id"), false, "the replaced bearer is revoked from the in-memory vault");
+    assert.equal(spawns, 1, "bearer rotation must not restart the provider");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("an unattached live durable generation blocks a duplicate provider start", async () => {
   const env = await fixture();
   const paths = {
