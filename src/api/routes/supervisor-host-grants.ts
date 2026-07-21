@@ -273,7 +273,10 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     }
     let ended;
     try {
-      ended = await endRoomAgentSession({ session_id: sessionId, owner_account_id: grant.owner_account_id, supervisor_grant_fence: fence(grant) });
+      ended = await endRoomAgentSession({
+        session_id: sessionId, owner_account_id: grant.owner_account_id,
+        supervisor_grant_id: grant.grant_id, supervisor_grant_fence: fence(grant),
+      });
     } catch (error) {
       if (respondToStaleSupervisorGrantFence(res, error)) return;
       throw error;

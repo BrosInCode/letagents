@@ -1083,11 +1083,22 @@ export async function endRoomAgentSession(input: {
   session_id: string;
   room_id?: string | null;
   owner_account_id?: string | null;
+  supervisor_grant_id?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<RoomAgentSession | null> {
   return db.transaction(async (tx) => {
   if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
     throw new SupervisorGrantFenceStaleError();
+  }
+  if (input.supervisor_grant_id) {
+    const [session] = await tx.select().from(room_agent_sessions).where(and(
+      eq(room_agent_sessions.session_id, input.session_id),
+      ...(input.owner_account_id ? [eq(room_agent_sessions.owner_account_id, input.owner_account_id)] : []),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      isNull(room_agent_sessions.ended_at),
+    )).limit(1);
+    if (!session?.agent_instance_id) throw new SupervisorGrantFenceStaleError();
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${session.owner_account_id}:${session.room_id}:${session.agent_key}:${session.agent_instance_id}`}, 0))`);
   }
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
@@ -1097,6 +1108,11 @@ export async function endRoomAgentSession(input: {
   if (input.owner_account_id) {
     conditions.push(eq(room_agent_sessions.owner_account_id, input.owner_account_id));
   }
+  if (input.supervisor_grant_id) {
+    conditions.push(eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id));
+    conditions.push(eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind));
+    conditions.push(isNull(room_agent_sessions.ended_at));
+  }
 
   const [row] = await tx
     .update(room_agent_sessions)
@@ -1105,8 +1121,10 @@ export async function endRoomAgentSession(input: {
       updated_at: now,
       last_seen_at: now,
     })
-    .where(and(...conditions))
-    .returning();
+      .where(and(...conditions))
+      .returning();
+
+  if (!row && input.supervisor_grant_id) throw new SupervisorGrantFenceStaleError();
 
   if (row) {
     await tx.update(room_agent_session_bearers)
