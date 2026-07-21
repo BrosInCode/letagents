@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -4019,6 +4019,65 @@ test("Codex app-server launcher redacts inherited environment secrets", async ()
     } else {
       process.env.LETAGENTS_TOKEN = previousToken;
     }
+  }
+});
+
+test("Codex app-server launcher strips ambient LetAgents credentials only for supervised bounded turns", async () => {
+  const bin = join(tempDir, "codex-reporting-supervised-environment");
+  const boundedReport = join(tempDir, "codex-supervised-environment.json");
+  const ordinaryReport = join(tempDir, "codex-ordinary-environment.json");
+  const ownerToken = "inherited-owner-token-for-bounded-launch";
+  const workerBearer = "inherited-worker-bearer-for-bounded-launch";
+  const previousOwner = process.env.LETAGENTS_TOKEN;
+  const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
+  process.env.LETAGENTS_TOKEN = ownerToken;
+  process.env.LETAGENTS_AGENT_SESSION_BEARER = workerBearer;
+  writeFileSync(bin, [
+    "#!/usr/bin/env node",
+    "const { writeFileSync } = require('node:fs');",
+    "writeFileSync(process.env.LAUNCH_ENV_REPORT, JSON.stringify({",
+    "  owner: process.env.LETAGENTS_TOKEN ?? null,",
+    "  bearer: process.env.LETAGENTS_AGENT_SESSION_BEARER ?? null,",
+    "  bounded: process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS ?? null,",
+    "  retained: process.env.LETAGENTS_ENV_CANARY ?? null,",
+    "}));",
+    "",
+  ].join("\n"), { mode: 0o755 });
+
+  try {
+    const bounded = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+      env: {
+        LAUNCH_ENV_REPORT: boundedReport,
+        LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+        LETAGENTS_ENV_CANARY: "retained-in-bounded-mode",
+      },
+    });
+    assert.equal((await waitForCodexLaunchExitForTest(bounded)).type, "exit");
+    assert.deepEqual(JSON.parse(readFileSync(boundedReport, "utf8")), {
+      owner: null,
+      bearer: null,
+      bounded: "1",
+      retained: "retained-in-bounded-mode",
+    });
+
+    const ordinary = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+      env: {
+        LAUNCH_ENV_REPORT: ordinaryReport,
+        LETAGENTS_ENV_CANARY: "retained-in-ordinary-mode",
+      },
+    });
+    assert.equal((await waitForCodexLaunchExitForTest(ordinary)).type, "exit");
+    assert.deepEqual(JSON.parse(readFileSync(ordinaryReport, "utf8")), {
+      owner: ownerToken,
+      bearer: workerBearer,
+      bounded: null,
+      retained: "retained-in-ordinary-mode",
+    });
+  } finally {
+    if (previousOwner === undefined) delete process.env.LETAGENTS_TOKEN;
+    else process.env.LETAGENTS_TOKEN = previousOwner;
+    if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
+    else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
   }
 });
 
