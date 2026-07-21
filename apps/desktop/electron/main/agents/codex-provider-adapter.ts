@@ -699,6 +699,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         room_id: req.roomId,
         work_attempt_id: req.workAttemptId,
         execution_generation_id: req.supervisorExecutionGenerationId!,
+        ...(req.supervisorWorkerSession ? {
+          agent_session_id: req.supervisorWorkerSession.agentSessionId,
+          ...(req.agentDisplayName?.trim() ? { agent_display_name: req.agentDisplayName.trim() } : {}),
+        } : {}),
       });
     }
     const devOverrides = req.devMcpServerEntryPath
@@ -714,6 +718,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
           LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
           LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+          ...(req.supervisorWorkerSession ? {
+            LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: req.supervisorWorkerSession.agentSessionId,
+            LETAGENTS_SUPERVISOR_ROOM_ID: req.roomId,
+            ...(req.agentDisplayName?.trim() ? {
+              LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: req.agentDisplayName.trim(),
+            } : {}),
+          } : {}),
           ...(req.deliveryMode === "daemon_inbox" ? { LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1" } : {}),
         },
       } : {}),

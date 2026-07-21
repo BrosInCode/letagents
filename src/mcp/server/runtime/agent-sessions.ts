@@ -20,6 +20,7 @@ import {
   ensureAgentIdentity,
 } from "./identity.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { resolveCurrentSupervisedWorkerSession } from "./supervisor-bridge.js";
 
 // A worker bearer already represents a server-side worker session. This local
 // marker lets the MCP tool contract stay session-shaped without persisting or
@@ -29,7 +30,8 @@ export const WORKER_BEARER_AGENT_SESSION_ID = "worker_bearer";
 export function buildAgentDeliveryHeaders(
   agentSession?: StoredAgentSessionState | null
 ): Record<string, string> {
-  if (!agentSession || requireValidWorkerBearerRuntime().mode === "worker") {
+  const runtime = requireValidWorkerBearerRuntime();
+  if (!agentSession || runtime.mode === "worker" || runtime.mode === "supervised") {
     return {};
   }
 
@@ -156,8 +158,20 @@ export async function resolveWorkerToolIdentity(input: {
   roomId?: string | null;
   agentSessionId?: string | null;
 }): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
+  const runtimeMode = requireValidWorkerBearerRuntime().mode;
+  if (runtimeMode === "supervised") {
+    const agentSession = await resolveCurrentSupervisedWorkerSession(input.roomId);
+    if (
+      input.agentSessionId
+      && input.agentSessionId !== WORKER_BEARER_AGENT_SESSION_ID
+      && input.agentSessionId !== agentSession.session_id
+    ) {
+      throw new Error(`Daemon-supervised worker session is ${agentSession.session_id}, not ${input.agentSessionId}.`);
+    }
+    return { identity: identityFromAgentSession(agentSession), agentSession };
+  }
   if (
-    requireValidWorkerBearerRuntime().mode === "worker" &&
+    runtimeMode === "worker" &&
     (!input.agentSessionId || input.agentSessionId === WORKER_BEARER_AGENT_SESSION_ID)
   ) {
     const identity = await ensureAgentIdentity();
@@ -244,7 +258,8 @@ export function getAgentSessionRepoBranch(cwd?: string | null): string | null {
 }
 
 export function agentSessionCredentials(agentSession: StoredAgentSessionState): Record<string, string> {
-  if (requireValidWorkerBearerRuntime().mode === "worker") {
+  const runtime = requireValidWorkerBearerRuntime();
+  if (runtime.mode === "worker" || runtime.mode === "supervised") {
     return {};
   }
   return {

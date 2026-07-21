@@ -69,10 +69,10 @@ export function registerRoomInspectionTools(server: McpServer): void {
 
 export async function getCurrentRoomPayload(conversationId?: string) {
   const runtime = requireValidWorkerBearerRuntime();
-  const workerAuth = runtime.mode === "worker"
-    ? { source: "worker_bearer", expires_at: null, account: null }
+  const workerAuth = runtime.mode !== "owner"
+    ? { source: runtime.mode === "worker" ? "worker_bearer" : "daemon_supervised", expires_at: null, account: null }
     : null;
-  const localCodexDetails = runtime.mode === "worker"
+  const localCodexDetails = runtime.mode !== "owner"
     ? { current_local_codex_session: null, local_codex_session_count: 0 }
     : {
         current_local_codex_session: getCurrentLiveSessionPayload(currentRoom?.room_id),
@@ -87,7 +87,7 @@ export async function getCurrentRoomPayload(conversationId?: string) {
     };
   }
 
-  const auth = runtime.mode === "worker"
+  const auth = runtime.mode !== "owner"
     ? null
     : (await ownerAuthStoreLoader()).getStoredAuth();
   return withJoinRoomAgentPrompt({
