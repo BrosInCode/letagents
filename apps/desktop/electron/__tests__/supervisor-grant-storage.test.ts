@@ -154,6 +154,76 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
   });
 });
 
+test("concurrent same-agent get-or-provision performs one POST and returns one credential", async () => {
+  await withRegistry(async (path) => {
+    let posts = 0;
+    let signalStarted!: () => void;
+    let releasePost!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const released = new Promise<void>((resolve) => { releasePost = resolve; });
+    const apiFetch = (async <T>(_path: string, init?: { body?: string }) => {
+      posts += 1;
+      const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+      signalStarted();
+      await released;
+      return {
+        grant_id: "grant_same", host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: "lashg_same_secret",
+      } as T;
+    }) as never;
+    const input = {
+      hostId: "desktop_host", entryId: "entry-same", agentKey: "owner/agent-same", allowedRoomIds: ["room-same"],
+    };
+    const firstPromise = getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch });
+    await started;
+    const secondPromise = getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch });
+    await Promise.resolve();
+    assert.equal(posts, 1, "the second caller waits behind the complete same-agent lifecycle");
+    releasePost();
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+    assert.equal(posts, 1);
+    assert.deepEqual(second, first);
+    assert.equal(first.token, "lashg_same_secret");
+    const registry = JSON.parse(await readFile(path, "utf8")) as { grants: Record<string, unknown> };
+    assert.deepEqual(Object.keys(registry.grants), ["owner/agent-same"]);
+  });
+});
+
+test("stale or under-scoped cached grant is revoked and reprovisioned", async () => {
+  await withRegistry(async () => {
+    const agentKey = "owner/agent-stale";
+    const installationId = desktopSupervisorGrantInstallationId("desktop_host", "entry-stale");
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        ...metadata(agentKey, "stale"), hostId: "desktop_host", installationId,
+        allowedRoomIds: ["room-old"], expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      },
+      token: "lashg_old", entryId: "entry-stale",
+    }, { storage: keychain });
+    const calls: string[] = [];
+    const apiFetch = (async <T>(path: string, init?: { body?: string }) => {
+      calls.push(`${init?.body ? "POST" : "DELETE"} ${path}`);
+      if (!init?.body) return {} as T;
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      return {
+        grant_id: "grant_replacement", host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: "lashg_replacement",
+      } as T;
+    }) as never;
+    const result = await getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "desktop_host", entryId: "entry-stale", agentKey, allowedRoomIds: ["room-old", "room-new"],
+    }, { storage: keychain, apiFetch });
+    assert.deepEqual(calls, ["DELETE /supervisor-host-grants/grant_stale", "POST /supervisor-host-grants"]);
+    assert.equal(result.token, "lashg_replacement");
+    assert.deepEqual(result.metadata.allowedRoomIds, ["room-old", "room-new"]);
+  });
+});
+
 test("missing safeStorage fails before get-or-provision performs an API request", async () => {
   let requests = 0;
   const unavailable = {
