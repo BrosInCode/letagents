@@ -19,7 +19,7 @@ import {
   detectAgentRuntimeLabel,
   ensureAgentIdentity,
 } from "./identity.js";
-import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { isSupervisedBoundedTurn, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { resolveCurrentSupervisedWorkerSession } from "./supervisor-bridge.js";
 
 // A worker bearer already represents a server-side worker session. This local
@@ -205,7 +205,7 @@ export async function resolveWorkerToolIdentity(input: {
   }
   const agentSession = input.agentSessionId
     ? requireWorkerAgentSession(input.roomId, input.agentSessionId)
-    : input.roomId && await isLocalRoomStorageEnabled(input.roomId)
+    : input.roomId && !isSupervisedBoundedTurn() && await isLocalRoomStorageEnabled(input.roomId)
       ? await ensureLocalWorkerAgentSession(input.roomId)
       : requireWorkerAgentSession(input.roomId, input.agentSessionId);
   return {

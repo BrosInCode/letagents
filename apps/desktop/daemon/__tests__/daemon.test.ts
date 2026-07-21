@@ -3868,7 +3868,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal((installed.result as { status: string }).status, "stale");
     const oldBorrow = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
       entry_id: "supervised_handoff", room_id: "focus_37", work_attempt_id: workAttemptId,
-      execution_generation_id: stoppedGenerationId, agent_session_id: "agent_session_exact", daemon_generation: daemonGeneration,
+      execution_generation_id: stoppedGenerationId, agent_session_id: "agent_session_exact", daemon_generation: daemonGeneration, api_url: apiUrl,
     });
     assert.equal((oldBorrow.result as { status: string }).status, "stale", "terminal predecessor cannot borrow while the successor is recovering");
 
@@ -3888,9 +3888,15 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal((successorInstall.result as { status: string }).status, "installed");
     const successorBorrow = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
       entry_id: "supervised_handoff", room_id: "focus_37", work_attempt_id: workAttemptId,
-      execution_generation_id: resumedGenerationId, agent_session_id: "agent_session_exact", daemon_generation: daemonGeneration,
+      execution_generation_id: resumedGenerationId, agent_session_id: "agent_session_exact", daemon_generation: daemonGeneration, api_url: apiUrl,
     });
     assert.deepEqual(successorBorrow.result, { status: "available", credential: "desktop-delivered-successor-secret" });
+    const crossOriginBorrow = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
+      entry_id: "supervised_handoff", room_id: "focus_37", work_attempt_id: workAttemptId,
+      execution_generation_id: resumedGenerationId, agent_session_id: "agent_session_exact", daemon_generation: daemonGeneration,
+      api_url: "https://attacker.invalid",
+    });
+    assert.deepEqual(crossOriginBorrow.result, { status: "stale" }, "credential borrowing is bound to the registered API origin");
     const rebound = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
       entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
       work_attempt_id: workAttemptId, execution_generation_id: resumedGenerationId,

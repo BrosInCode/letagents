@@ -75,6 +75,7 @@ test("credential borrowing requires the negotiated daemon generation and defers 
     assert.deepEqual(requests.filter((request) => request.method === "supervisor.borrow_worker_credential")[1]?.params, {
       entry_id: "manifest_exact", room_id: session.room_id, work_attempt_id: "attempt_exact",
       execution_generation_id: "generation_exact", agent_session_id: session.session_id, daemon_generation: 9,
+      api_url: "https://letagents.chat",
     });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -120,6 +121,7 @@ test("bounded MCP borrowing resolves its exact non-secret worker identity from t
     assert.deepEqual(requests[1]?.params, {
       entry_id: "manifest_exact", room_id: session.room_id, work_attempt_id: "attempt_exact",
       execution_generation_id: "generation_exact", agent_session_id: session.session_id, daemon_generation: 11,
+      api_url: "https://letagents.chat",
     });
     assert.equal(requests.filter((request) => request.method === "supervisor.borrow_worker_credential").length, 2);
     assert.doesNotMatch(JSON.stringify(await readContext(root)), /rotated-in-daemon-memory|session-secret/);

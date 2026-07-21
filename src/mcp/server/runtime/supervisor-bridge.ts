@@ -144,6 +144,7 @@ export async function borrowSupervisedWorkerCredential(
   if (!coordinates) return { state: "not_supervised" };
   if (session.session_kind !== "worker") return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const apiUrl = normalizedWorkerApiOrigin(env);
   const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
   if (negotiated.generation === null) return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
   const response = await supervisorRequest(coordinates.socketPath, {
@@ -153,7 +154,7 @@ export async function borrowSupervisedWorkerCredential(
     params: {
       entry_id: coordinates.entryId, room_id: session.room_id, work_attempt_id: coordinates.workAttemptId,
       execution_generation_id: coordinates.executionGenerationId, agent_session_id: session.session_id,
-      daemon_generation: negotiated.generation,
+      daemon_generation: negotiated.generation, api_url: apiUrl,
     },
   }, timeoutMs);
   if (!response.ok || response.version !== negotiated.protocolVersion) return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
@@ -163,6 +164,21 @@ export async function borrowSupervisedWorkerCredential(
     return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
   }
   return { state: "available", credential: result.credential };
+}
+
+function normalizedWorkerApiOrigin(env: NodeJS.ProcessEnv): string {
+  const apiUrl = env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
+  let parsed: URL;
+  try {
+    parsed = new URL(apiUrl);
+  } catch {
+    throw new Error("Daemon-supervised worker requires a valid LETAGENTS_API_URL.");
+  }
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopbackHosts.has(parsed.hostname.toLowerCase()))) {
+    throw new Error("Daemon-supervised worker requires HTTPS unless LETAGENTS_API_URL uses an exact loopback host.");
+  }
+  return parsed.origin;
 }
 
 /** Bind the exact worker credential minted by registration to its daemon lane. */
