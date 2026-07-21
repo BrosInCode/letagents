@@ -11,9 +11,12 @@ import {
   desktopSupervisorGrantInstallationId,
   encryptSupervisorGrantForStorage,
   getOrProvisionDesktopSupervisorGrantForAgent,
+  provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
+  revokeDesktopSupervisorGrant,
 } from "../main/supervisor-grant.js";
+import { DesktopApiError } from "../main/auth.js";
 
 const keychain = {
   isEncryptionAvailable: () => true,
@@ -219,6 +222,34 @@ test("different aliases resolving to the same canonical room reuse one grant", a
   });
 });
 
+test("narrowing the canonical room set rotates away excess authority", async () => {
+  await withRegistry(async () => {
+    let posts = 0;
+    let deletes = 0;
+    const apiFetch = (async <T>(_path: string, init?: { body?: string }) => {
+      if (!init?.body) { deletes += 1; return {} as T; }
+      posts += 1;
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      return {
+        grant_id: `grant_scope_${posts}`, host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: `lashg_scope_${posts}`,
+      } as T;
+    }) as never;
+    const base = { hostId: "desktop_host", entryId: "entry-scope", agentKey: "owner/agent-scope" };
+    await getOrProvisionDesktopSupervisorGrantForAgent({
+      ...base, roomScopes: [roomScope("alias-a", "room-a"), roomScope("alias-b", "room-b")],
+    }, { storage: keychain, apiFetch });
+    const narrowed = await getOrProvisionDesktopSupervisorGrantForAgent({
+      ...base, roomScopes: [roomScope("another-a", "room-a")],
+    }, { storage: keychain, apiFetch });
+    assert.equal(posts, 2);
+    assert.equal(deletes, 1);
+    assert.deepEqual(narrowed.metadata.allowedRoomIds, ["room-a"]);
+  });
+});
+
 test("stale or under-scoped cached grant is revoked and reprovisioned", async () => {
   await withRegistry(async () => {
     const agentKey = "owner/agent-stale";
@@ -253,7 +284,53 @@ test("stale or under-scoped cached grant is revoked and reprovisioned", async ()
   });
 });
 
-test("already-revoked or response-lost cleanup still removes the exact stale entry and reprovisions", async () => {
+test("pre-send DELETE failure preserves local recovery until an acknowledged retry", async () => {
+  await withRegistry(async () => {
+    const agentKey = "owner/agent-presend";
+    const installationId = desktopSupervisorGrantInstallationId("desktop_host", "entry-presend");
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        ...metadata(agentKey, "presend"), hostId: "desktop_host", installationId,
+        allowedRoomIds: ["room-old"],
+      },
+      token: "lashg_presend_old", entryId: "entry-presend",
+    }, { storage: keychain });
+    let deletes = 0;
+    let posts = 0;
+    const apiFetch = (async <T>(_path: string, init?: { body?: string }) => {
+      if (!init?.body) {
+        deletes += 1;
+        if (deletes === 1) throw new Error("network unreachable before send");
+        return {} as T;
+      }
+      posts += 1;
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      return {
+        grant_id: "grant_presend_new", host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: "lashg_presend_new",
+      } as T;
+    }) as never;
+    const input = {
+      hostId: "desktop_host", entryId: "entry-presend", agentKey,
+      roomScopes: [roomScope("alias-new", "room-new")],
+    };
+    await assert.rejects(
+      getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch }),
+      /network unreachable before send/,
+    );
+    assert.equal(posts, 0);
+    assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_presend_old");
+    const recovered = await getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch });
+    assert.equal(deletes, 2);
+    assert.equal(posts, 1);
+    assert.equal(recovered.token, "lashg_presend_new");
+  });
+});
+
+test("lost DELETE response preserves local recovery, then an explicit 404 retry reprovisions", async () => {
   await withRegistry(async () => {
     const agentKey = "owner/agent-cleanup";
     const installationId = desktopSupervisorGrantInstallationId("desktop_host", "entry-cleanup");
@@ -266,11 +343,16 @@ test("already-revoked or response-lost cleanup still removes the exact stale ent
       token: "lashg_cleanup_old", entryId: "entry-cleanup",
     }, { storage: keychain });
     const calls: string[] = [];
+    let deleteAttempts = 0;
     const apiFetch = (async <T>(path: string, init?: { body?: string }) => {
       calls.push(`${init?.body ? "POST" : "DELETE"} ${path}`);
-      if (!init?.body) throw Object.assign(new Error("delete response lost"), { status: 404 });
+      if (!init?.body) {
+        deleteAttempts += 1;
+        if (deleteAttempts === 1) throw new Error("delete response lost after server revoke");
+        throw new DesktopApiError(404, { error: "Active supervisor grant not found." });
+      }
       assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null,
-        "the exact stale local entry is removed even when DELETE acknowledgement is lost");
+        "an acknowledged 404 removes the exact stale local entry before POST");
       const body = JSON.parse(init.body) as Record<string, unknown>;
       return {
         grant_id: "grant_cleanup_new", host_id: body.host_id, installation_id: body.installation_id,
@@ -279,11 +361,24 @@ test("already-revoked or response-lost cleanup still removes the exact stale ent
         supervisor_grant: "lashg_cleanup_new",
       } as T;
     }) as never;
-    const result = await getOrProvisionDesktopSupervisorGrantForAgent({
+    const input = {
       hostId: "desktop_host", entryId: "entry-cleanup", agentKey,
       roomScopes: [roomScope("alias-new", "room-new")],
-    }, { storage: keychain, apiFetch });
-    assert.deepEqual(calls, ["DELETE /supervisor-host-grants/grant_cleanup", "POST /supervisor-host-grants"]);
+    };
+    await assert.rejects(
+      getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch }),
+      /delete response lost after server revoke/,
+    );
+    assert.deepEqual(calls, ["DELETE /supervisor-host-grants/grant_cleanup"]);
+    assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_cleanup_old",
+      "ambiguous transport failure preserves the recoverable encrypted credential");
+
+    const result = await getOrProvisionDesktopSupervisorGrantForAgent(input, { storage: keychain, apiFetch });
+    assert.deepEqual(calls, [
+      "DELETE /supervisor-host-grants/grant_cleanup",
+      "DELETE /supervisor-host-grants/grant_cleanup",
+      "POST /supervisor-host-grants",
+    ]);
     assert.equal(result.token, "lashg_cleanup_new");
   });
 });
@@ -305,4 +400,68 @@ test("missing safeStorage fails before get-or-provision performs an API request"
     /Keychain encryption is unavailable/,
   );
   assert.equal(requests, 0);
+});
+
+test("legacy provision cannot overwrite a concurrent managed registry save", async () => {
+  await withRegistry(async () => {
+    let signalPost!: () => void;
+    let releasePost!: () => void;
+    const postStarted = new Promise<void>((resolve) => { signalPost = resolve; });
+    const postReleased = new Promise<void>((resolve) => { releasePost = resolve; });
+    const apiFetch = (async <T>(_path: string, init?: { body?: string }) => {
+      const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+      signalPost();
+      await postReleased;
+      return {
+        grant_id: "grant_manual", host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: "lashg_manual",
+      } as T;
+    }) as never;
+    const manual = provisionDesktopSupervisorGrant({
+      hostId: "desktop_host", installationId: "manual-install", allowedRoomIds: ["room-manual"],
+      allowedAgentKeys: ["owner/agent-manual"],
+    }, { storage: keychain, apiFetch });
+    await postStarted;
+    const managed = replaceDesktopSupervisorGrantForAgent({
+      agentKey: "owner/agent-managed", metadata: metadata("owner/agent-managed", "managed"),
+      token: "lashg_managed", entryId: "entry-managed",
+    }, { storage: keychain });
+    releasePost();
+    await Promise.all([manual, managed]);
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-manual", { storage: keychain }))?.token, "lashg_manual");
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-managed", { storage: keychain }))?.token, "lashg_managed");
+  });
+});
+
+test("global revoke cannot erase a concurrent managed save it did not revoke", async () => {
+  await withRegistry(async () => {
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey: "owner/agent-old", metadata: metadata("owner/agent-old", "old"),
+      token: "lashg_old", entryId: "entry-old",
+    }, { storage: keychain });
+    let signalDelete!: () => void;
+    let releaseDelete!: () => void;
+    const deleteStarted = new Promise<void>((resolve) => { signalDelete = resolve; });
+    const deleteReleased = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    const revoked: string[] = [];
+    const apiFetch = (async <T>(path: string) => {
+      revoked.push(path);
+      signalDelete();
+      await deleteReleased;
+      return {} as T;
+    }) as never;
+    const revoke = revokeDesktopSupervisorGrant({ apiFetch });
+    await deleteStarted;
+    const managed = replaceDesktopSupervisorGrantForAgent({
+      agentKey: "owner/agent-new", metadata: metadata("owner/agent-new", "new"),
+      token: "lashg_new", entryId: "entry-new",
+    }, { storage: keychain });
+    releaseDelete();
+    await Promise.all([revoke, managed]);
+    assert.deepEqual(revoked, ["/supervisor-host-grants/grant_old"]);
+    assert.equal(await readDesktopSupervisorGrantForAgent("owner/agent-old", { storage: keychain }), null);
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-new", { storage: keychain }))?.token, "lashg_new");
+  });
 });

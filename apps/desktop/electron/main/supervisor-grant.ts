@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { apiFetch } from "./auth.js";
+import { apiFetch, DesktopApiError } from "./auth.js";
 import type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
 
 const require = createRequire(import.meta.url);
@@ -223,37 +223,41 @@ export function canonicalDesktopSupervisorGrantRoomIds(
   return [...new Set(canonicalIds)];
 }
 
-export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSupervisorGrantInput): Promise<DesktopSupervisorGrantMetadata> {
-  if (!getStorage().isEncryptionAvailable()) {
+export async function provisionDesktopSupervisorGrant(
+  input: DesktopProvisionSupervisorGrantInput,
+  options: GrantStorageOptions = {},
+): Promise<DesktopSupervisorGrantMetadata> {
+  const storage = options.storage ?? getStorage();
+  if (!storage.isEncryptionAvailable()) {
     throw new Error("macOS Keychain encryption is unavailable; host grant was not provisioned.");
   }
-  // Refuse replacement while a live local grant exists. The owner must revoke
-  // it explicitly instead of silently orphaning a durable host credential.
-  if (await getDesktopSupervisorGrantMetadata()) {
-    throw new Error("A host grant is already stored on this desktop. Revoke it before provisioning a replacement.");
-  }
-  const response = await apiFetch<{
-    grant_id: string; host_id: string; installation_id: string; allowed_room_ids: string[];
-    allowed_agent_keys: string[]; current_generation: number; expires_at: string; supervisor_grant: string;
-  }>("/supervisor-host-grants", {
-    method: "POST",
-    body: JSON.stringify({ host_id: input.hostId, installation_id: input.installationId, allowed_room_ids: input.allowedRoomIds, allowed_agent_keys: input.allowedAgentKeys, ttl_ms: input.ttlMs }),
-  });
-  const metadata = toMetadata(response);
-  try {
-    if (metadata.allowedAgentKeys.length !== 1) {
-      throw new Error("A per-agent desktop grant must be scoped to exactly one agent identity.");
+  const request = options.apiFetch ?? apiFetch;
+  return withRegistryMutation(async () => {
+    // Refuse replacement while any local grant exists. Keeping the check,
+    // server POST, and write under one registry lock prevents a concurrent
+    // managed save from being overwritten by this legacy one-entry format.
+    const registry = await readRegistry();
+    if (registry && Object.keys(registry.grants).length > 0) {
+      throw new Error("A host grant is already stored on this desktop. Revoke it before provisioning a replacement.");
     }
-    const agentKey = canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!);
-    const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant);
-    await writeRegistry({ version: 4, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } }, entryAgentKeys: {} });
-    return metadata;
-  } catch (error) {
-    // Do not leave an unusable, owner-scoped server grant behind when the
-    // desktop cannot durably protect its credential.
-    await apiFetch(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
-    throw error;
-  }
+    const response = await request<SupervisorGrantApiResponse>("/supervisor-host-grants", {
+      method: "POST",
+      body: JSON.stringify({ host_id: input.hostId, installation_id: input.installationId, allowed_room_ids: input.allowedRoomIds, allowed_agent_keys: input.allowedAgentKeys, ttl_ms: input.ttlMs }),
+    });
+    const metadata = toMetadata(response);
+    try {
+      if (metadata.allowedAgentKeys.length !== 1) {
+        throw new Error("A per-agent desktop grant must be scoped to exactly one agent identity.");
+      }
+      const agentKey = canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!);
+      const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant, storage);
+      await writeRegistry({ version: 4, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } }, entryAgentKeys: registry?.entryAgentKeys ?? {} });
+      return metadata;
+    } catch (error) {
+      await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+      throw error;
+    }
+  });
 }
 
 export async function getDesktopSupervisorGrantMetadata(): Promise<DesktopSupervisorGrantMetadata | null> {
@@ -350,7 +354,8 @@ function reusableDesktopSupervisorGrant(input: {
     return false;
   }
   const coveredRooms = new Set(metadata.allowedRoomIds);
-  return input.allowedRoomIds.every((roomId) => coveredRooms.has(roomId));
+  return coveredRooms.size === input.allowedRoomIds.length
+    && input.allowedRoomIds.every((roomId) => coveredRooms.has(roomId));
 }
 
 /** Backward-compatible main-process storage name. */
@@ -402,11 +407,15 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       };
     }
     if (existing) {
-      // A 404 or lost response can mean a prior attempt already revoked the
-      // server grant. Remove only the exact cached entry and continue; if the
-      // revoke never reached the server, the unique installation fence makes
-      // the subsequent POST fail safely instead of minting a duplicate.
-      await request(`/supervisor-host-grants/${encodeURIComponent(existing.metadata.grantId)}`, { method: "DELETE" }).catch(() => {});
+      // Only an acknowledged revoke (including an explicit already-revoked
+      // 404) permits deleting the sole recoverable local credential. A
+      // transport error is ambiguous: preserve it and make the next attempt
+      // repeat DELETE rather than proceeding into an unrecoverable 409.
+      try {
+        await request(`/supervisor-host-grants/${encodeURIComponent(existing.metadata.grantId)}`, { method: "DELETE" });
+      } catch (error) {
+        if (!(error instanceof DesktopApiError && error.status === 404)) throw error;
+      }
       await removeDesktopSupervisorGrantForAgentIfCurrent(agentKey, existing.metadata.grantId);
     }
 
@@ -486,10 +495,25 @@ export async function clearDesktopSupervisorGrant(): Promise<void> {
   await rm(storePath(), { force: true });
 }
 
-export async function revokeDesktopSupervisorGrant(): Promise<void> {
-  const registry = await readRegistry();
-  if (!registry) return;
-  const ids = [...new Set(Object.values(registry.grants).map((stored) => stored.grantId))];
-  await Promise.all(ids.map((grantId) => apiFetch(`/supervisor-host-grants/${encodeURIComponent(grantId)}`, { method: "DELETE" })));
-  await clearDesktopSupervisorGrant();
+export async function revokeDesktopSupervisorGrant(options: GrantStorageOptions = {}): Promise<void> {
+  const request = options.apiFetch ?? apiFetch;
+  await withRegistryMutation(async () => {
+    const snapshot = await readRegistry();
+    if (!snapshot) return;
+    const ids = [...new Set(Object.values(snapshot.grants).map((stored) => stored.grantId))];
+    await Promise.all(ids.map(async (grantId) => {
+      try {
+        await request(`/supervisor-host-grants/${encodeURIComponent(grantId)}`, { method: "DELETE" });
+      } catch (error) {
+        if (!(error instanceof DesktopApiError && error.status === 404)) throw error;
+      }
+    }));
+    const current = await readRegistry();
+    if (!current) return;
+    for (const [agentKey, stored] of Object.entries(snapshot.grants)) {
+      if (current.grants[agentKey]?.grantId === stored.grantId) delete current.grants[agentKey];
+    }
+    if (Object.keys(current.grants).length === 0) await rm(storePath(), { force: true });
+    else await writeRegistry(current);
+  });
 }

@@ -169,12 +169,17 @@ test("supervisor worker retry collapses all historical active duplicates before 
 });
 
 test("a replacement grant takes over the exact durable worker session across grant ids", { skip: requiresDatabase }, async () => {
-  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
   const body = { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "rollover-worker" };
   const first = recorder();
   await mint({ ...reqBase, body }, first);
   assert.equal(first.statusCode, 201);
+  const capturedByOldGrant = await authDb!.getSupervisorRoomAgentSession({
+    session_id: (first.body as any).session_id,
+    supervisor_grant_id: grantResult.grant.grant_id,
+  });
+  assert.ok(capturedByOldGrant, "grant A route prelookup captured the session before rollover");
   const replacementGrant = await authDb!.createSupervisorHostGrant({
     owner_account_id: "owner_route", host_id: "host_route_2", installation_id: "install_route_2",
     allowed_room_ids: [room.id], allowed_agent_keys: [agent.canonical_key],
@@ -193,6 +198,18 @@ test("a replacement grant takes over the exact durable worker session across gra
   const [session] = await client!.db.select().from(schema!.room_agent_sessions)
     .where(eq(schema!.room_agent_sessions.session_id, (first.body as any).session_id)).limit(1);
   assert.equal(session.supervisor_grant_id, replacementGrant.grant.grant_id);
+  await assert.rejects(authDb!.endRoomAgentSession({
+    session_id: capturedByOldGrant!.session_id,
+    owner_account_id: grantResult.grant.owner_account_id,
+    supervisor_grant_id: grantResult.grant.grant_id,
+    supervisor_grant_fence: {
+      grant_id: grantResult.grant.grant_id,
+      generation: grantResult.grant.current_generation,
+      token_version: grantResult.grant.token_version,
+    },
+  }), (error: unknown) => authDb!.isSupervisorGrantFenceStaleError(error));
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(second.body as any).worker_bearer}` } } as never)).authKind, "agent_session",
+    "grant A's stale end cannot terminate grant B's replacement bearer");
 });
 
 test("stale supervisor worker fence is an explicit conflict, never an internal error", { skip: requiresDatabase }, async () => {
