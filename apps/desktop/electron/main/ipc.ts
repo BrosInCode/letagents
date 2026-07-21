@@ -122,7 +122,12 @@ import {
   setAuthInvalidatedHandler,
   startDeviceAuthFlow,
 } from "./auth.js";
-import { getDesktopSupervisorGrantMetadata, provisionDesktopSupervisorGrant, revokeDesktopSupervisorGrant } from "./supervisor-grant.js";
+import {
+  getDesktopSupervisorGrantMetadata,
+  provisionDesktopSupervisorGrant,
+  readDesktopSupervisorGrantAgentKeysForEntries,
+  revokeDesktopSupervisorGrant,
+} from "./supervisor-grant.js";
 import {
   buildMcpInstallState,
   completeMcpOnboarding,
@@ -867,10 +872,18 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle(
     "desktop:supervisor:list-agents",
-    async (_event, roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> =>
-      isDesktopSmokeCheck()
+    async (_event, roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> => {
+      const entries = isDesktopSmokeCheck()
         ? desktopSmokeSupervisorEntries().filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier)
-        : supervisorDaemonClient.list(roomIdentifier ?? null),
+        : await supervisorDaemonClient.list(roomIdentifier ?? null);
+      const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(
+        entries.map((entry) => entry.id),
+      ).catch(() => new Map<string, string>());
+      return entries.map((entry) => ({
+        ...entry,
+        agentKey: entry.agentKey ?? agentKeys.get(entry.id) ?? null,
+      }));
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor:create-agent",

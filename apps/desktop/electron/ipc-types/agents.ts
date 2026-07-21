@@ -450,6 +450,8 @@ export interface DesktopSupervisorManifestEntry {
   id: string;
   roomId: string;
   displayName: string;
+  /** Canonical server-owned room identity. This is routing metadata, never a credential. */
+  agentKey?: string | null;
   provider: string;
   model: string | null;
   charter: string;
