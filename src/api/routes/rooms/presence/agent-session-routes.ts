@@ -24,7 +24,10 @@ import { normalizeRoomId } from "../../../rooms/routing.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
 import { buildAgentActorLabel, parseAgentActorLabel } from "../../../../shared/agent-identity.js";
 import { pickLocalCodename } from "../../../../shared/codenames.js";
-import { normalizeRoomAgentSessionKind } from "../../../../shared/agent-presence.js";
+import {
+  normalizeAgentPresenceStatus,
+  normalizeRoomAgentSessionKind,
+} from "../../../../shared/agent-presence.js";
 import {
   isActiveWorkerActorLabelConflict,
   normalizeOptionalText,
@@ -599,11 +602,16 @@ export function registerAgentSessionRoutes(
     const observedMs = Date.parse(observedAt);
     const sequence = body.sequence;
     const method = typeof body.method === "string" ? body.method.trim().slice(0, 160) : "";
-    const status = typeof body.status === "string" ? body.status.trim().slice(0, 32) : "working";
+    // A native heartbeat is evidence of a connected provider, not work by
+    // itself. Missing status therefore defaults to idle/listening, while an
+    // explicitly supplied value must use the public presence vocabulary.
+    const status = body.status === undefined
+      ? "idle"
+      : normalizeAgentPresenceStatus(body.status);
     const serverNowMs = Date.now();
     if (!Number.isFinite(observedMs) || observedMs > serverNowMs + 5_000 || serverNowMs - observedMs > 10 * 60 * 1000
-      || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1 || !method) {
-      res.status(400).json({ error: "observed_at, positive integer sequence, and native method are required." });
+      || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1 || !method || !status) {
+      res.status(400).json({ error: "observed_at, positive integer sequence, native method, and a valid native status are required." });
       return;
     }
     try {

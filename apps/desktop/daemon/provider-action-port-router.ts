@@ -2,14 +2,19 @@ import type {
   ProviderActionAttachment,
   ProviderActionAttachTerminal,
   ProviderActionCapabilities,
+  ProviderExactTurnControlResult,
   ProviderActionHandle,
   ProviderActionPort,
   ProviderActionRef,
+  ProviderRoomTurnRequest,
+  ProviderRoomTurnRecoveryRequest,
+  ProviderRoomTurnResult,
   ProviderActionSpawn,
   ProviderActionStreamEvent,
   ProviderActionTerminal,
   ProviderTurnControlResult,
 } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
 
 type NativeHandle = {
   workAttemptId: string;
@@ -25,7 +30,11 @@ export type NativeProviderAdapter = {
   attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
   poke(handle: NativeHandle, message: string): Promise<void>;
-  controlTurn(handle: NativeHandle, correction?: string | null, options?: { markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
+  controlTurn(handle: NativeHandle, correction?: string | null, options?: { checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
+  inspectTurn?(handle: NativeHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
+  controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
+  runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
+  recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -73,7 +82,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
-    if (remembered) return publicHandle(remembered.handle);
+    if (remembered) {
+      const handle = remembered.handle;
+      if (
+        handle.providerContinuationId !== ref.providerContinuationId
+        || !sameProviderActionConnectionIdentity(handle.providerConnection, ref.providerConnection)
+      ) return null;
+      return publicHandle(handle);
+    }
     const handle = await (await this.adapter(provider)).attach(ref);
     if (!handle || isAttachTerminal(handle)) return handle;
     this.handles.set(ref.workAttemptId, { provider, handle });
@@ -104,13 +120,41 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
   }
 
-  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
+  async controlTurn(handle: ProviderActionHandle, correction?: string | null, options?: { actionId?: string; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult> {
     const remembered = this.required(handle);
     const result = await (await this.adapter(remembered.provider)).controlTurn(remembered.handle, correction, {
-      markDispatched: options?.markDispatched,
+      checkpointTurnStarted: options?.checkpointTurnStarted, markDispatched: options?.markDispatched,
     });
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
     return result;
+  }
+
+  async inspectTurn(handle: ProviderActionHandle, turnId: string): Promise<"active" | "terminal" | "unknown"> {
+    const remembered = this.required(handle);
+    const adapter = await this.adapter(remembered.provider);
+    if (!adapter.inspectTurn) throw new Error(`Provider '${remembered.provider}' does not support exact turn inspection.`);
+    return adapter.inspectTurn(remembered.handle, turnId);
+  }
+
+  async controlExactTurn(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult> {
+    const remembered = this.required(handle);
+    const adapter = await this.adapter(remembered.provider);
+    if (!adapter.controlExactTurn) throw new Error(`Provider '${remembered.provider}' does not support exact turn control.`);
+    return adapter.controlExactTurn(remembered.handle, options);
+  }
+
+  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {
+    const remembered = this.required(handle);
+    const adapter = await this.adapter(remembered.provider);
+    if (!adapter.runRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room turns.`);
+    return adapter.runRoomTurn(remembered.handle, request, options);
+  }
+
+  async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {
+    const remembered = this.required(handle);
+    const adapter = await this.adapter(remembered.provider);
+    if (!adapter.recoverRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room-turn recovery.`);
+    return adapter.recoverRoomTurn(remembered.handle, request, options);
   }
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {

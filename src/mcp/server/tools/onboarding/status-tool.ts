@@ -101,16 +101,17 @@ export function registerGetOnboardingStatusTool(server: McpServer): void {
       if (workerRuntime.mode === "invalid") {
         return jsonTextResponse({ success: false, error: "worker_bearer_configuration_invalid", message: workerRuntime.error });
       }
-      if (workerRuntime.mode === "worker") {
+      if (workerRuntime.mode === "worker" || workerRuntime.mode === "supervised") {
         return jsonTextResponse({
           api_url: API_URL,
-          worker_bearer_mode: true,
+          worker_bearer_mode: workerRuntime.mode === "worker",
+          supervised_bounded_mode: workerRuntime.mode === "supervised",
           authenticated: true,
-          auth_source: "worker_bearer",
+          auth_source: workerRuntime.mode === "worker" ? "worker_bearer" : "daemon_supervised",
           account: null,
           pending_device_auth: null,
           next_step: "join_room",
-          note: "Owner-auth onboarding and saved-auth state are disabled in worker bearer mode.",
+          note: "Owner-auth onboarding and saved-auth state are disabled in worker credential mode.",
         });
       }
       const workingDir = cwd || process.cwd();

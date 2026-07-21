@@ -134,6 +134,26 @@ test("an unattached durable generation is an actionable recovery failure, not an
   assert.equal(progress.joinHint, null);
 });
 
+test("a pre-provider provisioning failure is retryable and never described as reconnecting", () => {
+  const progress = supervisedLaunchProgress(entry({
+    observedState: "failed",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: revision was not found",
+    workspacePath: null,
+    workAttemptId: null,
+    providerPid: null,
+    providerContinuationId: null,
+    executionGenerationId: null,
+  }));
+
+  assert.equal(progress.failed, true);
+  assert.equal(progress.recoverableBlocked, false);
+  assert.equal(progress.currentPhaseId, "preparing_workspace");
+  assert.doesNotMatch(progress.headline, /reconnect/i);
+  assert.doesNotMatch(progress.failureDetail ?? "", /reconnect/i);
+  assert.match(progress.failureDetail ?? "", /prepare the private project area/i);
+});
+
 test("expected exact-bind coordination remains an in-progress registration", () => {
   const progress = supervisedLaunchProgress(entry({
     workspacePath: "/tmp/wt",

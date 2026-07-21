@@ -177,7 +177,7 @@ export function shouldStopCodexSessionMonitor(
     return false;
   }
 
-  return deliveryMode !== "desktop_events" || status !== "completed";
+  return (deliveryMode !== "desktop_events" && deliveryMode !== "daemon_inbox") || status !== "completed";
 }
 
 export function codexSessionStatusAfterInspectFailure(
@@ -194,7 +194,7 @@ export function codexSessionStatusAfterTurnInterrupt(
   serverReachable: boolean,
   shutdownServer: boolean,
 ): DesktopManagedAgentSessionStatus {
-  if (deliveryMode === "desktop_events" && !shutdownServer) {
+  if ((deliveryMode === "desktop_events" || deliveryMode === "daemon_inbox") && !shutdownServer) {
     return serverReachable ? "running" : "unknown";
   }
   return "interrupted";

@@ -11,6 +11,9 @@ export interface CodexSupervisorBridgeContext {
   room_id: string;
   work_attempt_id: string;
   execution_generation_id: string;
+  /** Exact, non-secret worker identity for a resumed daemon inbox turn. */
+  agent_session_id?: string;
+  agent_display_name?: string;
 }
 
 /**

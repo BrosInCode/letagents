@@ -180,6 +180,7 @@ const recoveryScanStatus = computed(() => props.supervised.launch.recoveryScanSt
 const activeSupervisedLaunch = computed(() => props.supervised.launch.view.value);
 const canStart = computed(() => props.canStartBase
   && (props.launchMode !== "supervised" || canStartNewSupervisedLaunch({
+    providerId: props.providerId,
     scanStatus: recoveryScanStatus.value,
     hasActiveLaunch: Boolean(props.supervised.launch.view.value),
     hasRecoveryCandidate: Boolean(props.supervised.launch.recoveryCandidate.value),

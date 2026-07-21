@@ -30,6 +30,10 @@ type SupervisorCoordinates = {
   socketPath: string;
   workAttemptId: string;
   executionGenerationId: string;
+  /** Non-secret, exact worker route supplied only for resumed bounded turns. */
+  agentSessionId?: string;
+  roomId?: string;
+  agentDisplayName?: string;
 };
 type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
   supervisorContextCwd: string | null;
@@ -37,6 +41,7 @@ type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
 type NegotiatedSupervisor = {
   protocolVersion: number;
   daemonIdentity: string | null;
+  generation: number | null;
 };
 
 const confirmedBindingsBySession = new Map<string, string>();
@@ -58,6 +63,123 @@ export type SupervisedWorkerBindingResult = {
   /** Validated, canonical, non-secret route suitable for protected local state. */
   supervisorContextCwd: string | null;
 };
+
+/** A credential is returned only to the supervised MCP process that proved all identities. */
+export type SupervisedCredentialBorrowResult =
+  | { state: "not_supervised" }
+  | { state: "available"; credential: string }
+  | { state: "deferred"; code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" }
+  | { state: "stale"; code: "SUPERVISED_CREDENTIAL_STALE" };
+
+/**
+ * Resolve and borrow for the MCP process itself. Unlike registration, this
+ * never reads local agent state: the daemon-owned launch context is the sole
+ * authority for the exact worker session identity.
+ */
+export async function borrowCurrentSupervisedWorkerCredential(
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+): Promise<SupervisedCredentialBorrowResult> {
+  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
+    return { state: "not_supervised" };
+  }
+  const seed = supervisedContextSession();
+  const coordinates = await resolveSupervisorCoordinates(seed, env, options);
+  if (!coordinates?.agentSessionId || !coordinates.roomId) {
+    return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  }
+  return borrowSupervisedWorkerCredential({
+    ...seed,
+    session_id: coordinates.agentSessionId,
+    room_id: coordinates.roomId,
+  }, env, { ...options, resolvedCoordinates: coordinates });
+}
+
+/** A public, non-secret session-shaped marker for supervised MCP tools. */
+export async function resolveCurrentSupervisedWorkerSession(
+  roomId?: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+): Promise<StoredAgentSessionState> {
+  const seed = supervisedContextSession();
+  const coordinates = await resolveSupervisorCoordinates(seed, env, options);
+  if (!coordinates?.agentSessionId || !coordinates.roomId) {
+    throw new Error("Daemon-supervised bounded turn is missing its exact worker session context.");
+  }
+  if (roomId && roomId !== coordinates.roomId) {
+    throw new Error(`Daemon-supervised worker session is registered for ${coordinates.roomId}, not ${roomId}.`);
+  }
+  const displayName = coordinates.agentDisplayName || "Daemon-supervised worker";
+  return {
+    ...seed,
+    session_id: coordinates.agentSessionId,
+    room_id: coordinates.roomId,
+    agent_key: coordinates.agentSessionId,
+    actor_label: displayName,
+    display_name: displayName,
+  };
+}
+
+function supervisedContextSession(): StoredAgentSessionState {
+  const now = new Date(0).toISOString();
+  return {
+    session_id: "", session_token: "", room_id: "", session_kind: "worker", runtime: "codex",
+    actor_label: "Daemon-supervised worker", agent_key: "daemon-supervised-worker",
+    display_name: "Daemon-supervised worker", owner_label: "", ide_label: "Codex",
+    created_at: now, updated_at: now, last_seen_at: now,
+  };
+}
+
+/**
+ * Borrow an in-memory, exact-generation worker bearer. This intentionally has
+ * no fallback to the owner/session token: a daemon restarted without Electron
+ * handoff must retain its durable inbox and wait.
+ */
+export async function borrowSupervisedWorkerCredential(
+  session: StoredAgentSessionState,
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+): Promise<SupervisedCredentialBorrowResult> {
+  const coordinates = options.resolvedCoordinates ?? await resolveSupervisorCoordinates(session, env, options);
+  if (!coordinates) return { state: "not_supervised" };
+  if (session.session_kind !== "worker") return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const apiUrl = normalizedWorkerApiOrigin(env);
+  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
+  if (negotiated.generation === null) return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: negotiated.protocolVersion,
+    id: randomUUID(),
+    method: "supervisor.borrow_worker_credential",
+    params: {
+      entry_id: coordinates.entryId, room_id: session.room_id, work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId, agent_session_id: session.session_id,
+      daemon_generation: negotiated.generation, api_url: apiUrl,
+    },
+  }, timeoutMs);
+  if (!response.ok || response.version !== negotiated.protocolVersion) return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  const result = response.result && typeof response.result === "object" ? response.result as Record<string, unknown> : {};
+  if (result.status === "deferred") return { state: "deferred", code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" };
+  if (result.status !== "available" || typeof result.credential !== "string" || !result.credential.trim()) {
+    return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
+  }
+  return { state: "available", credential: result.credential };
+}
+
+function normalizedWorkerApiOrigin(env: NodeJS.ProcessEnv): string {
+  const apiUrl = env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
+  let parsed: URL;
+  try {
+    parsed = new URL(apiUrl);
+  } catch {
+    throw new Error("Daemon-supervised worker requires a valid LETAGENTS_API_URL.");
+  }
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopbackHosts.has(parsed.hostname.toLowerCase()))) {
+    throw new Error("Daemon-supervised worker requires HTTPS unless LETAGENTS_API_URL uses an exact loopback host.");
+  }
+  return parsed.origin;
+}
 
 /** Bind the exact worker credential minted by registration to its daemon lane. */
 export async function bindSupervisedWorkerSession(
@@ -382,8 +504,16 @@ async function resolveSupervisorCoordinates(
     socketPath: env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim() ?? "",
     workAttemptId: env.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID?.trim() ?? "",
     executionGenerationId: env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID?.trim() ?? "",
+    agentSessionId: env.LETAGENTS_SUPERVISOR_AGENT_SESSION_ID?.trim() || undefined,
+    roomId: env.LETAGENTS_SUPERVISOR_ROOM_ID?.trim() || undefined,
+    agentDisplayName: env.LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME?.trim() || undefined,
   };
-  const values = Object.values(environmentCoordinates);
+  const values = [
+    environmentCoordinates.entryId,
+    environmentCoordinates.socketPath,
+    environmentCoordinates.workAttemptId,
+    environmentCoordinates.executionGenerationId,
+  ];
   const hasEnvironmentCoordinates = values.some((value) => Boolean(value));
   if (hasEnvironmentCoordinates && values.some((value) => !value)) {
     throw new Error("Supervised worker bridge environment is incomplete.");
@@ -404,7 +534,7 @@ async function resolveSupervisorCoordinates(
   if (!/^codex(?::|$)/i.test(session.runtime.trim())) {
     throw new Error("Codex supervisor bridge context cannot bind a non-Codex worker session.");
   }
-  if (context.roomId !== session.room_id) {
+  if (session.room_id && context.roomId !== session.room_id) {
     throw new Error("Codex supervisor bridge context does not match the worker room.");
   }
   return {
@@ -456,11 +586,17 @@ async function readCodexSupervisorContext(cwd: string): Promise<(
   const coordinates = Object.fromEntries(
     Object.entries(required).map(([field, candidate]) => [field, (candidate as string).trim()]),
   ) as Omit<SupervisorCoordinates, "socketPath"> & { roomId: string };
+  const agentSessionId = typeof record.agent_session_id === "string" && record.agent_session_id.trim()
+    ? record.agent_session_id.trim()
+    : undefined;
+  const agentDisplayName = typeof record.agent_display_name === "string" && record.agent_display_name.trim()
+    ? record.agent_display_name.trim()
+    : undefined;
   const marker = await readWorkAttemptMarker(cwd);
   if (marker.workAttemptId !== coordinates.workAttemptId) {
     throw new Error("Codex supervisor bridge context does not match the daemon-owned worktree.");
   }
-  return { ...coordinates, supervisorContextCwd: await realpath(cwd) };
+  return { ...coordinates, agentSessionId, agentDisplayName, supervisorContextCwd: await realpath(cwd) };
 }
 
 async function readWorkAttemptMarker(cwd: string): Promise<{ workAttemptId: string }> {
@@ -522,7 +658,7 @@ async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promi
   const daemonIdentity = hasCompleteIdentity
     ? [result.generation, result.pid, result.started_at].join(":")
     : null;
-  return { protocolVersion, daemonIdentity };
+  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null };
 }
 
 function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number): Promise<SupervisorResponse> {

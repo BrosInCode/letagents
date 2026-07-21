@@ -28,7 +28,10 @@ import {
   waitForLocalChatMessages,
   type StoredAgentSessionState,
 } from "../../runtime.js";
-import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
+import {
+  requireValidWorkerBearerRuntime,
+  supervisedBoundedDeliveryDisabledToolResult,
+} from "../../runtime/worker-bearer.js";
 import { attachAgentMessageActivations } from "../../../../shared/activation-routing.js";
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { fetchRecentRemoteMessages } from "./read-tool.js";
@@ -366,6 +369,13 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         .describe("Registered agent session to use. Without this, the MCP transport is treated as controller traffic and is hidden from connected-agent activity."),
     },
     async ({ room_id, after_message_id, timeout, agent_session_id }) => {
+      // This guard intentionally runs before room resolution, identity setup,
+      // local SQLite reads, presence writes, or HTTP traffic. In supervised
+      // bounded-turn mode the daemon is the sole inbox owner.
+      const boundedDeliveryDisabled = supervisedBoundedDeliveryDisabledToolResult();
+      if (boundedDeliveryDisabled) {
+        return jsonToolResponse(boundedDeliveryDisabled);
+      }
       const targetRoomId = getTargetRoomId(room_id);
       const targetProjectId = getFallbackProjectId();
       const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;

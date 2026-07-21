@@ -1,6 +1,21 @@
 // Compatibility facade for MCP server runtime helpers. The implementation lives
 // in src/mcp/server/runtime/* so tool modules can import focused responsibilities
 // without turning this file back into the runtime god module.
+import {
+  isLocalRoomStorageEnabled as isStoredLocalRoomStorageEnabled,
+  touchRoomSession as touchStoredRoomSession,
+} from "../local-state.js";
+import { isSupervisedBoundedTurn } from "./runtime/worker-bearer.js";
+
+/** A daemon-supervised turn must always use its exact cloud worker route. */
+export async function isLocalRoomStorageEnabled(roomId: string): Promise<boolean> {
+  return !isSupervisedBoundedTurn() && isStoredLocalRoomStorageEnabled(roomId);
+}
+
+export function touchRoomSession(roomId: string, lastMessageId?: string): void {
+  if (!isSupervisedBoundedTurn()) touchStoredRoomSession(roomId, lastMessageId);
+}
+
 export {
   API_URL,
   ApiError,
@@ -81,10 +96,13 @@ export {
 } from "./runtime/presence.js";
 export { roomScopedApiCall } from "./runtime/room-api.js";
 export {
+  borrowSupervisedWorkerCredential,
+  borrowCurrentSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
   checkpointSupervisedWorkerCursor,
   isRetryableSupervisorBridgeError,
   scheduleSupervisedWorkerCursorCheckpoint,
+  resolveCurrentSupervisedWorkerSession,
 } from "./runtime/supervisor-bridge.js";
 export {
   autoJoinFromContext,
@@ -118,7 +136,6 @@ export {
   setPendingDeviceAuth,
   setStoredAuth,
   setStoredAgentIdentity,
-  touchRoomSession,
   addLocalChatMessage,
   addLocalTask,
   claimLocalTaskReviewLease,
@@ -127,7 +144,6 @@ export {
   getLocalTask,
   listLocalTasks,
   isLocalChatStorageEnabled,
-  isLocalRoomStorageEnabled,
   resolveLocalRoomStorageIdentifiers,
   releaseLocalTaskReviewLease,
   updateLocalTask,

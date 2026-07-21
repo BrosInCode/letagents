@@ -310,6 +310,8 @@ test("native harness session-token self-auth survives flag-off/expired bearers a
   try {
     const flagOff = await invoke(session.session_id, { observed_at: new Date(Date.now() - 90_000).toISOString(), sequence: 1, method: "native_harness.bound", status: "working" });
     assert.equal(flagOff.statusCode, 200, "optional worker-bearer feature cannot gate native activity");
+    assert.equal((flagOff.body as { presence: { status: string; status_text: string } }).presence.status, "working");
+    assert.equal((flagOff.body as { presence: { status: string; status_text: string } }).presence.status_text, "Working");
     assert.equal(await readLastSeenAt(), originalLastSeenAt, "accepted native activity cannot refresh generic session/workplace liveness");
   } finally {
     process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
@@ -324,12 +326,12 @@ test("native harness session-token self-auth survives flag-off/expired bearers a
     observed_at: freshAt,
     sequence: 2,
     method: "turn/started",
-    status: "working",
+    status: "idle",
   });
   assert.equal(fresh.statusCode, 200);
   assert.deepEqual((fresh.body as { lease_heartbeats: unknown[] }).lease_heartbeats, [{ id: lease.id, epoch: lease.epoch }]);
-  assert.equal((fresh.body as { presence: { status: string; status_text: string } }).presence.status, "working");
-  assert.equal((fresh.body as { presence: { status: string; status_text: string } }).presence.status_text, "Working — room channel quiet");
+  assert.equal((fresh.body as { presence: { status: string; status_text: string } }).presence.status, "idle");
+  assert.equal((fresh.body as { presence: { status: string; status_text: string } }).presence.status_text, "Connected — listening");
   assert.equal(await readLastSeenAt(), originalLastSeenAt, "post-TTL accepted native activity leaves session last_seen_at unchanged");
   const [workAfterFresh] = await db!.select().from(task_leases!).where(eq(task_leases!.id, lease.id));
 
@@ -341,6 +343,9 @@ test("native harness session-token self-auth survives flag-off/expired bearers a
 
   const futureAt = new Date(Date.now() + 60_000).toISOString();
   assert.equal((await invoke(session.session_id, { observed_at: futureAt, sequence: 3, method: "turn/started" })).statusCode, 400);
+  assert.equal((await invoke(session.session_id, {
+    observed_at: new Date().toISOString(), sequence: 3, method: "turn/started", status: "sleeping",
+  })).statusCode, 400, "native activity accepts only public presence statuses");
   assert.equal(await readLastSeenAt(), originalLastSeenAt, "malformed/future native activity cannot refresh generic session/workplace liveness");
   assert.equal((await invoke(session.session_id, {
     agent_session_token: "invalid-native-session-token",
@@ -359,8 +364,8 @@ test("native harness session-token self-auth survives flag-off/expired bearers a
   assert.equal(heldLease?.last_heartbeat_at, workAfterFresh?.last_heartbeat_at, "delayed/future observations cannot extend lease freshness");
   assert.ok(Date.parse(heldLease!.last_heartbeat_at!) > Date.parse(freshAt), "work lease freshness uses server-now");
   assert.equal(heldReview?.last_heartbeat_at, reviewBefore?.last_heartbeat_at, "review lease is not native-heartbeated");
-  assert.equal(presence?.status, "working");
-  assert.equal(presence?.status_text, "Working — room channel quiet");
+  assert.equal(presence?.status, "idle");
+  assert.equal(presence?.status_text, "Connected — listening");
 
   const successor = await createRoomAgentSession!({
     room_id: room.id,

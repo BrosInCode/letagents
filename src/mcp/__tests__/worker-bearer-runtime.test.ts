@@ -13,18 +13,26 @@ const {
   requireValidWorkerBearerRuntime,
   WorkerBearerRuntimeConfigurationError,
 } = await import("../server/runtime/worker-bearer.js");
-const { ApiError, apiCall, setOwnerAuthStoreLoaderForTest } = await import("../server/runtime/api.js");
+const {
+  ApiError,
+  SupervisedWorkerCredentialError,
+  apiCall,
+  setOwnerAuthStoreLoaderForTest,
+  setSupervisedCredentialBorrowerForTest,
+} = await import("../server/runtime/api.js");
 const { agentSessionCredentials } = await import("../server/runtime/agent-sessions.js");
 const { registerAgentSessionTools } = await import("../server/tools/agent-sessions.js");
 const {
   getCurrentRoomPayload,
   setRoomInspectionOwnerAuthStoreLoaderForTest,
 } = await import("../server/tools/rooms/inspection-tools.js");
-const { rememberRoom, toRoomState } = await import("../server/runtime/room-state.js");
+const roomState = await import("../server/runtime/room-state.js");
+const { rememberRoom, toRoomState } = roomState;
 const { autoJoinFromContext } = await import("../server/runtime/rooms.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
+const { registerRoomJoinTools } = await import("../server/tools/rooms/join-tools.js");
 
 function toolHandler(
   register: (server: McpServer) => void,
@@ -39,18 +47,26 @@ function toolHandler(
 }
 
 function withAuthEnv<T>(
-  values: { bearer?: string | undefined; owner?: string | undefined; apiUrl?: string | null },
+  values: {
+    bearer?: string | undefined;
+    owner?: string | undefined;
+    apiUrl?: string | null;
+    boundedTurns?: string | undefined;
+  },
   callback: () => T | Promise<T>,
 ): Promise<T> | T {
   const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
   const previousOwner = process.env.LETAGENTS_TOKEN;
   const previousApiUrl = process.env.LETAGENTS_API_URL;
+  const previousBoundedTurns = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
   if (values.bearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
   else process.env.LETAGENTS_AGENT_SESSION_BEARER = values.bearer;
   if (values.owner === undefined) delete process.env.LETAGENTS_TOKEN;
   else process.env.LETAGENTS_TOKEN = values.owner;
   if (values.apiUrl === null) delete process.env.LETAGENTS_API_URL;
   else if (values.apiUrl !== undefined) process.env.LETAGENTS_API_URL = values.apiUrl;
+  if (values.boundedTurns === undefined) delete process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
+  else process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS = values.boundedTurns;
   return Promise.resolve(callback()).finally(() => {
     if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
     else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
@@ -58,6 +74,8 @@ function withAuthEnv<T>(
     else process.env.LETAGENTS_TOKEN = previousOwner;
     if (previousApiUrl === undefined) delete process.env.LETAGENTS_API_URL;
     else process.env.LETAGENTS_API_URL = previousApiUrl;
+    if (previousBoundedTurns === undefined) delete process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
+    else process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS = previousBoundedTurns;
   });
 }
 
@@ -104,6 +122,74 @@ test("worker bearer mode rejects dual owner credentials before an API request", 
     await assert.rejects(() => apiCall("/rooms/room_1/messages"), WorkerBearerRuntimeConfigurationError);
   });
   globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised calls borrow the current credential for every request and ignore owner auth", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    const borrowed = ["rotated-worker-one", "rotated-worker-two"];
+    const observed: string[] = [];
+    setOwnerAuthStoreLoaderForTest(async () => assert.fail("bounded supervised calls must not load owner auth"));
+    setSupervisedCredentialBorrowerForTest(async () => {
+      const credential = borrowed.shift();
+      assert.ok(credential, "each request borrows exactly once");
+      return { state: "available", credential };
+    });
+    try {
+      globalThis.fetch = async (_url, init) => {
+        observed.push(new Headers(init?.headers).get("authorization") || "");
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      };
+      await apiCall("/rooms/room_1/messages");
+      await apiCall("/rooms/room_1/messages");
+      assert.deepEqual(observed, ["Bearer rotated-worker-one", "Bearer rotated-worker-two"]);
+    } finally {
+      setSupervisedCredentialBorrowerForTest(null);
+      setOwnerAuthStoreLoaderForTest(null);
+    }
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised calls fail closed before fetch for deferred, stale, or absent context", async () => {
+  const originalFetch = globalThis.fetch;
+  for (const result of [
+    { state: "deferred", code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" } as const,
+    { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" } as const,
+  ]) {
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      globalThis.fetch = async () => assert.fail("unavailable supervised credentials must fail before fetch");
+      setOwnerAuthStoreLoaderForTest(async () => assert.fail("unavailable supervised credentials must not read owner auth"));
+      setSupervisedCredentialBorrowerForTest(async () => result);
+      try {
+        await assert.rejects(() => apiCall("/rooms/room_1/messages"), (error: unknown) =>
+          error instanceof SupervisedWorkerCredentialError && error.code === result.code,
+        );
+      } finally {
+        setSupervisedCredentialBorrowerForTest(null);
+        setOwnerAuthStoreLoaderForTest(null);
+      }
+    });
+  }
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    globalThis.fetch = async () => assert.fail("missing supervised context must fail before fetch");
+    setOwnerAuthStoreLoaderForTest(async () => assert.fail("missing supervised context must not read owner auth"));
+    try {
+      await assert.rejects(() => apiCall("/rooms/room_1/messages"), SupervisedWorkerCredentialError);
+    } finally {
+      setOwnerAuthStoreLoaderForTest(null);
+    }
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised turns reject a fixed bearer instead of bypassing daemon rotation", async () => {
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "1" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), {
+      mode: "invalid",
+      error: "Daemon-supervised bounded turns refuse LETAGENTS_AGENT_SESSION_BEARER; credentials must be borrowed from the exact supervisor generation.",
+    });
+  });
 });
 
 test("blank worker bearer does not activate worker mode", async () => {
@@ -197,6 +283,159 @@ test("worker bearer mode disables local Codex session orchestration", async () =
       message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
     });
   });
+});
+
+test("supervised bounded turns refuse wait_for_messages before any local or network work", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    globalThis.fetch = async () => assert.fail("bounded wait guard must run before fetch");
+    const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+    const result = await wait({ room_id: "room_supervised", after_message_id: "msg_1" });
+    assert.deepEqual(JSON.parse(result.content[0]!.text), {
+      success: false,
+      error: "supervised_bounded_delivery",
+      message: "wait_for_messages is disabled because supervised room delivery is owned by the desktop daemon.",
+    });
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("bounded supervised turns disable owner onboarding before any local owner access", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    globalThis.fetch = async () => assert.fail("bounded onboarding guard must run before fetch");
+    const startDeviceAuth = toolHandler(registerDeviceAuthTools, "start_device_auth");
+    const result = await startDeviceAuth({});
+    assert.deepEqual(JSON.parse(result.content[0]!.text), {
+      success: false,
+      error: "supervised_bounded_mode",
+      message: "This owner-auth onboarding tool is disabled during a daemon-supervised bounded turn.",
+    });
+  });
+  globalThis.fetch = originalFetch;
+});
+
+test("supervised registration and message sends use the exact context room before local storage", async () => {
+  const originalCwd = process.cwd();
+  const originalFetch = globalThis.fetch;
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const originalChatStorage = process.env.LETAGENTS_CHAT_STORAGE;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-supervised-register-"));
+  try {
+    writeFileSync(join(tempDir, ".letagents-supervisor-context.json"), JSON.stringify({
+      version: 1, provider: "codex", entry_id: "entry_exact", room_id: "room_exact",
+      work_attempt_id: "attempt_exact", execution_generation_id: "generation_exact",
+      agent_session_id: "session_exact", agent_display_name: "Exact worker",
+    }));
+    writeFileSync(join(tempDir, ".letagents-work-attempt.json"), JSON.stringify({
+      version: 1, work_attempt_id: "attempt_exact",
+    }));
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "ambient_local_room" }));
+    process.chdir(tempDir);
+    process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+    process.env.LETAGENTS_CHAT_STORAGE = "local";
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      const register = toolHandler(registerAgentSessionTools, "register_agent_session");
+      const registration = JSON.parse((await register({})).content[0]!.text);
+      assert.equal(registration.success, true);
+      assert.equal(registration.agent_session_id, "session_exact");
+      assert.equal(registration.agent_session.room_id, "room_exact");
+      await assert.rejects(() => register({ room_id: "ambient_local_room" }), /registered for room_exact/);
+
+      const requests: string[] = [];
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "daemon-only" }));
+      globalThis.fetch = async (url, init) => {
+        requests.push(String(url));
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer daemon-only");
+        if (String(url).endsWith("/presence")) return new Response(null, { status: 204 });
+        return new Response(JSON.stringify({ id: "msg_exact", text: "sent" }), { status: 200 });
+      };
+      const send = toolHandler(registerSendMessageTool, "send_message");
+      await send({ room_id: "room_exact", text: "cloud only", agent_session_id: "session_exact" });
+      assert.ok(requests.some((url) => url.endsWith("/rooms/room_exact/messages")), "local storage cannot bypass the exact cloud route");
+      setSupervisedCredentialBorrowerForTest(null);
+    });
+  } finally {
+    setSupervisedCredentialBorrowerForTest(null);
+    globalThis.fetch = originalFetch;
+    process.chdir(originalCwd);
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    if (originalChatStorage === undefined) delete process.env.LETAGENTS_CHAT_STORAGE;
+    else process.env.LETAGENTS_CHAT_STORAGE = originalChatStorage;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("bounded supervised auto-join never replaces the current room from ambient repository context", async () => {
+  const originalCwd = process.cwd();
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-bounded-autojoin-"));
+  try {
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "ambient-room" }));
+    process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+    process.chdir(tempDir);
+    rememberRoom(toRoomState({ room_id: "exact-supervisor-room", joined_via: "join_room", is_local: true }));
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      await autoJoinFromContext();
+      assert.equal(roomState.currentRoom?.room_id, "exact-supervisor-room");
+    });
+  } finally {
+    process.chdir(originalCwd);
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("bounded supervised room joins cannot select an ambient local room", async () => {
+  const originalCwd = process.cwd();
+  const originalFetch = globalThis.fetch;
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const originalChatStorage = process.env.LETAGENTS_CHAT_STORAGE;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-bounded-room-join-"));
+  try {
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "ambient_local_room" }));
+    process.chdir(tempDir);
+    process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+    process.env.LETAGENTS_CHAT_STORAGE = "local";
+    rememberRoom(toRoomState({ room_id: "exact-supervisor-room", joined_via: "join_room", is_local: true }));
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      globalThis.fetch = async () => assert.fail("bounded room joins must fail before network");
+      const joinRoom = toolHandler(registerRoomJoinTools, "join_room");
+      await assert.rejects(() => joinRoom({ name: "ambient_local_room" }), /Room joins and creation are disabled/);
+      assert.equal(roomState.currentRoom?.room_id, "exact-supervisor-room");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.chdir(originalCwd);
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    if (originalChatStorage === undefined) delete process.env.LETAGENTS_CHAT_STORAGE;
+    else process.env.LETAGENTS_CHAT_STORAGE = originalChatStorage;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("ordinary worker bearer mode retains wait_for_messages when bounded delivery is off", async () => {
+  const originalFetch = globalThis.fetch;
+  await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "0" }, async () => {
+    const requests: string[] = [];
+    globalThis.fetch = async (url) => {
+      const requestUrl = String(url);
+      requests.push(requestUrl);
+      if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
+      if (requestUrl.includes("/messages/poll")) {
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+    };
+    const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+    const result = await wait({ room_id: "room_ordinary", after_message_id: "msg_1", timeout: 1 });
+    assert.match(result.content[0]!.text, /messages/);
+    assert.ok(requests.some((url) => url.includes("/rooms/room_ordinary/messages/poll")));
+  });
+  globalThis.fetch = originalFetch;
 });
 
 test("worker bearer startup binds its configured room locally for omitted-room tools", async () => {

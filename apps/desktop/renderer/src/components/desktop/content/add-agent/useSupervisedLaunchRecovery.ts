@@ -19,6 +19,7 @@ export function recoveryScanAllowsNewLaunch(status: SupervisedRecoveryScanStatus
 }
 
 export function canStartNewSupervisedLaunch(input: {
+  providerId: DesktopAgentProviderId | null;
   scanStatus: SupervisedRecoveryScanStatus;
   hasActiveLaunch: boolean;
   hasRecoveryCandidate: boolean;
@@ -26,8 +27,17 @@ export function canStartNewSupervisedLaunch(input: {
 }): boolean {
   return recoveryScanAllowsNewLaunch(input.scanStatus)
     && !input.hasActiveLaunch
-    && !input.hasRecoveryCandidate
+    && (!input.hasRecoveryCandidate || input.providerId === "codex")
     && !input.recoveringCandidate;
+}
+
+/** Recovery belongs to launches that never produced a ready agent. Once an
+ * agent reached ready, later liveness degradation is lifecycle state for that
+ * stable agent—not an abandoned Add Agent transaction. */
+function isIncompleteRecoverableLaunch(entry: DesktopSupervisorManifestEntry): boolean {
+  return (entry.desiredState === "running" || entry.desiredState === "paused")
+    && entry.readyReachedAt == null
+    && !supervisedLaunchProgress(entry).ready;
 }
 
 function withRecoveryScanTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
@@ -141,8 +151,7 @@ export function useSupervisedLaunchRecovery(options: {
     const recoverable = entries
       .filter((entry) => (
         entry.provider === providerId
-        && (entry.desiredState === "running" || entry.desiredState === "paused")
-        && !supervisedLaunchProgress(entry).ready
+        && isIncompleteRecoverableLaunch(entry)
       ))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     const remembered = recoverable.find((entry) => options.hasRememberedLaunch(roomIdentifier, entry.id));
@@ -231,8 +240,7 @@ export function useSupervisedLaunchRecovery(options: {
       !options.open()
       || entry.roomId !== options.roomIdentifier()
       || entry.provider !== options.providerId()
-      || (entry.desiredState !== "running" && entry.desiredState !== "paused")
-      || supervisedLaunchProgress(entry).ready
+      || !isIncompleteRecoverableLaunch(entry)
       || options.conflict.value
       || options.launchStarted.value
       || recovering.value

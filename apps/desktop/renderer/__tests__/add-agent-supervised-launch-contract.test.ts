@@ -28,6 +28,14 @@ const launchComponentSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunch.vue",
   import.meta.url,
 )), "utf8");
+const launchActionsSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.ts",
+  import.meta.url,
+)), "utf8");
+const launchActionStyles = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.module.css",
+  import.meta.url,
+)), "utf8");
 const actionBarSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentActionBar.vue",
   import.meta.url,
@@ -75,7 +83,8 @@ test("Add Agent modal shows the launch card the instant Start is clicked, backed
   // the launch-event subscription attaches before the awaited create call.
   const startBody = controllerSource.slice(controllerSource.indexOf("const creationRequestId = supervisedLaunch.begin();"));
   assert.match(launchSource, /launchStarted\.value = true;/);
-  assert.match(startBody, /supervisedLaunch\.begin\(\)[\s\S]*await desktopIpc\.supervisor\.createAgent\(/);
+  assert.match(startBody, /supervisedLaunch\.begin\(\)[\s\S]*await createSupervisedAgentFromSnapshot\(/);
+  assert.match(controllerSource, /createSupervisedAgentFromSnapshot\([\s\S]*?desktopIpc\.supervisor,[\s\S]*?creationSnapshot/);
   assert.match(launchEventStreamSource, /desktopIpc\.supervisor\.onLaunchEvent/);
   assert.match(launchEventStreamSource, /desktopIpc\.supervisor\.getLaunchEvents/);
 });
@@ -167,6 +176,32 @@ test("an active supervised launch owns the action bar instead of stale preflight
   assert.match(actionBarSource, /activeSupervisedLaunch\.agentName \|\| activeSupervisedLaunch\.providerLabel/);
   assert.match(actionBarSource, /activeSupervisedLaunch\.status === "stopping"[\s\S]*?is stopping/);
   assert.match(actionBarSource, /providerLabel\} setup is in progress/);
+});
+
+test("a ready Codex launch can start another without stopping the completed agent", () => {
+  assert.match(launchActionsSource, /"data-testid": "desktop-add-agent-add-another-codex"/);
+  assert.match(launchActionsSource, /Add another Codex agent/);
+  assert.match(launchComponentSource, /props\.controller\.launch\.canAddAnotherCodexAgent\.value/);
+  assert.match(launchComponentSource, /@add-another="controller\.launch\.dismissReadyCodexLaunchForAnother"/);
+  assert.match(launchSource, /function dismissReadyCodexLaunchForAnother\(\): void/);
+  const releaseBody = launchSource.slice(
+    launchSource.indexOf("function dismissReadyCodexLaunchForAnother"),
+    launchSource.indexOf("function resetActiveLaunch"),
+  );
+  assert.match(releaseBody, /dismiss\(\);/);
+  assert.doesNotMatch(releaseBody, /stop\(/);
+  assert.match(controllerSource, /suggestSupervisedCodexCodename\(existingDisplayNames, snapshot\.creationRequestId\)/);
+  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName,/);
+});
+
+test("the supervised action island owns complete responsive interaction styles", () => {
+  assert.match(launchActionsSource, /import styles from "\.\/AddAgentSupervisedLaunchActions\.module\.css"/);
+  assert.match(launchActionsSource, /class: \[styles\.button, styles\.danger\]/);
+  assert.match(launchActionStyles, /\.button\s*\{[\s\S]*?min-height: 34px/);
+  assert.match(launchActionStyles, /\.button:hover:not\(:disabled\)/);
+  assert.match(launchActionStyles, /\.button:disabled/);
+  assert.match(launchActionStyles, /prefers-reduced-motion: reduce/);
+  assert.match(launchActionStyles, /@media \(max-width: 680px\)[\s\S]*?\.actions/);
 });
 
 test("legacy start feedback is assigned only after the modal request guard", () => {

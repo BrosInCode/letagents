@@ -32,6 +32,10 @@
           :thread-messages="threadMessagesWithThreadOverrides"
           :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
+          :delivery-receipts-by-message="deliveryReceiptsByMessage"
+          :delivery-recovery-available="deliveryRecoveryAvailable"
+          :delivery-retry-keys="deliveryRetryKeys"
+          @reveal-message="requestMessageReveal"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
           :github-activity-available="githubEventsAvailable"
@@ -47,6 +51,7 @@
           @quote-selection="quoteSelectedText"
           @open-github-event="emit('open-github-event', $event)"
           @open-task="emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
           @scroll-position="emit('scroll-position', $event)"
         />
 
@@ -149,9 +154,14 @@
         :pending-attachment-drafts="threadPendingAttachmentDrafts"
         :has-older-replies="activeThreadHasOlder"
         :loading-older-replies="loadingOlderThreadReplies"
+        :reveal-message-id="threadRevealTargetId"
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
         :task-reference-ids="taskReferenceIds"
+        :delivery-receipts-by-message="deliveryReceiptsByMessage"
+        :delivery-recovery-available="deliveryRecoveryAvailable"
+        :delivery-retry-keys="deliveryRetryKeys"
+        @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
         @close="closeThread"
         @open-image="openImageViewer"
         @open-agent="openAgentModal"
@@ -210,6 +220,7 @@ import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher
 import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
 import { desktopIpc } from "../../../ipc/index.js";
+import { roomMessageRevealDestination } from "../../../domain/room-message-reveal";
 
 const props = defineProps<{
   active: boolean;
@@ -217,6 +228,10 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
+  deliveryRecoveryAvailable?: boolean;
+  deliveryRetryKeys?: ReadonlySet<string>;
+  revealedMessageId?: string | null;
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
   composerEventPreviews: ComposerEventPreview[];
@@ -254,6 +269,9 @@ const emit = defineEmits<{
   "open-github-event": [url: string];
   "open-events": [];
   "open-task": [taskId: string];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
+  "reveal-message": [messageId: string];
+  "message-reveal-unavailable": [messageId: string];
   "dismiss-event-preview": [messageId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
@@ -273,6 +291,7 @@ const taskReferenceIds = computed<ReadonlySet<string>>(() =>
 );
 const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
+const threadRevealTargetId = ref<string | null>(null);
 const replyTarget = ref<RoomReplyTarget | null>(null);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const threadLayoutElement = ref<HTMLElement | null>(null);
@@ -375,7 +394,7 @@ const { openAgentModal } = useAgentReasoningLauncher({
   openAgentDetail: (target) => emit("open-agent-detail", target),
 });
 
-function openThread(messageId: string): void {
+function openThread(messageId: string, refresh = true): void {
   if (document.activeElement instanceof HTMLElement) {
     threadReturnFocusElement.value = document.activeElement;
   }
@@ -385,7 +404,7 @@ function openThread(messageId: string): void {
   }
   forgetOpenedThreadSummary(messageId);
   activeThreadParentId.value = messageId;
-  void loadThread(messageId);
+  if (refresh) void loadThread(messageId);
 }
 
 function quoteReply(messageId: string): void {
@@ -426,6 +445,7 @@ function clearReplyTarget(): void {
 function closeThread(): void {
   messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
   activeThreadParentId.value = null;
+  threadRevealTargetId.value = null;
   clearThreadAttachmentDrafts();
   void nextTick(() => {
     threadReturnFocusElement.value?.focus({ preventScroll: true });
@@ -656,8 +676,27 @@ function mergeThreadMessages(
 }
 
 function jumpToMessage(messageId: string): void {
+  const destination = roomMessageRevealDestination(
+    messageId,
+    messagesWithThreadOverrides.value,
+    threadMessagesWithThreadOverrides.value,
+  );
+  if (destination.kind === "thread") {
+    // The source graph already contains this exact reply. Render it directly;
+    // a refresh RPC must not be allowed to turn a known link into a no-op.
+    threadRevealTargetId.value = messageId;
+    openThread(destination.threadRootId, false);
+    return;
+  }
+  if (destination.kind === "history") {
+    emit("reveal-message", messageId);
+    return;
+  }
   transientHighlightMessageId.value = messageId;
-  messageViewport.value?.scrollToMessage(messageId);
+  if (!messageViewport.value?.scrollToMessage(messageId)) {
+    emit("reveal-message", messageId);
+    return;
+  }
   if (transientHighlightTimeout !== null) {
     window.clearTimeout(transientHighlightTimeout);
   }
@@ -666,6 +705,17 @@ function jumpToMessage(messageId: string): void {
     transientHighlightTimeout = null;
   }, 1800);
 }
+
+function requestMessageReveal(messageId: string): void {
+  emit("reveal-message", messageId);
+}
+
+watch(
+  () => props.revealedMessageId,
+  (messageId) => {
+    if (messageId) void nextTick(() => jumpToMessage(messageId));
+  },
+);
 
 function handleComposerSend(
   text: string,

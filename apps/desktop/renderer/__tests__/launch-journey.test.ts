@@ -208,6 +208,28 @@ test("an unattached prior process becomes a live blocked state without a fake re
   assert.match(view.failureDetail ?? "", /wait.*cancel/i);
 });
 
+test("project preparation failure before provider creation offers retry, not reconnect", () => {
+  const view = foldLaunchJourney({
+    entry: entry({
+      observedState: "failed",
+      condition: "coordination_blocked",
+      lastError: "convergence scheduler failure: local revision was unavailable",
+      workspacePath: null,
+      workAttemptId: null,
+      providerPid: null,
+      providerContinuationId: null,
+      executionGenerationId: null,
+    }),
+  });
+
+  assert.equal(view.status, "failed");
+  assert.equal(view.currentPhaseId, "preparing_workspace");
+  assert.equal(view.recovery, "retry");
+  assert.match(view.headline, /Couldn't add the Codex agent/i);
+  assert.doesNotMatch(view.headline, /reconnect/i);
+  assert.match(view.failureDetail ?? "", /prepare the private project area/i);
+});
+
 test("folding is idempotent under duplicate and out-of-order delivery", () => {
   const ordered = foldLaunchJourney({
     events: [

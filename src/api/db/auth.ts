@@ -344,6 +344,19 @@ export interface SupervisorGrantFence {
   token_version: number;
 }
 
+export class SupervisorGrantFenceStaleError extends Error {
+  readonly code = "supervisor_grant_fence_stale";
+
+  constructor() {
+    super("Supervisor grant fence is stale.");
+    this.name = "SupervisorGrantFenceStaleError";
+  }
+}
+
+export function isSupervisorGrantFenceStaleError(error: unknown): error is SupervisorGrantFenceStaleError {
+  return error instanceof SupervisorGrantFenceStaleError;
+}
+
 export async function assertSupervisorGrantFenceTx(tx: any, fence: SupervisorGrantFence): Promise<boolean> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${fence.grant_id}`}, 0))`);
   const [grant] = await tx.select({ grant_id: supervisor_host_grants.grant_id }).from(supervisor_host_grants).where(and(
@@ -538,6 +551,14 @@ async function rotateRoomAgentSessionTx(
   if (!updated) throw new Error("Agent session replacement target disappeared.");
 
   if (workerBearer) {
+    // A supervisor restart replaces the worker credential on the same durable
+    // session.  Do not leave the predecessor usable alongside the retry.
+    await tx.update(room_agent_session_bearers)
+      .set({ revoked_at: now })
+      .where(and(
+        eq(room_agent_session_bearers.session_id, current.session_id),
+        isNull(room_agent_session_bearers.revoked_at),
+      ));
     await tx.insert(room_agent_session_bearers).values({
       bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
       session_id: current.session_id,
@@ -678,6 +699,84 @@ export async function createFencedRoomAgentSession(
   });
 }
 
+/**
+ * Create, restart, or roll over the exact worker identity owned by a
+ * supervisor grant. A replacement grant for the same owner/room/key/instance
+ * takes over the durable session id while every predecessor bearer is revoked.
+ *
+ * This is deliberately separate from the general reconnect path: a
+ * supervisor never receives an owner-capable session token with which to
+ * prove replacement.  The current grant fence plus this tuple lock are the
+ * authority to rotate the worker bearer in place.
+ */
+export async function createOrRotateSupervisorWorkerSession(
+  input: CreateRoomAgentSessionInput & {
+    supervisor_grant_id: string;
+    supervisor_grant_fence: SupervisorGrantFence;
+    agent_instance_id: string;
+  },
+): Promise<{ session: CreatedRoomAgentSession; bearer: RoomAgentSessionBearer }> {
+  const instanceId = input.agent_instance_id.trim();
+  if (!instanceId) throw new Error("Supervisor worker agent_instance_id is required.");
+
+  return db.transaction(async (tx) => {
+    if (!(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+      throw new SupervisorGrantFenceStaleError();
+    }
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${input.owner_account_id}:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
+    const existing = await tx.select()
+      .from(room_agent_sessions)
+      .where(and(
+        eq(room_agent_sessions.owner_account_id, input.owner_account_id),
+        sql`${room_agent_sessions.supervisor_grant_id} IS NOT NULL`,
+        eq(room_agent_sessions.room_id, input.room_id),
+        eq(room_agent_sessions.agent_key, input.agent_key),
+        eq(room_agent_sessions.agent_instance_id, instanceId),
+        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+        isNull(room_agent_sessions.ended_at),
+      ))
+      .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id));
+    const retained = existing[0] ?? null;
+    const duplicateSessionIds = existing.slice(1).map((row: RoomAgentSessionRow) => row.session_id);
+    if (duplicateSessionIds.length > 0) {
+      const now = new Date().toISOString();
+      await tx.update(room_agent_sessions)
+        .set({ ended_at: now, updated_at: now, last_seen_at: now })
+        .where(and(
+          inArray(room_agent_sessions.session_id, duplicateSessionIds),
+          isNull(room_agent_sessions.ended_at),
+        ));
+      await tx.update(room_agent_session_bearers)
+        .set({ revoked_at: now })
+        .where(and(
+          inArray(room_agent_session_bearers.session_id, duplicateSessionIds),
+          isNull(room_agent_session_bearers.revoked_at),
+        ));
+      await tx.update(room_agent_delivery_sessions)
+        .set({
+          active_connection_count: 0,
+          last_disconnected_at: now,
+          reconnect_grace_expires_at: now,
+          updated_at: now,
+        })
+        .where(inArray(room_agent_delivery_sessions.agent_session_id, duplicateSessionIds));
+      await tx.delete(room_agent_presence)
+        .where(inArray(room_agent_presence.agent_session_id, duplicateSessionIds));
+    }
+    const session = retained
+      ? await rotateRoomAgentSessionTx(tx, retained as RoomAgentSessionRow, { ...input, agent_instance_id: instanceId })
+      : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId });
+    if (!session.worker_bearer) throw new Error("Worker bearer mode is not enabled.");
+    const [bearer] = await tx.select().from(room_agent_session_bearers).where(and(
+      eq(room_agent_session_bearers.session_id, session.session_id),
+      eq(room_agent_session_bearers.token_hash, hashToken(session.worker_bearer)),
+      isNull(room_agent_session_bearers.revoked_at),
+    )).limit(1);
+    if (!bearer) throw new Error("Worker bearer was not persisted.");
+    return { session, bearer: toRoomAgentSessionBearer(bearer) };
+  });
+}
+
 export async function createSupervisorHostGrant(input: {
   owner_account_id: string;
   host_id: string;
@@ -754,20 +853,24 @@ export async function advanceSupervisorHostGrantGeneration(input: {
   grant_id: string;
   expected_generation: number;
   expected_token_version: number;
-}): Promise<SupervisorHostGrant | null> {
+}): Promise<{ grant: SupervisorHostGrant; token: string } | null> {
   return db.transaction(async (tx) => {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${input.grant_id}`}, 0))`);
-  const now = new Date().toISOString();
-  const [updated] = await tx.update(supervisor_host_grants).set({
-    current_generation: input.expected_generation + 1, updated_at: now,
-  }).where(and(
-    eq(supervisor_host_grants.grant_id, input.grant_id),
-    eq(supervisor_host_grants.current_generation, input.expected_generation),
-    eq(supervisor_host_grants.token_version, input.expected_token_version),
-    isNull(supervisor_host_grants.revoked_at),
-    gt(supervisor_host_grants.expires_at, now),
-  )).returning();
-  return updated ? toSupervisorHostGrant(updated) : null;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${input.grant_id}`}, 0))`);
+    const now = new Date().toISOString();
+    const token = makeSupervisorGrantToken();
+    const [updated] = await tx.update(supervisor_host_grants).set({
+      current_generation: input.expected_generation + 1,
+      token_hash: hashToken(token),
+      token_version: input.expected_token_version + 1,
+      updated_at: now,
+    }).where(and(
+      eq(supervisor_host_grants.grant_id, input.grant_id),
+      eq(supervisor_host_grants.current_generation, input.expected_generation),
+      eq(supervisor_host_grants.token_version, input.expected_token_version),
+      isNull(supervisor_host_grants.revoked_at),
+      gt(supervisor_host_grants.expires_at, now),
+    )).returning();
+    return updated ? { grant: toSupervisorHostGrant(updated), token } : null;
   });
 }
 
@@ -923,7 +1026,9 @@ export async function rotateRoomAgentSessionBearer(input: {
   supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<{ bearer: RoomAgentSessionBearer; token: string } | null> {
   return db.transaction(async (tx) => {
-    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) return null;
+    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+      throw new SupervisorGrantFenceStaleError();
+    }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_bearer:${input.bearer_id}`}, 0))`);
     const [current] = await tx
       .select()
@@ -978,10 +1083,23 @@ export async function endRoomAgentSession(input: {
   session_id: string;
   room_id?: string | null;
   owner_account_id?: string | null;
+  supervisor_grant_id?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<RoomAgentSession | null> {
   return db.transaction(async (tx) => {
-  if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) return null;
+  if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+    throw new SupervisorGrantFenceStaleError();
+  }
+  if (input.supervisor_grant_id) {
+    const [session] = await tx.select().from(room_agent_sessions).where(and(
+      eq(room_agent_sessions.session_id, input.session_id),
+      ...(input.owner_account_id ? [eq(room_agent_sessions.owner_account_id, input.owner_account_id)] : []),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      isNull(room_agent_sessions.ended_at),
+    )).limit(1);
+    if (!session?.agent_instance_id) throw new SupervisorGrantFenceStaleError();
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${session.owner_account_id}:${session.room_id}:${session.agent_key}:${session.agent_instance_id}`}, 0))`);
+  }
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
   if (input.room_id) {
@@ -989,6 +1107,11 @@ export async function endRoomAgentSession(input: {
   }
   if (input.owner_account_id) {
     conditions.push(eq(room_agent_sessions.owner_account_id, input.owner_account_id));
+  }
+  if (input.supervisor_grant_id) {
+    conditions.push(eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id));
+    conditions.push(eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind));
+    conditions.push(isNull(room_agent_sessions.ended_at));
   }
 
   const [row] = await tx
@@ -998,8 +1121,10 @@ export async function endRoomAgentSession(input: {
       updated_at: now,
       last_seen_at: now,
     })
-    .where(and(...conditions))
-    .returning();
+      .where(and(...conditions))
+      .returning();
+
+  if (!row && input.supervisor_grant_id) throw new SupervisorGrantFenceStaleError();
 
   if (row) {
     await tx.update(room_agent_session_bearers)
