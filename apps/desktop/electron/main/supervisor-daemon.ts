@@ -18,7 +18,7 @@ import type {
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
-import { desktopRoot, workspaceRoot } from "./paths.js";
+import { apiUrl, desktopRoot, workspaceRoot } from "./paths.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
@@ -472,6 +472,39 @@ export class SupervisorDaemonClient {
       entry_id: input.entryId, room_id: input.roomId, work_attempt_id: input.workAttemptId,
       execution_generation_id: input.executionGenerationId, agent_session_id: input.agentSessionId,
       agent_session_token: input.credential, daemon_generation: status.generation,
+    });
+    return result.status === "installed" ? "installed" : "stale";
+  }
+
+  /**
+   * Main-process-only grant ingress.  This is deliberately not represented in
+   * IPC types: a supervisor bearer may cross only the owner-only Unix socket
+   * to the exact daemon generation that will hold it in process memory.
+   */
+  async installHostGrant(input: {
+    entryId: string;
+    roomId: string;
+    agentKey: string;
+    grantId: string;
+    supervisorGrant: string;
+    grantGeneration: number;
+    daemonGeneration: number;
+    apiUrl?: string;
+  }): Promise<"installed" | "stale"> {
+    if (!input.supervisorGrant.trim()) throw new Error("A supervised host grant is required.");
+    const status = await this.ensureRunning();
+    // Never let a request started against an old process install into its
+    // successor. The daemon independently checks this fence too.
+    if (status.generation !== input.daemonGeneration) return "stale";
+    const result = await this.request<{ status?: unknown }>("supervisor.install_host_grant", {
+      entry_id: input.entryId,
+      room_id: input.roomId,
+      agent_key: input.agentKey,
+      grant_id: input.grantId,
+      supervisor_grant: input.supervisorGrant,
+      grant_generation: input.grantGeneration,
+      api_url: input.apiUrl ?? apiUrl,
+      daemon_generation: input.daemonGeneration,
     });
     return result.status === "installed" ? "installed" : "stale";
   }

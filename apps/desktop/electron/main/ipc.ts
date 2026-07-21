@@ -147,6 +147,7 @@ import {
   onSupervisorActivity,
   supervisorDaemonClient,
 } from "./supervisor-daemon.js";
+import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
 import { emitToMainWindow } from "./window.js";
 import { transferSupervisorOwnership } from "./supervisor-ownership.js";
 import {
@@ -916,7 +917,7 @@ export function registerDesktopIpcHandlers(
         // fence, so no new legacy owner may appear while transfer is in flight.
         return await transferSupervisorOwnership({
           claim: async () => {
-            const manifest = await supervisorDaemonClient.create(input);
+            const { entry: manifest } = await supervisorGrantCoordinator.createPausedAndInstall(input);
             // The paused ownership claim is now persisted: setup survives an app
             // restart from here on.
             launchFact("agent.saved", { entryId: manifest.id, detail: "Your request is recorded and will survive an app restart.", durable: true });
@@ -972,6 +973,7 @@ export function registerDesktopIpcHandlers(
       try {
         if (entry.provider === "claude-code") await refreshInstalledLetAgentsMcpServerAuth();
         await supervisorDaemonClient.ensureRunning();
+        await supervisorGrantCoordinator.prepareEntryForActivation(entry);
         launchFact("supervisor.connected", "Background agent management is available.");
         launchFact("agent.saved", "Your saved launch is ready to resume.");
         return await transferSupervisorOwnership({
@@ -1007,6 +1009,11 @@ export function registerDesktopIpcHandlers(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
       if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
+      if (desiredState === "running") {
+        const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
+        if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
+        await supervisorGrantCoordinator.prepareEntryForActivation(entry);
+      }
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
       // Cancelling belongs to launch history only when the launch never reached
       // ready. "Ever ready" is durable/monotonic (readyReachedAt), so a launch
