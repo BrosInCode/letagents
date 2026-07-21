@@ -7,6 +7,7 @@ import {
   coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
   liveActivityEchoText,
+  isHumanVisibleSupervisorActivity,
   supervisedAgentWorkIndicators,
   type ManagedAgentWorkIndicator,
 } from "../src/domain/managed-agents";
@@ -162,4 +163,17 @@ test("supervised indicator echoes a bounded summary and uses a stable per-entry 
 test("supervised indicator clears when the agent is only idle-polling (composes with task_67)", () => {
   const idlePoll = entry({ observedState: "idle" });
   assert.deepEqual(supervisedAgentWorkIndicators([idlePoll], [], "room_1"), []);
+});
+
+test("provider account notifications stay in diagnostics but never masquerade as room work", () => {
+  const rateLimitEvent = {
+    ...entry().activity[0]!,
+    kind: "provider_event",
+    method: "account/rateLimits/updated",
+    summary: "account/rateLimits/updated",
+  };
+  const withNoiseOnly = entry({ activity: [rateLimitEvent] });
+  assert.deepEqual(supervisedAgentWorkIndicators([withNoiseOnly], [], "room_1"), []);
+  assert.equal(isHumanVisibleSupervisorActivity(rateLimitEvent), false);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "turn_lifecycle", method: "turn/completed" }), true);
 });

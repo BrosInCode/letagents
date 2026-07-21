@@ -1,7 +1,11 @@
 import { computed, ref, watch, type ComputedRef } from "vue";
 import type {
+  DesktopAgentProviderId,
   DesktopGitRoomInfo,
   DesktopManagedAgentSession,
+  DesktopManagedAgentPermissionProfileId,
+  DesktopSupervisorCreateInput,
+  DesktopSupervisorManifestEntry,
   RepoStatus,
 } from "../../../../../../electron/ipc-types";
 import {
@@ -17,6 +21,7 @@ import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
 import { contextualAddAgentError } from "./add-agent-errors";
+import { suggestSupervisedCodexCodename } from "../../../../domain/codenames";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -47,6 +52,60 @@ export type AddAgentModalEmit = <Event extends keyof AddAgentModalEvents>(
 export interface AddAgentSupervisedUi {
   launch: ReturnType<typeof useSupervisedAgentLaunch>;
   recoverableProviderName: ComputedRef<string | null>;
+}
+
+export interface SupervisedLaunchCreateSnapshot {
+  creationRequestId: string;
+  providerId: DesktopAgentProviderId;
+  providerName: string;
+  roomIdentifier: string;
+  repoRootPath: string;
+  charter: string;
+  permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
+  launchPolicy: unknown;
+  model: string | null;
+}
+
+type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "listAgents" | "createAgent">;
+
+/**
+ * The click-time snapshot is intentionally complete: controls remain editable
+ * while the name lookup awaits, but they must not change the authority of the
+ * durable agent that click already requested.
+ */
+export async function createSupervisedAgentFromSnapshot(
+  client: SupervisedCreateClient,
+  snapshot: SupervisedLaunchCreateSnapshot,
+  isCurrent: () => boolean,
+): Promise<DesktopSupervisorManifestEntry | null> {
+  let existingDisplayNames: string[] = [];
+  try {
+    existingDisplayNames = (await client.listAgents(snapshot.roomIdentifier))
+      .map((entry) => entry.displayName);
+  } catch {
+    // A recovery scan can legitimately be unavailable while create still
+    // succeeds. The request id still gives this attempt a unique display
+    // suffix; the daemon remains the identity authority.
+  }
+  const displayName = snapshot.providerId === "codex"
+    ? suggestSupervisedCodexCodename(existingDisplayNames, snapshot.creationRequestId)
+    : `${snapshot.providerName} supervised agent`;
+  // listAgents is an async gap before the durable boundary. Modal close,
+  // provider switch, and request invalidation must all fence createAgent here,
+  // not only after a durable agent has already been created.
+  if (!isCurrent()) return null;
+  const input: DesktopSupervisorCreateInput = {
+    creationRequestId: snapshot.creationRequestId,
+    providerId: snapshot.providerId,
+    roomIdentifier: snapshot.roomIdentifier,
+    displayName,
+    repoRootPath: snapshot.repoRootPath,
+    charter: snapshot.charter,
+    permissionProfileId: snapshot.permissionProfileId,
+    launchPolicy: snapshot.launchPolicy,
+    model: snapshot.model,
+  };
+  return client.createAgent(input);
 }
 
 export function useAddAgentController(
@@ -262,6 +321,16 @@ async function startManagedAgent(): Promise<void> {
   const requestVersion = setup.currentVersion();
   const requestRoomIdentifier = props.roomIdentifier;
   const requestLaunchMode = launchMode.value;
+  const requestProviderId = selectedProviderId.value;
+  const requestProviderName = selectedProvider.value?.name ?? "Agent";
+  const requestRepoRootPath = props.repoRootPath;
+  const requestCharter = supervisedCharter.value.trim();
+  const requestPermissionProfileId = selectedPermissionProfile.value?.id ?? null;
+  const requestLaunchPolicy = supervisedProviderLaunchPolicy(
+    requestProviderId,
+    requestPermissionProfileId,
+  );
+  const requestModel = selectedModel.value;
   let supervisedCreationRequestId: string | null = null;
   startingAgent.value = true;
   startOperationInFlight = true;
@@ -273,6 +342,7 @@ async function startManagedAgent(): Promise<void> {
         throw new Error("Check for previous supervised agents before starting a new one.");
       }
       if (!canStartNewSupervisedLaunch({
+        providerId: requestProviderId,
         scanStatus: supervisedRecoveryScanStatus.value,
         hasActiveLaunch: Boolean(supervisedLaunchView.value || supervisedConflict.value || launchStarted.value),
         hasRecoveryCandidate: Boolean(supervisedRecoveryCandidate.value),
@@ -290,20 +360,28 @@ async function startManagedAgent(): Promise<void> {
       // activate). Subscribe first so no early fact is missed.
       const creationRequestId = supervisedLaunch.begin();
       supervisedCreationRequestId = creationRequestId;
-      const entry = await desktopIpc.supervisor.createAgent({
+      const creationSnapshot: SupervisedLaunchCreateSnapshot = {
         creationRequestId,
-        providerId: selectedProviderId.value,
-        roomIdentifier: props.roomIdentifier,
-        displayName: `${selectedProvider.value?.name ?? "Agent"} supervised agent`,
-        repoRootPath: props.repoRootPath,
-        charter: supervisedCharter.value.trim(),
-        permissionProfileId: selectedPermissionProfile.value?.id ?? null,
-        launchPolicy: supervisedProviderLaunchPolicy(
-          selectedProviderId.value,
-          selectedPermissionProfile.value?.id ?? null,
-        ),
-        model: selectedModel.value,
-      });
+        providerId: requestProviderId,
+        providerName: requestProviderName,
+        roomIdentifier: requestRoomIdentifier,
+        repoRootPath: requestRepoRootPath,
+        charter: requestCharter,
+        permissionProfileId: requestPermissionProfileId,
+        launchPolicy: requestLaunchPolicy,
+        model: requestModel,
+      };
+      // A name is presentation, never identity. The helper reads the room's
+      // labels while retaining every click-time launch input above.
+      const entry = await createSupervisedAgentFromSnapshot(
+        desktopIpc.supervisor,
+        creationSnapshot,
+        () => setupActions.isCurrentRequest(requestVersion),
+      );
+      if (!entry) {
+        supervisedLaunch.dismiss();
+        return;
+      }
       if (!setupActions.isCurrentRequest(requestVersion)) {
         if (props.open && props.roomIdentifier === requestRoomIdentifier) {
           supervisedLaunch.offerRecoveryCandidate(entry);

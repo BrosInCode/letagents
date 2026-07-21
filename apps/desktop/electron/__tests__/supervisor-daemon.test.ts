@@ -10,17 +10,40 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+  type DaemonHandoffDiagnostic,
+  type DaemonProcessIdentity,
+  mapEntry,
   SupervisorDaemonClient,
   onSupervisorActivity,
   publishSupervisorActivity,
   supervisorDaemonSpawnEnvironment,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
+import { apiUrl as configuredApiUrl } from "../main/paths.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
 const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
+
+function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
+  return {
+    id: "agent_1", room_id: "room_1", display_name: "Aster", provider: "codex", model: null, charter: "help",
+    desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
+    created_by: "user", created_at: "2026-01-01T00:00:00.000Z",
+    room_agent_state: {
+      connection: { state: "connected", observed_at: "2026-01-01T00:00:00.000Z", detail: null },
+      inbox: { state: "blocked", pending_count: 2, blocked_by_message_id: "msg_1", detail: null },
+      turn: { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null },
+      task: { state: "none", task_id: null, title: null },
+    },
+    delivery_receipts: [{
+      inbox_item_id: "inbox_1", source_message_id: "msg_1", state: "blocked", attempt_count: 3,
+      provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
+      timeline: [{ phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+    }],
+  };
+}
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-electron-supervisor-"));
@@ -32,6 +55,18 @@ function fakeChild(): ChildProcess {
   return child as unknown as ChildProcess;
 }
 
+function fakeDaemonProcessIdentity(
+  overrides: Partial<Omit<DaemonProcessIdentity, "expectedScriptPath">> = {},
+): Omit<DaemonProcessIdentity, "expectedScriptPath"> {
+  return {
+    pid: 77,
+    kernelStartTime: "Thu Jan  1 00:00:00 2026",
+    command: `${process.execPath} ${daemonScriptPath}`,
+    state: "live",
+    ...overrides,
+  };
+}
+
 async function startWireDaemon(
   socketPath: string,
   version: number,
@@ -39,9 +74,12 @@ async function startWireDaemon(
   onPrepare?: () => void,
   implementationVersion = SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   controlTurnDelayMs = 0,
+  unresponsiveAfterPrepare = false,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
+  const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
+  let handoffPrepared = false;
   const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -49,12 +87,15 @@ async function startWireDaemon(
       buffer += chunk;
       if (!buffer.includes("\n")) return;
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as { id: string; method: string; params?: Record<string, any> };
+      requests.push({ method: request.method, params: request.params });
+      if (unresponsiveAfterPrepare && handoffPrepared && (request.method === "daemon.negotiate" || request.method === "daemon.status")) return;
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
+        handoffPrepared = true;
         setTimeout(() => onPrepare?.(), 5);
       } else if (request.method === "manifest.list") {
         result = entries;
@@ -119,6 +160,10 @@ async function startWireDaemon(
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         entry.activity.push(request.params!.event);
         result = entry;
+      } else if (request.method === "supervisor.retry_room_delivery") {
+        result = { accepted: true };
+      } else if (request.method === "supervisor.install_host_grant") {
+        result = { status: "installed" };
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -130,13 +175,71 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries };
+  return { server, entries, requests };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
   if (!server) return;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await unlink(socketPath).catch(() => undefined);
+}
+
+async function runReleasedSocketHandoffScenario(input: {
+  inspectAfterPrepare: (context: { signals: Array<"SIGTERM" | "SIGKILL">; inspection: number }) => Omit<DaemonProcessIdentity, "expectedScriptPath"> | null | undefined;
+  implementationVersion?: string;
+}) {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let prepared = false;
+  let inspection = 0;
+  const signals: Array<"SIGTERM" | "SIGKILL"> = [];
+  const diagnostics: DaemonHandoffDiagnostic[] = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    41,
+    () => {
+      void closeServer(oldServer, env.socketPath).then(() => { prepared = true; });
+    },
+    input.implementationVersion ?? "2.0.25",
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 50,
+      terminateTimeoutMs: 0,
+      killTimeoutMs: 0,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => {
+        if (!prepared) return fakeDaemonProcessIdentity();
+        inspection += 1;
+        return input.inspectAfterPrepare({ signals, inspection });
+      },
+      signalDaemon: (pid, signal) => {
+        assert.equal(pid, 77);
+        assert.ok(pid > 0, "daemon handoff signals only the positive daemon PID");
+        signals.push(signal);
+      },
+      reportHandoffDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    const status = await client.ensureRunning();
+    return { status, signals, diagnostics };
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
 }
 
 test("local supervisor activity subscribers receive only the canonical redacted event", async () => {
@@ -166,6 +269,107 @@ test("local supervisor activity subscribers receive only the canonical redacted 
   } finally {
     unsubscribe();
     (supervisorDaemonClient as unknown as { appendActivity: typeof originalAppend }).appendActivity = originalAppend;
+  }
+});
+
+test("causal manifest projection accepts a fully valid room state and receipt timeline", () => {
+  const projected = mapEntry(wireEntryWithCausalProjection());
+  assert.equal(projected.roomAgentState?.connection.state, "connected");
+  assert.equal(projected.roomAgentState?.inbox.pendingCount, 2);
+  assert.deepEqual(projected.deliveryReceipts, [{
+    inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
+    providerTurnId: null, blockedByMessageId: null, error: "failed", updatedAt: "2026-01-01T00:00:00.000Z",
+    timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+  }]);
+});
+
+test("causal manifest projection drops malformed nested state and malformed receipt rows without coercion", () => {
+  const malformed = wireEntryWithCausalProjection() as unknown as {
+    room_agent_state: unknown; delivery_receipts: unknown;
+  };
+  malformed.room_agent_state = {
+    connection: { state: "connected", observed_at: 7, detail: null },
+    inbox: { state: "blocked", pending_count: -1, blocked_by_message_id: null, detail: null },
+    turn: { state: "responding", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null },
+    task: { state: "none", task_id: null, title: null },
+  };
+  malformed.delivery_receipts = [
+    { inbox_item_id: "", source_message_id: "msg_1", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_2", source_message_id: "msg_2", state: "blocked", attempt_count: Number.NaN, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_3", source_message_id: "msg_3", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [{ phase: "invented", observed_at: "now", detail: null }] },
+    null,
+  ];
+  const projected = mapEntry(malformed as unknown as Parameters<typeof mapEntry>[0]);
+  assert.equal(projected.roomAgentState, null);
+  assert.deepEqual(projected.deliveryReceipts, []);
+});
+
+test("room delivery retry is capability-negotiated and carries the exact current daemon generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 37);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    await client.retryRoomDelivery({
+      entryId: "agent_1", roomId: "room_1", sourceMessageId: "msg_1", workAttemptId: "attempt_1",
+      executionGenerationId: "execution_1", agentSessionId: "session_1",
+    });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.retry_room_delivery")?.params, {
+      entry_id: "agent_1", room_id: "room_1", source_message_id: "msg_1", work_attempt_id: "attempt_1",
+      execution_generation_id: "execution_1", agent_session_id: "session_1", daemon_generation: 37,
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("daemon client emits one nonrecursive ready event per observed generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 38);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const observed: number[] = [];
+    const unsubscribe = client.onGeneration((status) => observed.push(status.generation));
+    await client.ensureRunning();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await client.ensureRunning();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    unsubscribe();
+    assert.deepEqual(observed, [38]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("host grant install carries renewal ownership and expiry metadata to the exact daemon generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    assert.equal(await client.installHostGrant({
+      entryId: "entry-1", roomId: "room-1", agentKey: "owner/agent", grantId: "grant-1",
+      supervisorGrant: "secret-parent", grantGeneration: 4, daemonGeneration: 39,
+      hostId: "host-1", installationId: "installation-1", expiresAt: "2026-07-22T12:00:00.000Z",
+    }), "installed");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.install_host_grant")?.params, {
+      entry_id: "entry-1", room_id: "room-1", agent_key: "owner/agent", grant_id: "grant-1",
+      supervisor_grant: "secret-parent", grant_generation: 4,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2026-07-22T12:00:00.000Z",
+      api_url: configuredApiUrl, daemon_generation: 39,
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
   }
 });
 
@@ -358,7 +562,7 @@ test("desktop development watches daemon builds and rejects a stale replacement 
   const clientSource = await readFile(daemonClientPath, "utf8");
   const healthCheck = clientSource.slice(
     clientSource.indexOf("private async waitForHealthy"),
-    clientSource.indexOf("private async waitForSocketDown"),
+    clientSource.indexOf("private captureRetiredDaemon"),
   );
   assert.match(healthCheck, /status\.implementationVersion !== SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION/);
   assert.match(healthCheck, /Rebuild the desktop daemon and try again/);
@@ -371,12 +575,18 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   let oldServer: Server | null = null;
   let replacementServer: Server | null = null;
   let spawns = 0;
-  const old = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION - 1, 7, () => { void closeServer(oldServer, env.socketPath); });
+  let retiredAlive = true;
+  const old = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION - 1, 7, () => {
+    retiredAlive = false;
+    void closeServer(oldServer, env.socketPath);
+  });
   oldServer = old.server;
   try {
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 50,
       spawnDaemon: () => {
         spawns += 1;
         void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 8).then((wire) => { replacementServer = wire.server; });
@@ -402,6 +612,7 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
   let oldServer: Server | null = null;
   let replacementServer: Server | null = null;
   let handoffPrepared = false;
+  let retiredAlive = true;
   let spawnedCwd: string | null = null;
   const stableCwd = join(env.root, "stable-daemon-cwd");
   const old = await startWireDaemon(
@@ -410,6 +621,7 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
     11,
     () => {
       handoffPrepared = true;
+      retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
     "2.0.0-stale",
@@ -420,6 +632,8 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
       socketPath: env.socketPath,
       daemonScriptPath,
       daemonWorkingDirectory: stableCwd,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 50,
       spawnDaemon: (_scriptPath, cwd) => {
         spawnedCwd = cwd;
         void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 12)
@@ -448,6 +662,7 @@ test("desktop safely terminates a wedged negotiated daemon while preserving prov
   let oldServer: Server | null = null;
   let replacementServer: Server | null = null;
   let terminatedPid: number | null = null;
+  let retiredAlive = true;
   const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   const old = await startWireDaemon(
     env.socketPath,
@@ -462,8 +677,13 @@ test("desktop safely terminates a wedged negotiated daemon while preserving prov
       socketPath: env.socketPath,
       daemonScriptPath,
       handoffTimeoutMs: 50,
+      terminateTimeoutMs: 50,
+      killTimeoutMs: 25,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
       terminateDaemon: (pid) => {
         terminatedPid = pid;
+        retiredAlive = false;
         void closeServer(oldServer, env.socketPath);
       },
       spawnDaemon: () => {
@@ -483,4 +703,197 @@ test("desktop safely terminates a wedged negotiated daemon while preserving prov
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
   }
+});
+
+test("acknowledged but unresponsive socket still enters exact-PID bounded enforcement", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let retiredAlive = true;
+  const signals: Array<"SIGTERM" | "SIGKILL"> = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    31,
+    undefined,
+    "2.0.25",
+    0,
+    true,
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 0,
+      terminateTimeoutMs: 100,
+      killTimeoutMs: 25,
+      processPollIntervalMs: 1,
+      requestTimeoutMs: 10,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      signalDaemon: (pid, signal) => {
+        assert.equal(pid, 77);
+        signals.push(signal);
+        if (signal === "SIGTERM") {
+          void closeServer(oldServer, env.socketPath).then(() => { retiredAlive = false; });
+        }
+      },
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 32)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    const status = await client.ensureRunning();
+    assert.deepEqual(signals, ["SIGTERM"], "the verified predecessor is retired even when its socket stops answering");
+    assert.equal(status.generation, 32);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("live socket plus unverifiable PID leaves the existing daemon serving", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let prepared = false;
+  let spawns = 0;
+  const signals: NodeJS.Signals[] = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    51,
+    () => { prepared = true; },
+    "2.0.25",
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 10,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => prepared ? undefined : fakeDaemonProcessIdentity(),
+      signalDaemon: (_pid, signal) => signals.push(signal),
+      spawnDaemon: () => { spawns += 1; return fakeChild(); },
+    });
+    await assert.rejects(client.ensureRunning(), /still owns its socket.*unverifiable/i);
+    assert.equal(spawns, 0, "a competing daemon is not spawned while authority is still live");
+    assert.deepEqual(signals, [], "an unverifiable PID is never signalled");
+    assert.equal(old.server.listening, true, "the existing daemon remains available after the aborted upgrade");
+  } finally {
+    await closeServer(old.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("free socket plus unverifiable PID proceeds with a loud diagnostic", async () => {
+  const result = await runReleasedSocketHandoffScenario({ inspectAfterPrepare: () => undefined });
+  assert.equal(result.status.generation, 42);
+  assert.deepEqual(result.signals, []);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "unverifiable" && entry.authorityReleased), true);
+});
+
+test("daemon signal guard refuses PID reuse before TERM", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: () => fakeDaemonProcessIdentity({ kernelStartTime: "Thu Jan  1 00:00:01 2026" }),
+  });
+  assert.deepEqual(result.signals, []);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "changed" && /PID reuse/.test(entry.detail)), true);
+});
+
+test("daemon signal guard re-verifies PID reuse immediately before KILL", async () => {
+  let postTermInspections = 0;
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: ({ signals }) => {
+      if (signals.length === 0) return fakeDaemonProcessIdentity();
+      postTermInspections += 1;
+      if (postTermInspections === 1) return fakeDaemonProcessIdentity();
+      return fakeDaemonProcessIdentity({ kernelStartTime: "Thu Jan  1 00:00:01 2026" });
+    },
+  });
+  assert.deepEqual(result.signals, ["SIGTERM"], "SIGKILL is withheld after the PID birth identity changes");
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "changed"), true);
+});
+
+test("daemon signal guard refuses a changed command", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: () => fakeDaemonProcessIdentity({ command: `${process.execPath} /tmp/not-the-daemon.js` }),
+  });
+  assert.deepEqual(result.signals, []);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "changed" && /command changed/.test(entry.detail)), true);
+});
+
+test("zombie after SIGKILL does not block replacement after authority release", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    inspectAfterPrepare: ({ signals }) => signals.at(-1) === "SIGKILL"
+      ? fakeDaemonProcessIdentity({ state: "zombie" })
+      : fakeDaemonProcessIdentity(),
+  });
+  assert.deepEqual(result.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(result.status.generation, 42);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "zombie_after_sigkill"), true);
+});
+
+test("non-zombie SIGKILL survivor is diagnosed but cannot retain transferred authority", async () => {
+  const result = await runReleasedSocketHandoffScenario({ inspectAfterPrepare: () => fakeDaemonProcessIdentity() });
+  assert.deepEqual(result.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(result.status.generation, 42);
+  assert.equal(result.diagnostics.some((entry) => entry.outcome === "non_zombie_survived_sigkill"), true);
+});
+
+test("replacement cannot report healthy without acquiring a newer singleton generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let retiredAlive = true;
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    61,
+    () => { void closeServer(oldServer, env.socketPath).then(() => { retiredAlive = false; }); },
+    "2.0.25",
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 10,
+      startTimeoutMs: 200,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 61)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    await assert.rejects(client.ensureRunning(), /did not acquire a newer singleton generation/i);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("every daemon termination signal is identity-guarded and positive-PID only", async () => {
+  const source = await readFile(daemonClientPath, "utf8");
+  const signalCalls = [...source.matchAll(/this\.signalDaemon\(([^;]+)\);/g)].map((match) => match[1]);
+  assert.deepEqual(signalCalls, ["retired.pid, signal"], "all injected daemon signalling is centralized in the guarded helper");
+  const helper = source.slice(
+    source.indexOf("private guardedSignalRetiredDaemon"),
+    source.indexOf("private async waitForRetiredProcessChange"),
+  );
+  assert.match(helper, /observeRetiredDaemon\(retired\)/);
+  assert.match(helper, /retired\.pid <= 1/);
+  assert.doesNotMatch(helper, /-retired\.pid|process\.kill\(-/);
 });

@@ -14,6 +14,7 @@ const {
   normalizeReplayedAgentDisplayName,
   resolveReplayCanonicalBase,
 } = await import("../routes/rooms/presence/agent-session-routes.js");
+const { nativeHarnessPresenceForStatus } = await import("../db/presence/liveness.js");
 const {
   isActiveRoomAgentSessionStaleForRegistration,
   SAME_INSTANCE_RECLAIM_STALE_AFTER_MS,
@@ -27,6 +28,17 @@ test("desktop closed-room pauses stay distinct from agent failures", () => {
   assert.deepEqual(desktopManagedPausePresence({ availability: "failure" }), {
     status: "blocked",
     statusText: "Needs attention",
+  });
+});
+
+test("native liveness presents validated idle status as listening rather than invented work", () => {
+  assert.deepEqual(nativeHarnessPresenceForStatus("idle"), {
+    status: "idle",
+    status_text: "Connected — listening",
+  });
+  assert.deepEqual(nativeHarnessPresenceForStatus("working"), {
+    status: "working",
+    status_text: "Working",
   });
 });
 

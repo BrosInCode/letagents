@@ -3,8 +3,30 @@ import { db } from "../client.js";
 import { toRoomAgentLivenessObservation, toRoomAgentPresence } from "../mappers.js";
 import { room_agent_liveness_observations, room_agent_presence, task_leases } from "../schema.js";
 import type { RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow } from "../types.js";
+import type { AgentPresenceStatus } from "../../../shared/agent-presence.js";
 
 class StaleNativePresenceOwnerError extends Error {}
+
+/**
+ * A native activity heartbeat proves that the provider connection is alive;
+ * it must not manufacture work.  Preserve the validated provider status and
+ * give an idle heartbeat a human-readable listening label.
+ */
+export function nativeHarnessPresenceForStatus(status: AgentPresenceStatus): {
+  status: AgentPresenceStatus;
+  status_text: string;
+} {
+  switch (status) {
+    case "idle":
+      return { status, status_text: "Connected — listening" };
+    case "reviewing":
+      return { status, status_text: "Reviewing" };
+    case "blocked":
+      return { status, status_text: "Needs attention" };
+    case "working":
+      return { status, status_text: "Working" };
+  }
+}
 
 export async function upsertRoomAgentLivenessObservation(input: {
   room_id: string;
@@ -107,7 +129,7 @@ export async function heartbeatNativeHarnessTaskLeases(input: {
 }
 
 /**
- * Atomically publishes the native axis, rendered room-quiet presence, and the
+ * Atomically publishes the native axis, rendered provider presence, and the
  * exact worker's work-lease heartbeat. Provider time orders observations only;
  * every server-owned freshness write uses one server timestamp.
  */
@@ -125,7 +147,7 @@ export async function recordNativeHarnessActivity(input: {
   provider_observed_at: string;
   sequence: number;
   method: string;
-  status: string;
+  status: AgentPresenceStatus;
 }): Promise<{
   observation: RoomAgentLivenessObservation | null;
   presence: RoomAgentPresence | null;
@@ -194,6 +216,7 @@ export async function recordNativeHarnessActivity(input: {
       };
     }
 
+    const presence = nativeHarnessPresenceForStatus(input.status);
     const [presenceRow] = await tx.insert(room_agent_presence).values({
       room_id: input.room_id,
       actor_label: input.actor_label,
@@ -205,8 +228,8 @@ export async function recordNativeHarnessActivity(input: {
       owner_label: input.owner_label,
       ide_label: input.ide_label,
       repo_branch: input.repo_branch,
-      status: "working",
-      status_text: "Working — room channel quiet",
+      status: presence.status,
+      status_text: presence.status_text,
       last_heartbeat_at: serverNow,
       created_at: serverNow,
       updated_at: serverNow,
@@ -221,8 +244,8 @@ export async function recordNativeHarnessActivity(input: {
         owner_label: input.owner_label,
         ide_label: input.ide_label,
         repo_branch: input.repo_branch,
-        status: "working",
-        status_text: "Working — room channel quiet",
+        status: presence.status,
+        status_text: presence.status_text,
         last_heartbeat_at: serverNow,
         updated_at: serverNow,
       },

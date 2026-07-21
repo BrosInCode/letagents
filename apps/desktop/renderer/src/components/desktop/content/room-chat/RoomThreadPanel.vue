@@ -54,6 +54,9 @@
         :search-active="parent.id === activeSearchMessageId"
         :thread-message-id="parent.id"
         :test-id="`room-thread-message-${parent.id}`"
+        :delivery-receipts="deliveryReceiptsByMessage[parent.id] || []"
+        :delivery-recovery-available="deliveryRecoveryAvailable"
+        :delivery-retry-keys="deliveryRetryKeys"
         @quote-reply="quoteInThread(parent)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
         @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -62,6 +65,7 @@
         @open-agent="$emit('open-agent', $event)"
         @open-github-event="$emit('open-github-event', $event)"
         @open-task="$emit('open-task', $event)"
+        @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
       />
 
       <div class="room-thread-divider">
@@ -87,6 +91,9 @@
           :search-active="reply.id === activeSearchMessageId"
           :thread-message-id="reply.id"
           :test-id="`room-thread-reply-${reply.id}`"
+          :delivery-receipts="deliveryReceiptsByMessage[reply.id] || []"
+          :delivery-recovery-available="deliveryRecoveryAvailable"
+          :delivery-retry-keys="deliveryRetryKeys"
           @quote-reply="quoteInThread(reply)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
           @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -95,6 +102,7 @@
           @open-agent="$emit('open-agent', $event)"
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
         />
       </template>
 
@@ -229,9 +237,13 @@ const props = defineProps<{
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   hasOlderReplies: boolean;
   loadingOlderReplies: boolean;
+  revealMessageId?: string | null;
   searchQuery: string;
   activeSearchMessageId: string | null;
   taskReferenceIds: ReadonlySet<string>;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
+  deliveryRecoveryAvailable?: boolean;
+  deliveryRetryKeys?: ReadonlySet<string>;
 }>();
 
 const emit = defineEmits<{
@@ -246,6 +258,7 @@ const emit = defineEmits<{
   "pick-attachments": [];
   "remove-attachment": [uploadId: string];
   "stage-dropped-attachments": [files: File[]];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
 const draft = ref("");
@@ -296,6 +309,16 @@ const mentionOpen = computed(() => mentionQuery.value !== null && mentionCandida
 const mentionCandidates = computed(() => {
   return roomMentionCandidates(props.participants, mentionQuery.value);
 });
+
+watch(
+  () => [props.revealMessageId, props.parent.id, props.replies.map((reply) => reply.id).join("|")] as const,
+  ([messageId]) => {
+    if (!messageId) return;
+    if (messageId !== props.parent.id && !props.replies.some((reply) => reply.id === messageId)) return;
+    void nextTick(() => jumpToThreadMessageReference(messageId));
+  },
+  { flush: "post", immediate: true },
+);
 
 watch(
   () => props.parent.id,

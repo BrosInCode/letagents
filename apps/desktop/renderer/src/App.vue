@@ -179,6 +179,7 @@
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
+          @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
@@ -1591,6 +1592,10 @@ function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): void {
   handleRefreshRoom(snapshot);
   if (!snapshot?.roomIdentifier) return;
   void syncSelectedRoomStream(snapshot.roomIdentifier);
+}
+
+function handleRoomMessageRevealUnavailable(_messageId: string): void {
+  pushActionToast("That earlier message is not available in the loaded room history.", "info");
 }
 
 function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {

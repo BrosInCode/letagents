@@ -1,14 +1,43 @@
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import {
+  borrowCurrentSupervisedWorkerCredential,
+  type SupervisedCredentialBorrowResult,
+} from "./supervisor-bridge.js";
 
 type OwnerAuthStore = Pick<typeof import("../../local-state.js"), "clearStoredAuth" | "getStoredAuth">;
 
 let ownerAuthStoreLoader: () => Promise<OwnerAuthStore> = () => import("../../local-state.js");
+let supervisedCredentialBorrower: () => Promise<SupervisedCredentialBorrowResult> =
+  () => borrowCurrentSupervisedWorkerCredential();
 
 export function setOwnerAuthStoreLoaderForTest(
   loader: (() => Promise<OwnerAuthStore>) | null,
 ): void {
   ownerAuthStoreLoader = loader ?? (() => import("../../local-state.js"));
+}
+
+export function setSupervisedCredentialBorrowerForTest(
+  borrower: (() => Promise<SupervisedCredentialBorrowResult>) | null,
+): void {
+  supervisedCredentialBorrower = borrower ?? (() => borrowCurrentSupervisedWorkerCredential());
+}
+
+export class SupervisedWorkerCredentialError extends Error {
+  constructor(readonly code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" | "SUPERVISED_CREDENTIAL_STALE") {
+    super(code === "SUPERVISED_CREDENTIAL_UNAVAILABLE"
+      ? "The daemon-supervised worker credential is not available yet."
+      : "The daemon-supervised worker credential is stale or missing its exact context.");
+    this.name = "SupervisedWorkerCredentialError";
+  }
+}
+
+async function getSupervisedCredential(): Promise<string> {
+  const result = await supervisedCredentialBorrower();
+  if (result.state === "available") return result.credential;
+  throw new SupervisedWorkerCredentialError(
+    result.state === "deferred" ? "SUPERVISED_CREDENTIAL_UNAVAILABLE" : "SUPERVISED_CREDENTIAL_STALE",
+  );
 }
 
 export const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
@@ -30,6 +59,7 @@ export async function getLetagentsToken(): Promise<string> {
   if (runtime.mode === "worker") {
     return runtime.bearer;
   }
+  if (runtime.mode === "supervised") return getSupervisedCredential();
 
   const envToken = process.env.LETAGENTS_TOKEN?.trim();
   if (envToken) {
@@ -95,6 +125,10 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
     // The bearer is the complete worker credential. Normalize headers first so
     // every caller spelling of Authorization is overwritten.
     headers.set("Authorization", `Bearer ${runtime.bearer}`);
+  } else if (runtime.mode === "supervised") {
+    // Resolve on every API request: the daemon may rotate the in-memory
+    // credential while Codex remains running.
+    headers.set("Authorization", `Bearer ${await getSupervisedCredential()}`);
   } else {
     const authorizationHeader = await getAuthorizationHeader();
     if (authorizationHeader && !headers.has("Authorization")) {
@@ -109,7 +143,7 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
 
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 401 && requireValidWorkerBearerRuntime().mode !== "worker") {
+    if (res.status === 401 && requireValidWorkerBearerRuntime().mode === "owner") {
       // Only clear on 401 (invalid/expired credential), NOT on 403
       // (valid credential but insufficient permissions, e.g., private repo access)
       const { clearStoredAuth } = await ownerAuthStoreLoader();

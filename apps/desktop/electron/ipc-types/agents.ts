@@ -114,7 +114,8 @@ export interface DesktopManagedAgentFailure {
 
 export type DesktopManagedAgentDeliveryMode =
   | "mcp_polling"
-  | "desktop_events";
+  | "desktop_events"
+  | "daemon_inbox";
 
 export type DesktopManagedAgentEffort =
   | "low"
@@ -362,6 +363,7 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
+  capabilities: { roomDeliveryRetry: boolean };
 }
 
 export interface DesktopSupervisorLivenessAxis {
@@ -384,6 +386,66 @@ export interface DesktopSupervisorActivityEvent {
   durablePayloadRef: string | null;
 }
 
+export type DesktopRoomAgentConnectionState = "connected" | "reconnecting" | "disconnected";
+export type DesktopRoomAgentInboxState = "empty" | "queued" | "blocked" | "waiting_for_desktop_credentials";
+export type DesktopRoomAgentTurnState = "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed";
+export type DesktopRoomAgentTaskState = "none" | "assigned" | "working" | "blocked";
+export type DesktopRoomAgentReceiptState =
+  | "queued"
+  | "dispatching"
+  | "awaiting_result"
+  | "publishing"
+  | "acknowledged"
+  | "acknowledged_no_reply"
+  | "retryable"
+  | "blocked"
+  | "queued_behind_blocked";
+
+export interface DesktopRoomAgentCausalEvent {
+  phase: "received" | "queued" | "turn_started" | "turn_finished" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked";
+  observedAt: string;
+  detail: string | null;
+}
+
+export interface DesktopRoomAgentDeliveryReceipt {
+  inboxItemId: string;
+  sourceMessageId: string;
+  state: DesktopRoomAgentReceiptState;
+  attemptCount: number;
+  providerTurnId: string | null;
+  blockedByMessageId: string | null;
+  error: string | null;
+  updatedAt: string;
+  timeline: DesktopRoomAgentCausalEvent[];
+}
+
+/** Four independent truths; no field is inferred from another. */
+export interface DesktopRoomAgentStateProjection {
+  connection: {
+    state: DesktopRoomAgentConnectionState;
+    observedAt: string | null;
+    detail: string | null;
+  };
+  inbox: {
+    state: DesktopRoomAgentInboxState;
+    pendingCount: number;
+    blockedByMessageId: string | null;
+    detail: string | null;
+  };
+  turn: {
+    state: DesktopRoomAgentTurnState;
+    inboxItemId: string | null;
+    sourceMessageId: string | null;
+    providerTurnId: string | null;
+    detail: string | null;
+  };
+  task: {
+    state: DesktopRoomAgentTaskState;
+    taskId: string | null;
+    title: string | null;
+  };
+}
+
 export interface DesktopSupervisorManifestEntry {
   id: string;
   roomId: string;
@@ -397,6 +459,8 @@ export interface DesktopSupervisorManifestEntry {
   /** Latest actionable daemon lifecycle failure, when one is retained. */
   lastError?: string | null;
   permissionProfileId: string | null;
+  /** Durable room-ingress owner for this supervised provider. */
+  deliveryMode: DesktopManagedAgentDeliveryMode;
   createdBy: string;
   createdAt: string;
   workspacePath: string | null;
@@ -416,6 +480,9 @@ export interface DesktopSupervisorManifestEntry {
   restartCount: number;
   lastTerminal: Record<string, unknown> | null;
   activity: DesktopSupervisorActivityEvent[];
+  /** Additive causal projection for daemon-owned bounded room delivery. */
+  roomAgentState?: DesktopRoomAgentStateProjection | null;
+  deliveryReceipts?: DesktopRoomAgentDeliveryReceipt[];
   turnControl: {
     actionId: string;
     workAttemptId: string;
@@ -454,6 +521,16 @@ export interface DesktopSupervisorTurnControlInput {
   actionId: string;
   /** Null/blank is the non-destructive Stop-turn primitive. */
   correction?: string | null;
+}
+
+/** Renderer-safe exact identity tuple for retrying one blocked room receipt. */
+export interface DesktopSupervisorRoomDeliveryRetryInput {
+  entryId: string;
+  roomId: string;
+  sourceMessageId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  agentSessionId: string;
 }
 
 export interface DesktopSupervisorTurnControlResult {

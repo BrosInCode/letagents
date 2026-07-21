@@ -42,7 +42,7 @@ import {
   toRoomState,
   type RoomState,
 } from "./room-state.js";
-import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { isSupervisedBoundedTurn, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 
 export type JoinSessionMode = "live" | "current";
 
@@ -91,6 +91,9 @@ export async function joinRoomIdentifier(
   room: RoomState;
   response: Record<string, unknown>;
 }> {
+  if (isSupervisedBoundedTurn()) {
+    throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
+  }
   const roomId = joinedVia === "join_code" ? normalizeInviteCode(identifier) : identifier.trim();
 
   if (joinedVia !== "join_code" && await isLocalRoomStorageEnabled(roomId)) {
@@ -294,6 +297,9 @@ export async function createInviteRoom(): Promise<{
   room: RoomState;
   response: Record<string, unknown>;
 }> {
+  if (isSupervisedBoundedTurn()) {
+    throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
+  }
   const project = await apiCall<Record<string, unknown>>("/projects", { method: "POST" });
   const roomId =
     typeof project.code === "string"
@@ -434,7 +440,14 @@ function bindWorkerRoomFromContext(): { room: RoomState; source: string } | null
 
 export async function autoJoinFromContext(): Promise<void> {
   try {
-    if (requireValidWorkerBearerRuntime().mode === "worker") {
+    const workerRuntime = requireValidWorkerBearerRuntime();
+    if (workerRuntime.mode === "supervised") {
+      // The exact room is daemon-owned context, not ambient repository or
+      // persisted MCP state. Do not bind a potentially unrelated local room.
+      console.error("ℹ️ Daemon-supervised bounded turn leaves room selection to its exact supervisor context.");
+      return;
+    }
+    if (workerRuntime.mode === "worker") {
       const bound = bindWorkerRoomFromContext();
       if (bound) {
         console.error(`🏠 Bound worker bearer to room '${bound.room.room_id}' (from ${bound.source}; no join/create request).`);

@@ -107,6 +107,48 @@ test("context-menu dismissal restores focus only for keyboard and copy actions",
   assert.deepEqual(calls, [{ preventScroll: true }]);
 });
 
+test("one room message groups delivery receipts for every activated agent", async () => {
+  const app = createSSRApp({
+    render: () => h(DesktopChatMessage as object, {
+      message: {
+        id: "msg_everyone",
+        sender: "EmmyMay",
+        text: "hi @everyone",
+        attachments: [],
+        agentPromptKind: null,
+        source: "browser",
+        timestamp: "2026-07-20T12:00:00.000Z",
+        actorLabel: null,
+        agentIdentity: null,
+        threadRootId: null,
+        threadReplyToId: null,
+        thread: null,
+        replyTo: null,
+      },
+      threadSummary: {
+        count: 0, unreadCount: 0, latest: null, latestPreview: null, latestTimestamp: null,
+        participants: [], hasPartialHistory: false, loadingEarlier: false,
+      },
+      activeThreadRoot: false,
+      highlightQuery: "",
+      searchActive: false,
+      deliveryReceipts: [
+        { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null },
+        { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked" },
+        { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null },
+      ],
+    }),
+  });
+
+  const html = await renderToString(app);
+  assert.match(html, /StoneRidge is responding/);
+  assert.match(html, /Waiting — DawnPeak needs attention on msg_blocked/);
+  assert.match(html, /View earlier message/);
+  assert.match(html, /disabled aria-label="Retry delivery for Oak is unavailable"/);
+  assert.match(html, />Retry unavailable<\/button>/);
+  assert.match(html, /Retry will be available when delivery recovery is connected/);
+});
+
 test("GitHub event task chips expose the shared Board navigation contract", async () => {
   const app = createSSRApp({
     render: () => h(DesktopChatMessage as object, {

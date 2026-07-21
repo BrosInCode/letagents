@@ -440,9 +440,19 @@ export function launchCodexAppServer(
   codexBin: string,
   options: CodexAppServerLaunchOptions = {},
 ): CodexAppServerLaunch {
-  const env = options.env && Object.keys(options.env).length
+  const configuredEnv = options.env && Object.keys(options.env).length
     ? { ...process.env, ...options.env }
     : process.env;
+  const env = configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"
+    ? { ...configuredEnv }
+    : configuredEnv;
+  if (env !== configuredEnv) {
+    // A bounded supervised worker borrows exact-generation authority from the
+    // daemon. Ambient desktop owner or fixed worker credentials would bypass
+    // that fence and would also leak into provider-started shell commands.
+    delete env.LETAGENTS_TOKEN;
+    delete env.LETAGENTS_AGENT_SESSION_BEARER;
+  }
   const outputCapture = createCodexAppServerOutputCapture(
     sensitiveCodexAppServerLaunchValues(env, options),
   );

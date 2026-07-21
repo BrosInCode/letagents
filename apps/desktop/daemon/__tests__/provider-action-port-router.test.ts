@@ -12,6 +12,7 @@ import {
   type NativeProviderAdapter,
 } from "../provider-action-port-router.js";
 import type {
+  ProviderActionConnectionRef,
   ProviderActionRef,
   ProviderActionSpawn,
   ProviderActionTerminal,
@@ -51,6 +52,7 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
 
 function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): NativeProviderAdapter {
   const handles = new Map<string, ReturnType<typeof nativeHandle>>();
+  let nextPid = provider === "codex" ? 100 : 200;
   return {
     capabilities: () => ({
       resume: true,
@@ -62,7 +64,7 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
     }),
     async spawn(input: ProviderActionSpawn) {
       calls.push(`${provider}:spawn:${input.workAttemptId}`);
-      const handle = nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`);
+      const handle = nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`, ++nextPid);
       handles.set(input.workAttemptId, handle);
       return handle;
     },
@@ -72,7 +74,7 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
     },
     async resume(ref: ProviderActionRef, input: ProviderActionSpawn) {
       calls.push(`${provider}:resume:${ref.workAttemptId}`);
-      const handle = nativeHandle(provider, input.workAttemptId, ref.providerContinuationId);
+      const handle = nativeHandle(provider, input.workAttemptId, ref.providerContinuationId, ++nextPid);
       handles.set(input.workAttemptId, handle);
       return handle;
     },
@@ -81,6 +83,11 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
       await options?.markDispatched?.();
       calls.push(`${provider}:control:${handle.workAttemptId}:${correction ?? "stop"}`);
       return { capability: "native_interrupt", interrupted: true, resumed: Boolean(correction), state: correction ? "working" : "idle" };
+    },
+    async runRoomTurn(handle, request, options) {
+      await options?.markDispatched?.();
+      calls.push(`${provider}:room-turn:${handle.workAttemptId}:${request.inboxItemId}`);
+      return { turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "bounded reply" };
     },
     async stop(handle): Promise<ProviderActionTerminal> {
       calls.push(`${provider}:stop:${handle.workAttemptId}`);
@@ -91,14 +98,19 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
   };
 }
 
-function nativeHandle(provider: "codex" | "claude-code", workAttemptId: string, providerContinuationId: string) {
+function nativeHandle(
+  provider: "codex" | "claude-code",
+  workAttemptId: string,
+  providerContinuationId: string,
+  pid = provider === "codex" ? 101 : 202,
+) {
   return {
     workAttemptId,
-    pid: provider === "codex" ? 101 : 202,
+    pid,
     providerContinuationId,
     providerConnection: provider === "codex"
-      ? { kind: "codex_app_server" as const, url: "ws://127.0.0.1:1", pid: 101 }
-      : { kind: "claude_cli" as const, pid: 202 },
+      ? { kind: "codex_app_server" as const, url: `ws://127.0.0.1:${pid}`, pid, processIdentity: `codex:${pid}` }
+      : { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
     observedState: () => "working" as const,
   };
 }
@@ -142,11 +154,20 @@ test("provider router selects the native adapter by manifest provider and fences
   assert.deepEqual(await router.controlTurn(resumed, "redirect", { actionId: "control-claude" }), {
     capability: "native_interrupt", interrupted: true, resumed: true, state: "working",
   });
+  let dispatchPersisted = false;
+  assert.deepEqual(await router.runRoomTurn(resumed, {
+    inboxItemId: "inbox-1", sourceMessage: { id: "msg-1", text: "hello" },
+    activation: { for_current_agent: true }, actionId: "room-action-1",
+  }, { markDispatched: async () => { dispatchPersisted = true; } }), {
+    turnId: "turn:inbox-1", outcome: "reply", text: "bounded reply",
+  });
+  assert.equal(dispatchPersisted, true);
   assert.deepEqual(calls, [
     "claude-code:spawn:claude-attempt",
     "claude-code:resume:claude-attempt",
     "claude-code:poke:claude-attempt:continue",
     "claude-code:control:claude-attempt:redirect",
+    "claude-code:room-turn:claude-attempt:inbox-1",
   ]);
 
   await assert.rejects(
@@ -180,6 +201,49 @@ test("provider router selects the native adapter by manifest provider and fences
     agentDisplayName: "Durable Cursor Agent",
   });
   assert.equal(cursor.providerContinuationId, "continuation:cursor-attempt");
+});
+
+test("provider router only returns a cached handle for an exact durable connection identity", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("codex", calls);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const alpha = await router.spawn({
+    provider: "codex", workAttemptId: "alpha-attempt", roomId: "room", cwd: "/tmp/alpha", launchPolicy: {},
+  });
+  const bravo = await router.spawn({
+    provider: "codex", workAttemptId: "bravo-attempt", roomId: "room", cwd: "/tmp/bravo", launchPolicy: {},
+  });
+  const alphaRef: ProviderActionRef = {
+    workAttemptId: alpha.workAttemptId,
+    provider: "codex",
+    providerContinuationId: alpha.providerContinuationId!,
+    providerConnection: alpha.providerConnection,
+  };
+
+  assert.deepEqual(await router.attach(alphaRef), alpha);
+  assert.equal(await router.attach({ ...alphaRef, providerContinuationId: bravo.providerContinuationId! }), null);
+  assert.equal(await router.attach({ ...alphaRef, providerConnection: bravo.providerConnection }), null);
+  assert.equal(await router.attach({ ...alphaRef, providerConnection: null }), null);
+  assert.ok(alpha.providerConnection?.kind === "codex_app_server");
+  const mismatchedConnections: ProviderActionConnectionRef[] = [
+    { ...alpha.providerConnection, url: "ws://127.0.0.1:9999" },
+    { ...alpha.providerConnection, url: "" },
+    { ...alpha.providerConnection, pid: alpha.providerConnection.pid! + 1 },
+    { ...alpha.providerConnection, pid: null },
+    { ...alpha.providerConnection, processIdentity: "another-process-birth" },
+    { ...alpha.providerConnection, processIdentity: null },
+  ];
+  for (const providerConnection of mismatchedConnections) {
+    assert.equal(await router.attach({ ...alphaRef, providerConnection }), null);
+  }
+  await assert.rejects(router.attach({
+    ...alphaRef,
+    providerConnection: { kind: "claude_cli", pid: alpha.providerConnection.pid, processIdentity: alpha.providerConnection.processIdentity },
+  }), /Conflicting provider identities/);
+  assert.deepEqual(calls, [
+    "codex:spawn:alpha-attempt",
+    "codex:spawn:bravo-attempt",
+  ], "connection mismatches are rejected by the router instead of delegated to an adapter");
 });
 
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {
@@ -412,7 +476,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(first.work_attempt_id);
     const firstGeneration = first.provider_ref?.execution_generation_id;
     assert.ok(firstGeneration);
-    await new WorkerBindingStore(paths.workerBindingsPath).bind({
+    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
       entry_id: entry.id,
       room_id: entry.room_id,
       work_attempt_id: first.work_attempt_id!,
@@ -480,7 +544,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     const journaled = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
     assert.equal(journaled?.status, "uncertain");
     assert.deepEqual(journaled?.stages, []);
-    await new WorkerBindingStore(paths.workerBindingsPath).unbind(entry.id);
+    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "Claude router stop");

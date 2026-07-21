@@ -91,6 +91,8 @@ type LaunchFields = Pick<
   | "lastError"
   | "workspacePath"
   | "providerPid"
+  | "providerContinuationId"
+  | "executionGenerationId"
   | "agentSessionId"
   | "agentSessionBindingState"
   | "workplaceLiveness"
@@ -157,7 +159,11 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     && !stopFailed;
   const stopped = entry.desiredState === "stopped" && entry.observedState === "stopped";
   const ready = entry.desiredState === "running" && reached >= 4;
-  const recoverableBlocked = !ready
+  const hasProviderExecution = entry.providerPid != null
+    || entry.providerContinuationId != null
+    || entry.executionGenerationId != null;
+  const recoverableBlocked = hasProviderExecution
+    && !ready
     && !stopFailed
     && !stopping
     && !stopped
@@ -192,8 +198,12 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
         ? safeUserVisibleErrorDetail(entry.lastError, `The ${providerLabel} launch was saved, but ownership transfer did not finish. Cancel it before starting a replacement.`)
         : stopFailed
         ? safeUserVisibleErrorDetail(entry.lastError, `The supervisor couldn't stop the ${providerLabel} agent. Check its status and try again.`)
-        : entry.condition === "coordination_blocked"
+        : entry.condition === "coordination_blocked" && hasProviderExecution
         ? `LetAgents can't currently reconnect to the previous ${providerLabel} process. It may still reconnect; you can wait or cancel this launch and start a new agent.`
+        : entry.condition === "coordination_blocked"
+        ? entry.workspacePath == null
+          ? "LetAgents couldn't prepare the private project area. Try this launch again or cancel it and start a new agent."
+          : `LetAgents couldn't start ${providerLabel} in the private project area. Try this launch again or cancel it and start a new agent.`
         : safeUserVisibleErrorDetail(entry.lastError, blockedConditionDetail(entry.condition)))
     : null;
 

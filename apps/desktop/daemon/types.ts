@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.18";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.30";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -59,6 +59,154 @@ export type DaemonWorkerBindingProjection = {
   updated_at: string;
 };
 
+/** Stable identity plus creation provenance; everything else may change independently. */
+export type DaemonAgentIdentity = {
+  agent_id: string;
+  created_by: string;
+  created_at: string;
+};
+
+/** Mutable presentation metadata for one stable agent identity. */
+export type DaemonAgentProfile = {
+  agent_id: string;
+  display_name: string;
+};
+
+/** Room membership is durable but independent of both identity and runtime. */
+export type DaemonAgentRoomMembership = {
+  agent_id: string;
+  room_id: string;
+};
+
+/** Provider behavior, charter, and authority selected for an agent. */
+export type DaemonAgentConfiguration = {
+  agent_id: string;
+  provider: string;
+  model: string | null;
+  charter: string;
+  permission_profile_id: string | null;
+  /** Explicit inbox owner; never infer daemon delivery from native policy. */
+  delivery_mode?: DaemonAgentDeliveryMode;
+  /** Present only while a legacy Codex polling turn is being fenced. */
+  delivery_cutover?: DaemonDeliveryCutover | null;
+  /** Provider-native policy selected in Add Agent; passed through unchanged. */
+  provider_launch_policy?: unknown;
+};
+
+/** Durable owner of room ingress for one supervised provider execution. */
+export type DaemonAgentDeliveryMode = "mcp_polling" | "desktop_events" | "daemon_inbox";
+
+/** Durable one-way handoff from legacy polling to daemon-owned ingress. */
+export type DaemonDeliveryCutover = {
+  work_attempt_id: string;
+  execution_generation_id: string;
+  provider_continuation_id: string;
+  /** Null only before the one permitted active-turn discovery completes. */
+  provider_turn_id: string | null;
+  phase: "prepared" | "dispatching" | "uncertain";
+  /** Redacted operator-facing reason when the handoff remains fenced. */
+  error?: string | null;
+  updated_at: string;
+};
+
+/** Requested launch/control state. This is intent, not agent identity or observed runtime. */
+export type DaemonAgentLaunchIntent = {
+  agent_id: string;
+  desired_state: DesiredState;
+  /** Read-only source checkout used only to resolve remote + revision. */
+  source_repo_path?: string | null;
+};
+
+/** Process evidence owned by one replaceable provider deployment. */
+export type DaemonProviderConnection =
+  | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
+  | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
+  | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null };
+
+export type DaemonProviderRuntimeReference = {
+  work_attempt_id: string;
+  provider_continuation_id: string;
+  provider_connection: DaemonProviderConnection | null;
+  execution_generation_id: string;
+};
+
+/** Durable human turn-control effect journal for one agent. */
+export type DaemonTurnControlEffect = {
+  action_id: string;
+  work_attempt_id: string;
+  execution_generation_id: string;
+  /** Exact native turn fenced before the first interrupt side effect. */
+  provider_turn_id?: string | null;
+  has_correction: boolean;
+  status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
+  capability: "native_interrupt" | "restart_resume" | "unsupported";
+  interrupted: boolean | null;
+  resumed: boolean | null;
+  state: "idle" | "working" | null;
+  stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
+  error: string | null;
+  recorded_at: string;
+  updated_at: string;
+};
+
+/**
+ * Replaceable runtime placement, process, and liveness facts.
+ *
+ * A launched deployment receives its own `run_id` and `deployment_id`, initially
+ * derived from the provider execution generation and stable agent id. They are
+ * durable deployment identity and survive detachment of the optional provider
+ * reference. Both remain null before the first provider execution exists.
+ */
+export type DaemonRuntimeDeployment = {
+  agent_id: string;
+  run_id: string | null;
+  deployment_id: string | null;
+  observed_state: ObservedState;
+  workspace_path?: string | null;
+  work_attempt_id?: string | null;
+  provider_ref?: DaemonProviderRuntimeReference | null;
+  workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
+  native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
+  activity?: DaemonActivityEvent[];
+};
+
+export type DaemonAgentLifecycleState = {
+  agent_id: string;
+  condition: PolicyCondition;
+  /** Latest actionable lifecycle failure, retained for Inspector/conflict UX. */
+  last_error?: string | null;
+};
+
+/** Set-once evidence that an agent launch reached ready. */
+export type DaemonAgentReadinessRecord = {
+  agent_id: string;
+  ready_reached_at?: string | null;
+};
+
+/** Accepted turn-control effects are durable and are never blindly replayed. */
+export type DaemonTurnControlJournalRecord = {
+  agent_id: string;
+  turn_control?: DaemonTurnControlEffect | null;
+};
+
+/** Last verified room-worker binding, retained after live credentials unbind. */
+export type DaemonRetainedWorkerBindingRecord = {
+  agent_id: string;
+  last_worker_binding?: DaemonWorkerBindingProjection | null;
+};
+
+/** Crash-loop/backoff state and operator-visible reconciliation notices. */
+export type DaemonReconciliationRecord = {
+  agent_id: string;
+  reconciliation?: ReconciliationState;
+  reconciliation_notices?: ReconciliationNotice[];
+};
+
+/**
+ * Backward-compatible flat manifest wire contract. Domain code should project
+ * this transport record into the narrower records above before reasoning about
+ * identity, configuration, runtime, or lifecycle ownership.
+ */
 export type DaemonManifestEntry = {
   id: string;
   room_id: string;
@@ -69,57 +217,25 @@ export type DaemonManifestEntry = {
   desired_state: DesiredState;
   observed_state: ObservedState;
   condition: PolicyCondition;
-  /** Latest actionable lifecycle failure, retained for Inspector/conflict UX. */
   last_error?: string | null;
   permission_profile_id: string | null;
-  /** Provider-native policy selected in Add Agent; passed through unchanged. */
+  delivery_mode?: DaemonAgentDeliveryMode;
+  delivery_cutover?: DaemonDeliveryCutover | null;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
-  /** Read-only source checkout used only to resolve remote + revision. */
   source_repo_path?: string | null;
   workspace_path?: string | null;
   work_attempt_id?: string | null;
-  provider_ref?: {
-    work_attempt_id: string;
-    provider_continuation_id: string;
-    provider_connection:
-      | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
-      | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
-      | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
-      | null;
-    execution_generation_id: string;
-  } | null;
+  /** Durable runtime identity, explicit when it cannot be derived from provider_ref. */
+  run_id?: string | null;
+  deployment_id?: string | null;
+  provider_ref?: DaemonProviderRuntimeReference | null;
   workplace_liveness?: DaemonLivenessAxis<WorkplaceReachability>;
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
-  /**
-   * First time this entry converged to ready (bound + reachable + running +
-   * unblocked). Set once, monotonically, and never cleared — durable evidence
-   * that the launch succeeded, so a later Stop is a lifecycle event rather than
-   * a cancelled launch. Absent for entries that never reached ready.
-   */
   ready_reached_at?: string | null;
   activity?: DaemonActivityEvent[];
-  /**
-   * Durable human turn-control effect journal. `accepted` is written before
-   * provider dispatch; after a daemon restart it is never blindly replayed.
-   */
-  turn_control?: {
-    action_id: string;
-    work_attempt_id: string;
-    execution_generation_id: string;
-    has_correction: boolean;
-    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
-    capability: "native_interrupt" | "restart_resume" | "unsupported";
-    interrupted: boolean | null;
-    resumed: boolean | null;
-    state: "idle" | "working" | null;
-    stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
-    error: string | null;
-    recorded_at: string;
-    updated_at: string;
-  } | null;
-  /** Last verified exact room identity; retained when live credentials unbind. */
+  turn_control?: DaemonTurnControlEffect | null;
   last_worker_binding?: DaemonWorkerBindingProjection | null;
   reconciliation?: ReconciliationState;
   reconciliation_notices?: ReconciliationNotice[];
@@ -127,6 +243,19 @@ export type DaemonManifestEntry = {
 
 export type DaemonManifestEntryView = DaemonManifestEntry & {
   worker_binding?: DaemonWorkerBindingProjection | null;
+  /** Ephemeral causal delivery projection; never persisted in the manifest. */
+  room_agent_state?: {
+    connection: { state: "connected" | "reconnecting" | "disconnected"; observed_at: string | null; detail: string | null };
+    inbox: { state: "empty" | "queued" | "blocked" | "waiting_for_desktop_credentials"; pending_count: number; blocked_by_message_id: string | null; detail: string | null };
+    turn: { state: "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed"; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
+    task: { state: "none" | "assigned" | "working" | "blocked"; task_id: string | null; title: string | null };
+  } | null;
+  delivery_receipts?: Array<{
+    inbox_item_id: string; source_message_id: string;
+    state: "pending" | "dispatching" | "awaiting_result" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "retryable" | "blocked" | "queued_behind_blocked";
+    attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; updated_at: string;
+    timeline: Array<{ phase: "received" | "queued" | "turn_started" | "turn_finished" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked"; observed_at: string; detail: string | null }>;
+  }>;
 };
 
 /** Durable mixed-engine fence for a legacy Electron-owned provider lane. */

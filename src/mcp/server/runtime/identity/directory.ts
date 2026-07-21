@@ -36,7 +36,7 @@ export async function getAuthenticatedAgentDirectory(): Promise<{
   account: AuthenticatedAccountLookup;
   agents: AuthenticatedAgentLookup[];
 } | null> {
-  if (requireValidWorkerBearerRuntime().mode === "worker") {
+  if (requireValidWorkerBearerRuntime().mode !== "owner") {
     return null;
   }
   try {
@@ -65,7 +65,7 @@ export async function getAuthenticatedAgentDirectory(): Promise<{
 }
 
 async function getAuthenticatedAccountProfile(): Promise<StoredAccount | null> {
-  if (requireValidWorkerBearerRuntime().mode === "worker") {
+  if (requireValidWorkerBearerRuntime().mode !== "owner") {
     return null;
   }
   const envToken = (process.env.LETAGENTS_TOKEN || "").trim();

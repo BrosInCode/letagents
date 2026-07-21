@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { nextTick, ref } from "vue";
 import type { DesktopLaunchEvent, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
-import { useSupervisedAgentLaunch } from "../src/components/desktop/content/add-agent/useSupervisedAgentLaunch";
+import {
+  canAddAnotherCodexAgent,
+  useSupervisedAgentLaunch,
+} from "../src/components/desktop/content/add-agent/useSupervisedAgentLaunch";
+import { createSupervisedAgentFromSnapshot } from "../src/components/desktop/content/add-agent/useAddAgentController";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -472,6 +476,7 @@ test("a failed passive recovery check does not fence starting a new supervised a
 
 test("the shared supervised start policy preserves authoritative live fences", () => {
   const base = {
+    providerId: "claude-code" as const,
     scanStatus: "error" as const,
     hasActiveLaunch: false,
     hasRecoveryCandidate: false,
@@ -479,6 +484,7 @@ test("the shared supervised start policy preserves authoritative live fences", (
   };
   assert.equal(canStartNewSupervisedLaunch(base), true);
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasRecoveryCandidate: true }), false);
+  assert.equal(canStartNewSupervisedLaunch({ ...base, providerId: "codex", hasRecoveryCandidate: true }), true);
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasActiveLaunch: true }), false);
   assert.equal(canStartNewSupervisedLaunch({ ...base, recoveringCandidate: true }), false);
 });
@@ -1143,6 +1149,49 @@ test("recovery detection is passive and explicit recovery revalidates stale term
   await Promise.resolve();
   await nextTick();
   assert.equal(launch.view.value, terminalView, "terminal unsubscribe invalidates an in-flight replay");
+});
+
+test("recovery discovery ignores an established agent whose current liveness degraded", async () => {
+  Object.assign(globalThis, {
+    window: {
+      sessionStorage: memorySessionStorage(),
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: {
+        supervisor: {
+          listAgents: async () => [entry({
+            observedState: "working",
+            workspacePath: "/tmp/worktree",
+            providerPid: 42,
+            agentSessionId: "agent-1",
+            agentSessionBindingState: "active",
+            workplaceLiveness: { state: "stale", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+            readyReachedAt: "2026-07-18T00:00:03.000Z",
+          })],
+        },
+      },
+    },
+  });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomLabel: () => "Room one",
+    providerId: () => "codex",
+    authCommand: () => null,
+    authCommandForProvider: () => null,
+    currentVersion: () => 0,
+    isCurrentRequest: () => true,
+    onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined,
+    onRetry: () => undefined,
+    onMessage: () => undefined,
+  });
+
+  await launch.detectRecoverableLaunch();
+
+  assert.equal(launch.recoveryCandidate.value, null);
+  assert.equal(launch.recoveryScanStatus.value, "ready");
+  launch.cleanup();
 });
 
 test("reopening after explicit recovery automatically restores the same live launch", async () => {
@@ -1917,4 +1966,200 @@ test("recovered launches never fall back to another provider's authentication co
 
   assert.equal(copiedCommand, null);
   assert.equal(retries, 1);
+});
+
+test("a ready Codex card can be released for another request without stopping its durable agent", () => {
+  const requestIds = ["codex-request-one", "codex-request-two"];
+  let stopCalls = 0;
+  Object.assign(globalThis, {
+    window: {
+      crypto: { randomUUID: () => requestIds.shift()! },
+      sessionStorage: memorySessionStorage(),
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: {
+        supervisor: {
+          onLaunchEvent: () => () => undefined,
+          getLaunchEvents: async () => [],
+          setDesiredState: async () => { stopCalls += 1; },
+        },
+      },
+    },
+  });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomLabel: () => "Room one",
+    providerId: () => "codex",
+    authCommand: () => null,
+    authCommandForProvider: () => null,
+    currentVersion: () => 0,
+    isCurrentRequest: () => true,
+    onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined,
+    onRetry: () => undefined,
+    onMessage: () => undefined,
+  });
+  assert.equal(launch.begin(), "codex-request-one");
+  launch.complete(entry({
+    provider: "codex",
+    observedState: "working",
+    workspacePath: "/tmp/worktree",
+    providerPid: 42,
+    agentSessionId: "agent-1",
+    agentSessionBindingState: "active",
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+  }));
+
+  assert.equal(launch.view.value?.ready, true);
+  launch.dismissReadyCodexLaunchForAnother();
+  assert.equal(launch.view.value, null);
+  assert.equal(stopCalls, 0, "Add another only clears local attachment state");
+  assert.equal(launch.begin(), "codex-request-two");
+  launch.cleanup();
+});
+
+test("only a ready Codex entry can offer Add another", () => {
+  const ready = entry({
+    observedState: "working",
+    workspacePath: "/tmp/worktree",
+    providerPid: 42,
+    agentSessionId: "agent-1",
+    agentSessionBindingState: "active",
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+  });
+  assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: ready }), true);
+  assert.equal(canAddAnotherCodexAgent({ providerId: "claude-code", entry: { ...ready, provider: "claude-code" } }), false);
+  assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: entry() }), false);
+});
+
+test("a deferred name lookup persists the complete Start-click snapshot", async () => {
+  const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
+  let createdInput: Record<string, unknown> | null = null;
+  const client = {
+    listAgents: () => nameLookup.promise,
+    createAgent: async (input: Record<string, unknown>) => {
+      createdInput = input;
+      return entry({
+        id: "supervised_snapshot",
+        displayName: String(input.displayName),
+        provider: String(input.providerId),
+      });
+    },
+  };
+  const form = {
+    providerId: "codex",
+    providerName: "Codex",
+    roomIdentifier: "room-before",
+    repoRootPath: "/repo-before",
+    charter: "Investigate the failure.",
+    permissionProfileId: "read-only",
+    launchPolicy: { profile: "read-only" },
+    model: "gpt-5.6",
+  };
+  const request = createSupervisedAgentFromSnapshot(client as never, {
+    creationRequestId: "request-snapshot",
+    ...form,
+  }, () => true);
+
+  // These represent editable controls changing while listAgents is pending.
+  form.providerId = "claude-code";
+  form.providerName = "Claude Code";
+  form.roomIdentifier = "room-after";
+  form.repoRootPath = "/repo-after";
+  form.charter = "Do something else.";
+  form.permissionProfileId = "full-access";
+  form.launchPolicy = { profile: "full-access" };
+  form.model = "other-model";
+  nameLookup.resolve([]);
+  await request;
+
+  assert.equal(createdInput?.creationRequestId, "request-snapshot");
+  assert.equal(createdInput?.providerId, "codex");
+  assert.equal(createdInput?.roomIdentifier, "room-before");
+  assert.match(String(createdInput?.displayName), / · request-snapshot$/);
+  assert.equal(createdInput?.repoRootPath, "/repo-before");
+  assert.equal(createdInput?.charter, "Investigate the failure.");
+  assert.equal(createdInput?.permissionProfileId, "read-only");
+  assert.deepEqual(createdInput?.launchPolicy, { profile: "read-only" });
+  assert.equal(createdInput?.model, "gpt-5.6");
+});
+
+test("modal close or provider invalidation during name lookup fences durable creation", async () => {
+  for (const invalidation of ["modal close", "provider switch"]) {
+    const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
+    let current = true;
+    let createCalls = 0;
+    const request = createSupervisedAgentFromSnapshot({
+      listAgents: () => nameLookup.promise,
+      createAgent: async () => {
+        createCalls += 1;
+        return entry();
+      },
+    }, {
+      creationRequestId: `request-${invalidation}`,
+      providerId: "codex",
+      providerName: "Codex",
+      roomIdentifier: "room-1",
+      repoRootPath: "/repo",
+      charter: "Keep working.",
+      permissionProfileId: null,
+      launchPolicy: null,
+      model: null,
+    }, () => current);
+
+    current = false;
+    nameLookup.resolve([]);
+    assert.equal(await request, null);
+    assert.equal(createCalls, 0, `${invalidation} must prevent createAgent`);
+  }
+});
+
+test("switching away from Codex revokes the shared Add-another eligibility and handler", async () => {
+  const selectedProviderId = ref<"codex" | "claude-code">("codex");
+  Object.assign(globalThis, {
+    window: {
+      crypto: { randomUUID: () => "codex-request" },
+      sessionStorage: memorySessionStorage(),
+      setTimeout: () => 1,
+      clearTimeout: () => undefined,
+      letagentsDesktop: {
+        supervisor: {
+          onLaunchEvent: () => () => undefined,
+          getLaunchEvents: async () => [],
+        },
+      },
+    },
+  });
+  const launch = useSupervisedAgentLaunch({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomLabel: () => "Room one",
+    providerId: selectedProviderId,
+    authCommand: () => null,
+    authCommandForProvider: () => null,
+    currentVersion: () => 0,
+    isCurrentRequest: () => true,
+    onChooseRepo: () => undefined,
+    onCopyAuthCommand: () => undefined,
+    onRetry: () => undefined,
+    onMessage: () => undefined,
+  });
+  launch.begin();
+  launch.complete(entry({
+    observedState: "working",
+    workspacePath: "/tmp/worktree",
+    providerPid: 42,
+    agentSessionId: "agent-1",
+    agentSessionBindingState: "active",
+    workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+  }));
+  assert.equal(launch.canAddAnotherCodexAgent.value, true);
+
+  selectedProviderId.value = "claude-code";
+  await nextTick();
+  assert.equal(launch.canAddAnotherCodexAgent.value, false);
+  launch.dismissReadyCodexLaunchForAnother();
+  assert.equal(launch.view.value?.ready, true, "revoked handler must preserve the Codex card");
+  launch.cleanup();
 });

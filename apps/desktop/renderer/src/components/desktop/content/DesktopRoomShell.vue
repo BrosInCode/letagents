@@ -105,11 +105,16 @@
       :participants="roomParticipants"
       :presence="roomPresence"
       :local-agent-work="localAgentWork"
+      :delivery-receipts-by-message="deliveryReceiptsByMessage"
+      :delivery-recovery-available="deliveryRetryAvailable"
+      :delivery-retry-keys="deliveryRetryingKeys"
+      :revealed-message-id="revealedMessageId"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
       :resolving-permission-ids="resolvingComposerPermissionIds"
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
+      :supervisor-entries="supervisorEntries"
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
       :initial-draft="chatDraftText"
@@ -122,6 +127,9 @@
       @open-agent-detail="openAgentDetail"
       @open-add-agent="openAddAgentModal"
       @open-permission-detail="openComposerPermissionDetail"
+      @retry-delivery="retryRoomAgentDelivery"
+      @reveal-message="revealRoomMessage"
+      @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
       @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
@@ -162,6 +170,7 @@
         :board-settings="boardSettings"
         :presence="roomPresence"
         :workers="workers"
+        :supervisor-entries="supervisorEntries"
         :selected-task-id="boardSelectedTaskId"
         @task-updated="emit('task-updated', $event)"
         @refresh-room="emit('refresh-room')"
@@ -204,12 +213,14 @@
         :presence="roomPresence"
         :reasoning-sessions="reasoningSessions"
         :room-git-room="room.gitRoom"
+        :room-identifier="room.identifier"
         :room-artifacts="roomArtifacts"
         :activity-history-request="activityHistoryRequest"
         :artifact-task-filter-id="artifactTimelineTaskFilterId"
         :tasks="tasks"
         :messages="visibleMessages"
         :workers="workers"
+        :supervisor-entries="supervisorEntries"
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetail"
@@ -323,6 +334,7 @@ import {
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
+import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
@@ -416,6 +428,9 @@ const emit = defineEmits<{
   "choose-worktree": [rootPath: string];
   "open-repo-root": [rootPath: string];
   "add-agent-open-request-consumed": [];
+  /** Placeholder until the daemon exposes a receipt retry control endpoint. */
+  "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
+  "message-reveal-unavailable": [messageId: string];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -423,12 +438,17 @@ const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
 const activeTab = ref<RoomTabId>(readRoomActiveTab(props.room.identifier));
 const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
+const revealedMessageId = ref<string | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
+const deliveryRetryCoordinator = createRoomDeliveryRetryCoordinator();
+const deliveryRetryingKeys = deliveryRetryCoordinator.retryingKeys;
+const deliveryRetryNegotiated = ref(false);
+const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
 const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
 const inboxLoading = ref(false);
 const inboxLoadingOlder = ref(false);
@@ -458,6 +478,13 @@ const eventsUnseenCount = ref(0);
 const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+const deliveryReceiptsByMessage = computed(() => {
+  const grouped: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>> = {};
+  for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
+    (grouped[receipt.sourceMessageId] ??= []).push({ agentId: entry.id, agentName: entry.displayName, state: receipt.state, blockedByMessageId: receipt.blockedByMessageId });
+  }
+  return grouped;
+});
 provide(managedAgentSessionsKey, {
   sessions: shallowReadonly(managedAgentSessions),
   refresh: refreshManagedAgentSessions,
@@ -522,6 +549,7 @@ const {
   sendRoomMessage,
   discardAttachment,
   loadOlderMessages,
+  revealMessage,
 } = useDesktopRoomMessages({
   room: roomRef,
   messages: messagesRef,
@@ -821,6 +849,9 @@ onBeforeUnmount(() => {
 });
 
 onMounted(() => {
+  void desktopIpc.supervisor?.getStatus().then((status) => {
+    deliveryRetryNegotiated.value = status.capabilities.roomDeliveryRetry;
+  }).catch(() => { deliveryRetryNegotiated.value = false; });
   document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
     if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
@@ -1498,6 +1529,53 @@ function openRules(): void {
 
 function openAddAgentModal(): void {
   addAgentModalOpen.value = true;
+}
+
+async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): Promise<void> {
+  if (!deliveryRetryAvailable.value) return;
+  const entry = supervisorEntries.value.find((candidate) => candidate.id === agentId);
+  if (!entry?.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
+    pushActionToast("This delivery binding changed. Refresh the room before retrying.", "error", 6_000);
+    return;
+  }
+  const { workAttemptId, executionGenerationId, agentSessionId } = entry;
+  const result = await deliveryRetryCoordinator.run({ agentId, sourceMessageId }, async () => {
+    await desktopIpc.supervisor!.retryRoomDelivery({
+      entryId: entry.id,
+      roomId: props.room.identifier,
+      sourceMessageId,
+      workAttemptId,
+      executionGenerationId,
+      agentSessionId,
+    });
+    await refreshManagedAgentSessions();
+    const refreshed = supervisorEntries.value.find((candidate) => candidate.id === agentId);
+    return refreshed?.deliveryReceipts?.find((candidate) => candidate.sourceMessageId === sourceMessageId);
+  });
+  if (!result.started) return;
+  if (!result.ok) {
+    pushActionToast(result.error instanceof Error ? result.error.message : "Could not retry room delivery.", "error", 7_000);
+    return;
+  }
+  pushActionToast(
+    result.value?.state === "blocked"
+      ? "Delivery still needs attention."
+      : "Delivery retry accepted. The agent is resuming delivery.",
+    result.value?.state === "blocked" ? "error" : "success",
+    5_000,
+  );
+}
+
+async function revealRoomMessage(messageId: string): Promise<void> {
+  const revealed = await revealMessage(messageId);
+  if (!revealed) {
+    emit("message-reveal-unavailable", messageId);
+    return;
+  }
+  // Repeated links to the same message need a new reactive edge.
+  revealedMessageId.value = null;
+  await nextTick();
+  revealedMessageId.value = messageId;
 }
 
 function refreshManagedAgentSessions(): Promise<void> {

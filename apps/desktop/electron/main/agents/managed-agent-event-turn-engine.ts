@@ -240,6 +240,9 @@ export function createManagedAgentEventTurnEngine<
       status: "interrupted",
       active_work: null,
       last_error: null,
+      failure: null,
+      pending_event: null,
+      queued_events: [],
       updated_at: adapter.now(),
     })) ?? session;
     adapter.emitSessionUpdate(updated);
@@ -302,6 +305,15 @@ export function createManagedAgentEventTurnEngine<
       return;
     }
     if (session.status === "blocked") {
+      // A blocked worker normally preserves room events for an explicit retry,
+      // but its exact stop phrase is lifecycle control, not recoverable work.
+      // Handle it before queueing so the worker is actually interrupted and
+      // disconnected instead of staying blocked with a stop event trapped in
+      // `queued_events` forever.
+      if (isStopPhraseRoomStreamEvent(session, event)) {
+        await stopAfterRoomStopPhrase(session);
+        return;
+      }
       const eventId = event.type === "message" ? event.message.id : event.task.id;
       const updated = adapter.updateSession(sessionId, (current) => {
         const queued = current.queued_events ?? [];

@@ -8,6 +8,8 @@ import test from "node:test";
 import type { StoredAgentSessionState } from "../local-state.js";
 import { toPublicAgentSession } from "../server/runtime/agent-sessions.js";
 import {
+  borrowSupervisedWorkerCredential,
+  borrowCurrentSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
   bindSupervisedWorkerSessionWithContext,
   checkpointSupervisedWorkerCursor,
@@ -35,6 +37,111 @@ test("supervisor bridge is inert outside a daemon-supervised provider", async ()
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-absent-"));
   try {
     assert.equal(await bindSupervisedWorkerSession(session, {}, { cwd: root }), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("credential borrowing requires the negotiated daemon generation and defers without desktop delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-credential-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  let result: Record<string, unknown> = { status: "deferred" };
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const payload = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 9, pid: 123, started_at: "2026-07-20T00:00:00.000Z" }
+        : result;
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: payload })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const options = { cwd: root, trustedDaemonSocketPath: socketPath };
+    await writeSupervisorContext(root, "generation_exact");
+    assert.deepEqual(await borrowSupervisedWorkerCredential(session, {}, options), {
+      state: "deferred", code: "SUPERVISED_CREDENTIAL_UNAVAILABLE",
+    });
+    result = { status: "available", credential: "worker-bearer-only" };
+    assert.deepEqual(await borrowSupervisedWorkerCredential(session, {}, options), {
+      state: "available", credential: "worker-bearer-only",
+    });
+    assert.deepEqual(requests.filter((request) => request.method === "supervisor.borrow_worker_credential")[1]?.params, {
+      entry_id: "manifest_exact", room_id: session.room_id, work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact", agent_session_id: session.session_id, daemon_generation: 9,
+      api_url: "https://letagents.chat",
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded MCP borrowing resolves its exact non-secret worker identity from the Codex context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-current-credential-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  let borrowCount = 0;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 11, pid: 123, started_at: "2026-07-21T00:00:00.000Z" }
+        : { status: "available", credential: `rotated-in-daemon-memory-${++borrowCount}` };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact", session.room_id, {
+      agent_session_id: session.session_id,
+      agent_display_name: "Exact worker",
+    });
+    const env = {
+      LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+      LETAGENTS_API_URL: "https://letagents.chat",
+    };
+    assert.deepEqual(await borrowCurrentSupervisedWorkerCredential(env, { cwd: root, trustedDaemonSocketPath: socketPath }), {
+      state: "available", credential: "rotated-in-daemon-memory-1",
+    });
+    assert.deepEqual(await borrowCurrentSupervisedWorkerCredential(env, { cwd: root, trustedDaemonSocketPath: socketPath }), {
+      state: "available", credential: "rotated-in-daemon-memory-2",
+    });
+    assert.deepEqual(requests[1]?.params, {
+      entry_id: "manifest_exact", room_id: session.room_id, work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact", agent_session_id: session.session_id, daemon_generation: 11,
+      api_url: "https://letagents.chat",
+    });
+    assert.equal(requests.filter((request) => request.method === "supervisor.borrow_worker_credential").length, 2);
+    assert.doesNotMatch(JSON.stringify(await readContext(root)), /rotated-in-daemon-memory|session-secret/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded MCP borrowing rejects absent identity before contacting the daemon", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-current-missing-"));
+  const socketPath = join(root, "missing.sock");
+  try {
+    await writeSupervisorContext(root, "generation_exact");
+    assert.deepEqual(await borrowCurrentSupervisedWorkerCredential({
+      LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+      LETAGENTS_API_URL: "https://letagents.chat",
+    }, { cwd: root, trustedDaemonSocketPath: socketPath }), {
+      state: "stale", code: "SUPERVISED_CREDENTIAL_STALE",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

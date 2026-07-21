@@ -54,7 +54,17 @@ function inside(root: string, candidate: string): boolean {
 
 export function normalizeRemote(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");
-  return trimmed.endsWith(".git") ? trimmed.slice(0, -4) : trimmed;
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed)?.[1]?.toLowerCase();
+  const networkUrl = scheme != null && scheme !== "file";
+  // Git's scp-like syntax (git@host:owner/repo) is a network identity too.
+  // Everything else is a filesystem path, where `repo.git` and `repo` may be
+  // two different repositories and must never share daemon storage.
+  const scpLike = scheme == null
+    && /^(?:[^/@:\s]+@)?[^/:\s]+:.+$/.test(trimmed)
+    && !/^[A-Za-z]:[\\/]/.test(trimmed);
+  return (networkUrl || scpLike) && trimmed.endsWith(".git")
+    ? trimmed.slice(0, -4)
+    : trimmed;
 }
 
 /** A readable, collision-safe daemon storage key derived from full remote identity. */
@@ -87,7 +97,7 @@ export class WorkspaceProvisioner {
     return this.insideRoot("worktrees", safeSegment(repo, "repository"), safeSegment(workAttemptId, "work attempt id"));
   }
 
-  async provision(input: { repo: string; workAttemptId: string; taskId: string; remoteUrl: string; revision: string }): Promise<{ path: string; reused: boolean; identity: WorkspaceMarker }> {
+  async provision(input: { repo: string; workAttemptId: string; taskId: string; remoteUrl: string; revision: string; sourceRepoPath?: string }): Promise<{ path: string; reused: boolean; identity: WorkspaceMarker }> {
     const repo = safeSegment(input.repo, "repository");
     const workAttemptId = safeSegment(input.workAttemptId, "work attempt id");
     if (!isUuid(workAttemptId)) throw new Error("Work attempt IDs must be supervisor-minted UUIDs.");
@@ -145,7 +155,7 @@ export class WorkspaceProvisioner {
         }
         // A crash after worktree-add is recoverable: prove the exact expected
         // Git identity, then finish the final marker rather than orphaning it.
-        const recovered = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision);
+        const recovered = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision, input.sourceRepoPath);
         try {
           await this.verifyWorkspace(workspace, recovered);
           await this.writeMarker(markerPath, recovered);
@@ -157,7 +167,7 @@ export class WorkspaceProvisioner {
         }
       }
 
-      const identity = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision);
+      const identity = await this.resolveIdentity(repo, workAttemptId, input.taskId, remoteUrl, canonicalBare, input.revision, input.sourceRepoPath);
       await this.run(["--git-dir", canonicalBare, "worktree", "add", "--detach", workspace, identity.resolved_revision]);
       await this.ensureDirectory(workspace, await realpath(repoWorktrees));
       await this.verifyWorkspace(workspace, identity);
@@ -167,10 +177,53 @@ export class WorkspaceProvisioner {
     });
   }
 
-  private async resolveIdentity(repo: string, workAttemptId: string, taskId: string, remoteUrl: string, barePath: string, revision: string): Promise<WorkspaceMarker> {
-    const resolvedRevision = await this.query(["--git-dir", barePath, "rev-parse", "--verify", `${revision}^{commit}`]);
+  private async resolveIdentity(repo: string, workAttemptId: string, taskId: string, remoteUrl: string, barePath: string, revision: string, sourceRepoPath?: string): Promise<WorkspaceMarker> {
+    let resolvedRevision: string;
+    try {
+      resolvedRevision = await this.query(["--git-dir", barePath, "rev-parse", "--verify", `${revision}^{commit}`]);
+    } catch (remoteResolutionError) {
+      if (!sourceRepoPath?.trim()) throw remoteResolutionError;
+      resolvedRevision = await this.importSourceRevision({
+        barePath,
+        remoteUrl,
+        revision,
+        sourceRepoPath,
+        workAttemptId,
+      });
+    }
     await this.run(["--git-dir", barePath, "cat-file", "-e", `${resolvedRevision}^{commit}`]);
     return { version: 1, repo, work_attempt_id: workAttemptId, task_id: taskId, remote_url: remoteUrl, resolved_revision: resolvedRevision, bare_path: barePath };
+  }
+
+  /**
+   * A feature branch can legitimately contain commits that have not been
+   * pushed yet. The daemon still needs an isolated detached worktree, so copy
+   * only the already-resolved commit object from the verified local checkout
+   * into a daemon-private ref. Never substitute origin's branch tip.
+   */
+  private async importSourceRevision(input: {
+    barePath: string;
+    remoteUrl: string;
+    revision: string;
+    sourceRepoPath: string;
+    workAttemptId: string;
+  }): Promise<string> {
+    const source = await realpath(resolve(input.sourceRepoPath));
+    const sourceRemote = normalizeRemote(await this.query(["-C", source, "remote", "get-url", "origin"]));
+    if (sourceRemote !== input.remoteUrl) throw new Error("Local source repository remote identity does not match the daemon repository.");
+    const sourceRevision = await this.query(["-C", source, "rev-parse", "--verify", `${input.revision}^{commit}`]);
+    const targetRef = `refs/letagents/sources/${safeSegment(input.workAttemptId, "work attempt id")}`;
+    await withWorkspaceFence(input.barePath, async () => {
+      await this.verifyBare(input.barePath, input.remoteUrl);
+      await this.run([
+        "--git-dir", input.barePath,
+        "fetch", "--no-tags", "--no-write-fetch-head", source,
+        `+${sourceRevision}:${targetRef}`,
+      ]);
+    });
+    const imported = await this.query(["--git-dir", input.barePath, "rev-parse", "--verify", `${targetRef}^{commit}`]);
+    if (imported !== sourceRevision) throw new Error("Daemon repository did not import the exact local source revision.");
+    return imported;
   }
 
   private async quarantineWorkspace(workspace: string, bare: string): Promise<void> {

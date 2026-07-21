@@ -36,6 +36,22 @@ function normalizeDisplayName(value: string | null | undefined): string {
   return String(value ?? "").trim();
 }
 
+function isParserCompatibleMentionHandle(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)*$/.test(value);
+}
+
+function agentMentionInsertText(
+  participant: DesktopParticipantSummary,
+  duplicateDisplayName: boolean,
+): string | null {
+  const displayName = normalizeDisplayName(participant.displayName);
+  if (!duplicateDisplayName && isParserCompatibleMentionHandle(displayName)) {
+    return displayName;
+  }
+  const canonical = participant.agentKey ? `agent:${participant.agentKey.trim()}` : "";
+  return canonical && isParserCompatibleMentionHandle(canonical) ? canonical : null;
+}
+
 function matchesRuntimePrefix(value: string, prefix: string): boolean {
   const normalized = value.toLowerCase();
   if (normalized === prefix || normalized.startsWith(`${prefix}-`)) {
@@ -122,23 +138,23 @@ export function roomMentionCandidates(
     agentDisplayNameCounts.set(key, (agentDisplayNameCounts.get(key) || 0) + 1);
   }
 
-  candidates.push(...mentionableParticipants
-    .filter((participant) => participant.kind !== "agent"
-      || (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) <= 1
-      || Boolean(participant.agentKey))
-    .map((participant) => ({
+  candidates.push(...mentionableParticipants.flatMap((participant) => {
+    const duplicateDisplayName = participant.kind === "agent" &&
+      (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) > 1;
+    const insertText = participant.kind === "agent"
+      ? agentMentionInsertText(participant, duplicateDisplayName)
+      : participant.displayName;
+    if (!insertText) return [];
+    return [{
       participantKey: participant.participantKey,
       kind: participant.kind,
       displayName: participant.displayName,
-      insertText: participant.kind === "agent"
-          && (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) > 1
-          && participant.agentKey
-        ? `agent:${participant.agentKey}`
-        : participant.displayName,
+      insertText,
       label: participant.kind === "agent"
         ? agentOwnerAttribution(participant.ownerLabel, participant.actorLabel)
         : "Human",
-    })));
+    }];
+  }));
 
   return candidates.slice(0, limit);
 }

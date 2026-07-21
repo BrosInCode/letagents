@@ -44,6 +44,7 @@ const {
 const {
   getLocalChatMessages,
 } = await import("../main/rooms/messages/local-store.js");
+const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
 
 import type {
   DesktopCodexLiveSessionState,
@@ -389,7 +390,7 @@ test("codex dispatch enqueues, delivers, and publishes a room reply", async () =
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_happy",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_happy",
     }));
 
@@ -424,7 +425,7 @@ test("codex delivery waits for the in-flight turn to go idle and never interrupt
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_idle",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_idle",
     }));
 
@@ -461,7 +462,7 @@ test("codex delivery retries a transient thread-not-found response after wake", 
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_after_wake",
-      text: "are you still there?",
+      text: "@RiverField are you still there?",
       threadRootId: "msg_after_wake",
     }));
 
@@ -492,7 +493,7 @@ test("codex turn errors set status 'unknown', stay deliverable, and never park (
     for (let index = 0; index < 5; index += 1) {
       dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
         id: `msg_error_${index}`,
-        text: "please check this",
+        text: "@RiverField please check this",
         threadRootId: `msg_error_${index}`,
       }));
     }
@@ -514,7 +515,7 @@ test("codex turn errors set status 'unknown', stay deliverable, and never park (
     // A further event still delivers (proves infinite retry, no budget gate).
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_error_after",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_error_after",
     }));
     await waitFor(
@@ -530,23 +531,29 @@ test("codex turn errors set status 'unknown', stay deliverable, and never park (
 
 test("codex stop with shutdown interrupts the session and disconnects the worker", async () => {
   resetState();
+  const originalReleaseLegacyLane = supervisorDaemonClient.releaseLegacyLane;
+  (supervisorDaemonClient as unknown as { releaseLegacyLane: () => Promise<{ released: boolean }> }).releaseLegacyLane = async () => ({ released: true });
   const roomIdentifier = "local_room_codex_stop_shutdown";
-  const seeded = await seedDeliverableSession({
-    roomIdentifier,
-    sessionId: "codex_stop_shutdown",
-    workerSessionId: "agent_session_stop_shutdown",
-  });
-  // No RPC server needed: the shutdown stop path never touches the app-server.
-  const stopped = await stopDesktopManagedAgent({ sessionId: seeded.session_id, stopMode: "worker" });
+  try {
+    const seeded = await seedDeliverableSession({
+      roomIdentifier,
+      sessionId: "codex_stop_shutdown",
+      workerSessionId: "agent_session_stop_shutdown",
+    });
+    // No RPC server needed: the shutdown stop path never touches the app-server.
+    const stopped = await stopDesktopManagedAgent({ sessionId: seeded.session_id, stopMode: "worker" });
 
-  assert.ok(stopped);
-  assert.equal(stopped?.status, "interrupted");
-  const session = getStoredCodexLiveSession(seeded.session_id);
-  assert.equal(session?.status, "interrupted");
-  assert.equal(session?.active_work, null);
-  // killOwnedAppServer marks the worker session ended (worker disconnected).
-  const worker = getStoredAgentSession(seeded.agent_session_id ?? null);
-  assert.ok(worker?.ended_at, "expected the worker agent-session to be marked ended");
+    assert.ok(stopped);
+    assert.equal(stopped?.status, "interrupted");
+    const session = getStoredCodexLiveSession(seeded.session_id);
+    assert.equal(session?.status, "interrupted");
+    assert.equal(session?.active_work, null);
+    // killOwnedAppServer marks the worker session ended (worker disconnected).
+    const worker = getStoredAgentSession(seeded.agent_session_id ?? null);
+    assert.ok(worker?.ended_at, "expected the worker agent-session to be marked ended");
+  } finally {
+    (supervisorDaemonClient as unknown as { releaseLegacyLane: typeof originalReleaseLegacyLane }).releaseLegacyLane = originalReleaseLegacyLane;
+  }
 });
 
 test("codex non-shutdown stop issues a turn/interrupt RPC for an active turn", async () => {
@@ -612,6 +619,49 @@ test("codex stop-phrase message ends the session after the turn", async () => {
   } finally {
     server.restore();
   }
+});
+
+test("blocked Codex stop phrase tears down immediately instead of queuing stale work", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_blocked_stop_phrase";
+  const seeded = await seedDeliverableSession({
+    roomIdentifier,
+    sessionId: "codex_blocked_stop_phrase",
+    workerSessionId: "agent_session_blocked_stop_phrase",
+    stopPhrase: "/stop-codex-room",
+  });
+  const staleEvent = messageEvent(roomIdentifier, { id: "msg_stale", text: "retry this after recovery" });
+  saveCodexLiveSession({
+    ...seeded,
+    status: "blocked",
+    active_work: { kind: "message", event_id: staleEvent.message.id, started_at: seeded.updated_at, summary: "Blocked" },
+    pending_event: staleEvent,
+    queued_events: [staleEvent],
+    failure: {
+      code: "configuration_error",
+      message: "Needs attention",
+      retryable: false,
+      eventId: staleEvent.message.id,
+      occurredAt: seeded.updated_at,
+    },
+  });
+
+  dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+    id: "msg_blocked_stop_phrase",
+    text: "/stop-codex-room",
+  }));
+
+  const stopped = await waitFor(() => {
+    const current = getStoredCodexLiveSession(seeded.session_id);
+    return current?.status === "interrupted" ? current : null;
+  }, "blocked Codex session interrupted by stop phrase");
+
+  assert.equal(stopped.pending_event ?? null, null);
+  assert.deepEqual(stopped.queued_events ?? [], []);
+  assert.equal(stopped.failure ?? null, null);
+  assert.equal(stopped.active_work ?? null, null);
+  assert.ok(getStoredAgentSession(seeded.agent_session_id ?? null)?.ended_at,
+    "an exact stop must disconnect the blocked worker, not only queue its event");
 });
 
 test("codex stop-phrase message still ends the session when its turn is interrupted", async () => {
@@ -739,7 +789,7 @@ test("codex captures the change baseline after the previous turn goes idle, not 
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_baseline_1",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_baseline_1",
     }));
 
@@ -760,7 +810,7 @@ test("codex captures the change baseline after the previous turn goes idle, not 
     // turn (after the baseline) IS attributed to that event's reply.
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_baseline_2",
-      text: "please check this again",
+      text: "@RiverField please check this again",
       threadRootId: "msg_baseline_2",
     }));
     const secondReply = await waitFor(async () => {
@@ -801,12 +851,12 @@ test("codex publishes to the storage destination captured at enqueue time, not a
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_flip_a",
-      text: "please check this",
+      text: "@RiverField please check this",
       threadRootId: "msg_flip_a",
     }));
     dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
       id: "msg_flip_b",
-      text: "please check this too",
+      text: "@RiverField please check this too",
       threadRootId: "msg_flip_b",
     }));
 

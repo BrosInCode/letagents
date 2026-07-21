@@ -1,8 +1,15 @@
 import type { DesktopRoomStreamEvent } from "../../ipc-types.js";
-import { shouldDeliverRoomStreamEventToSession } from "./codex-event-routing.js";
+import {
+  canDeliverCodexStopControlToManagedAgent,
+  isOwnRoomStreamEventForManagedAgentAmongWorkers,
+  isStopPhraseRoomStreamEvent,
+  resolveCodexRoomStreamEventRecipients,
+  shouldDeliverRoomStreamEventToSession,
+} from "./codex-event-routing.js";
 import {
   bindCodexLiveSessionToWorker,
   listDesktopManagedCodexLiveSessions,
+  toPublicManagedAgentSession,
   type DesktopCodexLiveSessionState,
 } from "./state.js";
 
@@ -15,7 +22,26 @@ export function isManagedRoomStreamEvent(event: DesktopRoomStreamEvent): event i
 export function listDeliverableCodexSessionsForRoomStreamEvent(
   event: ManagedRoomEvent,
 ): DesktopCodexLiveSessionState[] {
-  return listDesktopManagedCodexLiveSessions(event.roomIdentifier)
-    .map((session) => bindCodexLiveSessionToWorker(session))
-    .filter((session) => shouldDeliverRoomStreamEventToSession(session, event));
+  const sessions = listDesktopManagedCodexLiveSessions(event.roomIdentifier)
+    .map((session) => bindCodexLiveSessionToWorker(session));
+  const codexSessions = sessions.filter((session) => session.provider_id !== "open-model");
+  const publicCodexSessions = codexSessions.map(toPublicManagedAgentSession);
+  const resolvedCodexIds = new Set(resolveCodexRoomStreamEventRecipients(
+    publicCodexSessions,
+    event,
+  ).map((session) => session.id));
+
+  return sessions.filter((session) => {
+    if (session.provider_id === "open-model") {
+      return shouldDeliverRoomStreamEventToSession(session, event);
+    }
+    return resolvedCodexIds.has(session.session_id) ||
+      (isStopPhraseRoomStreamEvent(session, event) &&
+        canDeliverCodexStopControlToManagedAgent(toPublicManagedAgentSession(session)) &&
+        !isOwnRoomStreamEventForManagedAgentAmongWorkers(
+          toPublicManagedAgentSession(session),
+          publicCodexSessions,
+          event,
+        ));
+  });
 }

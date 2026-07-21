@@ -13,23 +13,15 @@
   >
     <article class="desktop-add-agent-managed-session" :data-state="state">
       <SupervisedLaunchProgress :progress="progress" @recover="controller.launch.handleRecover($event)" />
-      <div class="desktop-add-agent-managed-session-actions">
-        <button
-          v-if="hasConflict"
-          type="button"
-          class="desktop-add-agent-managed-session-danger"
-          data-testid="desktop-add-agent-stop-supervised-runtime"
-          :disabled="stopping"
-          @click="controller.launch.stop"
-        >{{ stopping ? "Stopping..." : progress.stopFailed ? "Retry stop" : progress.ready ? "Stop this supervised agent" : "Cancel launch" }}</button>
-        <button
-          v-else-if="progress.failed || progress.stopped"
-          type="button"
-          class="desktop-add-agent-managed-session-secondary"
-          data-testid="desktop-add-agent-dismiss-launch"
-          @click="controller.launch.dismiss"
-        >Dismiss</button>
-      </div>
+      <AddAgentSupervisedLaunchActions
+        :progress="progress"
+        :can-add-another-codex-agent="canAddAnotherCodexAgent"
+        :has-stop-action="hasStopAction"
+        :stopping="stopping"
+        @add-another="controller.launch.dismissReadyCodexLaunchForAnother"
+        @stop="controller.launch.stop"
+        @dismiss="controller.launch.dismiss"
+      />
     </article>
   </section>
   <AddAgentFeedback
@@ -48,14 +40,17 @@ import { computed } from "vue";
 import SupervisedLaunchProgress from "../SupervisedLaunchProgress.vue";
 import AddAgentFeedback from "./AddAgentFeedback.vue";
 import AddAgentRecoveryNotice from "./AddAgentRecoveryNotice.vue";
+import { AddAgentSupervisedLaunchActions } from "./AddAgentSupervisedLaunchActions";
 import type { AddAgentSupervisedUi } from "./useAddAgentController";
 
 const props = defineProps<{
   controller: AddAgentSupervisedUi;
 }>();
 const progress = computed(() => props.controller.launch.view.value);
-const hasConflict = computed(() => Boolean(props.controller.launch.conflict.value));
 const stopping = computed(() => Boolean(props.controller.launch.stoppingEntryId.value));
+const canAddAnotherCodexAgent = computed(() => props.controller.launch.canAddAnotherCodexAgent.value);
+const hasStopAction = computed(() => Boolean(props.controller.launch.conflict.value)
+  && !canAddAnotherCodexAgent.value);
 const recoveryCandidate = computed(() => props.controller.launch.recoveryCandidate.value);
 const recoverableProviderName = computed(() => props.controller.recoverableProviderName.value);
 const recoveryAnnouncement = computed(() => recoveryCandidate.value && recoverableProviderName.value

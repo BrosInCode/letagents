@@ -33,14 +33,18 @@
           :task-reference-ids="taskReferenceIds"
           :search-active="entry.message.id === activeSearchMessageId"
           :animate-arrival="arrivingMessageIds.has(entry.message.id)"
+          :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
+          :delivery-recovery-available="deliveryRecoveryAvailable"
+          :delivery-retry-keys="deliveryRetryKeys"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
-          @scroll-to-message="scrollToMessage"
+          @scroll-to-message="revealOrScrollToMessage"
           @open-image="$emit('open-image', $event)"
           @open-agent="$emit('open-agent', $event)"
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
         />
       </template>
 
@@ -173,6 +177,9 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
+  deliveryRecoveryAvailable?: boolean;
+  deliveryRetryKeys?: ReadonlySet<string>;
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubActivityAvailable: boolean;
@@ -188,6 +195,8 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "quote-reply": [messageId: string];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
+  "reveal-message": [messageId: string];
   "quote-selection": [messageId: string, text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
@@ -817,13 +826,19 @@ function openThreadActivityNotice(): void {
   emit("open-thread", notice.parentId);
 }
 
-function scrollToMessage(messageId: string | null): void {
-  if (!messageId || !messagesElement.value) return;
+function revealOrScrollToMessage(messageId: string | null): void {
+  if (!messageId) return;
+  if (!scrollToMessage(messageId)) emit("reveal-message", messageId);
+}
+
+function scrollToMessage(messageId: string | null): boolean {
+  if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
-  if (!target) return;
+  if (!target) return false;
   target.scrollIntoView({ behavior: "smooth", block: "center" });
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
+  return true;
 }
 
 function dismissThreadActivityNotice(): void {
