@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { Buffer } from "node:buffer";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -432,6 +432,33 @@ test("legacy provision cannot overwrite a concurrent managed registry save", asy
     await Promise.all([manual, managed]);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-manual", { storage: keychain }))?.token, "lashg_manual");
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-managed", { storage: keychain }))?.token, "lashg_managed");
+  });
+});
+
+test("legacy provision accepts a registry with identity metadata but no actual grants", async () => {
+  await withRegistry(async (path) => {
+    await writeFile(path, `${JSON.stringify({
+      version: 4, grants: {}, entryAgentKeys: { "entry-preserved": "owner/preserved" },
+    })}\n`, "utf8");
+    let posts = 0;
+    const apiFetch = (async <T>(_path: string, init?: { body?: string }) => {
+      posts += 1;
+      const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+      return {
+        grant_id: "grant_manual", host_id: body.host_id, installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: "lashg_manual",
+      } as T;
+    }) as never;
+    await provisionDesktopSupervisorGrant({
+      hostId: "desktop_host", installationId: "manual-install", allowedRoomIds: ["room-manual"],
+      allowedAgentKeys: ["owner/agent-manual"],
+    }, { storage: keychain, apiFetch });
+    assert.equal(posts, 1);
+    const registry = JSON.parse(await readFile(path, "utf8")) as { grants: Record<string, unknown>; entryAgentKeys: Record<string, string> };
+    assert.deepEqual(Object.keys(registry.grants), ["owner/agent-manual"]);
+    assert.equal(registry.entryAgentKeys["entry-preserved"], "owner/preserved");
   });
 });
 

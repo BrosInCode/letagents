@@ -84,6 +84,72 @@ test("app restart same daemon generation reinstalls idempotently without a hando
   assert.equal(h.events.some((event) => event.includes("provision")), false);
 });
 
+test("daemon generation notifications reconcile once per generation without recursive ensure", async () => {
+  let generation = 7;
+  let ensures = 0;
+  let lists = 0;
+  const daemon = {
+    async ensureRunning() { ensures += 1; return { generation }; },
+    async list() { lists += 1; return []; },
+  };
+  const c = new SupervisorGrantCoordinator(daemon as never);
+  c.scheduleReconciliation({ generation: 7 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  c.scheduleReconciliation({ generation: 7 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(lists, 1);
+  generation = 8;
+  c.scheduleReconciliation({ generation: 8 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(lists, 2);
+  assert.equal(ensures, 2, "reconciliation may ensure once but never recursively schedules the same generation");
+});
+
+test("persistent same-generation reconciliation failure does not retry-storm", async () => {
+  let attempts = 0;
+  const daemon = {
+    async ensureRunning() { return { generation: 7 }; },
+    async list() { attempts += 1; throw new Error("owner auth unavailable"); },
+  };
+  const c = new SupervisorGrantCoordinator(daemon as never);
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    c.scheduleReconciliation({ generation: 7 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(attempts, 1);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("a generation change during reconciliation schedules exactly one follow-up", async () => {
+  let generation = 7;
+  let lists = 0;
+  let releaseFirst!: () => void;
+  let signalFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+  const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const daemon = {
+    async ensureRunning() { return { generation }; },
+    async list() {
+      lists += 1;
+      if (lists === 1) { signalFirst(); await firstReleased; }
+      return [];
+    },
+  };
+  const c = new SupervisorGrantCoordinator(daemon as never);
+  c.scheduleReconciliation({ generation: 7 });
+  await firstStarted;
+  generation = 8;
+  c.scheduleReconciliation({ generation: 8 });
+  releaseFirst();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(lists, 2);
+});
+
 test("daemon successor rotates then persists the replacement before exact-generation install", async () => {
   const h = harness();
   const key = "owner/supervised_launch_1234567";
@@ -117,11 +183,11 @@ test("stale or revoked handoff safely owner-reprovisions, and two entries stay i
 
 test("canonical room reuse avoids alias-triggered reprovision while independent agents share a room", async () => {
   const h = harness();
-  const scopes: string[][] = [];
+  const scopes: Array<Array<{ requestedRoomId: string; canonicalRoomId: string }>> = [];
   const operations: SupervisorGrantCoordinatorOperations = {
     ...h.operations,
     provision: async (input) => {
-      scopes.push(input.allowedRoomIds);
+      scopes.push(input.roomScopes);
       return h.operations.provision(input);
     },
   };
@@ -129,7 +195,7 @@ test("canonical room reuse avoids alias-triggered reprovision while independent 
   await c.createPausedAndInstall({
     creationRequestId: "launch_alias_1234567", roomIdentifier: "github.com/Owner/Repo", displayName: "First", providerId: "codex", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
   });
-  assert.deepEqual(scopes, [["room_canonical"]]);
+  assert.deepEqual(scopes, [[{ requestedRoomId: "github.com/Owner/Repo", canonicalRoomId: "room_canonical" }]]);
   // A separate durable entry maps to a separate canonical key/grant even in
   // the same canonical room; no display-name comparison participates.
   const second = entry("supervised_second_1234567");

@@ -14,7 +14,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
+import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -911,7 +911,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(spawns, 0, "daemon_inbox Codex cannot spawn without the desktop grant");
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
-    const install = { entry_id: "host_grant_bind_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-1", supervisor_grant: "host-grant-secret", grant_generation: 7, api_url: "http://127.0.0.1:3000", daemon_generation: generation };
+    const install = { entry_id: "host_grant_bind_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-1", supervisor_grant: "host-grant-secret", grant_generation: 7, api_url: "http://127.0.0.1:3000", host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation };
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", install)).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "coordination_blocked", "post-spawn binding failure");
     assert.equal(spawns, 1);
@@ -977,6 +977,7 @@ test("handoff during delayed host-grant mint creates no generation and the succe
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: "delayed_host_grant_handoff", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-delayed",
       supervisor_grant: "first-grant", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: firstGeneration,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
     })).ok, true);
     await mintStarted;
     const beforeHandoff = (await daemonRequest(paths.socketPath, "attempt.read", { id: "delayed_host_grant_handoff" })).result as { execution_generations: unknown[] };
@@ -996,6 +997,7 @@ test("handoff during delayed host-grant mint creates no generation and the succe
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: "delayed_host_grant_handoff", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-delayed",
       supervisor_grant: "second-grant", grant_generation: 2, api_url: "https://letagents.example", daemon_generation: secondGeneration,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
     })).ok, true);
     await eventually(async () => {
       const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
@@ -1012,6 +1014,316 @@ test("handoff during delayed host-grant mint creates no generation and the succe
     assert.equal(spawns, 1, "late retired mint completion cannot create a generation or provider");
   } finally {
     releaseMint?.();
+    await second?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("pause fences a launch waiting on host-grant mint before any generation or provider exists", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "pause_during_host_grant_mint");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "pause_during_host_grant_mint", leaseId: "pause_during_host_grant_mint", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  let mintEntered!: () => void;
+  const mintStarted = new Promise<void>((resolve) => { mintEntered = resolve; });
+  let releaseMint!: () => void;
+  const mintGate = new Promise<void>((resolve) => { releaseMint = resolve; });
+  let spawns = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawns += 1; throw new Error("paused launch must not dispatch"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("paused launch must not resume"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintEntered();
+      await mintGate;
+      return { sessionId: "paused-session", bearer: "paused-bearer", bearerId: "paused-bearer-id", expiresAt: null };
+    },
+  });
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "pause_during_host_grant_mint", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "pause_during_host_grant_mint", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-pause",
+      supervisor_grant: "pause-grant", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    await mintStarted;
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "pause_during_host_grant_mint", desired_state: "paused",
+    })).ok, true);
+    releaseMint();
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "paused", "paused delayed grant launch");
+    const result = (await daemonRequest(paths.socketPath, "attempt.read", { id: "pause_during_host_grant_mint" })).result as { execution_generations: unknown[] };
+    assert.equal(result.execution_generations.length, 0);
+    assert.equal(spawns, 0);
+  } finally {
+    releaseMint?.();
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("stop fences a launch waiting on provider capabilities before generation creation", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "stop_during_capabilities");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "stop_during_capabilities", leaseId: "stop_during_capabilities", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  let capabilitiesEntered!: () => void;
+  const capabilitiesStarted = new Promise<void>((resolve) => { capabilitiesEntered = resolve; });
+  let releaseCapabilities!: () => void;
+  const capabilitiesGate = new Promise<void>((resolve) => { releaseCapabilities = resolve; });
+  let spawns = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => {
+      capabilitiesEntered();
+      await capabilitiesGate;
+      return { resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true };
+    },
+    spawn: async () => { spawns += 1; throw new Error("stopped launch must not dispatch"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("stopped launch must not resume"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "stop_during_capabilities", provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    await capabilitiesStarted;
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "stop_during_capabilities", desired_state: "stopped",
+    })).ok, true);
+    releaseCapabilities();
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "stopped", "stopped delayed capabilities launch");
+    const result = (await daemonRequest(paths.socketPath, "attempt.read", { id: "stop_during_capabilities" })).result as { execution_generations: unknown[] };
+    assert.equal(result.execution_generations.length, 0);
+    assert.equal(spawns, 0);
+  } finally {
+    releaseCapabilities?.();
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("stop during grant mint and pause during capabilities both fence before provider dispatch", async () => {
+  const runCase = async (boundary: "mint" | "capabilities", desiredState: "paused" | "stopped") => {
+    const env = await fixture();
+    const id = `${desiredState}_during_${boundary}`;
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    };
+    const workspace = await provisionedWorkspace(env.root, id);
+    const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+    const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+    await durability.close();
+    let boundaryEntered!: () => void;
+    const boundaryStarted = new Promise<void>((resolve) => { boundaryEntered = resolve; });
+    let releaseBoundary!: () => void;
+    const boundaryGate = new Promise<void>((resolve) => { releaseBoundary = resolve; });
+    let spawns = 0;
+    const port: ProviderActionPort = {
+      capabilities: async () => {
+        if (boundary === "capabilities") { boundaryEntered(); await boundaryGate; }
+        return { resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true };
+      },
+      spawn: async () => { spawns += 1; throw new Error("fenced delayed launch must not dispatch"); },
+      attach: async () => null, attachAction: async () => ({ state: "absent" }),
+      resume: async () => { throw new Error("fenced delayed launch must not resume"); }, poke: async () => {},
+      stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+      onExit: async () => () => {}, onStream: async () => () => {},
+    };
+    const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+      poll: async () => ({ messages: [] }), publish: async () => {},
+    }, {
+      createWorkerSession: async () => {
+        if (boundary === "mint") { boundaryEntered(); await boundaryGate; }
+        return { sessionId: `${id}-session`, bearer: `${id}-bearer`, bearerId: `${id}-bearer-id`, expiresAt: null };
+      },
+    });
+    try {
+      await daemon.start();
+      await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry, id, provider: boundary === "mint" ? "codex" : "claude-code",
+        delivery_mode: boundary === "mint" ? "daemon_inbox" : "mcp_polling", observed_state: "absent",
+        workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      } });
+      if (boundary === "mint") {
+        const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+        assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+          entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: `grant-${id}`,
+          supervisor_grant: `${id}-grant`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+          host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+        })).ok, true);
+      }
+      await boundaryStarted;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: desiredState })).ok, true);
+      releaseBoundary();
+      await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === desiredState, `${desiredState} ${boundary} fence`);
+      const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+      assert.equal(result.execution_generations.length, 0);
+      assert.equal(spawns, 0);
+    } finally {
+      releaseBoundary?.();
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  };
+  await runCase("mint", "stopped");
+  await runCase("capabilities", "paused");
+});
+
+test("pause arriving during provider dispatch persists and fences the exact returned handle", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "pause_during_dispatch");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "pause_during_dispatch", leaseId: "pause_during_dispatch", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  let spawnEntered!: () => void;
+  const spawnStarted = new Promise<void>((resolve) => { spawnEntered = resolve; });
+  let releaseSpawn!: () => void;
+  const spawnGate = new Promise<void>((resolve) => { releaseSpawn = resolve; });
+  const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: 44551, providerContinuationId: "pause-dispatch-continuation", observedState: "working" as const };
+  const stoppedHandles: typeof returnedHandle[] = [];
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawnEntered(); await spawnGate; return returnedHandle; },
+    attach: async () => { throw new Error("dispatch fencing must not infer the returned handle via attach"); },
+    attachAction: async () => { throw new Error("dispatch fencing must not inspect attachAction"); },
+    resume: async () => { throw new Error("fresh dispatch must not resume"); }, poke: async () => {},
+    stop: async (handle) => {
+      stoppedHandles.push(handle as typeof returnedHandle);
+      return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId };
+    },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "pause_during_dispatch", provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    await spawnStarted;
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: "pause_during_dispatch", desired_state: "paused",
+    })).ok, true);
+    releaseSpawn();
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "paused", "paused dispatch fence");
+    const manifest = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(manifest.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId, "the exact returned identity is durable before fencing");
+    assert.deepEqual(stoppedHandles, [returnedHandle]);
+    const result = (await daemonRequest(paths.socketPath, "attempt.read", { id: "pause_during_dispatch" })).result as { execution_generations: Array<{ terminal: { terminal_cause: string } | null }> };
+    assert.equal(result.execution_generations.length, 1);
+    assert.equal(result.execution_generations[0]?.terminal?.terminal_cause, "stopped");
+  } finally {
+    releaseSpawn?.();
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("handoff during provider dispatch persists the exact handle for successor attach without signaling it", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "handoff_during_dispatch");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "handoff_during_dispatch", leaseId: "handoff_during_dispatch", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  let spawnEntered!: () => void;
+  const spawnStarted = new Promise<void>((resolve) => { spawnEntered = resolve; });
+  let releaseSpawn!: () => void;
+  const spawnGate = new Promise<void>((resolve) => { releaseSpawn = resolve; });
+  const returnedHandle = { workAttemptId: attempt.work_attempt_id, pid: 55441, providerContinuationId: "handoff-dispatch-continuation", observedState: "working" as const };
+  let spawns = 0;
+  let attaches = 0;
+  let stops = 0;
+  let exitRegistrations = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawns += 1; spawnEntered(); await spawnGate; return returnedHandle; },
+    attach: async (ref) => {
+      attaches += 1;
+      assert.equal(ref.providerContinuationId, returnedHandle.providerContinuationId);
+      return returnedHandle;
+    },
+    attachAction: async () => { throw new Error("handoff successor uses the durable provider ref, not action inference"); },
+    resume: async () => { throw new Error("successor must attach instead of resume/spawn"); }, poke: async () => {},
+    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: returnedHandle.providerContinuationId }; },
+    onExit: async () => { exitRegistrations += 1; return () => {}; }, onStream: async () => () => {},
+  };
+  const first = new SupervisorDaemon(paths, "darwin", port, true);
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "handoff_during_dispatch", provider: "claude-code", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    await spawnStarted;
+    const handoff = first.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    let handoffFinished = false;
+    void handoff.then(() => { handoffFinished = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(handoffFinished, false, "handoff holds stores only after native dispatch has begun");
+    releaseSpawn();
+    await within(handoff, "dispatch persistence handoff", 1_000);
+    assert.equal(stops, 0, "handoff preserves the provider process");
+    assert.equal(exitRegistrations, 0, "the retiring daemon registers no callbacks on the returned handle");
+
+    second = new SupervisorDaemon(paths, "darwin", port, true);
+    await second.start();
+    await eventually(async () => attaches === 1, "successor exact provider attach");
+    const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
+    const live = (second as unknown as { liveHandles: Map<string, typeof returnedHandle> }).liveHandles.get("handoff_during_dispatch");
+    assert.equal(live?.pid, returnedHandle.pid);
+    assert.equal(live?.providerContinuationId, returnedHandle.providerContinuationId);
+    const result = (await daemonRequest(paths.socketPath, "attempt.read", { id: "handoff_during_dispatch" })).result as { execution_generations: Array<{ execution_generation_id: string; terminal: unknown }> };
+    assert.equal(result.execution_generations.length, 1);
+    assert.equal(result.execution_generations[0]?.execution_generation_id, current.provider_ref?.execution_generation_id);
+    assert.equal(result.execution_generations[0]?.terminal, null);
+    assert.equal(spawns, 1);
+    assert.equal(stops, 0);
+  } finally {
+    releaseSpawn?.();
     await second?.stop().catch(() => undefined);
     await env.cleanup();
   }
@@ -1061,6 +1373,7 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: "host_grant_expiry_rotation", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-rotation",
       supervisor_grant: "rotation-grant", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
     })).ok, true);
     let firstBinding: Awaited<ReturnType<WorkerBindingStore["get"]>> = null;
     await eventually(async () => {
@@ -1085,6 +1398,172 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
+});
+
+test("host grant renewal retries transient failures, rotates the bearer in place, and rejects stale Electron rollback", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "host_grant_renewal_retry");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "host_grant_renewal_retry", leaseId: "host_grant_renewal_retry", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  let clock = Date.parse("2026-07-21T12:00:00.000Z");
+  let spawns = 0;
+  let stops = 0;
+  let renewalCalls = 0;
+  let mintCalls = 0;
+  const handle = { workAttemptId: attempt.work_attempt_id, pid: 9915, providerContinuationId: "renewing-host-grant-continuation", observedState: "working" as const };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("grant renewal must retain the exact provider"); }, poke: async () => {},
+    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    renewHostGrant: async (input) => {
+      renewalCalls += 1;
+      if (renewalCalls === 1) throw new Error("temporary renewal transport failure");
+      return {
+        grantId: input.grantId, supervisorGrant: "renewed-parent-secret",
+        grantGeneration: input.grantGeneration, expiresAt: new Date(clock + 24 * 60 * 60_000).toISOString(),
+      };
+    },
+    createWorkerSession: async () => {
+      mintCalls += 1;
+      if (mintCalls === 2) throw new Error("temporary child-session transport failure");
+      return mintCalls === 1
+        ? { sessionId: "renewal-session", bearer: "pre-renewal-bearer", bearerId: "pre-renewal-bearer-id", expiresAt: new Date(clock + 30_000).toISOString() }
+        : { sessionId: "renewal-session", bearer: "renewed-worker-bearer", bearerId: "renewed-worker-bearer-id", expiresAt: new Date(clock + 3_600_000).toISOString() };
+    },
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      workerBindings: WorkerBindingStore;
+      hostGrants: Map<string, { supervisorGrant: string; expiresAt: string }>;
+      publishNativeActivity: () => Promise<boolean>;
+    };
+    internals.publishNativeActivity = async () => true;
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "host_grant_renewal_retry", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const staleInstall = {
+      entry_id: "host_grant_renewal_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-renewal",
+      supervisor_grant: "pre-renewal-parent-secret", grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(clock + 30 * 60_000).toISOString(),
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", staleInstall)).ok, true);
+    await eventually(async () => {
+      const binding = await internals.workerBindings.get("host_grant_renewal_retry");
+      return renewalCalls >= 2 && mintCalls >= 3 && binding?.credential_ref === "renewed-worker-bearer-id";
+    }, "parent renewal and transient child-session retry");
+    const beforeStale = internals.hostGrants.get("host_grant_renewal_retry")!;
+    assert.equal(beforeStale.supervisorGrant, "renewed-parent-secret");
+    const renewedExpiry = beforeStale.expiresAt;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", staleInstall)).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const afterStale = internals.hostGrants.get("host_grant_renewal_retry")!;
+    assert.equal(afterStale.supervisorGrant, "renewed-parent-secret");
+    assert.equal(afterStale.expiresAt, renewedExpiry);
+    const binding = await internals.workerBindings.get("host_grant_renewal_retry");
+    assert(binding);
+    assert.equal(await internals.workerBindings.credentialFor(binding), "renewed-worker-bearer");
+    const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.notEqual(current.condition, "auth_blocked", "transient renewal failures preserve still-valid authority");
+    const result = (await daemonRequest(paths.socketPath, "attempt.read", { id: "host_grant_renewal_retry" })).result as { execution_generations: Array<{ terminal: unknown }> };
+    assert.equal(result.execution_generations.length, 1);
+    assert.equal(result.execution_generations[0]?.terminal, null);
+    assert.equal(spawns, 1);
+    assert.equal(stops, 0);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("expired and definitively rejected host grants become auth-blocked without stopping the provider", async () => {
+  const runCase = async (rejection: "expired" | 401 | 403 | 409) => {
+    const env = await fixture();
+    const id = `host_grant_block_${rejection}`;
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    };
+    const workspace = await provisionedWorkspace(env.root, id);
+    const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+    const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+    await durability.close();
+    let clock = Date.parse("2026-07-21T12:00:00.000Z");
+    let stops = 0;
+    let renewals = 0;
+    const handle = { workAttemptId: attempt.work_attempt_id, pid: 9970 + (typeof rejection === "number" ? rejection : 0), providerContinuationId: `${id}-continuation`, observedState: "working" as const };
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+      spawn: async () => handle, attach: async () => null, attachAction: async () => ({ state: "absent" }),
+      resume: async () => { throw new Error("authority failure must retain the provider"); }, poke: async () => {},
+      stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
+      onExit: async () => () => {}, onStream: async () => () => {},
+    };
+    const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
+      poll: async () => ({ messages: [] }), publish: async () => {},
+    }, {
+      renewHostGrant: async () => {
+        renewals += 1;
+        if (typeof rejection === "number") throw new SupervisorGrantRequestError(rejection, "injected renewal");
+        throw new Error("expired grant must not be renewed");
+      },
+      createWorkerSession: async () => ({
+        sessionId: `${id}-session`, bearer: `${id}-bearer`, bearerId: `${id}-bearer-id`,
+        expiresAt: new Date(clock + 24 * 60 * 60_000).toISOString(),
+      }),
+    });
+    try {
+      await daemon.start();
+      const internals = daemon as unknown as {
+        liveHandles: Map<string, typeof handle>;
+        hostGrants: Map<string, unknown>;
+        publishNativeActivity: () => Promise<boolean>;
+      };
+      internals.publishNativeActivity = async () => true;
+      await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+        workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      } });
+      const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: `grant-${id}`,
+        supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+        host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(clock + 2 * 60 * 60_000).toISOString(),
+      })).ok, true);
+      await eventually(async () => internals.liveHandles.get(id) === handle, `${id} initial provider`);
+      clock += rejection === "expired" ? 2 * 60 * 60_000 + 1 : 61 * 60_000;
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
+        return current?.condition === "auth_blocked" && current.observed_state === "recovering";
+      }, `${id} auth block`);
+      assert.equal(internals.liveHandles.get(id), handle, "authority loss preserves the exact provider handle");
+      assert.equal(internals.hostGrants.has(id), false, "rejected plaintext parent authority is removed from memory");
+      assert.equal(stops, 0);
+      assert.equal(rejection === "expired" ? renewals === 0 : renewals >= 1, true);
+    } finally {
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  };
+  await runCase("expired");
+  await runCase(401);
+  await runCase(403);
+  await runCase(409);
 });
 
 test("an unattached live durable generation blocks a duplicate provider start", async () => {
@@ -2390,6 +2869,7 @@ test("a host-grant install queued before handoff cannot retain plaintext or repo
     const queuedInstall = daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: "queued_host_grant", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-queued",
       supervisor_grant: "queued-plaintext-grant", grant_generation: 3, api_url: "https://letagents.example",
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
       daemon_generation: generation,
     });
     await admitted;
