@@ -3079,7 +3079,9 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
   }
 });
 
-test("the daemon entrypoint exits after a completed handoff instead of retaining ref-counted handles", async () => {
+test("the daemon entrypoint exits after a completed handoff instead of retaining ref-counted handles", {
+  skip: process.platform !== "darwin" ? "the production daemon entrypoint is macOS-only" : false,
+}, async () => {
   const env = await fixture();
   const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "daemon/main.ts")], {
     cwd: process.cwd(),
@@ -3088,24 +3090,25 @@ test("the daemon entrypoint exits after a completed handoff instead of retaining
   });
   try {
     const socketPath = join(env.root, ".letagents", "daemon.sock");
-    await within((async () => {
-      while (true) {
-        try {
-          const status = await daemonRequest(socketPath, "daemon.status");
-          if (status.ok) return;
-        } catch {
-          // The entrypoint is still acquiring its singleton and SQLite state.
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10));
+    await eventually(async () => {
+      try {
+        return (await daemonRequest(socketPath, "daemon.status")).ok;
+      } catch {
+        // The entrypoint is still acquiring its singleton and SQLite state.
+        return false;
       }
-    })(), "daemon entrypoint startup", 2_000);
+    }, "daemon entrypoint startup", 2_000);
     assert.equal((await daemonRequest(socketPath, "daemon.prepare_handoff")).ok, true);
     const exited = await within(new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       child.once("exit", (code, signal) => resolve({ code, signal }));
     }), "daemon entrypoint exit after handoff", 2_000);
     assert.deepEqual(exited, { code: 0, signal: null });
   } finally {
-    child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGKILL");
+      await within(exited, "daemon entrypoint cleanup", 1_000).catch(() => undefined);
+    }
     await env.cleanup();
   }
 });
