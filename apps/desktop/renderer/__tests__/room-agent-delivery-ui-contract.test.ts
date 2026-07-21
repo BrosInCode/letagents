@@ -35,7 +35,8 @@ describe("durable room delivery UI contracts", () => {
 
   it("deduplicates only matching projected legacy roster rows and retains mixed rollout rows", async () => {
     const activity = await source("src/components/desktop/content/RoomActivityTabView.vue");
-    assert.match(activity, /entry\.roomId === props\.roomIdentifier && entry\.roomAgentState/);
+    assert.match(activity, /entry\.roomId === props\.roomIdentifier\s+&& entry\.roomAgentState/);
+    assert.match(activity, /entry\.desiredState === "stopped" && entry\.observedState === "stopped"/);
     assert.match(activity, /!liveRosterAgents\.length && !truthfulAgents\.length/);
     assert.match(activity, /projectedSessionIds/);
     assert.match(activity, /legacyReachableAgents/);

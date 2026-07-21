@@ -535,7 +535,11 @@ const selectedLiveBranchMismatchLabel = computed(() =>
     : null
 );
 const selectedTruthfulId = ref<string | null>(null);
-const truthfulAgents = computed(() => props.supervisorEntries.filter((entry) => entry.roomId === props.roomIdentifier && entry.roomAgentState));
+const truthfulAgents = computed(() => props.supervisorEntries.filter((entry) =>
+  entry.roomId === props.roomIdentifier
+  && entry.roomAgentState
+  && !(entry.desiredState === "stopped" && entry.observedState === "stopped")
+));
 const projectedSessionIds = computed(() => new Set(
   truthfulAgents.value
     .map((entry) => entry.agentSessionId)
