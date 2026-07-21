@@ -21,7 +21,10 @@ import {
 } from "../../../http/helpers.js";
 import { disconnectRoomAgentDeliverySession } from "../../../rooms/agent-delivery.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
-import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
+import {
+  requireWorkerRequestAgentIdentity,
+  type ResolvedRequestAgentIdentity,
+} from "../../../request/agent-identity.js";
 import { buildAgentActorLabel, parseAgentActorLabel } from "../../../../shared/agent-identity.js";
 import { pickLocalCodename } from "../../../../shared/codenames.js";
 import {
@@ -577,24 +580,52 @@ export function registerAgentSessionRoutes(
       method?: unknown;
       status?: unknown;
     };
-    const suppliedSessionId = typeof body.agent_session_id === "string" ? body.agent_session_id.trim() : "";
-    const suppliedSessionToken = typeof body.agent_session_token === "string" ? body.agent_session_token.trim() : "";
-    const exactSession = suppliedSessionId && suppliedSessionToken
-      ? await getRoomAgentSessionByCredentials({
-        session_id: suppliedSessionId,
-        session_token: suppliedSessionToken,
-        room_id: project.id,
-      })
-      : null;
-    if (!exactSession) {
+    let identity: ResolvedRequestAgentIdentity | null = null;
+    if (req.authKind === "agent_session") {
+      // Scoped worker bearers authenticate in the HTTP middleware. Do not
+      // reinterpret that bearer as the legacy owner-capable session token.
+      const worker = await requireWorkerRequestAgentIdentity({ req, body: {}, room_id: project.id });
+      if (!worker.ok) {
+        res.status(worker.status).json({ error: worker.error });
+        return;
+      }
+      identity = worker.identity;
+    } else {
+      // Compatibility for existing native bridges that still send the legacy
+      // session credential in the body without an Authorization header.
+      const suppliedSessionId = typeof body.agent_session_id === "string" ? body.agent_session_id.trim() : "";
+      const suppliedSessionToken = typeof body.agent_session_token === "string" ? body.agent_session_token.trim() : "";
+      const exactSession = suppliedSessionId && suppliedSessionToken
+        ? await getRoomAgentSessionByCredentials({
+          session_id: suppliedSessionId,
+          session_token: suppliedSessionToken,
+          room_id: project.id,
+        })
+        : null;
+      if (exactSession) {
+        identity = {
+          actor_label: exactSession.actor_label,
+          agent_key: exactSession.agent_key,
+          agent_instance_id: exactSession.agent_instance_id,
+          agent_session_id: exactSession.session_id,
+          session_kind: exactSession.session_kind,
+          runtime: exactSession.runtime,
+          display_name: exactSession.display_name,
+          owner_label: exactSession.owner_label,
+          ide_label: exactSession.ide_label,
+          repo_branch: exactSession.repo_branch ?? null,
+        };
+      }
+    }
+    if (!identity) {
       res.status(401).json({ error: "Invalid or ended native worker session credentials." });
       return;
     }
-    if (exactSession.session_kind !== "worker") {
+    if (identity.session_kind !== "worker") {
       res.status(403).json({ error: "Native activity requires a worker session." });
       return;
     }
-    if (exactSession.session_id !== targetSessionId) {
+    if (identity.agent_session_id !== targetSessionId) {
       res.status(403).json({ error: "Worker sessions can only report native activity for themselves." });
       return;
     }
@@ -618,14 +649,14 @@ export function registerAgentSessionRoutes(
       const result = await recordNativeHarnessActivity({
         room_id: project.id,
         agent_session_id: targetSessionId,
-        actor_label: exactSession.actor_label,
-        agent_key: exactSession.agent_key,
+        actor_label: identity.actor_label,
+        agent_key: identity.agent_key,
         session_kind: "worker",
-        runtime: exactSession.runtime,
-        display_name: exactSession.display_name,
-        owner_label: exactSession.owner_label,
-        ide_label: exactSession.ide_label,
-        repo_branch: exactSession.repo_branch ?? null,
+        runtime: identity.runtime,
+        display_name: identity.display_name,
+        owner_label: identity.owner_label,
+        ide_label: identity.ide_label,
+        repo_branch: identity.repo_branch,
         provider_observed_at: observedAt,
         sequence,
         method,

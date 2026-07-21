@@ -253,6 +253,45 @@ test("bearer artifact publishing requires exactly one caller-held work lease", {
   assert.equal((await invoke({ ...base, task_id: first.id })).statusCode, 200);
 });
 
+test("native activity accepts the scoped worker bearer without a legacy session token", { skip: requiresDatabase }, async () => {
+  const { room, session } = await seed();
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  assert.equal(auth.authKind, "agent_session");
+  const handlers = new Map<string, (...args: any[]) => Promise<void>>();
+  registerRoomPresenceRoutes({
+    get() {},
+    post(path: RegExp, handler: any) { handlers.set(path.source, handler); },
+  } as never, {
+    resolveCanonicalRoomRequestId: async () => room.id,
+    resolveRoomOrReply: async () => room,
+    requireParticipant: async () => { throw new Error("scoped native activity must not require owner participation"); },
+    requireAdmin: async () => true,
+    rememberAgentRoomParticipant: async () => {},
+    maybeEmitStaleWorkPrompt: async () => {},
+    emitProjectMessage: async () => { throw new Error("native activity must not emit room chat"); },
+  } as never);
+  const handler = [...handlers.entries()].find(([route]) => route.includes("native-activity"))?.[1];
+  assert.ok(handler);
+  const invoke = async (targetSessionId: string) => {
+    const res = responseRecorder();
+    await handler!({
+      params: { 0: room.id, 1: targetSessionId },
+      body: {
+        observed_at: new Date().toISOString(),
+        sequence: 1,
+        method: "native_harness.bound",
+        status: "idle",
+      },
+      ...auth,
+    }, res);
+    return res;
+  };
+  const accepted = await invoke(session.session_id);
+  assert.equal(accepted.statusCode, 200);
+  assert.equal((accepted.body as { presence: { status: string } }).presence.status, "idle");
+  assert.equal((await invoke("agent_session_other")).statusCode, 403, "a bearer remains scoped to its own session");
+});
+
 test("native harness session-token self-auth survives flag-off/expired bearers and CAS-heartbeats the exact worker lease", { skip: requiresDatabase }, async () => {
   const { room, session } = await seed();
   const task = await createTask!(room.id, "native activity", session.actor_label);

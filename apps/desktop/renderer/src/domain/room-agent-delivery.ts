@@ -7,6 +7,28 @@ import type {
 
 export type RoomAgentDeliveryGroup = "listening" | "responding" | "attention" | "disconnected";
 
+type RoomAgentActivityEntry = Pick<
+  DesktopSupervisorManifestEntry,
+  "agentSessionId" | "desiredState" | "observedState" | "roomAgentState" | "roomId"
+>;
+
+/**
+ * A stopped supervisor record is history, but its session identity must still
+ * suppress any stale server-presence echo from the Live roster.
+ */
+export function roomAgentActivityProjection<T extends RoomAgentActivityEntry>(
+  entries: readonly T[],
+  roomId: string | null,
+): { liveAgents: T[]; projectedSessionIds: Set<string> } {
+  const scoped = entries.filter((entry) => entry.roomId === roomId && entry.roomAgentState);
+  return {
+    liveAgents: scoped.filter((entry) => !(entry.desiredState === "stopped" && entry.observedState === "stopped")),
+    projectedSessionIds: new Set(
+      scoped.map((entry) => entry.agentSessionId).filter((value): value is string => Boolean(value)),
+    ),
+  };
+}
+
 /**
  * Connection, delivery, and turn state are intentionally independent. This
  * classifier picks the one Activity grouping that best explains the agent's

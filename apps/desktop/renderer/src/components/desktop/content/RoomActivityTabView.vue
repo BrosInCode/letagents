@@ -15,8 +15,8 @@
       </button>
     </div>
 
-    <div v-if="activeView === 'live'" class="desktop-activity-layout" :data-empty="!liveRosterAgents.length && !truthfulAgents.length">
-      <article v-if="!liveRosterAgents.length && !truthfulAgents.length" class="desktop-activity-live-empty">
+    <div v-if="activeView === 'live'" class="desktop-activity-layout" :data-empty="!hasLiveActivity">
+      <article v-if="!hasLiveActivity" class="desktop-activity-live-empty">
         <span>Live activity</span>
         <h3>No agents are live right now</h3>
         <p>Agents you can message will appear here when they are online or working in this room.</p>
@@ -423,7 +423,7 @@ import type {
 import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
-import { roomAgentDeliveryGroup, roomAgentDeliverySummary } from "../../../domain/room-agent-delivery";
+import { roomAgentActivityProjection, roomAgentDeliveryGroup, roomAgentDeliverySummary } from "../../../domain/room-agent-delivery";
 import {
   findLinkedPullRequest,
   retainExpandableChangeArtifacts,
@@ -535,17 +535,17 @@ const selectedLiveBranchMismatchLabel = computed(() =>
     : null
 );
 const selectedTruthfulId = ref<string | null>(null);
-const truthfulAgents = computed(() => props.supervisorEntries.filter((entry) => entry.roomId === props.roomIdentifier && entry.roomAgentState));
-const projectedSessionIds = computed(() => new Set(
-  truthfulAgents.value
-    .map((entry) => entry.agentSessionId)
-    .filter((value): value is string => Boolean(value)),
-));
+const truthfulProjection = computed(() => roomAgentActivityProjection(props.supervisorEntries, props.roomIdentifier));
+const truthfulAgents = computed(() => truthfulProjection.value.liveAgents);
+const projectedSessionIds = computed(() => truthfulProjection.value.projectedSessionIds);
 const isProjectedLegacyAgent = (agent: ActivityParticipant) => Boolean(
   agent.agentSessionId && projectedSessionIds.value.has(agent.agentSessionId),
 );
 const legacyReachableAgents = computed(() => reachableAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
 const legacyWorkingAgents = computed(() => workingAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
+const hasLiveActivity = computed(() => Boolean(
+  truthfulAgents.value.length || legacyReachableAgents.value.length || legacyWorkingAgents.value.length,
+));
 const truthfulGroups = computed(() => {
   const groups = [
     { key: "listening", label: "Listening", description: "Connected and ready for a room message.", agents: [] as DesktopSupervisorManifestEntry[] },
