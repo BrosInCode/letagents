@@ -314,6 +314,58 @@ test("bounded supervised turns disable owner onboarding before any local owner a
   globalThis.fetch = originalFetch;
 });
 
+test("supervised registration and message sends use the exact context room before local storage", async () => {
+  const originalCwd = process.cwd();
+  const originalFetch = globalThis.fetch;
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const originalChatStorage = process.env.LETAGENTS_CHAT_STORAGE;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-supervised-register-"));
+  try {
+    writeFileSync(join(tempDir, ".letagents-supervisor-context.json"), JSON.stringify({
+      version: 1, provider: "codex", entry_id: "entry_exact", room_id: "room_exact",
+      work_attempt_id: "attempt_exact", execution_generation_id: "generation_exact",
+      agent_session_id: "session_exact", agent_display_name: "Exact worker",
+    }));
+    writeFileSync(join(tempDir, ".letagents-work-attempt.json"), JSON.stringify({
+      version: 1, work_attempt_id: "attempt_exact",
+    }));
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "ambient_local_room" }));
+    process.chdir(tempDir);
+    process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+    process.env.LETAGENTS_CHAT_STORAGE = "local";
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      const register = toolHandler(registerAgentSessionTools, "register_agent_session");
+      const registration = JSON.parse((await register({})).content[0]!.text);
+      assert.equal(registration.success, true);
+      assert.equal(registration.agent_session_id, "session_exact");
+      assert.equal(registration.agent_session.room_id, "room_exact");
+      await assert.rejects(() => register({ room_id: "ambient_local_room" }), /registered for room_exact/);
+
+      const requests: string[] = [];
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "daemon-only" }));
+      globalThis.fetch = async (url, init) => {
+        requests.push(String(url));
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer daemon-only");
+        if (String(url).endsWith("/presence")) return new Response(null, { status: 204 });
+        return new Response(JSON.stringify({ id: "msg_exact", text: "sent" }), { status: 200 });
+      };
+      const send = toolHandler(registerSendMessageTool, "send_message");
+      await send({ room_id: "room_exact", text: "cloud only", agent_session_id: "session_exact" });
+      assert.ok(requests.some((url) => url.endsWith("/rooms/room_exact/messages")), "local storage cannot bypass the exact cloud route");
+      setSupervisedCredentialBorrowerForTest(null);
+    });
+  } finally {
+    setSupervisedCredentialBorrowerForTest(null);
+    globalThis.fetch = originalFetch;
+    process.chdir(originalCwd);
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    if (originalChatStorage === undefined) delete process.env.LETAGENTS_CHAT_STORAGE;
+    else process.env.LETAGENTS_CHAT_STORAGE = originalChatStorage;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("bounded supervised auto-join never replaces the current room from ambient repository context", async () => {
   const originalCwd = process.cwd();
   const originalStatePath = process.env.LETAGENTS_STATE_PATH;

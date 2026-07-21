@@ -616,6 +616,7 @@ export class SupervisorDaemon {
           entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
           work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
           agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
+          api_url: String(params.api_url ?? ""),
         });
       }
       if (request.method === "supervisor.checkpoint_worker_cursor") {
@@ -2814,7 +2815,7 @@ export class SupervisorDaemon {
     });
   }
 
-  private async borrowWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number }): Promise<{ status: "available"; credential: string } | { status: "deferred" | "stale" }> {
+  private async borrowWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number; api_url: string }): Promise<{ status: "available"; credential: string } | { status: "deferred" | "stale" }> {
     return this.serializeEntryTick(input.entry_id, async () => {
       if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
       const credential = await this.workerBindings.credentialFor(input);
@@ -2823,7 +2824,7 @@ export class SupervisorDaemon {
   }
 
   /** All four durable identities fence a credential from a retired daemon/turn. */
-  private async isExactCredentialRoute(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number }): Promise<boolean> {
+  private async isExactCredentialRoute(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number; api_url?: string }): Promise<boolean> {
     if (!Number.isSafeInteger(input.daemon_generation) || input.daemon_generation !== this.singleton.currentGeneration) return false;
     const entry = await this.store.getEntry(input.entry_id);
     if (!entry || entry.room_id !== input.room_id || entry.work_attempt_id !== input.work_attempt_id
@@ -2832,8 +2833,13 @@ export class SupervisorDaemon {
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) return false;
     const binding = await this.workerBindings.get(input.entry_id);
+    let normalizedApiUrl: string | null = null;
+    if (input.api_url !== undefined) {
+      try { normalizedApiUrl = new URL(input.api_url).origin; } catch { return false; }
+    }
     return Boolean(binding && binding.room_id === input.room_id && binding.work_attempt_id === input.work_attempt_id
-      && binding.execution_generation_id === input.execution_generation_id && binding.agent_session_id === input.agent_session_id);
+      && binding.execution_generation_id === input.execution_generation_id && binding.agent_session_id === input.agent_session_id
+      && (normalizedApiUrl === null || binding.api_url === normalizedApiUrl));
   }
 
   private async checkpointWorkerCursor(input: { entry_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; room_cursor: string }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {

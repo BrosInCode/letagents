@@ -16,6 +16,7 @@ import {
   currentAgentIdentity,
   currentAgentIdentityKey,
 } from "./identity.js";
+import { isSupervisedBoundedTurn } from "./worker-bearer.js";
 
 let mcpServer: McpServer | null = null;
 let sseClient: SseClient | null = null;
@@ -152,6 +153,7 @@ export function toPublicRoomResponse(
 
 export function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
   currentRoom = state;
+  if (isSupervisedBoundedTurn()) return state;
   saveRoomSession({
     room_id: state.room_id,
     project_id: state.project_id ?? null,
@@ -180,6 +182,7 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
 }
 
 export function touchCurrentRoom(lastMessageId?: string): void {
+  if (isSupervisedBoundedTurn()) return;
   if (!currentRoom) {
     return;
   }

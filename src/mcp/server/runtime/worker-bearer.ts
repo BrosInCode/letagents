@@ -75,6 +75,10 @@ export function requireValidWorkerBearerRuntime(): WorkerBearerRuntime {
   return runtime;
 }
 
+export function isSupervisedBoundedTurn(): boolean {
+  return requireValidWorkerBearerRuntime().mode === "supervised";
+}
+
 export function workerModeDisabledToolResult(
   toolDescription = "This owner-auth onboarding tool",
 ): Record<string, unknown> | null {

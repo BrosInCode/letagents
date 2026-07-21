@@ -10,6 +10,7 @@ import {
 import { maybeHandleRepoRoomAuthRequired } from "./device-auth.js";
 import { getLastMessageId } from "./messages.js";
 import { currentRoom } from "./room-state.js";
+import { isSupervisedBoundedTurn } from "./worker-bearer.js";
 
 export async function roomScopedApiCall<T>(input: {
   room_id?: string | null;
@@ -43,7 +44,9 @@ export async function roomScopedApiCall<T>(input: {
     const apiRoomId = cloudRoomId || input.room_id;
     try {
       const result = await apiCall<T>(input.room_path(apiRoomId), options);
-      touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+      if (!isSupervisedBoundedTurn()) {
+        touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+      }
       return result;
     } catch (error) {
       await maybeHandleRepoRoomAuthRequired(error, apiRoomId);
@@ -59,7 +62,9 @@ export async function roomScopedApiCall<T>(input: {
 
   const result = await apiCall<T>(input.project_path(input.project_id), options);
   if (input.room_id) {
-    touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+    if (!isSupervisedBoundedTurn()) {
+      touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
+    }
   }
   return result;
 }
