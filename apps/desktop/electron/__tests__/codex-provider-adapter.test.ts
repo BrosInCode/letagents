@@ -53,6 +53,7 @@ class FakeRpc implements CodexAdapterRpc {
       workplaceProbeTimesOut: boolean;
       threadReadFails: boolean;
       threadReadTimesOut: boolean;
+      threadReadUnmaterialized: boolean;
     },
   ) {}
 
@@ -96,6 +97,14 @@ class FakeRpc implements CodexAdapterRpc {
         throw new Error("Codex app-server request timed out: thread/read");
       }
       if (this.options.threadReadFails) throw new Error("thread endpoint unavailable");
+      if (
+        this.options.threadReadUnmaterialized
+        && (params as { includeTurns?: boolean } | undefined)?.includeTurns !== false
+      ) {
+        throw new Error(
+          `thread ${this.threadId} is not materialized yet; includeTurns is unavailable before first user message`,
+        );
+      }
       const requestedThreadId = (params as { threadId?: string } | undefined)?.threadId;
       return {
         thread: {
@@ -144,6 +153,7 @@ function createHarness(options: {
   workplaceProbeTimesOut?: boolean;
   threadReadFails?: boolean;
   threadReadTimesOut?: boolean;
+  threadReadUnmaterialized?: boolean;
   identityUnavailableAtLaunch?: boolean;
   exitOnSignal?: boolean;
 } = {}) {
@@ -192,6 +202,7 @@ function createHarness(options: {
         workplaceProbeTimesOut: options.workplaceProbeTimesOut ?? false,
         threadReadFails: options.threadReadFails ?? false,
         threadReadTimesOut: options.threadReadTimesOut ?? false,
+        threadReadUnmaterialized: options.threadReadUnmaterialized ?? false,
       });
       clients.push(client);
       return client;
@@ -1077,6 +1088,30 @@ test("fresh attach fences an unverifiable live app-server instead of allowing a 
     providerConnection: first.providerConnection,
   }), /attach is ambiguous; refusing to launch a second writer/);
   assert.equal(harness.launches.length, 1);
+});
+
+test("fresh attach proves an empty unmaterialized daemon-inbox thread without launching a second writer", async () => {
+  const harness = createHarness({ threadReadUnmaterialized: true });
+  const request = spawnRequest({ deliveryMode: "daemon_inbox" });
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+
+  const attached = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  });
+
+  assertProviderHandle(attached);
+  assert.equal(attached.providerContinuationId, first.providerContinuationId);
+  assert.equal(harness.launches.length, 1, "the verified existing writer must be retained");
+  assert.deepEqual(
+    harness.clients[1]!.requests
+      .filter((entry) => entry.method === "thread/read")
+      .map((entry) => (entry.params as { includeTurns?: boolean }).includeTurns),
+    [true, false],
+    "metadata-only proof is used only after the exact empty-thread response",
+  );
+  assert.deepEqual(harness.signals, []);
 });
 
 test("fresh attach returns terminal evidence when the recorded app-server is verifiably gone", async () => {
