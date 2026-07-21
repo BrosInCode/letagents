@@ -84,6 +84,43 @@ test("app restart same daemon generation reinstalls idempotently without a hando
   assert.equal(h.events.some((event) => event.includes("provision")), false);
 });
 
+test("restart recovery repairs a lowercase mapping before provisioning and installing", async () => {
+  const h = harness();
+  const exactKey = "EmmyMay/desktop-codex-canonical";
+  let provisionedKey: string | null = null;
+  let installedKey: string | null = null;
+  const daemon = {
+    ...h.daemon,
+    async installHostGrant(input: { agentKey: string }) {
+      installedKey = input.agentKey;
+      return "installed" as const;
+    },
+  };
+  const operations: SupervisorGrantCoordinatorOperations = {
+    ...h.operations,
+    readEntryAgentKey: async () => "emmymay/desktop-codex-canonical",
+    readGrant: async () => null,
+    resolveIdentity: async () => exactKey,
+    provision: async (input) => {
+      provisionedKey = input.agentKey;
+      return {
+        metadata: metadata(input.agentKey), token: "secret_repaired", entryId: input.entryId,
+        lastInstalledDaemonGeneration: null,
+      };
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    operations,
+    async () => "room_1",
+  );
+  await coordinator.reconcileDesiredRunning();
+  assert.equal(provisionedKey, exactKey);
+  assert.equal(installedKey, exactKey);
+});
+
 test("daemon generation notifications reconcile once per generation without recursive ensure", async () => {
   let generation = 7;
   let ensures = 0;

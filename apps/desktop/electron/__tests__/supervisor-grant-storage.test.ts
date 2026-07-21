@@ -10,6 +10,7 @@ import {
   decryptSupervisorGrantFromStorage,
   desktopSupervisorGrantInstallationId,
   encryptSupervisorGrantForStorage,
+  getOrCreateDesktopCodexAgentIdentity,
   getOrProvisionDesktopSupervisorGrantForAgent,
   provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
@@ -70,7 +71,7 @@ test("supervisor grant storage fails closed without Keychain encryption", () => 
 });
 
 test("supervisor grant registry keys are stable agent identities rather than display names", () => {
-  assert.equal(canonicalSupervisorGrantAgentKey(" Agent_8F31 "), "agent_8f31");
+  assert.equal(canonicalSupervisorGrantAgentKey(" EmmyMay/Agent_8F31 "), "EmmyMay/Agent_8F31");
   assert.throws(() => canonicalSupervisorGrantAgentKey("  "), /identity is required/);
 });
 
@@ -84,7 +85,7 @@ test("encrypted registry retains disjoint grants for two desktop-managed agents"
       agentKey: "owner/agent-b", metadata: metadata("owner/agent-b", "b"), token: "lashg_secret_b",
       entryId: "entry-b", lastInstalledDaemonGeneration: 7,
     }, { storage: keychain });
-    const first = await readDesktopSupervisorGrantForAgent("OWNER/AGENT-A", { storage: keychain });
+    const first = await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain });
     const second = await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain });
     assert.equal(first?.token, "lashg_secret_a");
     assert.equal(first?.entryId, "entry-a");
@@ -95,6 +96,32 @@ test("encrypted registry retains disjoint grants for two desktop-managed agents"
     assert.doesNotMatch(file, /lashg_secret_a|lashg_secret_b/);
     assert.match(file, /entry-a/);
     assert.match(file, /entry-b/);
+  });
+});
+
+test("identity resolution preserves server casing and repairs a lowercased legacy mapping", async () => {
+  await withRegistry(async (path) => {
+    const entryId = "supervised_mixed_case_owner";
+    await writeFile(path, `${JSON.stringify({
+      version: 4,
+      grants: {},
+      entryAgentKeys: { [entryId]: "emmymay/desktop-codex-stale" },
+    })}\n`, "utf8");
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const resolved = await getOrCreateDesktopCodexAgentIdentity({
+      entryId,
+      displayName: "StoneRidge",
+    }, {
+      apiFetch: (async <T>(requestPath: string, init?: { body?: string }) => {
+        requests.push({ path: requestPath, body: JSON.parse(init?.body ?? "{}") as Record<string, unknown> });
+        return { canonical_key: "EmmyMay/desktop-codex-canonical" } as T;
+      }) as never,
+    });
+    assert.equal(resolved, "EmmyMay/desktop-codex-canonical");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.path, "/agents");
+    const registry = JSON.parse(await readFile(path, "utf8")) as { entryAgentKeys: Record<string, string> };
+    assert.equal(registry.entryAgentKeys[entryId], "EmmyMay/desktop-codex-canonical");
   });
 });
 

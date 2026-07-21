@@ -3,6 +3,8 @@ import type { IpcMain } from "electron";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 
+import { redactCredentialText } from "./agents/provider-evidence.js";
+
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -937,6 +939,8 @@ export function registerDesktopIpcHandlers(
           rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
         });
       } catch (error) {
+        const diagnostic = redactCredentialText(error instanceof Error ? error.message : String(error));
+        console.error(`[supervised-launch:${entryId}] ${diagnostic.value}`);
         const failure = classifyLaunchFailure(error);
         launchFact(failure.type, { entryId, detail: failure.detail, recovery: failure.recovery });
         throw error;

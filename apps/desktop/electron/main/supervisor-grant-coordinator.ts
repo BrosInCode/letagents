@@ -198,7 +198,15 @@ export class SupervisorGrantCoordinator {
       }
       const stored = await this.operations.readGrant(agentKey);
       if (!stored || stored.entryId !== entry.id) {
-        await this.provisionAndInstall(entry, agentKey, daemonGeneration, true);
+        // A pre-case-preservation registry can contain a truthy but invalid
+        // lowercase key. Re-resolve the deterministic server identity before
+        // provisioning whenever no usable encrypted grant proves this local
+        // mapping, so restart recovery converges on the exact canonical key.
+        const resolved = await this.operations.resolveIdentity(
+          { entryId: entry.id, displayName: entry.displayName },
+          { apiFetch: this.request },
+        );
+        await this.provisionAndInstall(entry, resolved, daemonGeneration, true);
         return;
       }
       if (!Number.isFinite(new Date(stored.metadata.expiresAt).getTime())
