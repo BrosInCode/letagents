@@ -161,6 +161,8 @@ async function startWireDaemon(
         result = entry;
       } else if (request.method === "supervisor.retry_room_delivery") {
         result = { accepted: true };
+      } else if (request.method === "supervisor.install_host_grant") {
+        result = { status: "installed" };
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -315,6 +317,53 @@ test("room delivery retry is capability-negotiated and carries the exact current
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.retry_room_delivery")?.params, {
       entry_id: "agent_1", room_id: "room_1", source_message_id: "msg_1", work_attempt_id: "attempt_1",
       execution_generation_id: "execution_1", agent_session_id: "session_1", daemon_generation: 37,
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("daemon client emits one nonrecursive ready event per observed generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 38);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const observed: number[] = [];
+    const unsubscribe = client.onGeneration((status) => observed.push(status.generation));
+    await client.ensureRunning();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await client.ensureRunning();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    unsubscribe();
+    assert.deepEqual(observed, [38]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("host grant install carries renewal ownership and expiry metadata to the exact daemon generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    assert.equal(await client.installHostGrant({
+      entryId: "entry-1", roomId: "room-1", agentKey: "owner/agent", grantId: "grant-1",
+      supervisorGrant: "secret-parent", grantGeneration: 4, daemonGeneration: 39,
+      hostId: "host-1", installationId: "installation-1", expiresAt: "2026-07-22T12:00:00.000Z",
+    }), "installed");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.install_host_grant")?.params, {
+      entry_id: "entry-1", room_id: "room-1", agent_key: "owner/agent", grant_id: "grant-1",
+      supervisor_grant: "secret-parent", grant_generation: 4,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2026-07-22T12:00:00.000Z",
+      api_url: "https://letagents.chat", daemon_generation: 39,
     });
   } finally {
     await closeServer(wire.server, env.socketPath);

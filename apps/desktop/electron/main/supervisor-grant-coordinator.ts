@@ -8,7 +8,7 @@ import {
   replaceDesktopSupervisorGrantForAgent,
   type DesktopSupervisorGrantMetadata,
 } from "./supervisor-grant.js";
-import { supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
+import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
 import { getJoinedRoomInfo } from "./rooms/room-info.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry } from "../ipc-types.js";
 
@@ -64,6 +64,10 @@ const defaultOperations: SupervisorGrantCoordinatorOperations = {
  */
 export class SupervisorGrantCoordinator {
   private readonly entryTails = new Map<string, Promise<void>>();
+  private reconciliation: Promise<void> | null = null;
+  private requestedDaemonGeneration: number | null = null;
+  private lastReconciledDaemonGeneration: number | null = null;
+  private generationEventSerial = 0;
 
   constructor(
     private readonly daemon: SupervisorDaemonClient = supervisorDaemonClient,
@@ -116,7 +120,8 @@ export class SupervisorGrantCoordinator {
       // Failure here occurs before the durable claim, hence cannot activate a
       // daemon-inbox worker without its scoped authority.
       const grant = await this.operations.provision({
-        hostId: this.hostId(), entryId, agentKey, allowedRoomIds: [roomId],
+        hostId: this.hostId(), entryId, agentKey,
+        roomScopes: [{ requestedRoomId: input.roomIdentifier, canonicalRoomId: roomId }],
       }, { apiFetch: this.request });
       const entry = await this.daemon.create({ ...input, roomIdentifier: roomId });
       // Re-read after the durable manifest write: a daemon successor may have
@@ -129,11 +134,49 @@ export class SupervisorGrantCoordinator {
 
   /** Reinstall the encrypted grant after app/daemon recovery without restarting a provider. */
   async reconcileDesiredRunning(): Promise<void> {
+    if (this.reconciliation) return this.reconciliation;
+    const startedEventSerial = this.generationEventSerial;
+    const operation = this.reconcileDesiredRunningOnce();
+    this.reconciliation = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.reconciliation === operation) this.reconciliation = null;
+      // Retry only when a genuinely different generation event arrived while
+      // this pass was active. A persistent same-generation auth/API failure
+      // stays blocked until an explicit recovery trigger instead of spinning
+      // an unbounded microtask/API loop.
+      if (this.generationEventSerial > startedEventSerial) {
+        queueMicrotask(() => this.startScheduledReconciliation());
+      }
+    }
+  }
+
+  scheduleReconciliation(status: { generation: number }): void {
+    if (this.requestedDaemonGeneration === status.generation) return;
+    this.requestedDaemonGeneration = status.generation;
+    this.generationEventSerial += 1;
+    this.startScheduledReconciliation();
+  }
+
+  private startScheduledReconciliation(): void {
+    if (this.reconciliation
+      || this.requestedDaemonGeneration === this.lastReconciledDaemonGeneration) return;
+    void this.reconcileDesiredRunning().catch((error) => {
+      // No bearer is interpolated into diagnostics. The daemon continues to
+      // report its paused/auth-blocked state until a later recovery succeeds.
+      console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  private async reconcileDesiredRunningOnce(): Promise<void> {
     const status = await this.daemon.ensureRunning();
+    this.requestedDaemonGeneration = status.generation;
     const entries = await this.daemon.list(null);
     await Promise.all(entries
       .filter((entry) => entry.provider === "codex" && entry.deliveryMode === "daemon_inbox" && entry.desiredState === "running")
       .map((entry) => this.reconcileEntry(entry, status.generation)));
+    this.lastReconciledDaemonGeneration = status.generation;
   }
 
   /** Install a paused entry before resume/restart activation. */
@@ -178,8 +221,10 @@ export class SupervisorGrantCoordinator {
   }
 
   private async provisionAndInstall(entry: DesktopSupervisorManifestEntry, agentKey: string, daemonGeneration: number, forceReprovision: boolean) {
+    const canonicalRoomId = await this.resolveRoomId(entry.roomId);
     const grant = await this.operations.provision({
-      hostId: this.hostId(), entryId: entry.id, agentKey, allowedRoomIds: [entry.roomId], forceReprovision,
+      hostId: this.hostId(), entryId: entry.id, agentKey,
+      roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision,
     }, { apiFetch: this.request });
     await this.install(entry, agentKey, grant, daemonGeneration);
   }
@@ -207,8 +252,10 @@ export class SupervisorGrantCoordinator {
       // The handoff may have succeeded but its response was lost, or the old
       // bearer may be revoked. Owner-auth revoke/reprovision is the only safe
       // recovery; do not try an owner token in the daemon or fallback to it.
+      const canonicalRoomId = await this.resolveRoomId(entry.roomId);
       return this.operations.provision({
-        hostId: this.hostId(), entryId: entry.id, agentKey, allowedRoomIds: [entry.roomId], forceReprovision: true,
+        hostId: this.hostId(), entryId: entry.id, agentKey,
+        roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision: true,
       }, { apiFetch: this.request });
     }
   }
@@ -216,13 +263,15 @@ export class SupervisorGrantCoordinator {
   private async install(
     entry: DesktopSupervisorManifestEntry,
     agentKey: string,
-    grant: { metadata: DesktopSupervisorGrantMetadata; token: string; entryId: string; lastInstalledDaemonGeneration: number | null },
+    grant: { metadata: DesktopSupervisorGrantMetadata; token: string; entryId: string | null; lastInstalledDaemonGeneration: number | null },
     daemonGeneration: number,
   ): Promise<void> {
     const installed = await this.daemon.installHostGrant({
       entryId: entry.id, roomId: entry.roomId, agentKey,
       grantId: grant.metadata.grantId, supervisorGrant: grant.token,
       grantGeneration: grant.metadata.generation, daemonGeneration,
+      hostId: grant.metadata.hostId, installationId: grant.metadata.installationId,
+      expiresAt: grant.metadata.expiresAt,
     });
     if (installed !== "installed") throw new Error("Background agent management changed generation before the host grant could be installed.");
     // Only a confirmed exact-generation socket install advances the durable
@@ -236,3 +285,4 @@ export class SupervisorGrantCoordinator {
 }
 
 export const supervisorGrantCoordinator = new SupervisorGrantCoordinator();
+onSupervisorDaemonGeneration((status) => supervisorGrantCoordinator.scheduleReconciliation(status));

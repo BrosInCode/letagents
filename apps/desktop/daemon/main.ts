@@ -42,10 +42,21 @@ export interface SupervisorGrantHttp {
   createWorkerSession(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
   }): Promise<{ sessionId: string; bearer: string; bearerId: string; expiresAt: string | null }>;
+  renewHostGrant?(input: {
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
+    hostId: string; installationId: string; ttlMs: number;
+  }): Promise<{ grantId: string; supervisorGrant: string; grantGeneration: number; expiresAt: string }>;
 }
+export class SupervisorGrantRequestError extends Error {
+  constructor(readonly status: number, operation: string) {
+    super(`${operation} failed with HTTP ${status}.`);
+  }
+}
+class InvalidSupervisorGrantRenewalError extends Error {}
 type InstalledHostGrant = {
   entryId: string; roomId: string; agentKey: string; grantId: string; supervisorGrant: string;
   grantGeneration: number; apiUrl: string; daemonGeneration: number;
+  hostId: string; installationId: string; expiresAt: string;
 };
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
@@ -53,6 +64,8 @@ const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const LIVENESS_GRACE_MS = 30_000;
 const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const WORKER_BEARER_ROTATION_LEAD_MS = 60_000;
+const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
+const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 
 function supervisedRoomPath(roomId: string): string {
   return roomId.split("/").map(encodeURIComponent).join("/");
@@ -97,7 +110,7 @@ const productionSupervisorGrantHttp: SupervisorGrantHttp = {
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
       body: JSON.stringify({ generation: input.grantGeneration, room_id: input.roomId, agent_key: input.agentKey, agent_instance_id: input.agentInstanceId, runtime: "supervisor" }),
     });
-    if (!response.ok) throw new Error(`Supervisor worker session mint failed with HTTP ${response.status}.`);
+    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session mint");
     const body = await response.json() as Record<string, unknown>;
     const requireString = (name: string) => {
       const value = body[name];
@@ -107,6 +120,29 @@ const productionSupervisorGrantHttp: SupervisorGrantHttp = {
     return {
       sessionId: requireString("session_id"), bearer: requireString("worker_bearer"), bearerId: requireString("worker_bearer_id"),
       expiresAt: typeof body.worker_bearer_expires_at === "string" ? body.worker_bearer_expires_at : null,
+    };
+  },
+  async renewHostGrant(input) {
+    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/renew`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
+      body: JSON.stringify({
+        generation: input.grantGeneration, host_id: input.hostId,
+        installation_id: input.installationId, ttl_ms: input.ttlMs,
+      }),
+    });
+    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor host grant renewal");
+    const body = await response.json() as Record<string, unknown>;
+    const requireString = (name: string) => {
+      const value = body[name];
+      if (typeof value !== "string" || !value.trim()) throw new Error(`Supervisor grant renewal response omitted ${name}.`);
+      return value;
+    };
+    const generation = Number(body.current_generation);
+    if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Supervisor grant renewal response omitted current_generation.");
+    return {
+      grantId: requireString("grant_id"), supervisorGrant: requireString("supervisor_grant"),
+      grantGeneration: generation, expiresAt: requireString("expires_at"),
     };
   },
 };
@@ -451,9 +487,20 @@ export class SupervisorDaemon {
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly liveDisposers = new Map<string, Array<() => void>>();
   private readonly convergenceRequests = new Map<string, Promise<void>>();
+  /**
+   * Control requests must be able to fence a launch while its per-entry
+   * reconciliation lane is awaiting remote authorization or capabilities.
+   * They therefore cannot rely on that same lane for ordering.
+   */
+  private readonly entryControlEpochs = new Map<string, number>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
+  /** Handoff drains only dispatches that crossed the native-effect boundary. */
+  private readonly providerDispatchReservations = new Set<Promise<void>>();
+  private readonly activeProviderDispatches = new Map<symbol, {
+    entryId: string; executionGenerationId: string; daemonGeneration: number;
+  }>();
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
   private readonly turnControlRequests = new Map<string, Promise<DaemonTurnControlResult>>();
   private readonly deliveryCutoverRequests = new Map<string, Promise<void>>();
@@ -659,6 +706,8 @@ export class SupervisorDaemon {
           entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""), agent_key: String(params.agent_key ?? ""),
           grant_id: String(params.grant_id ?? ""), supervisor_grant: String(params.supervisor_grant ?? ""),
           grant_generation: Number(params.grant_generation ?? NaN), api_url: String(params.api_url ?? ""),
+          host_id: String(params.host_id ?? ""), installation_id: String(params.installation_id ?? ""),
+          grant_expires_at: String(params.grant_expires_at ?? ""),
           daemon_generation: Number(params.daemon_generation ?? NaN),
         });
       }
@@ -788,6 +837,10 @@ export class SupervisorDaemon {
       void scheduled.then(({ dispose }) => dispose()).catch(() => undefined);
     }
     this.scheduledConvergence.clear();
+    // Remote grant/capability waits remain freely cancellable, but once a
+    // native provider dispatch begins its exact returned identity must be
+    // persisted before the shared stores are closed for successor attach.
+    await Promise.all([...this.providerDispatchReservations]);
     for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) captureSync(dispose);
     this.liveDisposers.clear();
     // Complete every local cleanup step even if one fails. The process-level
@@ -1332,6 +1385,7 @@ export class SupervisorDaemon {
   private async setDesiredState(id: string, desiredState: DesiredState): Promise<DaemonManifestEntry> {
     if (!id) throw new Error("Manifest entry id is required.");
     if (!["running", "paused", "stopped"].includes(desiredState)) throw new Error("Invalid desired state.");
+    this.bumpEntryControlEpoch(id);
     const updated = await this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
       const manifest = await this.store.load();
@@ -1370,6 +1424,7 @@ export class SupervisorDaemon {
     if (!id) throw new Error("Manifest entry id is required.");
     if (!["running", "paused", "stopped"].includes(expectedDesiredState)) throw new Error("Invalid expected desired state.");
     if (!["running", "paused", "stopped"].includes(desiredState)) throw new Error("Invalid desired state.");
+    this.bumpEntryControlEpoch(id);
     const result = await this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
       const manifest = await this.store.load();
@@ -1398,6 +1453,10 @@ export class SupervisorDaemon {
         this.clearRecoveryConvergence(id);
         void this.supervisedDelivery?.stop(id).catch(() => undefined);
       }
+      this.requestConvergence(id);
+    } else {
+      // The speculative epoch bump may have fenced an in-flight launch even
+      // though the CAS lost. Reconcile the unchanged durable state again.
       this.requestConvergence(id);
     }
     return result;
@@ -2088,10 +2147,95 @@ export class SupervisorDaemon {
     this.convergenceRequests.set(entryId, next);
   }
 
+  private currentEntryControlEpoch(entryId: string): number {
+    return this.entryControlEpochs.get(entryId) ?? 0;
+  }
+
+  private bumpEntryControlEpoch(entryId: string): number {
+    const next = this.currentEntryControlEpoch(entryId) + 1;
+    this.entryControlEpochs.set(entryId, next);
+    return next;
+  }
+
+  private reserveProviderDispatch(entryId: string, executionGenerationId: string): { token: symbol; release: () => void } {
+    const token = Symbol(`provider-dispatch:${entryId}`);
+    let release!: () => void;
+    const reservation = new Promise<void>((resolve) => { release = resolve; });
+    this.providerDispatchReservations.add(reservation);
+    this.activeProviderDispatches.set(token, {
+      entryId, executionGenerationId, daemonGeneration: this.singleton.currentGeneration,
+    });
+    return {
+      token,
+      release: () => {
+        this.activeProviderDispatches.delete(token);
+        this.providerDispatchReservations.delete(reservation);
+        release();
+      },
+    };
+  }
+
+  /** Re-read durable intent after every delayed launch boundary. */
+  private async launchEntryIfCurrent(entryId: string, expectedEpoch: number): Promise<DaemonManifestEntry | null> {
+    if (this.handoffScheduled || this.currentEntryControlEpoch(entryId) !== expectedEpoch) return null;
+    const current = await this.store.getEntry(entryId);
+    if (this.handoffScheduled || this.currentEntryControlEpoch(entryId) !== expectedEpoch
+      || current?.desired_state !== "running") return null;
+    return current;
+  }
+
+  private async terminalizeUnlaunchedGeneration(
+    attempt: Awaited<ReturnType<WorkDurabilityStore["getAttempt"]>>,
+    executionGenerationId: string,
+    generation: number,
+  ): Promise<void> {
+    const terminal = this.terminalPayload({
+      endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+      terminalCause: "stopped", providerContinuationId: null,
+    }, "daemon-provider");
+    await this.durability.recordTerminal(attempt.work_attempt_id, executionGenerationId, {
+      ...terminal, generation, actor: "daemon-provider",
+    });
+    await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, executionGenerationId);
+  }
+
+  /** A real handle returned after Pause/Stop won the race; fence that exact process. */
+  private async fenceReturnedProviderAfterControl(
+    entryId: string,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+    generation: number,
+  ): Promise<void> {
+    const current = await this.store.getEntry(entryId);
+    if (!current || current.desired_state === "running") return;
+    await this.transition(entryId, "stopping", current.condition, `desired state changed to ${current.desired_state} during provider dispatch`, "daemon-convergence");
+    const terminal = await this.providerPort!.stop(handle, {
+      actionId: `manifest:${entryId}:${current.desired_state}:dispatch-fence:${generation}`,
+    });
+    if (this.liveHandles.get(entryId) === handle) {
+      this.liveHandles.delete(entryId);
+      this.liveBindingIdentities.delete(entryId);
+      for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
+      this.liveDisposers.delete(entryId);
+    }
+    const attempt = current.work_attempt_id ? await this.durability.getAttempt(current.work_attempt_id) : null;
+    const execution = attempt?.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
+    if (attempt && execution && !execution.terminal) {
+      await this.durability.recordTerminal(attempt.work_attempt_id, executionGenerationId, {
+        ...this.terminalPayload(terminal, execution.actor), generation: execution.generation,
+      });
+      if (current.desired_state === "stopped") {
+        await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, executionGenerationId);
+      }
+    }
+    await this.observeProviderExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle);
+  }
+
   private async convergeManifestEntry(entryId: string): Promise<void> {
     if (this.handoffScheduled || !this.providerPort) return;
     let entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
     if (!entry) return;
+    const launchControlEpoch = this.currentEntryControlEpoch(entryId);
     if (!this.providerPort) throw new Error(`No daemon provider port is available for ${entry.provider}.`);
 
     if (entry.desired_state === "running") {
@@ -2100,6 +2244,9 @@ export class SupervisorDaemon {
       // provider (or even a new work execution) until Electron installs the
       // exact host grant over the local daemon socket.
       if (this.requiresHostGrant(entry) && !this.currentHostGrant(entry)) return;
+      if (this.requiresHostGrant(entry) && !await this.ensureHostGrantFresh(entry)) return;
+      entry = await this.launchEntryIfCurrent(entry.id, launchControlEpoch) ?? entry;
+      if (entry.desired_state !== "running" || this.currentEntryControlEpoch(entry.id) !== launchControlEpoch || this.handoffScheduled) return;
       if (entry.observed_state === "failed") {
         const now = this.nowMs();
         const exitsInWindow = (entry.reconciliation?.exit_timestamps_ms ?? [])
@@ -2121,6 +2268,9 @@ export class SupervisorDaemon {
         }
       }
       entry = await this.ensureWorkAttempt(entry);
+      const currentAfterAttempt = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+      if (!currentAfterAttempt) return;
+      entry = currentAfterAttempt;
       let handle = this.liveHandles.get(entry.id) ?? null;
       if (!handle && entry.provider_ref) {
         handle = await this.attachLiveProvider(entry);
@@ -2130,6 +2280,7 @@ export class SupervisorDaemon {
         if (this.requiresHostGrant(entry) && this.currentHostGrant(entry)) {
           const binding = await this.workerBindings.get(entry.id);
           const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
+          const supervisedSession = binding ? await this.workerBindings.supervisedWorkerSession(entry.id) : null;
           const expiring = binding ? await this.hostWorkerBearerNeedsRotation(entry, binding) : false;
           if ((!credential || expiring) && entry.provider_ref?.execution_generation_id) {
             try {
@@ -2138,7 +2289,12 @@ export class SupervisorDaemon {
             } catch (error) {
               // A still-live bearer remains usable until its deadline. Keep
               // the exact provider and let the next heartbeat retry rotation.
+              const bearerExpiry = supervisedSession?.expires_at ? Date.parse(supervisedSession.expires_at) : Number.NaN;
               if (!credential) throw error;
+              if (Number.isFinite(bearerExpiry) && bearerExpiry <= this.nowMs()) {
+                await this.blockExpiredWorkerAuthority(entry, `Worker bearer rotation failed after expiry: ${error instanceof Error ? error.message : "unknown error"}`);
+                return;
+              }
             }
           }
         }
@@ -2180,7 +2336,13 @@ export class SupervisorDaemon {
         ? await this.mintHostWorkerAuthorization(entry)
         : null;
       if (this.requiresHostGrant(entry) && !mintedAuthorization) return;
+      const currentAfterMint = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+      if (!currentAfterMint) return;
+      entry = currentAfterMint;
       const capabilities = await this.providerPort.capabilities(attempt.work_attempt_id, entry.provider);
+      const currentAfterCapabilities = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+      if (!currentAfterCapabilities) return;
+      entry = currentAfterCapabilities;
       const resumed = Boolean(ref && capabilities.resume);
       if (this.requiresHostGrant(entry)) {
         const grant = this.currentHostGrant(entry);
@@ -2189,12 +2351,19 @@ export class SupervisorDaemon {
       // Every potentially long remote authorization/capability await is now
       // complete. Only then may this daemon create a durable live generation.
       await this.transition(entry.id, entry.provider_ref ? "recovering" : "starting", "none", entry.provider_ref ? "recovering durable provider continuation" : "starting daemon-owned provider", "daemon-convergence");
+      const currentAfterTransition = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+      if (!currentAfterTransition) return;
+      entry = currentAfterTransition;
       if (this.requiresHostGrant(entry)) {
         const grant = this.currentHostGrant(entry);
         if (!grant || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return;
       }
       const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
       const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
+      if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
+        await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
+        return;
+      }
       const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
       let mintedHostSession: Awaited<ReturnType<typeof this.mintHostWorkerSession>> = null;
       const spawn: ProviderActionSpawn = {
@@ -2219,13 +2388,39 @@ export class SupervisorDaemon {
           if (!mintedHostSession) throw new Error("Waiting for desktop credential handoff.");
           Object.assign(spawn, { supervisorWorkerSession: { agentSessionId: mintedHostSession.agentSessionId, roomCursor: null } });
         }
-        handle = resumed
-          ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
-          : await this.providerPort.spawn(spawn);
-        await this.persistProviderHandle(entry.id, handle, execution.execution_generation_id);
-        providerPersisted = true;
-        await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
-        await this.installProviderHandle(entry.id, handle, execution.execution_generation_id);
+        if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
+          await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
+          return;
+        }
+        const dispatchReservation = this.reserveProviderDispatch(entry.id, execution.execution_generation_id);
+        let currentAfterDispatch: DaemonManifestEntry | null = null;
+        try {
+          handle = resumed
+            ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
+            : await this.providerPort.spawn(spawn);
+          currentAfterDispatch = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+          if (this.handoffScheduled) {
+            await this.persistReturnedProviderForHandoff(
+              dispatchReservation.token, entry.id, handle, execution.execution_generation_id,
+            );
+          } else {
+            await this.persistProviderHandle(entry.id, handle, execution.execution_generation_id);
+          }
+          providerPersisted = true;
+          await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
+          if (this.handoffScheduled) {
+            // The successor attaches this exact durable continuation. Do not
+            // signal it or register callbacks owned by the retiring daemon.
+            return;
+          }
+          await this.installProviderHandle(entry.id, handle, execution.execution_generation_id);
+        } finally {
+          dispatchReservation.release();
+        }
+        if (!currentAfterDispatch) {
+          await this.fenceReturnedProviderAfterControl(entry.id, handle, execution.execution_generation_id, generationNumber);
+          return;
+        }
       } catch (error) {
         // Once the provider reference is durable, do not convert a local
         // post-spawn bookkeeping/credential issue into a terminal execution.
@@ -2453,6 +2648,53 @@ export class SupervisorDaemon {
     }));
   }
 
+  /**
+   * The sole mutation admitted after prepare_handoff: finish journaling a
+   * native dispatch that began while this exact daemon generation owned the
+   * singleton. The reservation is deleted before authority/store release.
+   */
+  private async persistReturnedProviderForHandoff(
+    token: symbol,
+    entryId: string,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+  ): Promise<void> {
+    if (!handle.providerContinuationId) throw new Error("Provider launch did not return a durable continuation id.");
+    const reservation = this.activeProviderDispatches.get(token);
+    if (!this.handoffScheduled || !reservation
+      || reservation.entryId !== entryId
+      || reservation.executionGenerationId !== executionGenerationId
+      || reservation.daemonGeneration !== this.singleton.currentGeneration) {
+      throw new DaemonFenceLostError("Retiring provider dispatch reservation is no longer exact.");
+    }
+    await this.singleton.assertCurrent();
+    const current = await this.store.getEntry(entryId);
+    if (!current || current.work_attempt_id !== handle.workAttemptId) {
+      throw new DaemonFenceLostError("Retiring provider dispatch no longer matches the durable work attempt.");
+    }
+    const updated: DaemonManifestEntry = {
+      ...current,
+      run_id: executionGenerationId,
+      deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
+      provider_ref: {
+        work_attempt_id: handle.workAttemptId,
+        provider_continuation_id: handle.providerContinuationId,
+        provider_connection: handle.providerConnection ?? null,
+        execution_generation_id: executionGenerationId,
+      },
+    };
+    const next = await this.store.replaceEntry(this.manifestGeneration, updated, (commit) => this.serializeManifestCommit(async () => {
+      const active = this.activeProviderDispatches.get(token);
+      if (!this.handoffScheduled || active !== reservation
+        || active.daemonGeneration !== this.singleton.currentGeneration) {
+        throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
+      }
+      await this.singleton.assertCurrent();
+      await commit();
+    }));
+    this.manifestGeneration = next.generation;
+  }
+
   private async installProviderHandle(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): Promise<void> {
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveHandles.set(entryId, handle);
@@ -2485,7 +2727,12 @@ export class SupervisorDaemon {
         if (this.liveBindingIdentities.get(entryId)?.executionGenerationId !== manifestEntry.provider_ref?.execution_generation_id) return;
         if (!["working", "idle"].includes(manifestEntry.observed_state)) return;
         if (!["working", "idle"].includes(current.observedState)) return;
-        if (this.requiresHostGrant(manifestEntry) && this.currentHostGrant(manifestEntry)) {
+        const hostGrant = this.requiresHostGrant(manifestEntry) ? this.currentHostGrant(manifestEntry) : null;
+        if (hostGrant && this.hostGrantNeedsRenewal(hostGrant)) {
+          this.requestConvergence(entryId);
+          return;
+        }
+        if (hostGrant) {
           const binding = await this.workerBindings.get(entryId);
           if (binding && await this.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
             // The serialized convergence lane rotates the bearer against the
@@ -2868,7 +3115,8 @@ export class SupervisorDaemon {
     });
     this.pendingResumeBindings.delete(input.entry_id);
     await this.updateManifestEntry(input.entry_id, (current) => {
-      const clearsCoordinationLatch = current.desired_state === "running" && current.condition === "coordination_blocked";
+      const clearsCoordinationLatch = current.desired_state === "running"
+        && (current.condition === "coordination_blocked" || current.condition === "auth_blocked");
       const manifestBindingIsCurrent = current.last_worker_binding?.agent_session_id === binding.agent_session_id
         && current.last_worker_binding?.work_attempt_id === binding.work_attempt_id
         && current.last_worker_binding?.execution_generation_id === binding.execution_generation_id;
@@ -2922,6 +3170,117 @@ export class SupervisorDaemon {
     if (!grant || this.handoffScheduled || grant.daemonGeneration !== this.singleton.currentGeneration
       || grant.entryId !== entry.id || grant.roomId !== entry.room_id) return null;
     return grant;
+  }
+
+  private hostGrantNeedsRenewal(grant: InstalledHostGrant): boolean {
+    const expiresAt = Date.parse(grant.expiresAt);
+    return !Number.isFinite(expiresAt) || expiresAt <= this.nowMs() + HOST_GRANT_RENEWAL_LEAD_MS;
+  }
+
+  private async blockHostGrantAuthority(entry: DaemonManifestEntry, grant: InstalledHostGrant, detail: string): Promise<void> {
+    this.revokeHostGrantIfCurrent(entry.id, grant);
+    await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
+    const binding = await this.workerBindings.get(entry.id);
+    if (binding) await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
+    this.liveBindingIdentities.delete(entry.id);
+    await this.updateManifestEntry(entry.id, (current) => ({
+      ...current,
+      observed_state: current.desired_state === "running" ? "recovering" : current.observed_state,
+      condition: "auth_blocked",
+      last_error: redactCredentialText(detail).value,
+      workplace_liveness: {
+        state: "stale",
+        observed_at: new Date(this.nowMs()).toISOString(),
+        detail: "Supervisor host authority is unavailable; room delivery is paused.",
+      },
+    }));
+  }
+
+  private async blockExpiredWorkerAuthority(entry: DaemonManifestEntry, detail: string): Promise<void> {
+    await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
+    const binding = await this.workerBindings.get(entry.id);
+    if (binding) await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
+    await this.updateManifestEntry(entry.id, (current) => ({
+      ...current,
+      observed_state: current.desired_state === "running" ? "recovering" : current.observed_state,
+      condition: "auth_blocked",
+      last_error: redactCredentialText(detail).value,
+      workplace_liveness: {
+        state: "stale", observed_at: new Date(this.nowMs()).toISOString(),
+        detail: "The worker bearer expired before rotation succeeded; room delivery is paused.",
+      },
+    }));
+    this.scheduleRecoveryConvergence(entry.id, this.nativeHeartbeatIntervalMs);
+  }
+
+  /** Renew in memory only and rotate the live worker bearer in place. */
+  private async ensureHostGrantFresh(entry: DaemonManifestEntry): Promise<InstalledHostGrant | null> {
+    const grant = this.currentHostGrant(entry);
+    if (!grant) return null;
+    const expiresAt = Date.parse(grant.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= this.nowMs()) {
+      await this.blockHostGrantAuthority(entry, grant, "Supervisor host grant expired; waiting for Electron owner recovery.");
+      return null;
+    }
+    if (!this.hostGrantNeedsRenewal(grant)) return grant;
+    try {
+      if (!this.supervisorGrantHttp.renewHostGrant) throw new Error("Supervisor host grant renewal is unavailable.");
+      const renewed = await this.supervisorGrantHttp.renewHostGrant({
+        apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+        grantGeneration: grant.grantGeneration, hostId: grant.hostId,
+        installationId: grant.installationId, ttlMs: HOST_GRANT_TTL_MS,
+      });
+      const renewedExpiry = Date.parse(renewed.expiresAt);
+      if (renewed.grantId !== grant.grantId || renewed.grantGeneration !== grant.grantGeneration
+        || !renewed.supervisorGrant.trim() || !Number.isFinite(renewedExpiry) || renewedExpiry <= this.nowMs()) {
+        throw new InvalidSupervisorGrantRenewalError("Supervisor host grant renewal returned a stale fence.");
+      }
+      if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) return null;
+      const replacement: InstalledHostGrant = {
+        ...grant, supervisorGrant: renewed.supervisorGrant, expiresAt: renewed.expiresAt,
+      };
+      this.hostGrants.set(entry.id, replacement);
+      const current = await this.store.getEntry(entry.id);
+      if (current?.provider_ref?.execution_generation_id && this.liveHandles.get(entry.id)) {
+        try {
+          const minted = await this.mintHostWorkerSession(current, current.provider_ref.execution_generation_id);
+          if (!minted) throw new Error("Renewed host grant could not rotate the live worker bearer.");
+          await this.bindMintedHostWorkerSession(entry.id, minted);
+        } catch (error) {
+          if (error instanceof SupervisorGrantRequestError && [401, 403, 409].includes(error.status)) throw error;
+          // The renewed parent grant is valid and stays memory-only. Preserve
+          // the still-live worker bearer and let its heartbeat retry rotation;
+          // a transient child-session transport failure must not force owner
+          // recovery or disturb the provider.
+        }
+      }
+      return replacement;
+    } catch (error) {
+      const active = this.hostGrants.get(entry.id);
+      const definitiveRejection = error instanceof InvalidSupervisorGrantRenewalError
+        || (error instanceof SupervisorGrantRequestError && [401, 403, 409].includes(error.status));
+      if (definitiveRejection && active && active.grantId === grant.grantId && active.daemonGeneration === grant.daemonGeneration) {
+        await this.blockHostGrantAuthority(
+          entry,
+          active,
+          `Supervisor host grant renewal failed: ${error instanceof Error ? error.message : "unknown error"}`,
+        );
+        return null;
+      }
+      if (active && Date.parse(active.expiresAt) <= this.nowMs()) {
+        await this.blockHostGrantAuthority(
+          entry,
+          active,
+          `Supervisor host grant expired while renewal was pending: ${error instanceof Error ? error.message : "unknown error"}`,
+        );
+        return null;
+      }
+      // Transport and 5xx failures do not revoke a still-valid parent grant
+      // or its worker bearer. Retry in the background and let the actual
+      // parent/bearer deadlines decide when delivery becomes auth_blocked.
+      this.scheduleRecoveryConvergence(entry.id, this.nativeHeartbeatIntervalMs);
+      return this.currentHostGrant(entry);
+    }
   }
 
   private async hostWorkerBearerNeedsRotation(entry: DaemonManifestEntry, binding: WorkerSessionBinding): Promise<boolean> {
@@ -3038,22 +3397,37 @@ export class SupervisorDaemon {
   private async installHostGrant(input: {
     entry_id: string; room_id: string; agent_key: string; grant_id: string; supervisor_grant: string;
     grant_generation: number; api_url: string; daemon_generation: number;
+    host_id: string; installation_id: string; grant_expires_at: string;
   }): Promise<{ status: "installed" | "stale"; agent_session_id?: string }> {
     return this.serializeEntryTick(input.entry_id, async () => {
-      for (const field of ["entry_id", "room_id", "agent_key", "grant_id", "supervisor_grant", "api_url"] as const) {
+      for (const field of ["entry_id", "room_id", "agent_key", "grant_id", "supervisor_grant", "api_url", "host_id", "installation_id", "grant_expires_at"] as const) {
         if (!input[field].trim()) throw new Error(`Host grant ${field} is required.`);
       }
       if (!Number.isSafeInteger(input.grant_generation) || input.grant_generation < 1
         || !await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
+      const inputExpiry = Date.parse(input.grant_expires_at);
+      if (!Number.isFinite(inputExpiry) || inputExpiry <= this.nowMs()) return { status: "stale" };
       let apiUrl: string;
       try { apiUrl = hostGrantApiOrigin(input.api_url); } catch { throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP."); }
       const entry = await this.store.getEntry(input.entry_id);
       if (!entry || !this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
+      const currentGrant = this.currentHostGrant(entry);
+      if (currentGrant?.grantId === input.grant_id
+        && (currentGrant.grantGeneration > input.grant_generation
+          || (currentGrant.grantGeneration === input.grant_generation
+            && Date.parse(currentGrant.expiresAt) >= inputExpiry))) {
+        // Electron may still hold the pre-renewal safeStorage value. It may
+        // confirm installation, but must never roll the daemon's newer
+        // memory-only token/expiry backwards in the same generation.
+        this.requestConvergence(entry.id);
+        return { status: "installed" };
+      }
       const grant: InstalledHostGrant = {
         entryId: entry.id, roomId: entry.room_id, agentKey: input.agent_key, grantId: input.grant_id,
         supervisorGrant: input.supervisor_grant, grantGeneration: input.grant_generation, apiUrl,
-        daemonGeneration: input.daemon_generation,
+        daemonGeneration: input.daemon_generation, hostId: input.host_id,
+        installationId: input.installation_id, expiresAt: input.grant_expires_at,
       };
       this.hostGrants.set(entry.id, grant);
       // Recovery must not signal, restart, or migrate a live provider. It only

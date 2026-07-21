@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.27";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.28";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -35,6 +35,13 @@ const KILL_EXIT_TIMEOUT_MS = 1_000;
 const PROCESS_POLL_INTERVAL_MS = 25;
 const activityEmitter = new EventEmitter();
 const activitySequences = new Map<string, number>();
+
+/** Main-process lifecycle signal. Renderer IPC never receives this hook. */
+export function onSupervisorDaemonGeneration(
+  listener: (status: DesktopSupervisorDaemonStatus) => void,
+): () => void {
+  return supervisorDaemonClient.onGeneration(listener);
+}
 
 type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 type WireEntry = {
@@ -226,6 +233,8 @@ export class SupervisorDaemonClient {
   readonly socketPath: string;
   readonly daemonScriptPath: string;
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
+  private lastReadyGeneration: number | null = null;
+  private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
   private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
   private readonly daemonWorkingDirectory: string;
   private readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
@@ -280,9 +289,22 @@ export class SupervisorDaemonClient {
       return Promise.reject(new Error("Supervised agents currently require macOS."));
     }
     if (!this.ensureOperation) {
-      this.ensureOperation = this.ensureRunningOnce().finally(() => { this.ensureOperation = null; });
+      this.ensureOperation = this.ensureRunningOnce().then((status) => {
+        if (this.lastReadyGeneration !== status.generation) {
+          this.lastReadyGeneration = status.generation;
+          queueMicrotask(() => {
+            for (const listener of this.generationListeners) listener(status);
+          });
+        }
+        return status;
+      }).finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
+  }
+
+  onGeneration(listener: (status: DesktopSupervisorDaemonStatus) => void): () => void {
+    this.generationListeners.add(listener);
+    return () => this.generationListeners.delete(listener);
   }
 
   async list(roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> {
@@ -489,6 +511,9 @@ export class SupervisorDaemonClient {
     supervisorGrant: string;
     grantGeneration: number;
     daemonGeneration: number;
+    hostId: string;
+    installationId: string;
+    expiresAt: string;
     apiUrl?: string;
   }): Promise<"installed" | "stale"> {
     if (!input.supervisorGrant.trim()) throw new Error("A supervised host grant is required.");
@@ -503,6 +528,9 @@ export class SupervisorDaemonClient {
       grant_id: input.grantId,
       supervisor_grant: input.supervisorGrant,
       grant_generation: input.grantGeneration,
+      host_id: input.hostId,
+      installation_id: input.installationId,
+      grant_expires_at: input.expiresAt,
       api_url: input.apiUrl ?? apiUrl,
       daemon_generation: input.daemonGeneration,
     });
