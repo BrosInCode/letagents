@@ -42,7 +42,7 @@ import {
   toRoomState,
   type RoomState,
 } from "./room-state.js";
-import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { isSupervisedBoundedTurn, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 
 export type JoinSessionMode = "live" | "current";
 
@@ -91,6 +91,9 @@ export async function joinRoomIdentifier(
   room: RoomState;
   response: Record<string, unknown>;
 }> {
+  if (isSupervisedBoundedTurn()) {
+    throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
+  }
   const roomId = joinedVia === "join_code" ? normalizeInviteCode(identifier) : identifier.trim();
 
   if (joinedVia !== "join_code" && await isLocalRoomStorageEnabled(roomId)) {
@@ -294,6 +297,9 @@ export async function createInviteRoom(): Promise<{
   room: RoomState;
   response: Record<string, unknown>;
 }> {
+  if (isSupervisedBoundedTurn()) {
+    throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
+  }
   const project = await apiCall<Record<string, unknown>>("/projects", { method: "POST" });
   const roomId =
     typeof project.code === "string"
