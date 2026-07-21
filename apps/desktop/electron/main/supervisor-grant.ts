@@ -28,6 +28,7 @@ type StoredGrant = DesktopSupervisorGrantMetadata & {
 type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: string };
 type StoredGrantRegistry = { version: 3; grants: Record<string, StoredGrant> };
 const MANUAL_GRANT_KEY = "__manual__";
+const registryMutationTails = new Map<string, Promise<void>>();
 
 export type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
 
@@ -122,6 +123,24 @@ async function writeRegistry(registry: StoredGrantRegistry): Promise<void> {
   await writeFile(temporaryPath, `${JSON.stringify(registry)}\n`, { encoding: "utf8", mode: 0o600 });
   await rename(temporaryPath, path);
   await chmod(path, 0o600);
+}
+
+/** Serialize every registry read-modify-write in this Electron main process. */
+async function withRegistryMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  const path = storePath();
+  const previous = registryMutationTails.get(path) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const current = previous.catch(() => {}).then(() => gate);
+  registryMutationTails.set(path, current);
+  await previous.catch(() => {});
+  try {
+    return await mutation();
+  } finally {
+    release();
+    await current;
+    if (registryMutationTails.get(path) === current) registryMutationTails.delete(path);
+  }
 }
 
 export interface DesktopSupervisorGrantLifecycleInput {
@@ -236,15 +255,17 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
     || canonicalSupervisorGrantAgentKey(input.metadata.allowedAgentKeys[0]!) !== agentKey) {
     throw new Error("A per-agent desktop grant must be scoped to that exact one agent identity.");
   }
-  const registry = (await readRegistry()) ?? { version: 3, grants: {} };
-  registry.grants[agentKey] = {
-    ...input.metadata,
-    agentKey,
-    entryId: input.entryId?.trim() || undefined,
-    lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
-    encryptedToken: encryptSupervisorGrantForStorage(input.token, options.storage),
-  };
-  await writeRegistry(registry);
+  await withRegistryMutation(async () => {
+    const registry = (await readRegistry()) ?? { version: 3, grants: {} };
+    registry.grants[agentKey] = {
+      ...input.metadata,
+      agentKey,
+      entryId: input.entryId?.trim() || undefined,
+      lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+      encryptedToken: encryptSupervisorGrantForStorage(input.token, options.storage),
+    };
+    await writeRegistry(registry);
+  });
 }
 
 /** Backward-compatible main-process storage name. */

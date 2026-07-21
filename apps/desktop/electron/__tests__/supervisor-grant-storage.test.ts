@@ -99,31 +99,58 @@ test("per-agent installation ids are stable and independently scoped", () => {
   assert.notEqual(first, desktopSupervisorGrantInstallationId("desktop_host", "entry-b"));
 });
 
-test("get-or-provision creates disjoint server scopes for independent agents", async () => {
+test("concurrent provisioning preserves both grants and failed storage revokes only its own grant", async () => {
   await withRegistry(async () => {
     const requests: Array<Record<string, unknown>> = [];
-    const apiFetch = (async <T>(_path: string, init?: { body?: string }) => {
+    const revokedPaths: string[] = [];
+    let releaseBoth!: () => void;
+    const bothProvisioned = new Promise<void>((resolve) => { releaseBoth = resolve; });
+    const apiFetch = (async <T>(path: string, init?: { body?: string }) => {
+      if (path.includes("/grant_") && !init?.body) {
+        revokedPaths.push(path);
+        return {} as T;
+      }
       const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
       requests.push(body);
       const agentKey = (body.allowed_agent_keys as string[])[0]!;
       const index = requests.length;
+      if (index === 2) releaseBoth();
+      if (index <= 2) await bothProvisioned;
       return {
         grant_id: `grant_${index}`, host_id: body.host_id, installation_id: body.installation_id,
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: [agentKey], current_generation: 1,
         expires_at: new Date(Date.now() + 60_000).toISOString(), supervisor_grant: `lashg_secret_${index}`,
       } as T;
     }) as never;
-    const first = await getOrProvisionDesktopSupervisorGrantForAgent({
-      hostId: "desktop_host", entryId: "entry-a", agentKey: "owner/agent-a", allowedRoomIds: ["room-a"],
-    }, { storage: keychain, apiFetch });
-    const second = await getOrProvisionDesktopSupervisorGrantForAgent({
-      hostId: "desktop_host", entryId: "entry-b", agentKey: "owner/agent-b", allowedRoomIds: ["room-b"],
-    }, { storage: keychain, apiFetch });
+    const [first, second] = await Promise.all([
+      getOrProvisionDesktopSupervisorGrantForAgent({
+        hostId: "desktop_host", entryId: "entry-a", agentKey: "owner/agent-a", allowedRoomIds: ["room-a"],
+      }, { storage: keychain, apiFetch }),
+      getOrProvisionDesktopSupervisorGrantForAgent({
+        hostId: "desktop_host", entryId: "entry-b", agentKey: "owner/agent-b", allowedRoomIds: ["room-b"],
+      }, { storage: keychain, apiFetch }),
+    ]);
     assert.equal(requests.length, 2);
     assert.deepEqual(requests.map((request) => request.allowed_agent_keys), [["owner/agent-a"], ["owner/agent-b"]]);
     assert.notEqual(requests[0]!.installation_id, requests[1]!.installation_id);
     assert.equal(first.token, "lashg_secret_1");
     assert.equal(second.token, "lashg_secret_2");
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, "lashg_secret_1");
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_secret_2");
+
+    const failingStorage = {
+      ...keychain,
+      encryptString: (value: string) => {
+        if (value === "lashg_secret_3") throw new Error("Keychain write failed");
+        return keychain.encryptString(value);
+      },
+    };
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "desktop_host", entryId: "entry-c", agentKey: "owner/agent-c", allowedRoomIds: ["room-c"],
+    }, { storage: failingStorage, apiFetch }), /Keychain write failed/);
+    assert.deepEqual(revokedPaths, ["/supervisor-host-grants/grant_3"]);
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, "lashg_secret_1");
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_secret_2");
   });
 });
 

@@ -19,7 +19,8 @@ const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { resolveRequestAuth } = await import("../request/auth.js");
 const { isSupervisorGrantRouteAllowed } = await import("../request/supervisor-grant-route-registry.js");
 const { registerHttpMiddleware } = await import("../http/middleware.js");
-const { registerSupervisorHostGrantRoutes } = await import("../routes/supervisor-host-grants.js");
+const { registerSupervisorHostGrantRoutes, respondToStaleSupervisorGrantFence } = await import("../routes/supervisor-host-grants.js");
+const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
 
 async function reset() {
   if (!client) throw new Error("DB-backed supervisor tests require TEST_DB_URL");
@@ -90,6 +91,14 @@ test("feature-off retains only owner revoke route", () => {
   } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = prior; }
 });
 
+test("the exact in-transaction stale supervisor fence error maps to HTTP 409", () => {
+  const response = recorder();
+  assert.equal(respondToStaleSupervisorGrantFence(response as never, new SupervisorGrantFenceStaleError()), true);
+  assert.equal(response.statusCode, 409);
+  assert.match((response.body as any).error, /fence is stale/i);
+  assert.equal(respondToStaleSupervisorGrantFence(recorder() as never, new Error("unrelated")), false);
+});
+
 test("lifecycle mint enforces room and agent allowlists through the actual route", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
@@ -126,6 +135,60 @@ test("idempotent supervisor worker creation rotates one session and revokes its 
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(first.body as any).worker_bearer}` } } as never)).authKind, null);
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(second.body as any).worker_bearer}` } } as never)).authKind, "agent_session");
   assert.equal((second.body as any).session_token, undefined);
+});
+
+test("supervisor worker retry collapses all historical active duplicates before rotating the retained session", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const common = {
+    room_id: room.id, session_kind: "worker" as const, runtime: "legacy", agent_key: agent.canonical_key,
+    agent_instance_id: "duplicate-worker", display_name: "Route Agent", owner_account_id: "owner_route",
+    owner_label: "Owner", ide_label: "Legacy", supervisor_grant_id: grantResult.grant.grant_id,
+    worker_bearer_expires_at: new Date(Date.now() + 30_000).toISOString(),
+  };
+  const retained = await authDb!.createRoomAgentSession({ ...common, actor_label: "Legacy duplicate A" });
+  const duplicate = await authDb!.createRoomAgentSession({ ...common, actor_label: "Legacy duplicate B" });
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const response = recorder();
+  await mint({ ...reqBase, body: {
+    generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "duplicate-worker",
+  } }, response);
+  assert.equal(response.statusCode, 201);
+  assert.equal((response.body as any).session_id, retained.session_id);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${retained.worker_bearer}` } } as never)).authKind, null);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${duplicate.worker_bearer}` } } as never)).authKind, null);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(response.body as any).worker_bearer}` } } as never)).authKind, "agent_session");
+  const [duplicateRow] = await client!.db.select().from(schema!.room_agent_sessions)
+    .where(eq(schema!.room_agent_sessions.session_id, duplicate.session_id)).limit(1);
+  assert.ok(duplicateRow.ended_at, "duplicate session is ended inside the replacement transaction");
+  const matching = await client!.db.select().from(schema!.room_agent_sessions)
+    .where(eq(schema!.room_agent_sessions.agent_instance_id, "duplicate-worker"));
+  assert.equal(matching.filter((row) => row.ended_at === null
+    && row.supervisor_grant_id === grantResult.grant.grant_id
+    && row.room_id === room.id
+    && row.agent_key === agent.canonical_key).length, 1);
+});
+
+test("stale supervisor worker fence is an explicit conflict, never an internal error", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const rotated = await authDb!.rotateSupervisorHostGrant({
+    grant_id: grantResult.grant.grant_id, expected_generation: 1, expected_token_version: 1,
+    expires_at: grantResult.grant.expires_at,
+  });
+  assert.ok(rotated);
+  await assert.rejects(authDb!.createOrRotateSupervisorWorkerSession({
+    room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Stale Worker",
+    agent_key: agent.canonical_key, agent_instance_id: "stale-worker", display_name: "Stale Worker",
+    owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: grantResult.grant.grant_id, supervisor_grant_fence: {
+      grant_id: grantResult.grant.grant_id, generation: 1, token_version: 1,
+    },
+  }), (error: unknown) => authDb!.isSupervisorGrantFenceStaleError(error));
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const response = recorder();
+  await mint({ ...reqBase, body: {
+    generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "stale-worker",
+  } }, response);
+  assert.equal(response.statusCode, 409);
 });
 
 test("lifecycle handlers fail closed when the path grant differs from the authenticated grant", { skip: requiresDatabase }, async () => {

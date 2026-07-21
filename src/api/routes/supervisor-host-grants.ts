@@ -9,6 +9,7 @@ import {
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
   isRebindAttestationCause,
+  isSupervisorGrantFenceStaleError,
   isUuidShapedExecutionId,
   REBIND_ATTESTATION_CAUSES,
   rebindTaskLease,
@@ -67,6 +68,13 @@ function cappedExpiry(grantExpiry: string): string {
 
 function fence(grant: { grant_id: string; current_generation: number; token_version: number }) {
   return { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version };
+}
+
+/** Exact HTTP mapping for the in-transaction grant-fence race. */
+export function respondToStaleSupervisorGrantFence(res: Response, error: unknown): boolean {
+  if (!isSupervisorGrantFenceStaleError(error)) return false;
+  res.status(409).json({ error: "Supervisor grant fence is stale." });
+  return true;
 }
 
 /** Default-deny route registry: only these lifecycle endpoints accept a supervisor grant. */
@@ -213,6 +221,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
         worker_bearer_capabilities: created.bearer.capabilities,
       });
     } catch (error) {
+      if (respondToStaleSupervisorGrantFence(res, error)) return;
       respondWithInternalError(res, "POST /supervisor-host-grants/:grantId/worker-sessions", error, "Worker session could not be minted.");
     }
   });
