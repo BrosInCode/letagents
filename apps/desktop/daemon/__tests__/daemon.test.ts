@@ -4628,6 +4628,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
   let sequence = 0;
   let resumeCount = 0;
   let resumeSupported = true;
+  let deliveryPolls = 0;
   const resumeRequests: Array<Parameters<ProviderActionPort["resume"]>[1]> = [];
   const streamListeners = new Set<(event: any) => void>();
   const exitListeners = new Set<(terminal: any) => void>();
@@ -4669,9 +4670,16 @@ test("generation handoff reattaches the same provider and publishes its supervis
     }),
     onExit: async (_providerHandle, listener) => { exitListeners.add(listener); return () => exitListeners.delete(listener); },
     onStream: async (_providerHandle, listener) => { streamListeners.add(listener); return () => streamListeners.delete(listener); },
+    runRoomTurn: async () => ({ turnId: "unused-room-turn", outcome: "no_reply", text: null }),
   });
 
-  const first = new SupervisorDaemon(paths, "darwin", port(), true, 2_000);
+  const first = new SupervisorDaemon(paths, "darwin", port(), true, 2_000, undefined, {}, {
+    poll: ({ signal }) => new Promise((resolve) => {
+      deliveryPolls += 1;
+      signal.addEventListener("abort", () => resolve({}), { once: true });
+    }),
+    publish: async () => {},
+  });
   let second: SupervisorDaemon | null = null;
   let third: SupervisorDaemon | null = null;
   try {
@@ -4723,6 +4731,11 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(initialBindingPublication.body.agent_session_id, undefined);
     assert.equal(initialBindingPublication.body.agent_session_token, undefined,
       "the scoped bearer travels only in the Authorization header");
+    const deliveryRecoveryInternals = first as unknown as {
+      updateManifestEntry: (entryId: string, mutate: (current: DaemonManifestEntry) => DaemonManifestEntry) => Promise<DaemonManifestEntry>;
+      supervisedDelivery: { stop: (entryId: string) => Promise<void> };
+    };
+    await deliveryRecoveryInternals.updateManifestEntry("supervised_handoff", (current) => ({ ...current, delivery_mode: "daemon_inbox" }));
     await first.transition(
       "supervised_handoff",
       "recovering",
@@ -4746,6 +4759,9 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(recoveredFromStaleHandoff.last_error, null);
     assert.equal(recoveredFromStaleHandoff.workplace_liveness?.detail, "scoped worker bearer verified");
     assert.ok(recoveredFromStaleHandoff.ready_reached_at);
+    await eventually(async () => deliveryPolls > 0, "credential recovery resumes daemon inbox polling");
+    await deliveryRecoveryInternals.supervisedDelivery.stop("supervised_handoff");
+    await deliveryRecoveryInternals.updateManifestEntry("supervised_handoff", (current) => ({ ...current, delivery_mode: "mcp_polling" }));
     const manifestAfterFirstBind = await new ManifestStore(paths.manifestPath).load();
     const workplaceObservedAtAfterFirstBind = manifestAfterFirstBind.entries
       .find((candidate) => candidate.id === "supervised_handoff")?.workplace_liveness?.observed_at;

@@ -3786,6 +3786,7 @@ export class SupervisorDaemon {
       // A successful scoped-bearer write is stronger evidence than the stale
       // launch-time credential-handoff latch. This also heals agents that were
       // blocked while an older server still rejected worker bearers.
+      let recoveredCredentialHandoff = false;
       await this.updateManifestEntry(entryId, (current) => {
         const recoversCredentialHandoff = current.desired_state === "running"
           && current.condition === "coordination_blocked"
@@ -3794,6 +3795,7 @@ export class SupervisorDaemon {
           && current.work_attempt_id === verifiedBinding.work_attempt_id
           && current.provider_ref?.execution_generation_id === verifiedBinding.execution_generation_id;
         if (!recoversCredentialHandoff) return current;
+        recoveredCredentialHandoff = true;
         const confirmedAt = publication.observed_at;
         return {
           ...current,
@@ -3808,6 +3810,12 @@ export class SupervisorDaemon {
           },
         };
       });
+      if (recoveredCredentialHandoff) {
+        // The failed bind path suppresses initial inbox startup. A later
+        // successful heartbeat must restore both the visible state and actual
+        // room delivery, otherwise the agent appears healthy but hears nothing.
+        void this.startSupervisedDelivery(entryId).catch(() => undefined);
+      }
     }
     return true;
   }
