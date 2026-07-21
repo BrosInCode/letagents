@@ -10,7 +10,7 @@ import { WorkDurabilityStore } from "./durability-store.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
-import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionStreamEvent, ProviderActionTerminal, ProviderTurnControlResult } from "./provider-action-port.js";
+import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionSpawn, ProviderActionStreamEvent, ProviderActionTerminal, ProviderTurnControlResult } from "./provider-action-port.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
@@ -38,6 +38,15 @@ type RecoveryClock = {
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
 };
+export interface SupervisorGrantHttp {
+  createWorkerSession(input: {
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
+  }): Promise<{ sessionId: string; bearer: string; bearerId: string; expiresAt: string | null }>;
+}
+type InstalledHostGrant = {
+  entryId: string; roomId: string; agentKey: string; grantId: string; supervisorGrant: string;
+  grantGeneration: number; apiUrl: string; daemonGeneration: number;
+};
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
@@ -46,6 +55,15 @@ const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 
 function supervisedRoomPath(roomId: string): string {
   return roomId.split("/").map(encodeURIComponent).join("/");
+}
+
+function hostGrantApiOrigin(value: string): string {
+  const url = new URL(value);
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP.");
+  }
+  return url.origin;
 }
 
 /** The daemon talks to the room API only through the live worker bearer. */
@@ -67,6 +85,28 @@ const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       signal: input.signal,
     });
     if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
+  },
+};
+
+/** Host grants and worker bearers are process-memory values, never daemon state. */
+const productionSupervisorGrantHttp: SupervisorGrantHttp = {
+  async createWorkerSession(input) {
+    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
+      body: JSON.stringify({ generation: input.grantGeneration, room_id: input.roomId, agent_key: input.agentKey, agent_instance_id: input.agentInstanceId, runtime: "supervisor" }),
+    });
+    if (!response.ok) throw new Error(`Supervisor worker session mint failed with HTTP ${response.status}.`);
+    const body = await response.json() as Record<string, unknown>;
+    const requireString = (name: string) => {
+      const value = body[name];
+      if (typeof value !== "string" || !value.trim()) throw new Error(`Supervisor worker session response omitted ${name}.`);
+      return value;
+    };
+    return {
+      sessionId: requireString("session_id"), bearer: requireString("worker_bearer"), bearerId: requireString("worker_bearer_id"),
+      expiresAt: typeof body.worker_bearer_expires_at === "string" ? body.worker_bearer_expires_at : null,
+    };
   },
 };
 
@@ -421,6 +461,8 @@ export class SupervisorDaemon {
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
   private readonly pendingResumeBindings = new Map<string, PendingResumeBinding>();
+  /** Installed by the desktop over the local socket; intentionally never serialized. */
+  private readonly hostGrants = new Map<string, InstalledHostGrant>();
   private readonly nowMs: () => number;
   private readonly setRecoveryTimeout: typeof setTimeout;
   private readonly clearRecoveryTimeout: typeof clearTimeout;
@@ -432,7 +474,7 @@ export class SupervisorDaemon {
   private resolveHandoffCompletion!: () => void;
   private rejectHandoffCompletion!: (error: unknown) => void;
 
-  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp) {
+  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp) {
     this.handoffCompletion = new Promise<void>((resolve, reject) => {
       this.resolveHandoffCompletion = resolve;
       this.rejectHandoffCompletion = reject;
@@ -610,6 +652,15 @@ export class SupervisorDaemon {
           daemon_generation: Number(params.daemon_generation ?? 0),
         });
       }
+      if (request.method === "supervisor.install_host_grant") {
+        const params = this.paramsRecord(request.params);
+        return this.installHostGrant({
+          entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""), agent_key: String(params.agent_key ?? ""),
+          grant_id: String(params.grant_id ?? ""), supervisor_grant: String(params.supervisor_grant ?? ""),
+          grant_generation: Number(params.grant_generation ?? NaN), api_url: String(params.api_url ?? ""),
+          daemon_generation: Number(params.daemon_generation ?? NaN),
+        });
+      }
       if (request.method === "supervisor.borrow_worker_credential") {
         const params = this.paramsRecord(request.params);
         return this.borrowWorkerCredential({
@@ -686,6 +737,7 @@ export class SupervisorDaemon {
     // continuations before awaiting any drain so they cannot retain a socket
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
+    this.hostGrants.clear();
     await this.fenceAndDrainDeliveryCutovers();
     await this.supervisedDelivery?.fenceAndDrain();
     for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
@@ -720,6 +772,7 @@ export class SupervisorDaemon {
   private async stopForHandoff(): Promise<void> {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
+    this.hostGrants.clear();
     const failures: unknown[] = [];
     try { await this.fenceAndDrainDeliveryCutovers(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
@@ -1917,10 +1970,11 @@ export class SupervisorDaemon {
     const head = nonfinal[0] ?? null;
     const blocked = receipts.find((receipt) => receipt.receipt_state === "blocked") ?? null;
     const hasCurrentBinding = Boolean(bindingMatchesCurrentGeneration && binding);
+    const waitingForDesktopGrant = this.requiresHostGrant(entry) && !this.currentHostGrant(entry);
     const connection = hasCurrentBinding
       ? { state: "connected" as const, observed_at: binding!.updated_at, detail: "supervised worker session bound" }
       : entry.desired_state === "running" && ["starting", "recovering"].includes(entry.observed_state)
-        ? { state: "reconnecting" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: "Awaiting the current worker binding." }
+        ? { state: "reconnecting" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: waitingForDesktopGrant ? "Waiting for desktop credential handoff." : "Awaiting the current worker binding." }
         : { state: "disconnected" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: "No current supervised worker binding." };
     const cutoverNeedsAttention = entry.provider === "codex"
       && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
@@ -1933,7 +1987,7 @@ export class SupervisorDaemon {
           detail: `Daemon inbox cutover needs attention; legacy polling remains fenced. ${entry.delivery_cutover?.error ?? "Exact turn state is uncertain."}`,
         }
       : !hasCurrentBinding || !credential
-      ? { state: "waiting_for_desktop_credentials" as const, pending_count: nonfinal.length, blocked_by_message_id: blocked?.source_message_id ?? null, detail: hasCurrentBinding ? "Desktop credentials have not been handed to this daemon." : "A current worker binding is required before delivery can start." }
+      ? { state: "waiting_for_desktop_credentials" as const, pending_count: nonfinal.length, blocked_by_message_id: blocked?.source_message_id ?? null, detail: waitingForDesktopGrant || hasCurrentBinding ? "Waiting for desktop credential handoff." : "A current worker binding is required before delivery can start." }
       : blocked
         ? { state: "blocked" as const, pending_count: nonfinal.length, blocked_by_message_id: blocked.source_message_id, detail: blocked.last_error ?? "An earlier delivery needs attention." }
         : nonfinal.length
@@ -2038,6 +2092,10 @@ export class SupervisorDaemon {
 
     if (entry.desired_state === "running") {
       if (entry.condition === "quarantined") return;
+      // daemon_inbox Codex has no ambient MCP credential.  Do not create a
+      // provider (or even a new work execution) until Electron installs the
+      // exact host grant over the local daemon socket.
+      if (this.requiresHostGrant(entry) && !this.currentHostGrant(entry)) return;
       if (entry.observed_state === "failed") {
         const now = this.nowMs();
         const exitsInWindow = (entry.reconciliation?.exit_timestamps_ms ?? [])
@@ -2065,6 +2123,14 @@ export class SupervisorDaemon {
         entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId) ?? entry;
       }
       if (handle) {
+        if (this.requiresHostGrant(entry) && this.currentHostGrant(entry)) {
+          const binding = await this.workerBindings.get(entry.id);
+          const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
+          if (!credential && entry.provider_ref?.execution_generation_id) {
+            const minted = await this.mintHostWorkerSession(entry, entry.provider_ref.execution_generation_id);
+            if (minted) await this.bindMintedHostWorkerSession(entry.id, minted);
+          }
+        }
         if (entry.observed_state !== handle.observedState) {
           await this.transition(entry.id, handle.observedState, entry.condition, "reattached durable provider handle", "daemon-convergence");
         }
@@ -2102,7 +2168,8 @@ export class SupervisorDaemon {
         }
         : null;
       const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
-      const spawn = {
+      let mintedHostSession: Awaited<ReturnType<typeof this.mintHostWorkerSession>> = null;
+      const spawn: ProviderActionSpawn = {
         workAttemptId: attempt.work_attempt_id,
         roomId: entry.room_id,
         cwd: attempt.workspace_path,
@@ -2119,16 +2186,37 @@ export class SupervisorDaemon {
       };
       const ref = entry.provider_ref ? this.providerRef(entry) : null;
       let resumed = false;
+      let providerPersisted = false;
       try {
+        if (this.requiresHostGrant(entry)) {
+          mintedHostSession = await this.mintHostWorkerSession(entry, execution.execution_generation_id);
+          if (!mintedHostSession) throw new Error("Waiting for desktop credential handoff.");
+          Object.assign(spawn, { supervisorWorkerSession: { agentSessionId: mintedHostSession.agentSessionId, roomCursor: null } });
+        }
         const capabilities = await this.providerPort.capabilities(attempt.work_attempt_id, entry.provider);
         resumed = Boolean(ref && capabilities.resume);
         handle = resumed
           ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
           : await this.providerPort.spawn(spawn);
         await this.persistProviderHandle(entry.id, handle, execution.execution_generation_id);
+        providerPersisted = true;
         await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
         await this.installProviderHandle(entry.id, handle, execution.execution_generation_id);
       } catch (error) {
+        // Once the provider reference is durable, do not convert a local
+        // post-spawn bookkeeping/credential issue into a terminal execution.
+        // The exact provider remains the recovery target; no stop, restart,
+        // migration, or second spawn is permitted here.
+        if (providerPersisted) {
+          await this.transition(
+            entry.id,
+            "recovering",
+            "coordination_blocked",
+            "Provider is running; waiting for desktop credential handoff.",
+            "daemon-convergence",
+          );
+          return;
+        }
         const terminal = this.terminalPayload({
           endedAt: new Date().toISOString(), exitCode: null, signal: null,
           terminalCause: "protocol_error", providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
@@ -2142,6 +2230,23 @@ export class SupervisorDaemon {
           throw new Error(`Provider launch failed (${launchMessage}) and durable cleanup failed (${cleanupMessage}).`, { cause: error });
         }
         throw error;
+      }
+      if (mintedHostSession) {
+        try {
+          // The handle is now persisted and installed. A binding failure is a
+          // credential handoff failure, not a provider failure: retain this
+          // exact process/thread and let a later install rotate/rebind it.
+          await this.bindMintedHostWorkerSession(entry.id, mintedHostSession);
+        } catch {
+          await this.transition(
+            entry.id,
+            "recovering",
+            "coordination_blocked",
+            "Provider is running; waiting for desktop credential handoff.",
+            "daemon-convergence",
+          );
+          return;
+        }
       }
       if (["failed", "stopped"].includes(handle.observedState)
         || (handle.observedState === "idle" && entry.delivery_mode !== "daemon_inbox")) {
@@ -2691,11 +2796,11 @@ export class SupervisorDaemon {
     this.recoveryTimers.delete(entryId);
   }
 
-  private async bindWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
+  private async bindWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; credential_ref?: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     return this.serializeEntryTick(input.entry_id, () => this.bindWorkerSessionLocked(input));
   }
 
-  private async bindWorkerSessionLocked(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
+  private async bindWorkerSessionLocked(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; credential_ref?: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
     if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
@@ -2772,6 +2877,96 @@ export class SupervisorDaemon {
     }
     void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
+  }
+
+  private requiresHostGrant(entry: DaemonManifestEntry): boolean {
+    return entry.provider === "codex" && entry.delivery_mode === "daemon_inbox";
+  }
+
+  private currentHostGrant(entry: DaemonManifestEntry): InstalledHostGrant | null {
+    const grant = this.hostGrants.get(entry.id);
+    if (!grant || this.handoffScheduled || grant.daemonGeneration !== this.singleton.currentGeneration
+      || grant.entryId !== entry.id || grant.roomId !== entry.room_id) return null;
+    return grant;
+  }
+
+  /** Mint only after a durable execution exists. The result stays local until the exact provider ref exists. */
+  private async mintHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string): Promise<{
+    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
+  } | null> {
+    const grant = this.currentHostGrant(entry);
+    if (!grant || !entry.work_attempt_id) return null;
+    const minted = await this.supervisorGrantHttp.createWorkerSession({
+      apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+      grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
+      // This is stable for the exact durable attempt, so server-side idempotence
+      // rotates rather than creates a second worker on daemon recovery.
+      agentInstanceId: `daemon:${entry.id}`,
+    });
+    const current = await this.store.getEntry(entry.id);
+    if (!current || !this.currentHostGrant(current)
+      || current.work_attempt_id !== entry.work_attempt_id) return null;
+    const attempt = await this.durability.getAttempt(entry.work_attempt_id);
+    if (!attempt.execution_generations.some((candidate) => candidate.execution_generation_id === executionGenerationId && !candidate.terminal)) return null;
+    await this.workerBindings.recordSupervisedWorkerSession({
+      agent_id: entry.id, room_id: entry.room_id, agent_session_id: minted.sessionId,
+      execution_generation_id: executionGenerationId, credential_ref: minted.bearerId, expires_at: minted.expiresAt,
+    });
+    return { agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, apiUrl: grant.apiUrl, executionGenerationId };
+  }
+
+  /** Provider identity has already been persisted when this binds the raw bearer. */
+  private async bindMintedHostWorkerSession(entryId: string, session: {
+    agentSessionId: string; bearer: string; bearerId: string; apiUrl: string; executionGenerationId: string;
+  }): Promise<void> {
+    const entry = await this.store.getEntry(entryId);
+    if (!entry || !entry.work_attempt_id || !entry.provider_ref || entry.provider_ref.execution_generation_id !== session.executionGenerationId || !this.currentHostGrant(entry)) return;
+    await this.bindWorkerSessionLocked({
+      entry_id: entry.id, room_id: entry.room_id, work_attempt_id: entry.work_attempt_id,
+      execution_generation_id: session.executionGenerationId, agent_session_id: session.agentSessionId,
+      agent_session_token: session.bearer, credential_ref: session.bearerId, api_url: session.apiUrl,
+    });
+  }
+
+  /** Desktop-only local RPC. The host grant itself is never copied to SQLite, activity, or manifests. */
+  private async installHostGrant(input: {
+    entry_id: string; room_id: string; agent_key: string; grant_id: string; supervisor_grant: string;
+    grant_generation: number; api_url: string; daemon_generation: number;
+  }): Promise<{ status: "installed" | "stale"; agent_session_id?: string }> {
+    return this.serializeEntryTick(input.entry_id, async () => {
+      for (const field of ["entry_id", "room_id", "agent_key", "grant_id", "supervisor_grant", "api_url"] as const) {
+        if (!input[field].trim()) throw new Error(`Host grant ${field} is required.`);
+      }
+      if (!Number.isSafeInteger(input.grant_generation) || input.grant_generation < 1
+        || input.daemon_generation !== this.singleton.currentGeneration) return { status: "stale" };
+      let apiUrl: string;
+      try { apiUrl = hostGrantApiOrigin(input.api_url); } catch { throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP."); }
+      const entry = await this.store.getEntry(input.entry_id);
+      if (!entry || !this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
+      this.hostGrants.set(entry.id, {
+        entryId: entry.id, roomId: entry.room_id, agentKey: input.agent_key, grantId: input.grant_id,
+        supervisorGrant: input.supervisor_grant, grantGeneration: input.grant_generation, apiUrl,
+        daemonGeneration: input.daemon_generation,
+      });
+      // Recovery must not signal, restart, or migrate a live provider. It only
+      // rotates the worker bearer against the persisted exact generation.
+      const live = this.liveHandles.get(entry.id);
+      if (entry.provider_ref && entry.work_attempt_id && live
+        && live.workAttemptId === entry.work_attempt_id
+        && live.providerContinuationId === entry.provider_ref.provider_continuation_id) {
+        const attempt = await this.durability.getAttempt(entry.work_attempt_id);
+        const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === entry.provider_ref!.execution_generation_id);
+        if (execution && !execution.terminal) {
+          const minted = await this.mintHostWorkerSession(entry, execution.execution_generation_id);
+          if (minted) {
+            await this.bindMintedHostWorkerSession(entry.id, minted);
+            return { status: "installed", agent_session_id: minted.agentSessionId };
+          }
+        }
+      }
+      this.requestConvergence(entry.id);
+      return { status: "installed" };
+    });
   }
 
   private async verifyWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {

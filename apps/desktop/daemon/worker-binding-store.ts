@@ -22,6 +22,17 @@ export interface WorkerSessionBinding {
 
 export type WorkerSessionBindingInput = Omit<WorkerSessionBinding, "credential_ref" | "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at"> & {
   agent_session_token: string;
+  /** Server-issued opaque bearer id.  It is safe to persist, unlike the bearer. */
+  credential_ref?: string;
+};
+export type SupervisedWorkerSession = {
+  agent_id: string;
+  room_id: string;
+  agent_session_id: string;
+  execution_generation_id: string;
+  credential_ref: string;
+  expires_at: string | null;
+  updated_at: string;
 };
 type Row = Record<string, unknown>;
 type Reservation = { reservationId: string; binding: WorkerSessionBinding; bindingEpoch: number; sequence: number; observedAt: string; observedAtMs: number };
@@ -75,6 +86,36 @@ export class WorkerBindingStore {
     return this.withMutation(async (database) => (database.prepare("SELECT * FROM worker_session_bindings ORDER BY entry_id").all() as Row[]).map(rowToBinding));
   }
 
+  /** Public session metadata only; the raw bearer deliberately has no durable home. */
+  async recordSupervisedWorkerSession(input: Omit<SupervisedWorkerSession, "updated_at">): Promise<SupervisedWorkerSession> {
+    for (const field of ["agent_id", "room_id", "agent_session_id", "execution_generation_id", "credential_ref"] as const) {
+      if (!input[field].trim()) throw new Error(`Supervised worker session ${field} is required.`);
+    }
+    return this.withMutation(async (database) => this.transaction(database, () => {
+      const session: SupervisedWorkerSession = { ...input, updated_at: new Date().toISOString() };
+      run(database.prepare(`INSERT INTO supervised_worker_sessions
+        (agent_id, room_id, agent_session_id, execution_generation_id, credential_ref, expires_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id, agent_session_id=excluded.agent_session_id,
+          execution_generation_id=excluded.execution_generation_id, credential_ref=excluded.credential_ref,
+          expires_at=excluded.expires_at, updated_at=excluded.updated_at`),
+      session.agent_id, session.room_id, session.agent_session_id, session.execution_generation_id,
+      session.credential_ref, session.expires_at, session.updated_at);
+      return session;
+    }));
+  }
+
+  async supervisedWorkerSession(agentId: string): Promise<SupervisedWorkerSession | null> {
+    return this.withMutation(async (database) => {
+      const row = database.prepare("SELECT * FROM supervised_worker_sessions WHERE agent_id=?").get(agentId) as Row | undefined;
+      return row ? {
+        agent_id: String(row.agent_id), room_id: String(row.room_id), agent_session_id: String(row.agent_session_id),
+        execution_generation_id: String(row.execution_generation_id), credential_ref: String(row.credential_ref),
+        expires_at: typeof row.expires_at === "string" ? row.expires_at : null, updated_at: String(row.updated_at),
+      } : null;
+    });
+  }
+
   async bind(input: WorkerSessionBindingInput): Promise<WorkerSessionBinding> {
     this.validate(input);
     // Test/fence seam must remain outside the SQLite transaction: a stalled
@@ -90,7 +131,7 @@ export class WorkerBindingStore {
       const binding: WorkerSessionBinding = {
         entry_id: input.entry_id, room_id: input.room_id, work_attempt_id: input.work_attempt_id,
         execution_generation_id: input.execution_generation_id, agent_session_id: input.agent_session_id,
-        credential_ref: randomUUID(), api_url: new URL(input.api_url).origin,
+        credential_ref: input.credential_ref?.trim() || randomUUID(), api_url: new URL(input.api_url).origin,
         room_cursor: sameSession ? prior!.room_cursor : null,
         // Credentials may rotate, but the native API's sequence authority is
         // per durable agent entry. Never reuse a journal/API sequence.
@@ -333,7 +374,7 @@ export class WorkerBindingStore {
         last_observed_at_ms=MAX(worker_binding_watermarks.last_observed_at_ms, excluded.last_observed_at_ms),
         updated_at=CASE WHEN excluded.last_observed_at_ms >= worker_binding_watermarks.last_observed_at_ms THEN excluded.updated_at ELSE worker_binding_watermarks.updated_at END`), entryId, bindingEpoch, lastSequence, lastObservedAtMs, updatedAt);
   }
-  private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); const url = new URL(input.api_url); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
+  private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); if (input.credential_ref !== undefined && !input.credential_ref.trim()) throw new Error("Worker binding credential_ref is required when supplied."); const url = new URL(input.api_url); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
   private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
   private async transaction<T>(database: DatabaseSync, operation: () => T): Promise<T> {
     let open = false; let committed = false; let result!: T;

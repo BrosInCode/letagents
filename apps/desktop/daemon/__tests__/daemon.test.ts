@@ -868,6 +868,71 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
   }
 });
 
+test("daemon host-grant bind failure retains the exact spawned provider for a later credential retry", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "host_grant_bind_retry");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: "host_grant_bind_retry", leaseId: "host_grant_bind_retry", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  const handle = { workAttemptId: attempt.work_attempt_id, pid: 7711, providerContinuationId: "host-grant-continuation", observedState: "working" as const };
+  let spawns = 0;
+  let stops = 0;
+  const mintCalls: Array<{ grantGeneration: number; agentInstanceId: string }> = [];
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("must not resume a fresh host-grant provider"); }, poke: async () => {},
+    stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const grants = {
+    createWorkerSession: async (input: { grantGeneration: number; agentInstanceId: string }) => {
+      mintCalls.push(input);
+      return { sessionId: "session-host", bearer: "host-bearer-secret", bearerId: "bearer-host", expiresAt: "2030-01-01T00:00:00.000Z" };
+    },
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, grants);
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { workerBindings: WorkerBindingStore; publishNativeActivity: () => Promise<boolean> };
+    const originalBind = internals.workerBindings.bind.bind(internals.workerBindings);
+    internals.publishNativeActivity = async () => true;
+    internals.workerBindings.bind = async () => { throw new Error("simulated binding write failure"); };
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "host_grant_bind_retry", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(spawns, 0, "daemon_inbox Codex cannot spawn without the desktop grant");
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const install = { entry_id: "host_grant_bind_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-1", supervisor_grant: "host-grant-secret", grant_generation: 7, api_url: "http://127.0.0.1:3000", daemon_generation: generation };
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", install)).ok, true);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "coordination_blocked", "post-spawn binding failure");
+    assert.equal(spawns, 1);
+    assert.equal(stops, 0, "credential failure must never stop the spawned provider");
+    const beforeRetry = await daemonRequest(paths.socketPath, "attempt.read", { id: "host_grant_bind_retry" });
+    assert.equal((beforeRetry.result as { execution_generations: Array<{ terminal: unknown }> }).execution_generations[0]?.terminal, null);
+    internals.workerBindings.bind = originalBind;
+    const retryInstall = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", install);
+    assert.equal(retryInstall.ok, true, retryInstall.error);
+    await eventually(async () => Boolean(await internals.workerBindings.get("host_grant_bind_retry")), "host worker binding retry");
+    assert.equal(spawns, 1, "retry rebinds the exact provider rather than spawning a replacement");
+    assert.equal(mintCalls.every((call) => call.grantGeneration === 7 && call.agentInstanceId === "daemon:host_grant_bind_retry"), true);
+    const raw = await readFile(paths.manifestPath);
+    assert.equal(raw.includes(Buffer.from("host-grant-secret")), false);
+    assert.equal(raw.includes(Buffer.from("host-bearer-secret")), false);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("an unattached live durable generation blocks a duplicate provider start", async () => {
   const env = await fixture();
   const paths = {
