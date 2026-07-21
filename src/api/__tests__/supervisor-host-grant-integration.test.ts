@@ -94,25 +94,45 @@ test("lifecycle mint enforces room and agent allowlists through the actual route
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
   const allowed = recorder();
-  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key } }, allowed);
+  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "worker_route_1" } }, allowed);
   assert.equal(allowed.statusCode, 201); assert.equal((allowed.body as any).session_token, undefined);
+  assert.ok((allowed.body as any).worker_bearer_id);
+  assert.ok((allowed.body as any).worker_bearer_expires_at);
   const mintedAuth = await resolveRequestAuth({ headers: { authorization: `Bearer ${(allowed.body as any).worker_bearer}` } } as never);
   assert.ok(mintedAuth.agentSession);
   assert.ok(new Date(mintedAuth.agentSession!.expires_at).getTime() <= new Date(grantResult.grant.expires_at).getTime());
   const denied = recorder();
-  await mint({ ...reqBase, body: { generation: 1, room_id: "other_room", agent_key: agent.canonical_key } }, denied);
+  await mint({ ...reqBase, body: { generation: 1, room_id: "other_room", agent_key: agent.canonical_key, agent_instance_id: "worker_route_1" } }, denied);
   assert.equal(denied.statusCode, 403);
   const otherAgent = await authDb!.registerAgentIdentity({ canonical_key: "owner/disallowed-agent", name: "disallowed-agent", display_name: "Disallowed Agent", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
   const agentDenied = recorder();
-  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: otherAgent.canonical_key } }, agentDenied);
+  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: otherAgent.canonical_key, agent_instance_id: "worker_route_1" } }, agentDenied);
   assert.equal(agentDenied.statusCode, 403);
+});
+
+test("idempotent supervisor worker creation rotates one session and revokes its old bearer", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const body = { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "durable-worker-1" };
+  const first = recorder();
+  await mint({ ...reqBase, body }, first);
+  assert.equal(first.statusCode, 201);
+  const second = recorder();
+  await mint({ ...reqBase, body }, second);
+  assert.equal(second.statusCode, 201);
+  assert.equal((first.body as any).session_id, (second.body as any).session_id);
+  assert.notEqual((first.body as any).worker_bearer, (second.body as any).worker_bearer);
+  assert.notEqual((first.body as any).worker_bearer_id, (second.body as any).worker_bearer_id);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(first.body as any).worker_bearer}` } } as never)).authKind, null);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(second.body as any).worker_bearer}` } } as never)).authKind, "agent_session");
+  assert.equal((second.body as any).session_token, undefined);
 });
 
 test("lifecycle handlers fail closed when the path grant differs from the authenticated grant", { skip: requiresDatabase }, async () => {
   const { handlers, reqBase } = await setupLifecycle();
   const requests: Array<[string, Record<string, unknown>]> = [
     ["POST /supervisor-host-grants/:grantId/handoff", { body: { generation: 1 } }],
-    ["POST /supervisor-host-grants/:grantId/worker-sessions", { body: { generation: 1, room_id: "room", agent_key: "owner/agent" } }],
+    ["POST /supervisor-host-grants/:grantId/worker-sessions", { body: { generation: 1, room_id: "room", agent_key: "owner/agent", agent_instance_id: "worker_1" } }],
     ["POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate", { params: { grantId: "different_grant", sessionId: "session" }, body: { generation: 1, bearer_id: "bearer" } }],
     ["POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end", { params: { grantId: "different_grant", sessionId: "session" }, body: { generation: 1 } }],
   ];
@@ -266,7 +286,7 @@ test("concurrent renewal has exactly one winner and stale token cannot replay", 
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${winner!.token}` } } as never)).authKind, "supervisor_grant");
 });
 
-test("handoff is a current-generation CAS and revoked/lapsed grants cannot authenticate", { skip: requiresDatabase }, async () => {
+test("handoff is a current-generation CAS, rotates its host token, and rejects stale authority", { skip: requiresDatabase }, async () => {
   await seedOwner("owner_2");
   const created = await authDb!.createSupervisorHostGrant({
     owner_account_id: "owner_2", host_id: "host_2", installation_id: "install_2",
@@ -277,6 +297,11 @@ test("handoff is a current-generation CAS and revoked/lapsed grants cannot authe
     authDb!.advanceSupervisorHostGrantGeneration({ grant_id: created.grant.grant_id, expected_generation: 1, expected_token_version: 1 }),
   ]);
   assert.equal([left, right].filter(Boolean).length, 1);
+  const winner = left ?? right;
+  assert.equal(winner!.grant.current_generation, 2);
+  assert.equal(winner!.grant.token_version, 2);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${created.token}` } } as never)).authKind, null);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${winner!.token}` } } as never)).authKind, "supervisor_grant");
   assert.equal((await authDb!.advanceSupervisorHostGrantGeneration({ grant_id: created.grant.grant_id, expected_generation: 1, expected_token_version: 1 })), null);
   await authDb!.revokeSupervisorHostGrant({ grant_id: created.grant.grant_id, owner_account_id: "owner_2" });
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${created.token}` } } as never)).authKind, null);

@@ -538,6 +538,14 @@ async function rotateRoomAgentSessionTx(
   if (!updated) throw new Error("Agent session replacement target disappeared.");
 
   if (workerBearer) {
+    // A supervisor restart replaces the worker credential on the same durable
+    // session.  Do not leave the predecessor usable alongside the retry.
+    await tx.update(room_agent_session_bearers)
+      .set({ revoked_at: now })
+      .where(and(
+        eq(room_agent_session_bearers.session_id, current.session_id),
+        isNull(room_agent_session_bearers.revoked_at),
+      ));
     await tx.insert(room_agent_session_bearers).values({
       bearer_id: await nextPrefixedId("room_agent_session_bearers", "agent_bearer", tx),
       session_id: current.session_id,
@@ -678,6 +686,55 @@ export async function createFencedRoomAgentSession(
   });
 }
 
+/**
+ * Create or restart the exact worker identity owned by a supervisor grant.
+ *
+ * This is deliberately separate from the general reconnect path: a
+ * supervisor never receives an owner-capable session token with which to
+ * prove replacement.  The current grant fence plus this tuple lock are the
+ * authority to rotate the worker bearer in place.
+ */
+export async function createOrRotateSupervisorWorkerSession(
+  input: CreateRoomAgentSessionInput & {
+    supervisor_grant_id: string;
+    supervisor_grant_fence: SupervisorGrantFence;
+    agent_instance_id: string;
+  },
+): Promise<{ session: CreatedRoomAgentSession; bearer: RoomAgentSessionBearer }> {
+  const instanceId = input.agent_instance_id.trim();
+  if (!instanceId) throw new Error("Supervisor worker agent_instance_id is required.");
+
+  return db.transaction(async (tx) => {
+    if (!(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+      throw new Error("Supervisor grant fence is stale.");
+    }
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${input.supervisor_grant_id}:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
+    const [existing] = await tx.select()
+      .from(room_agent_sessions)
+      .where(and(
+        eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
+        eq(room_agent_sessions.room_id, input.room_id),
+        eq(room_agent_sessions.agent_key, input.agent_key),
+        eq(room_agent_sessions.agent_instance_id, instanceId),
+        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+        isNull(room_agent_sessions.ended_at),
+      ))
+      .orderBy(desc(room_agent_sessions.last_seen_at))
+      .limit(1);
+    const session = existing
+      ? await rotateRoomAgentSessionTx(tx, existing as RoomAgentSessionRow, { ...input, agent_instance_id: instanceId })
+      : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId });
+    if (!session.worker_bearer) throw new Error("Worker bearer mode is not enabled.");
+    const [bearer] = await tx.select().from(room_agent_session_bearers).where(and(
+      eq(room_agent_session_bearers.session_id, session.session_id),
+      eq(room_agent_session_bearers.token_hash, hashToken(session.worker_bearer)),
+      isNull(room_agent_session_bearers.revoked_at),
+    )).limit(1);
+    if (!bearer) throw new Error("Worker bearer was not persisted.");
+    return { session, bearer: toRoomAgentSessionBearer(bearer) };
+  });
+}
+
 export async function createSupervisorHostGrant(input: {
   owner_account_id: string;
   host_id: string;
@@ -754,20 +811,24 @@ export async function advanceSupervisorHostGrantGeneration(input: {
   grant_id: string;
   expected_generation: number;
   expected_token_version: number;
-}): Promise<SupervisorHostGrant | null> {
+}): Promise<{ grant: SupervisorHostGrant; token: string } | null> {
   return db.transaction(async (tx) => {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${input.grant_id}`}, 0))`);
-  const now = new Date().toISOString();
-  const [updated] = await tx.update(supervisor_host_grants).set({
-    current_generation: input.expected_generation + 1, updated_at: now,
-  }).where(and(
-    eq(supervisor_host_grants.grant_id, input.grant_id),
-    eq(supervisor_host_grants.current_generation, input.expected_generation),
-    eq(supervisor_host_grants.token_version, input.expected_token_version),
-    isNull(supervisor_host_grants.revoked_at),
-    gt(supervisor_host_grants.expires_at, now),
-  )).returning();
-  return updated ? toSupervisorHostGrant(updated) : null;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${input.grant_id}`}, 0))`);
+    const now = new Date().toISOString();
+    const token = makeSupervisorGrantToken();
+    const [updated] = await tx.update(supervisor_host_grants).set({
+      current_generation: input.expected_generation + 1,
+      token_hash: hashToken(token),
+      token_version: input.expected_token_version + 1,
+      updated_at: now,
+    }).where(and(
+      eq(supervisor_host_grants.grant_id, input.grant_id),
+      eq(supervisor_host_grants.current_generation, input.expected_generation),
+      eq(supervisor_host_grants.token_version, input.expected_token_version),
+      isNull(supervisor_host_grants.revoked_at),
+      gt(supervisor_host_grants.expires_at, now),
+    )).returning();
+    return updated ? { grant: toSupervisorHostGrant(updated), token } : null;
   });
 }
 

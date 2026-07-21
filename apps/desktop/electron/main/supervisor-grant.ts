@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,10 +19,14 @@ interface SecretStorage {
 type StoredGrant = DesktopSupervisorGrantMetadata & {
   /** Canonical agent identity. This is deliberately not a display name. */
   agentKey: string;
+  /** Durable desktop-managed agent entry identity; never a renderer secret. */
+  entryId?: string;
+  /** Last daemon generation that safely installed this grant, if any. */
+  lastInstalledDaemonGeneration?: number | null;
   encryptedToken: string;
 };
 type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: string };
-type StoredGrantRegistry = { version: 2; grants: Record<string, StoredGrant> };
+type StoredGrantRegistry = { version: 3; grants: Record<string, StoredGrant> };
 const MANUAL_GRANT_KEY = "__manual__";
 
 export type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
@@ -39,6 +44,8 @@ function getStorage(): SecretStorage {
 }
 
 function storePath(): string {
+  const override = process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH?.trim();
+  if (override) return override;
   try {
     const electron = require("electron") as { app?: { getPath(name: "userData"): string } };
     const userData = electron.app?.getPath("userData");
@@ -80,17 +87,17 @@ export function canonicalSupervisorGrantAgentKey(agentKey: string): string {
 }
 
 function metadataOf(stored: StoredGrant): DesktopSupervisorGrantMetadata {
-  const { agentKey: _agentKey, encryptedToken: _secret, ...metadata } = stored;
+  const { agentKey: _agentKey, entryId: _entryId, lastInstalledDaemonGeneration: _daemonGeneration, encryptedToken: _secret, ...metadata } = stored;
   return metadata;
 }
 
 function isRegistry(value: unknown): value is StoredGrantRegistry {
-  return Boolean(value && typeof value === "object" && (value as { version?: unknown }).version === 2
+  return Boolean(value && typeof value === "object" && ((value as { version?: unknown }).version === 2 || (value as { version?: unknown }).version === 3)
     && typeof (value as { grants?: unknown }).grants === "object");
 }
 
 function registryFrom(value: unknown): StoredGrantRegistry | null {
-  if (isRegistry(value)) return value;
+  if (isRegistry(value)) return { version: 3, grants: (value as { grants: Record<string, StoredGrant> }).grants };
   if (!value || typeof value !== "object" || !("encryptedToken" in value)) return null;
   // Version 1 had one desktop-wide grant. Treat it as manual unless it was
   // already narrowed to a single exact agent identity.
@@ -98,7 +105,7 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
   if (!legacy.grantId || !legacy.encryptedToken) return null;
   const candidate = legacy.allowedAgentKeys.length === 1 ? legacy.allowedAgentKeys[0] : MANUAL_GRANT_KEY;
   const agentKey = candidate === MANUAL_GRANT_KEY ? candidate : canonicalSupervisorGrantAgentKey(candidate);
-  return { version: 2, grants: { [agentKey]: { ...legacy, agentKey } } };
+  return { version: 3, grants: { [agentKey]: { ...legacy, agentKey } } };
 }
 
 async function readRegistry(): Promise<StoredGrantRegistry | null> {
@@ -108,8 +115,42 @@ async function readRegistry(): Promise<StoredGrantRegistry | null> {
 async function writeRegistry(registry: StoredGrantRegistry): Promise<void> {
   const path = storePath();
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify(registry)}\n`, { encoding: "utf8", mode: 0o600 });
+  // Never replace an encrypted registry in-place: a crash must leave either
+  // the old complete registry or the new complete registry, never JSON that
+  // drops a different agent's credential.
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(registry)}\n`, { encoding: "utf8", mode: 0o600 });
+  await rename(temporaryPath, path);
   await chmod(path, 0o600);
+}
+
+export interface DesktopSupervisorGrantLifecycleInput {
+  hostId: string;
+  /** Durable desktop-managed agent entry identity. */
+  entryId: string;
+  agentKey: string;
+  allowedRoomIds: string[];
+  ttlMs?: number;
+  lastInstalledDaemonGeneration?: number | null;
+}
+
+type SupervisorGrantApiResponse = {
+  grant_id: string; host_id: string; installation_id: string; allowed_room_ids: string[];
+  allowed_agent_keys: string[]; current_generation: number; expires_at: string; supervisor_grant: string;
+};
+
+type GrantStorageOptions = { storage?: SecretStorage; apiFetch?: typeof apiFetch };
+
+/**
+ * Stable server installation fence for one desktop-managed agent entry.  It
+ * is intentionally derived rather than user supplied, so two agents on the
+ * same desktop cannot collide at the server's host/installation unique index.
+ */
+export function desktopSupervisorGrantInstallationId(hostId: string, entryId: string): string {
+  const host = hostId.trim();
+  const entry = entryId.trim();
+  if (!host || !entry) throw new Error("A desktop host and durable agent entry identity are required.");
+  return `desktop-agent-${createHash("sha256").update(`${host}\u0000${entry}`).digest("hex").slice(0, 40)}`;
 }
 
 export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSupervisorGrantInput): Promise<DesktopSupervisorGrantMetadata> {
@@ -135,7 +176,7 @@ export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSup
     }
     const agentKey = canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!);
     const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant);
-    await writeRegistry({ version: 2, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } } });
+    await writeRegistry({ version: 3, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } } });
     return metadata;
   } catch (error) {
     // Do not leave an unusable, owner-scoped server grant behind when the
@@ -162,34 +203,117 @@ export async function readDesktopSupervisorGrantToken(): Promise<string | null> 
 }
 
 /** Main-process only. Renderer IPC intentionally exposes metadata, never this value. */
-export async function readDesktopSupervisorGrantForAgent(agentKey: string): Promise<{
+export async function readDesktopSupervisorGrantForAgent(agentKey: string, options: GrantStorageOptions = {}): Promise<{
   metadata: DesktopSupervisorGrantMetadata;
   token: string;
+  entryId: string | null;
+  lastInstalledDaemonGeneration: number | null;
 } | null> {
   const registry = await readRegistry();
   const stored = registry?.grants[canonicalSupervisorGrantAgentKey(agentKey)];
-  const token = stored && decryptSupervisorGrantFromStorage(stored.encryptedToken);
-  return stored && token ? { metadata: metadataOf(stored), token } : null;
+  const token = stored && decryptSupervisorGrantFromStorage(stored.encryptedToken, options.storage);
+  return stored && token ? {
+    metadata: metadataOf(stored), token,
+    entryId: stored.entryId?.trim() || null,
+    lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,
+  } : null;
 }
 
 /**
  * Main-process handoff helper. It stores the replacement encrypted at rest;
  * callers deliver its plaintext directly to the successor daemon socket.
  */
-export async function storeDesktopSupervisorGrantForAgent(input: {
+export async function replaceDesktopSupervisorGrantForAgent(input: {
   agentKey: string;
   metadata: DesktopSupervisorGrantMetadata;
   token: string;
-}): Promise<void> {
+  entryId?: string;
+  lastInstalledDaemonGeneration?: number | null;
+}, options: GrantStorageOptions = {}): Promise<void> {
   const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
   if (!input.token.trim()) throw new Error("A supervisor grant is required.");
   if (input.metadata.allowedAgentKeys.length !== 1
     || canonicalSupervisorGrantAgentKey(input.metadata.allowedAgentKeys[0]!) !== agentKey) {
     throw new Error("A per-agent desktop grant must be scoped to that exact one agent identity.");
   }
-  const registry = (await readRegistry()) ?? { version: 2, grants: {} };
-  registry.grants[agentKey] = { ...input.metadata, agentKey, encryptedToken: encryptSupervisorGrantForStorage(input.token) };
+  const registry = (await readRegistry()) ?? { version: 3, grants: {} };
+  registry.grants[agentKey] = {
+    ...input.metadata,
+    agentKey,
+    entryId: input.entryId?.trim() || undefined,
+    lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+    encryptedToken: encryptSupervisorGrantForStorage(input.token, options.storage),
+  };
   await writeRegistry(registry);
+}
+
+/** Backward-compatible main-process storage name. */
+export async function storeDesktopSupervisorGrantForAgent(input: {
+  agentKey: string;
+  metadata: DesktopSupervisorGrantMetadata;
+  token: string;
+  entryId?: string;
+  lastInstalledDaemonGeneration?: number | null;
+}, options: GrantStorageOptions = {}): Promise<void> {
+  await replaceDesktopSupervisorGrantForAgent(input, options);
+}
+
+/**
+ * Main-process-only lifecycle helper for desktop-managed agents.  It performs
+ * the Keychain availability check before any API call, scopes every grant to
+ * exactly one canonical agent key, and retains plaintext only for the caller
+ * to install directly into that agent's daemon process.
+ */
+export async function getOrProvisionDesktopSupervisorGrantForAgent(
+  input: DesktopSupervisorGrantLifecycleInput,
+  options: GrantStorageOptions = {},
+): Promise<{
+  metadata: DesktopSupervisorGrantMetadata;
+  token: string;
+  entryId: string;
+  lastInstalledDaemonGeneration: number | null;
+}> {
+  const storage = options.storage ?? getStorage();
+  if (!storage.isEncryptionAvailable()) {
+    throw new Error("macOS Keychain encryption is unavailable; host grant was not provisioned.");
+  }
+  const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
+  const entryId = input.entryId.trim();
+  const installationId = desktopSupervisorGrantInstallationId(input.hostId, entryId);
+  const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
+  if (existing && existing.entryId === entryId) {
+    return { ...existing, entryId };
+  }
+
+  const request = options.apiFetch ?? apiFetch;
+  const response = await request<SupervisorGrantApiResponse>("/supervisor-host-grants", {
+    method: "POST",
+    body: JSON.stringify({
+      host_id: input.hostId,
+      installation_id: installationId,
+      allowed_room_ids: input.allowedRoomIds,
+      allowed_agent_keys: [agentKey],
+      ttl_ms: input.ttlMs,
+    }),
+  });
+  const metadata = toMetadata(response);
+  try {
+    if (metadata.installationId !== installationId || metadata.allowedAgentKeys.length !== 1
+      || canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== agentKey) {
+      throw new Error("The provisioned desktop grant was not scoped to the requested agent entry.");
+    }
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey, metadata, token: response.supervisor_grant, entryId,
+      lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+    }, { storage });
+    return {
+      metadata, token: response.supervisor_grant, entryId,
+      lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+    };
+  } catch (error) {
+    await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
+    throw error;
+  }
 }
 
 export async function clearDesktopSupervisorGrant(): Promise<void> {
