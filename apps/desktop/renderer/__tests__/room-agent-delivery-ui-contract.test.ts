@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { roomAgentDeliveryGroup, roomAgentDeliverySummary } from "../src/domain/room-agent-delivery";
+import { roomAgentActivityProjection, roomAgentDeliveryGroup, roomAgentDeliverySummary } from "../src/domain/room-agent-delivery";
 import { roomMessageRevealDestination } from "../src/domain/room-message-reveal";
 
 const rendererRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -34,9 +34,26 @@ describe("durable room delivery UI contracts", () => {
   });
 
   it("deduplicates only matching projected legacy roster rows and retains mixed rollout rows", async () => {
+    const stopped = {
+      roomId: "focus_37",
+      roomAgentState: { connection: { state: "disconnected" } },
+      desiredState: "stopped",
+      observedState: "stopped",
+      agentSessionId: "agent_session_stale",
+    };
+    const running = {
+      ...stopped,
+      desiredState: "running",
+      observedState: "working",
+      agentSessionId: "agent_session_live",
+    };
+    const projection = roomAgentActivityProjection([stopped, running] as never, "focus_37");
+    assert.deepEqual(projection.liveAgents, [running]);
+    assert.deepEqual([...projection.projectedSessionIds], ["agent_session_stale", "agent_session_live"]);
+
     const activity = await source("src/components/desktop/content/RoomActivityTabView.vue");
-    assert.match(activity, /entry\.roomId === props\.roomIdentifier && entry\.roomAgentState/);
-    assert.match(activity, /!liveRosterAgents\.length && !truthfulAgents\.length/);
+    assert.match(activity, /roomAgentActivityProjection\(props\.supervisorEntries, props\.roomIdentifier\)/);
+    assert.match(activity, /!hasLiveActivity/);
     assert.match(activity, /projectedSessionIds/);
     assert.match(activity, /legacyReachableAgents/);
     assert.match(activity, /legacyWorkingAgents/);
