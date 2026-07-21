@@ -4671,7 +4671,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     onStream: async (_providerHandle, listener) => { streamListeners.add(listener); return () => streamListeners.delete(listener); },
   });
 
-  const first = new SupervisorDaemon(paths, "darwin", port(), true);
+  const first = new SupervisorDaemon(paths, "darwin", port(), true, 2_000);
   let second: SupervisorDaemon | null = null;
   let third: SupervisorDaemon | null = null;
   try {
@@ -4730,10 +4730,16 @@ test("generation handoff reattaches the same provider and publishes its supervis
       "Provider is running; waiting for desktop credential handoff.",
       "test-stale-handoff-latch",
     );
-    const recoveryPublication = first as unknown as {
-      publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean>;
-    };
-    assert.equal(await recoveryPublication.publishNativeActivity("supervised_handoff", "diagnostic/recover-bearer", "idle"), true);
+    const heartbeatCountBeforeRecovery = nativeRequests.filter((request) => request.body.method === "native_harness.heartbeat").length;
+    await eventually(
+      async () => nativeRequests.filter((request) => request.body.method === "native_harness.heartbeat").length > heartbeatCountBeforeRecovery,
+      "credential handoff latch recovery heartbeat",
+      5_000,
+    );
+    await eventually(async () => {
+      const current = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+      return current.condition === "none" && current.observed_state === "working";
+    }, "credential handoff latch self-heal");
     const recoveredFromStaleHandoff = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
     assert.equal(recoveredFromStaleHandoff.condition, "none");
     assert.equal(recoveredFromStaleHandoff.observed_state, "working");

@@ -2891,7 +2891,11 @@ export class SupervisorDaemon {
         const manifestEntry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
         if (!manifestEntry || this.liveHandles.get(entryId) !== current) return;
         if (this.liveBindingIdentities.get(entryId)?.executionGenerationId !== manifestEntry.provider_ref?.execution_generation_id) return;
-        if (!["working", "idle"].includes(manifestEntry.observed_state)) return;
+        const retriesCredentialHandoff = manifestEntry.desired_state === "running"
+          && manifestEntry.observed_state === "recovering"
+          && manifestEntry.condition === "coordination_blocked"
+          && manifestEntry.last_error === "Provider is running; waiting for desktop credential handoff.";
+        if (!["working", "idle"].includes(manifestEntry.observed_state) && !retriesCredentialHandoff) return;
         if (!["working", "idle"].includes(current.observedState)) return;
         const hostGrant = this.requiresHostGrant(manifestEntry) ? this.currentHostGrant(manifestEntry) : null;
         if (hostGrant && this.hostGrantNeedsRenewal(hostGrant)) {
