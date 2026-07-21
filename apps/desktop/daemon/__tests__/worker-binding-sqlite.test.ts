@@ -392,6 +392,43 @@ test("a mismatched pre-existing backup fails closed without replacing either pri
   } finally { await env.cleanup(); }
 });
 
+test("reopen upgrades an exact pre-redaction migration backup without losing committed bindings", async () => {
+  const env = await fixture(); try {
+    const raw = legacyRaw("agent_a");
+    await writeFile(env.legacy, raw, { mode: 0o600 });
+    const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
+    assert.equal((await initial.get("agent_a"))?.agent_session_id, "session_a");
+    await initial.close();
+
+    // Simulate the backup format emitted by the deployed pre-redaction
+    // daemon: the SQLite record contains this exact checksum, but the backup
+    // still contains the original credential-bearing envelope.
+    await writeFile(`${env.legacy}.migrated-backup`, raw, { mode: 0o600 });
+    const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
+    assert.equal((await reopened.get("agent_a"))?.agent_session_id, "session_a");
+    await reopened.close();
+    assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), raw);
+    assert.equal((await stat(`${env.legacy}.migrated-backup`)).mode & 0o777, 0o600);
+  } finally { await env.cleanup(); }
+});
+
+test("concurrent reopeners converge while upgrading an exact pre-redaction backup", async () => {
+  const env = await fixture(); try {
+    const raw = legacyRaw("agent_a");
+    await writeFile(env.legacy, raw, { mode: 0o600 });
+    const initial = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await initial.list(); await initial.close();
+    await writeFile(`${env.legacy}.migrated-backup`, raw, { mode: 0o600 });
+
+    const one = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const two = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const [left, right] = await Promise.all([one.list(), two.list()]);
+    assert.equal(left.length, 1); assert.equal(right.length, 1);
+    await one.close(); await two.close();
+    assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), raw);
+  } finally { await env.cleanup(); }
+});
+
 test("concurrent valid legacy importers converge on one exact private backup", async () => {
   const env = await fixture(); try {
     const rawA = legacyRaw("agent_a");
