@@ -186,6 +186,21 @@ export class SupervisorGrantCoordinator {
     await this.reconcileEntry(entry, status.generation);
   }
 
+  /**
+   * Human-triggered credential repair. It deliberately reuses the existing
+   * manifest entry and provider process: this operation only restores the
+   * Electron-held grant and exact-generation daemon binding. Starting a new
+   * provider from a continuation remains a separate, explicit lifecycle
+   * choice rather than an accidental side effect of "Reconnect".
+   */
+  async reconnectEntry(entry: DesktopSupervisorManifestEntry): Promise<void> {
+    if (entry.provider !== "codex" || entry.deliveryMode !== "daemon_inbox") {
+      throw new Error("This supervised provider does not support credential reconnection.");
+    }
+    const status = await this.daemon.ensureRunning();
+    await this.reconcileEntry(entry, status.generation);
+  }
+
   private async reconcileEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number): Promise<void> {
     await this.serialize(entry.id, async () => {
       const agentKey = await this.operations.readEntryAgentKey(entry.id);

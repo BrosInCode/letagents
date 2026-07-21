@@ -89,7 +89,14 @@ const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
     });
     if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
-    return await response.json() as { messages?: Array<Record<string, unknown>>; last_observed_message_id?: string | null };
+    return await response.json() as { messages?: Array<Record<string, unknown>>; has_more?: boolean };
+  },
+  async latest(input) {
+    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?limit=1&before=latest`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
+    });
+    if (!response.ok) throw new Error(`Supervised room tail read failed with HTTP ${response.status}.`);
+    return await response.json() as { messages?: Array<Record<string, unknown>> };
   },
   async publish(input) {
     const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {

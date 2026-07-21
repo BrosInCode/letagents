@@ -20,6 +20,7 @@ import type {
 } from "../../../electron/ipc-types";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
+import { supervisedAgentDisplayLabel } from "./codenames";
 
 export interface AgentSetupConfirmation {
   providerId: DesktopAgentProviderId;
@@ -361,7 +362,7 @@ export function supervisedAgentWorkIndicators(
         // native stream progresses instead of remounting (and re-animating) on
         // every new activity event.
         id: entry.id,
-        displayName: boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
+        displayName: boundPresence?.displayName || boundPresence?.actorLabel || supervisedAgentDisplayLabel(entry.displayName, entry.id),
         summary: liveActivityEchoText(latest.summary),
         startedAt: latest.observedAt,
       }];
@@ -1133,13 +1134,7 @@ function desktopSupervisorEntryToParticipant(
   entry: DesktopSupervisorManifestEntry,
 ): DesktopParticipantSummary {
   const timestamp = entry.bindingUpdatedAt || entry.createdAt;
-  const requestId = entry.id.startsWith("supervised_")
-    ? entry.id.slice("supervised_".length)
-    : "";
-  const generatedSuffix = requestId ? ` · ${requestId}` : "";
-  const displayName = generatedSuffix && entry.displayName.endsWith(generatedSuffix)
-    ? entry.displayName.slice(0, -generatedSuffix.length).trim()
-    : entry.displayName;
+  const displayName = supervisedAgentDisplayLabel(entry.displayName, entry.id);
   return {
     participantKey: `desktop-supervisor-agent:${entry.id}`,
     kind: "agent",

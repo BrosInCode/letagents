@@ -535,6 +535,11 @@ export interface DesktopSupervisorRoomDeliveryRetryInput {
   agentSessionId: string;
 }
 
+/** Reinstall Electron-held credentials without touching the provider runtime. */
+export interface DesktopSupervisorReconnectInput {
+  entryId: string;
+}
+
 export interface DesktopSupervisorTurnControlResult {
   entryId: string;
   workAttemptId: string;

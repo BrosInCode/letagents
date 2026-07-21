@@ -1061,6 +1061,16 @@ export function registerDesktopIpcHandlers(
     },
   );
   targetIpcMain.handle(
+    "desktop:supervisor:reconnect-agent",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorReconnectInput): Promise<DesktopSupervisorManifestEntry> => {
+      if (isDesktopSmokeCheck()) throw new Error("Agent reconnection is unavailable in the desktop smoke environment.");
+      const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+      if (!entry) throw new Error(`Unknown supervised agent: ${input.entryId}`);
+      await supervisorGrantCoordinator.reconnectEntry(entry);
+      return (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId) || entry;
+    },
+  );
+  targetIpcMain.handle(
     "desktop:supervisor:control-turn",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlInput) =>
       isDesktopSmokeCheck() ? desktopSmokeControlTurn(input) : supervisorDaemonClient.controlTurn(input),

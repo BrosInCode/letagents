@@ -32,8 +32,8 @@ const CANDIDATES = CODENAME_PREFIXES.flatMap((prefix) =>
 
 /**
  * Selects a deterministic name from the names that already exist in the
- * room. The full request id suffix makes the persisted label globally
- * distinguishable even when two desktop windows read the same stale room list.
+ * room. Durable entry ids—not visible text—resolve concurrent creation, so a
+ * human-facing label never needs to leak the launch UUID.
  */
 export function suggestSupervisedCodexCodename(
   existingNames: Iterable<string | null | undefined>,
@@ -48,12 +48,17 @@ export function suggestSupervisedCodexCodename(
   for (let offset = 0; offset < CANDIDATES.length; offset += 1) {
     const candidate = CANDIDATES[(startIndex + offset) % CANDIDATES.length]!;
     if (!usedNames.has(normalizeName(candidate))) {
-      return `${candidate} · ${creationRequestId}`;
+      return candidate;
     }
   }
 
-  // The expanded name is still deterministic and intentionally carries only
-  // a short, human-readable slice of the request id. It is a display label,
-  // never an identity key.
-  return `LumenForge · ${creationRequestId}`;
+  return "LumenForge";
+}
+
+/** Hide the exact legacy `Name · <creationRequestId>` suffix in UI only. */
+export function supervisedAgentDisplayLabel(displayName: string, entryId?: string | null): string {
+  const name = displayName.trim();
+  const requestId = entryId?.startsWith("supervised_") ? entryId.slice("supervised_".length) : "";
+  const suffix = requestId ? ` · ${requestId}` : "";
+  return suffix && name.endsWith(suffix) ? name.slice(0, -suffix.length).trim() || name : name;
 }
