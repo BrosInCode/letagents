@@ -364,7 +364,7 @@ test("host grant install carries renewal ownership and expiry metadata to the ex
       entry_id: "entry-1", room_id: "room-1", agent_key: "owner/agent", grant_id: "grant-1",
       supervisor_grant: "secret-parent", grant_generation: 4,
       host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2026-07-22T12:00:00.000Z",
-      api_url: configuredApiUrl, daemon_generation: 39,
+      api_url: configuredApiUrl, daemon_generation: 39, credential_only: false,
     });
   } finally {
     await closeServer(wire.server, env.socketPath);
