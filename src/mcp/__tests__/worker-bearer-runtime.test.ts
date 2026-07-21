@@ -32,6 +32,7 @@ const { autoJoinFromContext } = await import("../server/runtime/rooms.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
+const { registerRoomJoinTools } = await import("../server/tools/rooms/join-tools.js");
 
 function toolHandler(
   register: (server: McpServer) => void,
@@ -383,6 +384,35 @@ test("bounded supervised auto-join never replaces the current room from ambient 
     process.chdir(originalCwd);
     if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
     else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("bounded supervised room joins cannot select an ambient local room", async () => {
+  const originalCwd = process.cwd();
+  const originalFetch = globalThis.fetch;
+  const originalStatePath = process.env.LETAGENTS_STATE_PATH;
+  const originalChatStorage = process.env.LETAGENTS_CHAT_STORAGE;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-bounded-room-join-"));
+  try {
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "ambient_local_room" }));
+    process.chdir(tempDir);
+    process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+    process.env.LETAGENTS_CHAT_STORAGE = "local";
+    rememberRoom(toRoomState({ room_id: "exact-supervisor-room", joined_via: "join_room", is_local: true }));
+    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+      globalThis.fetch = async () => assert.fail("bounded room joins must fail before network");
+      const joinRoom = toolHandler(registerRoomJoinTools, "join_room");
+      await assert.rejects(() => joinRoom({ name: "ambient_local_room" }), /Room joins and creation are disabled/);
+      assert.equal(roomState.currentRoom?.room_id, "exact-supervisor-room");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.chdir(originalCwd);
+    if (originalStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = originalStatePath;
+    if (originalChatStorage === undefined) delete process.env.LETAGENTS_CHAT_STORAGE;
+    else process.env.LETAGENTS_CHAT_STORAGE = originalChatStorage;
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
