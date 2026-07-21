@@ -26,7 +26,16 @@ type StoredGrant = DesktopSupervisorGrantMetadata & {
   encryptedToken: string;
 };
 type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: string };
-type StoredGrantRegistry = { version: 3; grants: Record<string, StoredGrant> };
+/**
+ * The entry map is intentionally separate from the encrypted bearer records:
+ * it is durable, non-secret identity metadata used to recover a daemon-inbox
+ * worker after Electron restarts.  Never derive this from a mutable label.
+ */
+type StoredGrantRegistry = {
+  version: 4;
+  grants: Record<string, StoredGrant>;
+  entryAgentKeys: Record<string, string>;
+};
 const MANUAL_GRANT_KEY = "__manual__";
 const registryMutationTails = new Map<string, Promise<void>>();
 const agentLifecycleTails = new Map<string, Promise<void>>();
@@ -94,12 +103,24 @@ function metadataOf(stored: StoredGrant): DesktopSupervisorGrantMetadata {
 }
 
 function isRegistry(value: unknown): value is StoredGrantRegistry {
-  return Boolean(value && typeof value === "object" && ((value as { version?: unknown }).version === 2 || (value as { version?: unknown }).version === 3)
+  return Boolean(value && typeof value === "object" && ((value as { version?: unknown }).version === 2 || (value as { version?: unknown }).version === 3 || (value as { version?: unknown }).version === 4)
     && typeof (value as { grants?: unknown }).grants === "object");
 }
 
 function registryFrom(value: unknown): StoredGrantRegistry | null {
-  if (isRegistry(value)) return { version: 3, grants: (value as { grants: Record<string, StoredGrant> }).grants };
+  if (isRegistry(value)) {
+    const legacy = value as { grants: Record<string, StoredGrant>; entryAgentKeys?: Record<string, unknown> };
+    const entryAgentKeys: Record<string, string> = {};
+    for (const [entryId, agentKey] of Object.entries(legacy.entryAgentKeys ?? {})) {
+      if (typeof agentKey === "string" && entryId.trim() && agentKey.trim()) entryAgentKeys[entryId] = canonicalSupervisorGrantAgentKey(agentKey);
+    }
+    // v3 recorded the durable entry beside each grant.  Preserve that mapping
+    // when upgrading, rather than guessing from a display name.
+    for (const grant of Object.values(legacy.grants)) {
+      if (grant.entryId?.trim() && grant.agentKey?.trim()) entryAgentKeys[grant.entryId] = canonicalSupervisorGrantAgentKey(grant.agentKey);
+    }
+    return { version: 4, grants: legacy.grants, entryAgentKeys };
+  }
   if (!value || typeof value !== "object" || !("encryptedToken" in value)) return null;
   // Version 1 had one desktop-wide grant. Treat it as manual unless it was
   // already narrowed to a single exact agent identity.
@@ -107,7 +128,7 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
   if (!legacy.grantId || !legacy.encryptedToken) return null;
   const candidate = legacy.allowedAgentKeys.length === 1 ? legacy.allowedAgentKeys[0] : MANUAL_GRANT_KEY;
   const agentKey = candidate === MANUAL_GRANT_KEY ? candidate : canonicalSupervisorGrantAgentKey(candidate);
-  return { version: 3, grants: { [agentKey]: { ...legacy, agentKey } } };
+  return { version: 4, grants: { [agentKey]: { ...legacy, agentKey } }, entryAgentKeys: {} };
 }
 
 async function readRegistry(): Promise<StoredGrantRegistry | null> {
@@ -214,7 +235,7 @@ export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSup
     }
     const agentKey = canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!);
     const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant);
-    await writeRegistry({ version: 3, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } } });
+    await writeRegistry({ version: 4, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } }, entryAgentKeys: {} });
     return metadata;
   } catch (error) {
     // Do not leave an unusable, owner-scoped server grant behind when the
@@ -275,7 +296,8 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
     throw new Error("A per-agent desktop grant must be scoped to that exact one agent identity.");
   }
   await withRegistryMutation(async () => {
-    const registry = (await readRegistry()) ?? { version: 3, grants: {} };
+    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {} };
+    if (input.entryId?.trim()) registry.entryAgentKeys[input.entryId.trim()] = agentKey;
     registry.grants[agentKey] = {
       ...input.metadata,
       agentKey,
@@ -338,7 +360,7 @@ export async function storeDesktopSupervisorGrantForAgent(input: {
  * to install directly into that agent's daemon process.
  */
 export async function getOrProvisionDesktopSupervisorGrantForAgent(
-  input: DesktopSupervisorGrantLifecycleInput,
+  input: DesktopSupervisorGrantLifecycleInput & { forceReprovision?: boolean },
   options: GrantStorageOptions = {},
 ): Promise<{
   metadata: DesktopSupervisorGrantMetadata;
@@ -358,7 +380,7 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   const request = options.apiFetch ?? apiFetch;
   return withAgentGrantLifecycle(agentKey, async () => {
     const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
-    if (existing && reusableDesktopSupervisorGrant({
+    if (!input.forceReprovision && existing && reusableDesktopSupervisorGrant({
       existing, agentKey, entryId, hostId, installationId, allowedRoomIds,
     })) {
       return {
@@ -402,6 +424,47 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       throw error;
     }
   });
+}
+
+/** Return the stored canonical identity for one exact durable manifest entry. */
+export async function readDesktopSupervisorGrantAgentKeyForEntry(entryId: string): Promise<string | null> {
+  const registry = await readRegistry();
+  const agentKey = registry?.entryAgentKeys[entryId.trim()];
+  return agentKey?.trim() ? canonicalSupervisorGrantAgentKey(agentKey) : null;
+}
+
+/**
+ * Resolve (or create once) the server-owned identity used by a daemon-inbox
+ * Codex entry.  The stable name is derived from the immutable entry id, while
+ * the returned canonical key remains the server's authority.  This must run
+ * before grant provisioning because the API correctly rejects unknown agents.
+ */
+export async function getOrCreateDesktopCodexAgentIdentity(input: {
+  entryId: string;
+  displayName?: string | null;
+}, options: { apiFetch?: typeof apiFetch } = {}): Promise<string> {
+  const entryId = input.entryId.trim();
+  if (!entryId) throw new Error("A durable supervised entry identity is required.");
+  const existing = await readDesktopSupervisorGrantAgentKeyForEntry(entryId);
+  if (existing) return existing;
+  const name = `desktop-codex-${createHash("sha256").update(entryId).digest("hex").slice(0, 32)}`;
+  const request = options.apiFetch ?? apiFetch;
+  const created = await request<{ canonical_key?: unknown }>("/agents", {
+    method: "POST",
+    body: JSON.stringify({ name, display_name: input.displayName?.trim() || "Codex agent" }),
+  });
+  if (typeof created.canonical_key !== "string" || !created.canonical_key.trim()) {
+    throw new Error("LetAgents did not return a canonical Codex agent identity.");
+  }
+  const agentKey = canonicalSupervisorGrantAgentKey(created.canonical_key);
+  await withRegistryMutation(async () => {
+    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {} };
+    // First successful writer wins. This survives parallel launch/reconcile
+    // calls and never aliases a second entry to a mutable presentation label.
+    registry.entryAgentKeys[entryId] ??= agentKey;
+    await writeRegistry(registry);
+  });
+  return await readDesktopSupervisorGrantAgentKeyForEntry(entryId) ?? agentKey;
 }
 
 export async function clearDesktopSupervisorGrant(): Promise<void> {

@@ -8,6 +8,7 @@ import { stopDesktopRoomStream } from "./main/room-stream.js";
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
 import { createWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
+import { supervisorGrantCoordinator } from "./main/supervisor-grant-coordinator.js";
 
 configureDesktopSmokeEnvironment();
 
@@ -29,6 +30,12 @@ app.whenReady().then(async () => {
   if (process.platform === "darwin") {
     await supervisorDaemonClient.ensureRunning().catch((error) => {
       console.warn(`Supervisor daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    // Rehydrate only desired-running daemon-inbox Codex entries. A failure is
+    // intentionally non-fatal to Electron: the paused/blocked daemon entry is
+    // truthful and recovery remains available after sign-in/host authority.
+    await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
+      console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
   if (process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE === "1") {
