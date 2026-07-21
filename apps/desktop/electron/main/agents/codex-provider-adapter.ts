@@ -64,6 +64,12 @@ import {
 
 type CodexThreadResult = { thread?: { id?: string } };
 
+function isUnmaterializedEmptyThreadRead(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return message.includes("not materialized yet")
+    && message.includes("includeturns is unavailable before first user message");
+}
+
 export interface CodexAdapterRpc {
   connect(): Promise<void>;
   request<T>(method: string, params?: unknown): Promise<T>;
@@ -900,10 +906,23 @@ export class CodexProviderAdapter implements ProviderAdapter {
     try {
       await client.connect();
       await requireLetAgentsWorkplace(client);
-      const read = await client.request<ThreadReadResult>("thread/read", {
-        threadId: ref.providerContinuationId,
-        includeTurns: true,
-      });
+      let read: ThreadReadResult;
+      try {
+        read = await client.request<ThreadReadResult>("thread/read", {
+          threadId: ref.providerContinuationId,
+          includeTurns: true,
+        });
+      } catch (error) {
+        if (!isUnmaterializedEmptyThreadRead(error)) throw error;
+        // Codex creates daemon-inbox threads before their first room turn.
+        // Those threads deliberately reject includeTurns, but the metadata
+        // read still proves that this exact live endpoint owns the durable
+        // continuation. Never use this fallback for generic read failures.
+        read = await client.request<ThreadReadResult>("thread/read", {
+          threadId: ref.providerContinuationId,
+          includeTurns: false,
+        });
+      }
       if (read.thread?.id !== ref.providerContinuationId) {
         throw new Error("Codex app-server did not verify the exact durable continuation thread.");
       }
