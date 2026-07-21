@@ -188,7 +188,8 @@ export interface DesktopSupervisorGrantLifecycleInput {
   /** Durable desktop-managed agent entry identity. */
   entryId: string;
   agentKey: string;
-  allowedRoomIds: string[];
+  /** Caller-resolved room scopes; only canonical ids cross the API/storage boundary. */
+  roomScopes: Array<{ requestedRoomId: string; canonicalRoomId: string }>;
   ttlMs?: number;
   lastInstalledDaemonGeneration?: number | null;
 }
@@ -210,6 +211,16 @@ export function desktopSupervisorGrantInstallationId(hostId: string, entryId: st
   const entry = entryId.trim();
   if (!host || !entry) throw new Error("A desktop host and durable agent entry identity are required.");
   return `desktop-agent-${createHash("sha256").update(`${host}\u0000${entry}`).digest("hex").slice(0, 40)}`;
+}
+
+export function canonicalDesktopSupervisorGrantRoomIds(
+  scopes: DesktopSupervisorGrantLifecycleInput["roomScopes"],
+): string[] {
+  const canonicalIds = scopes.map((scope) => scope.canonicalRoomId.trim()).filter(Boolean);
+  if (canonicalIds.length !== scopes.length || canonicalIds.length === 0) {
+    throw new Error("Every supervisor grant room scope requires a canonical room id.");
+  }
+  return [...new Set(canonicalIds)];
 }
 
 export async function provisionDesktopSupervisorGrant(input: DesktopProvisionSupervisorGrantInput): Promise<DesktopSupervisorGrantMetadata> {
@@ -376,7 +387,7 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   const entryId = input.entryId.trim();
   const hostId = input.hostId.trim();
   const installationId = desktopSupervisorGrantInstallationId(hostId, entryId);
-  const allowedRoomIds = [...new Set(input.allowedRoomIds.map((roomId) => roomId.trim()).filter(Boolean))];
+  const allowedRoomIds = canonicalDesktopSupervisorGrantRoomIds(input.roomScopes);
   const request = options.apiFetch ?? apiFetch;
   return withAgentGrantLifecycle(agentKey, async () => {
     const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
@@ -391,7 +402,11 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       };
     }
     if (existing) {
-      await request(`/supervisor-host-grants/${encodeURIComponent(existing.metadata.grantId)}`, { method: "DELETE" });
+      // A 404 or lost response can mean a prior attempt already revoked the
+      // server grant. Remove only the exact cached entry and continue; if the
+      // revoke never reached the server, the unique installation fence makes
+      // the subsequent POST fail safely instead of minting a duplicate.
+      await request(`/supervisor-host-grants/${encodeURIComponent(existing.metadata.grantId)}`, { method: "DELETE" }).catch(() => {});
       await removeDesktopSupervisorGrantForAgentIfCurrent(agentKey, existing.metadata.grantId);
     }
 

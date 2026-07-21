@@ -168,8 +168,44 @@ test("supervisor worker retry collapses all historical active duplicates before 
     && row.agent_key === agent.canonical_key).length, 1);
 });
 
+test("a replacement grant takes over the exact durable worker session across grant ids", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const body = { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "rollover-worker" };
+  const first = recorder();
+  await mint({ ...reqBase, body }, first);
+  assert.equal(first.statusCode, 201);
+  const replacementGrant = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_route", host_id: "host_route_2", installation_id: "install_route_2",
+    allowed_room_ids: [room.id], allowed_agent_keys: [agent.canonical_key],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const second = recorder();
+  await mint({
+    ...reqBase, supervisorGrant: replacementGrant.grant,
+    params: { grantId: replacementGrant.grant.grant_id }, body,
+  }, second);
+  assert.equal(second.statusCode, 201);
+  assert.equal((second.body as any).session_id, (first.body as any).session_id);
+  assert.notEqual((second.body as any).worker_bearer, (first.body as any).worker_bearer);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(first.body as any).worker_bearer}` } } as never)).authKind, null);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(second.body as any).worker_bearer}` } } as never)).authKind, "agent_session");
+  const [session] = await client!.db.select().from(schema!.room_agent_sessions)
+    .where(eq(schema!.room_agent_sessions.session_id, (first.body as any).session_id)).limit(1);
+  assert.equal(session.supervisor_grant_id, replacementGrant.grant.grant_id);
+});
+
 test("stale supervisor worker fence is an explicit conflict, never an internal error", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const session = await authDb!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Stale Worker",
+    agent_key: agent.canonical_key, agent_instance_id: "stale-worker", display_name: "Stale Worker",
+    owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: grantResult.grant.grant_id,
+  });
+  const resolved = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  assert.ok(resolved.agentSession);
+  const staleFence = { grant_id: grantResult.grant.grant_id, generation: 1, token_version: 1 };
   const rotated = await authDb!.rotateSupervisorHostGrant({
     grant_id: grantResult.grant.grant_id, expected_generation: 1, expected_token_version: 1,
     expires_at: grantResult.grant.expires_at,
@@ -179,9 +215,14 @@ test("stale supervisor worker fence is an explicit conflict, never an internal e
     room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Stale Worker",
     agent_key: agent.canonical_key, agent_instance_id: "stale-worker", display_name: "Stale Worker",
     owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent",
-    supervisor_grant_id: grantResult.grant.grant_id, supervisor_grant_fence: {
-      grant_id: grantResult.grant.grant_id, generation: 1, token_version: 1,
-    },
+    supervisor_grant_id: grantResult.grant.grant_id, supervisor_grant_fence: staleFence,
+  }), (error: unknown) => authDb!.isSupervisorGrantFenceStaleError(error));
+  await assert.rejects(authDb!.rotateRoomAgentSessionBearer({
+    bearer_id: resolved.agentSession!.bearer_id, session_id: session.session_id,
+    supervisor_grant_id: grantResult.grant.grant_id, supervisor_grant_fence: staleFence,
+  }), (error: unknown) => authDb!.isSupervisorGrantFenceStaleError(error));
+  await assert.rejects(authDb!.endRoomAgentSession({
+    session_id: session.session_id, owner_account_id: "owner_route", supervisor_grant_fence: staleFence,
   }), (error: unknown) => authDb!.isSupervisorGrantFenceStaleError(error));
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
   const response = recorder();
@@ -189,6 +230,18 @@ test("stale supervisor worker fence is an explicit conflict, never an internal e
     generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: "stale-worker",
   } }, response);
   assert.equal(response.statusCode, 409);
+  const rotate = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate"); assert.ok(rotate);
+  const rotateResponse = recorder();
+  await rotate({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: session.session_id }, body: {
+    generation: 1, bearer_id: resolved.agentSession!.bearer_id,
+  } }, rotateResponse);
+  assert.equal(rotateResponse.statusCode, 409);
+  const end = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end"); assert.ok(end);
+  const endResponse = recorder();
+  await end({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: session.session_id }, body: {
+    generation: 1,
+  } }, endResponse);
+  assert.equal(endResponse.statusCode, 409);
 });
 
 test("lifecycle handlers fail closed when the path grant differs from the authenticated grant", { skip: requiresDatabase }, async () => {

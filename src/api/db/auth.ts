@@ -700,7 +700,9 @@ export async function createFencedRoomAgentSession(
 }
 
 /**
- * Create or restart the exact worker identity owned by a supervisor grant.
+ * Create, restart, or roll over the exact worker identity owned by a
+ * supervisor grant. A replacement grant for the same owner/room/key/instance
+ * takes over the durable session id while every predecessor bearer is revoked.
  *
  * This is deliberately separate from the general reconnect path: a
  * supervisor never receives an owner-capable session token with which to
@@ -721,11 +723,12 @@ export async function createOrRotateSupervisorWorkerSession(
     if (!(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new SupervisorGrantFenceStaleError();
     }
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${input.supervisor_grant_id}:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${input.owner_account_id}:${input.room_id}:${input.agent_key}:${instanceId}`}, 0))`);
     const existing = await tx.select()
       .from(room_agent_sessions)
       .where(and(
-        eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
+        eq(room_agent_sessions.owner_account_id, input.owner_account_id),
+        sql`${room_agent_sessions.supervisor_grant_id} IS NOT NULL`,
         eq(room_agent_sessions.room_id, input.room_id),
         eq(room_agent_sessions.agent_key, input.agent_key),
         eq(room_agent_sessions.agent_instance_id, instanceId),
@@ -1023,7 +1026,9 @@ export async function rotateRoomAgentSessionBearer(input: {
   supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<{ bearer: RoomAgentSessionBearer; token: string } | null> {
   return db.transaction(async (tx) => {
-    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) return null;
+    if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+      throw new SupervisorGrantFenceStaleError();
+    }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent_bearer:${input.bearer_id}`}, 0))`);
     const [current] = await tx
       .select()
@@ -1081,7 +1086,9 @@ export async function endRoomAgentSession(input: {
   supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<RoomAgentSession | null> {
   return db.transaction(async (tx) => {
-  if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) return null;
+  if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
+    throw new SupervisorGrantFenceStaleError();
+  }
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
   if (input.room_id) {
