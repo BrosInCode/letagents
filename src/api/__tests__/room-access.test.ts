@@ -12,6 +12,7 @@ const {
   isRepoBackedRoomId,
   replyRepoRoomAccessDecision,
   requireAdmin,
+  requireGitRoomParticipant,
   requireParticipant,
   resolveGitHubRoomEntryDecision,
   resolveProjectRepoRoomAccessDecision,
@@ -195,6 +196,30 @@ test("requireParticipant allows non-repo rooms without auth", async () => {
     await requireParticipant({ sessionAccount: null } as never, res, project("invite-room")),
     true
   );
+});
+
+test("Git-room participant access accepts only the worker bearer's exact room", async () => {
+  const scopedRequest = {
+    authKind: "agent_session",
+    sessionAccount: null,
+    agentSession: { room_id: "focus_37" },
+  } as never;
+  const gitBackedFocusRoom = project("focus_37", "github.com/BrosInCode/letagents");
+
+  const allowed = jsonResponse();
+  assert.equal(
+    await requireGitRoomParticipant(scopedRequest, allowed.res, gitBackedFocusRoom),
+    true,
+  );
+  assert.equal(allowed.state.statusCode, null);
+
+  const denied = jsonResponse();
+  assert.equal(
+    await requireGitRoomParticipant(scopedRequest, denied.res, project("focus_38", "github.com/BrosInCode/letagents")),
+    false,
+  );
+  assert.equal(denied.state.statusCode, 403);
+  assert.deepEqual(denied.state.body, { error: "Worker bearer is scoped to a different room." });
 });
 
 test("resolveGitHubRoomEntryDecision allows non-repo room entries", async () => {
