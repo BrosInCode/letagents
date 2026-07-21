@@ -1195,6 +1195,9 @@ export class SupervisorDaemon {
   private scheduleHandoff(): void {
     if (this.handoffScheduled) return;
     this.handoffScheduled = true;
+    // Retire secret custody synchronously with the public handoff fence. The
+    // delayed teardown exists only to flush the socket acknowledgement.
+    this.hostGrants.clear();
     setTimeout(() => {
       void this.stopForHandoff().then(
         () => this.resolveHandoffCompletion(),
@@ -2890,12 +2893,41 @@ export class SupervisorDaemon {
     return grant;
   }
 
+  private async ownsDaemonGeneration(expectedGeneration: number): Promise<boolean> {
+    if (this.handoffScheduled) {
+      this.hostGrants.clear();
+      return false;
+    }
+    if (expectedGeneration !== this.singleton.currentGeneration) return false;
+    try {
+      await this.singleton.assertCurrent();
+      if (this.handoffScheduled) {
+        this.hostGrants.clear();
+        return false;
+      }
+      return expectedGeneration === this.singleton.currentGeneration;
+    } catch {
+      // A successor acquired the singleton without this process completing its
+      // normal handoff path. Drop every process-memory credential immediately.
+      this.hostGrants.clear();
+      return false;
+    }
+  }
+
+  private revokeHostGrantIfCurrent(entryId: string, grant: InstalledHostGrant): void {
+    if (this.hostGrants.get(entryId) === grant) this.hostGrants.delete(entryId);
+  }
+
   /** Mint only after a durable execution exists. The result stays local until the exact provider ref exists. */
   private async mintHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string): Promise<{
     agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
   } | null> {
     const grant = this.currentHostGrant(entry);
     if (!grant || !entry.work_attempt_id) return null;
+    if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) {
+      this.revokeHostGrantIfCurrent(entry.id, grant);
+      return null;
+    }
     const minted = await this.supervisorGrantHttp.createWorkerSession({
       apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
       grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
@@ -2903,6 +2935,10 @@ export class SupervisorDaemon {
       // rotates rather than creates a second worker on daemon recovery.
       agentInstanceId: `daemon:${entry.id}`,
     });
+    if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) {
+      this.revokeHostGrantIfCurrent(entry.id, grant);
+      return null;
+    }
     const current = await this.store.getEntry(entry.id);
     if (!current || !this.currentHostGrant(current)
       || current.work_attempt_id !== entry.work_attempt_id) return null;
@@ -2912,6 +2948,10 @@ export class SupervisorDaemon {
       agent_id: entry.id, room_id: entry.room_id, agent_session_id: minted.sessionId,
       execution_generation_id: executionGenerationId, credential_ref: minted.bearerId, expires_at: minted.expiresAt,
     });
+    if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) {
+      this.revokeHostGrantIfCurrent(entry.id, grant);
+      return null;
+    }
     return { agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, apiUrl: grant.apiUrl, executionGenerationId };
   }
 
@@ -2938,16 +2978,18 @@ export class SupervisorDaemon {
         if (!input[field].trim()) throw new Error(`Host grant ${field} is required.`);
       }
       if (!Number.isSafeInteger(input.grant_generation) || input.grant_generation < 1
-        || input.daemon_generation !== this.singleton.currentGeneration) return { status: "stale" };
+        || !await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
       let apiUrl: string;
       try { apiUrl = hostGrantApiOrigin(input.api_url); } catch { throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP."); }
       const entry = await this.store.getEntry(input.entry_id);
       if (!entry || !this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
-      this.hostGrants.set(entry.id, {
+      if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
+      const grant: InstalledHostGrant = {
         entryId: entry.id, roomId: entry.room_id, agentKey: input.agent_key, grantId: input.grant_id,
         supervisorGrant: input.supervisor_grant, grantGeneration: input.grant_generation, apiUrl,
         daemonGeneration: input.daemon_generation,
-      });
+      };
+      this.hostGrants.set(entry.id, grant);
       // Recovery must not signal, restart, or migrate a live provider. It only
       // rotates the worker bearer against the persisted exact generation.
       const live = this.liveHandles.get(entry.id);
@@ -2955,14 +2997,26 @@ export class SupervisorDaemon {
         && live.workAttemptId === entry.work_attempt_id
         && live.providerContinuationId === entry.provider_ref.provider_continuation_id) {
         const attempt = await this.durability.getAttempt(entry.work_attempt_id);
+        if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {
+          this.revokeHostGrantIfCurrent(entry.id, grant);
+          return { status: "stale" };
+        }
         const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === entry.provider_ref!.execution_generation_id);
         if (execution && !execution.terminal) {
           const minted = await this.mintHostWorkerSession(entry, execution.execution_generation_id);
           if (minted) {
             await this.bindMintedHostWorkerSession(entry.id, minted);
+            if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {
+              this.revokeHostGrantIfCurrent(entry.id, grant);
+              return { status: "stale" };
+            }
             return { status: "installed", agent_session_id: minted.agentSessionId };
           }
         }
+      }
+      if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {
+        this.revokeHostGrantIfCurrent(entry.id, grant);
+        return { status: "stale" };
       }
       this.requestConvergence(entry.id);
       return { status: "installed" };

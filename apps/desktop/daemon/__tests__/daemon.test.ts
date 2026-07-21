@@ -2198,6 +2198,63 @@ test("prepare_handoff fences a mutation admitted before an asynchronous request 
   }
 });
 
+test("a host-grant install queued before handoff cannot retain plaintext or report installed after retirement", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  let installAdmitted!: () => void;
+  const admitted = new Promise<void>((resolve) => { installAdmitted = resolve; });
+  let mintCalls = 0;
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, async (request) => {
+    if (request.method === "supervisor.install_host_grant") installAdmitted();
+  }, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintCalls += 1;
+      return { sessionId: "must-not-mint", bearer: "must-not-retain", bearerId: "must-not-record", expiresAt: null };
+    },
+  });
+  let releaseTick!: () => void;
+  const tickGate = new Promise<void>((resolve) => { releaseTick = resolve; });
+  let tickEntered!: () => void;
+  const tickStarted = new Promise<void>((resolve) => { tickEntered = resolve; });
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "queued_host_grant", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+    } });
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const internals = daemon as unknown as {
+      serializeEntryTick: <T>(entryId: string, operation: () => Promise<T>) => Promise<T>;
+      hostGrants: Map<string, unknown>;
+    };
+    const heldTick = internals.serializeEntryTick("queued_host_grant", async () => { tickEntered(); await tickGate; });
+    await tickStarted;
+    const queuedInstall = daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "queued_host_grant", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-queued",
+      supervisor_grant: "queued-plaintext-grant", grant_generation: 3, api_url: "https://letagents.example",
+      daemon_generation: generation,
+    });
+    await admitted;
+    const handoff = daemon.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    releaseTick();
+    await heldTick;
+    const rejected = await queuedInstall;
+    assert.equal(rejected.ok, true);
+    assert.deepEqual(rejected.result, { status: "stale" });
+    assert.equal(mintCalls, 0, "a retired daemon cannot mint a worker session");
+    assert.equal(internals.hostGrants.size, 0, "a retired daemon retains no plaintext grant");
+    await within(handoff, "queued host-grant handoff", 1_000);
+  } finally {
+    releaseTick?.();
+    await env.cleanup();
+  }
+});
+
 test("handoff destroys open control sockets and fences a mutation paused before commit", async () => {
   const env = await fixture();
   const paths = {
