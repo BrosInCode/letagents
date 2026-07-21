@@ -75,6 +75,7 @@ import {
   supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
+import { supervisedAgentShortTag } from "../src/domain/codenames";
 
 function provider(
   overrides: Partial<DesktopAgentProvider> = {},
@@ -1648,7 +1649,7 @@ test("live daemon-inbox agents become canonical mentionable room participants", 
   })], "room_1");
 
   assert.equal(participants.length, 1);
-  assert.equal(participants[0]?.displayName, "GardenWinter");
+  assert.equal(participants[0]?.displayName, `GardenWinter · ${supervisedAgentShortTag("6697e364-62d0-4027-b02d-ee71a8fbf579")}`);
   assert.equal(participants[0]?.agentKey, "EmmyMay/desktop-codex-4d8fe3");
   assert.equal(participants[0]?.activityState, "active");
   assert.deepEqual(participants[0]?.sourceFlags, ["delivery", "presence"]);
