@@ -92,7 +92,11 @@ function toMetadata(response: {
 
 /** Stable local key for a provider agent identity; never use a display name. */
 export function canonicalSupervisorGrantAgentKey(agentKey: string): string {
-  const normalized = agentKey.trim().toLowerCase();
+  // The API's canonical key embeds the owner's login and is stored/looked up
+  // case-sensitively (for example, `EmmyMay/stone-ridge`). Lowercasing it here
+  // creates a different, nonexistent principal and makes grant provisioning
+  // fail ownership validation.
+  const normalized = agentKey.trim();
   if (!normalized) throw new Error("A supervised agent identity is required.");
   return normalized;
 }
@@ -469,10 +473,12 @@ export async function getOrCreateDesktopCodexAgentIdentity(input: {
 }, options: { apiFetch?: typeof apiFetch } = {}): Promise<string> {
   const entryId = input.entryId.trim();
   if (!entryId) throw new Error("A durable supervised entry identity is required.");
-  const existing = await readDesktopSupervisorGrantAgentKeyForEntry(entryId);
-  if (existing) return existing;
   const name = `desktop-codex-${createHash("sha256").update(entryId).digest("hex").slice(0, 32)}`;
   const request = options.apiFetch ?? apiFetch;
+  // Re-registering the deterministic name is intentionally idempotent. It
+  // also repairs registries written by builds that lowercased the canonical
+  // owner-login prefix and therefore cannot recover its original casing from
+  // local data alone.
   const created = await request<{ canonical_key?: unknown }>("/agents", {
     method: "POST",
     body: JSON.stringify({ name, display_name: input.displayName?.trim() || "Codex agent" }),
@@ -483,9 +489,9 @@ export async function getOrCreateDesktopCodexAgentIdentity(input: {
   const agentKey = canonicalSupervisorGrantAgentKey(created.canonical_key);
   await withRegistryMutation(async () => {
     const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {} };
-    // First successful writer wins. This survives parallel launch/reconcile
-    // calls and never aliases a second entry to a mutable presentation label.
-    registry.entryAgentKeys[entryId] ??= agentKey;
+    // The server response is the authority for canonical casing. Parallel
+    // calls converge on the same deterministic identity.
+    registry.entryAgentKeys[entryId] = agentKey;
     await writeRegistry(registry);
   });
   return await readDesktopSupervisorGrantAgentKeyForEntry(entryId) ?? agentKey;
