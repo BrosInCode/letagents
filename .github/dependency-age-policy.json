@@ -7,6 +7,16 @@
       "reason": "Intentional early adoption after tarball review and Codex Security scan 13f36e57-0cac-4a6c-8def-50cd6fc036a1. Re-scan before changing this version."
     },
     {
+      "name": "@hono/node-server",
+      "version": "2.0.10",
+      "reason": "Exact patched release required to remediate GHSA-9mqv-5hh9-4cgg before the normal cooldown expires; registry signatures and the full test suite are verified in CI."
+    },
+    {
+      "name": "fast-uri",
+      "version": "3.1.4",
+      "reason": "Exact patched release required to remediate the current fast-uri path traversal and host-confusion advisories before the normal cooldown expires; registry signatures and the full test suite are verified in CI."
+    },
+    {
       "name": "@typescript-eslint/parser",
       "version": "8.63.0",
       "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
