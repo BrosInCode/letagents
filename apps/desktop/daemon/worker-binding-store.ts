@@ -544,11 +544,55 @@ export class WorkerBindingStore {
       throw error;
     }
     await chmod(backup, 0o600);
-    if (!isRedactedLegacyBackup(raw, expectedChecksum)) {
-      await this.chmodIfPresent(this.legacyJsonPath);
-      throw new Error("Legacy worker binding migration integrity error: migrated backup does not match the committed migration record.");
+    if (isRedactedLegacyBackup(raw, expectedChecksum)) return true;
+    // Builds before the SQLite credential-custody hardening retained the
+    // exact imported v1 JSON as their migration backup. Its checksum is the
+    // value already committed in SQLite, so it is authoritative legacy
+    // evidence—not tampering. Upgrade it atomically to the secret-free proof
+    // format before allowing the daemon to continue.
+    if (checksumOf(raw) === expectedChecksum) {
+      await this.redactExactLegacyBackup(backup, raw, expectedChecksum);
+      return true;
     }
-    return true;
+    await this.chmodIfPresent(this.legacyJsonPath);
+    throw new Error("Legacy worker binding migration integrity error: migrated backup does not match the committed migration record.");
+  }
+
+  private async redactExactLegacyBackup(backup: string, raw: string, expectedChecksum: string): Promise<void> {
+    try {
+      const parsed = JSON.parse(raw) as LegacyBindings;
+      this.validateLegacy(parsed, raw);
+    } catch {
+      throw new Error("Legacy worker binding migration integrity error: checksum-matching backup is not a valid legacy binding envelope.");
+    }
+    const temporary = `${backup}.redacting.${randomUUID()}`;
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      handle = await open(temporary, "wx", 0o600);
+      await handle.writeFile(redactedLegacyBackup(raw, expectedChecksum), "utf8");
+      await handle.sync();
+    } finally { await handle?.close(); }
+    try {
+      // Re-read immediately before replacement. Concurrent legitimate
+      // openers either still see the same exact legacy bytes or have already
+      // installed the identical redacted proof; a differing artifact is
+      // preserved and fails closed.
+      const current = await this.readOwnerOnly(backup);
+      if (current === undefined) throw new Error("Legacy worker binding migration integrity error: exact backup disappeared during redaction.");
+      if (isRedactedLegacyBackup(current, expectedChecksum)) return;
+      if (checksumOf(current) !== expectedChecksum) {
+        throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
+      }
+      await rename(temporary, backup);
+      await chmod(backup, 0o600);
+      await this.syncDirectory(dirname(backup));
+      const converted = await this.readOwnerOnly(backup);
+      if (converted === undefined || !isRedactedLegacyBackup(converted, expectedChecksum)) {
+        throw new Error("Legacy worker binding migration integrity error: redacted backup replacement did not converge.");
+      }
+    } finally {
+      await unlink(temporary).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    }
   }
 
   private async createBackupExclusively(backup: string, raw: string, expectedChecksum: string): Promise<void> {
