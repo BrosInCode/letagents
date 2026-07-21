@@ -323,6 +323,7 @@ import {
   managedAgentSessionMatchesRoom,
   managedAgentRepoStatusForRoom,
   mergeDesktopManagedAgentParticipants,
+  mergeDesktopSupervisorAgentParticipants,
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   pendingManagedAgentPermissionApprovals,
@@ -644,7 +645,11 @@ const roomPresence = computed(() =>
 );
 const roomParticipants = computed(() =>
   mergeReachableAgentPresenceParticipants(
-    mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier),
+    mergeDesktopSupervisorAgentParticipants(
+      mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier),
+      supervisorEntries.value,
+      props.room.identifier,
+    ),
     roomPresence.value,
     props.room.identifier,
   )

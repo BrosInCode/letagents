@@ -1085,6 +1085,79 @@ export function mergeDesktopManagedAgentParticipants(
   return merged;
 }
 
+/**
+ * Daemon-inbox agents do not have to exist in the legacy managed-session
+ * registry. Project the live supervisor truth into Chat as well as Activity,
+ * while retaining the canonical server identity used for mention routing.
+ */
+export function mergeDesktopSupervisorAgentParticipants(
+  participants: readonly DesktopParticipantSummary[],
+  entries: readonly DesktopSupervisorManifestEntry[],
+  roomIdentifier: string | null | undefined,
+): DesktopParticipantSummary[] {
+  const merged = [...participants];
+  for (const entry of entries) {
+    if (!supervisorEntryIsMentionable(entry, roomIdentifier)) continue;
+    const existingIndex = merged.findIndex((participant) =>
+      participant.kind === "agent"
+      && Boolean(entry.agentKey)
+      && normalizeAgentKey(participant.agentKey) === normalizeAgentKey(entry.agentKey)
+    );
+    const projected = desktopSupervisorEntryToParticipant(entry);
+    if (existingIndex === -1) {
+      merged.push(projected);
+      continue;
+    }
+    merged[existingIndex] = {
+      ...merged[existingIndex],
+      ...projected,
+      sourceFlags: [...new Set([...merged[existingIndex].sourceFlags, ...projected.sourceFlags])],
+    };
+  }
+  return merged;
+}
+
+function supervisorEntryIsMentionable(
+  entry: DesktopSupervisorManifestEntry,
+  roomIdentifier: string | null | undefined,
+): boolean {
+  if (normalizeManagedAgentRoomIdentifier(entry.roomId) !== normalizeManagedAgentRoomIdentifier(roomIdentifier)) {
+    return false;
+  }
+  if (!entry.agentKey?.trim() || !entry.roomAgentState) return false;
+  if (entry.desiredState === "stopped" && entry.observedState === "stopped") return false;
+  return entry.roomAgentState.connection.state === "connected";
+}
+
+function desktopSupervisorEntryToParticipant(
+  entry: DesktopSupervisorManifestEntry,
+): DesktopParticipantSummary {
+  const timestamp = entry.bindingUpdatedAt || entry.createdAt;
+  const requestId = entry.id.startsWith("supervised_")
+    ? entry.id.slice("supervised_".length)
+    : "";
+  const generatedSuffix = requestId ? ` · ${requestId}` : "";
+  const displayName = generatedSuffix && entry.displayName.endsWith(generatedSuffix)
+    ? entry.displayName.slice(0, -generatedSuffix.length).trim()
+    : entry.displayName;
+  return {
+    participantKey: `desktop-supervisor-agent:${entry.id}`,
+    kind: "agent",
+    displayName,
+    actorLabel: entry.displayName,
+    agentKey: entry.agentKey ?? null,
+    githubLogin: null,
+    ownerLabel: "Local desktop",
+    ideLabel: entry.provider === "codex" ? "Codex" : entry.provider,
+    hiddenAt: null,
+    activityState: "active",
+    lastSeenAt: timestamp,
+    lastRoomActivityAt: timestamp,
+    lastLiveHeartbeatAt: entry.workplaceLiveness.observedAt || timestamp,
+    sourceFlags: ["delivery", "presence"],
+  };
+}
+
 export function mergeDesktopManagedAgentPresence(
   presenceEntries: readonly DesktopAgentPresence[],
   sessions: readonly DesktopManagedAgentSession[],

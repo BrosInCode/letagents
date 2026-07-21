@@ -724,6 +724,22 @@ describe("room chat helpers", () => {
     assert.deepEqual(unaddressable, [], "the UI never inserts a label the activation parser would truncate");
   });
 
+  it("shows a friendly supervised codename while routing through its canonical identity", () => {
+    const candidates = roomMentionCandidates([participant({
+      participantKey: "desktop-supervisor-agent:supervised_1",
+      kind: "agent",
+      displayName: "GardenWinter",
+      actorLabel: "GardenWinter · 6697e364-62d0-4027-b02d-ee71a8fbf579",
+      agentKey: "EmmyMay/desktop-codex-4d8fe3",
+      githubLogin: null,
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    })], "garden");
+
+    assert.equal(candidates[0]?.displayName, "GardenWinter");
+    assert.equal(candidates[0]?.insertText, "agent:EmmyMay/desktop-codex-4d8fe3");
+  });
+
   it("maps GitHub room messages to desktop event cards", () => {
     const event = parseGitHubEvent({
       ...roomMessage("github_1", null),
