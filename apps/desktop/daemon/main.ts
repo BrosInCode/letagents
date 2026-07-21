@@ -3639,18 +3639,21 @@ export class SupervisorDaemon {
       if (!entry || !this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
       const currentGrant = this.currentHostGrant(entry);
-      if (currentGrant?.grantId === input.grant_id
+      const currentGrantIsAtLeastInput = Boolean(currentGrant?.grantId === input.grant_id
         && (currentGrant.grantGeneration > input.grant_generation
           || (currentGrant.grantGeneration === input.grant_generation
-            && Date.parse(currentGrant.expiresAt) >= inputExpiry))
-        && !input.credential_only) {
+            && Date.parse(currentGrant.expiresAt) >= inputExpiry)));
+      if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only) {
         // Electron may still hold the pre-renewal safeStorage value. It may
         // confirm installation, but must never roll the daemon's newer
         // memory-only token/expiry backwards in the same generation.
         this.requestConvergence(entry.id);
         return { status: "installed" };
       }
-      const grant: InstalledHostGrant = {
+      // Credential-only reconnect is a rebind request, not a credential
+      // update. Electron can legitimately still have a pre-renewal encrypted
+      // copy, so retain and mint through the daemon's newer memory-only grant.
+      const grant: InstalledHostGrant = currentGrantIsAtLeastInput && currentGrant ? currentGrant : {
         entryId: entry.id, roomId: entry.room_id, agentKey: input.agent_key, grantId: input.grant_id,
         supervisorGrant: input.supervisor_grant, grantGeneration: input.grant_generation, apiUrl,
         daemonGeneration: input.daemon_generation, hostId: input.host_id,
@@ -3668,7 +3671,7 @@ export class SupervisorDaemon {
         // rejected reconnect into a launch.
         return { status: "provider_unavailable" };
       }
-      this.hostGrants.set(entry.id, grant);
+      if (this.hostGrants.get(entry.id) !== grant) this.hostGrants.set(entry.id, grant);
       if (hasExactLiveProvider && entry.provider_ref && entry.work_attempt_id && live) {
         const attempt = await this.durability.getAttempt(entry.work_attempt_id);
         if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {
@@ -3692,7 +3695,9 @@ export class SupervisorDaemon {
         // Reconnect is deliberately not recovery. It may rebind an exact live
         // provider generation, but it must never request convergence, resume,
         // spawn, stop, signal, or alter desired state when that handle is gone.
-        this.revokeHostGrantIfCurrent(entry.id, grant);
+        // A pre-existing newer grant remains valid even though this exact
+        // provider could not be rebound; only discard a newly supplied input.
+        if (grant !== currentGrant) this.revokeHostGrantIfCurrent(entry.id, grant);
         return { status: "provider_unavailable" };
       }
       if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {

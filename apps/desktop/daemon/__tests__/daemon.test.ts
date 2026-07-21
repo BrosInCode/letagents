@@ -1795,6 +1795,7 @@ test("host grant renewal retries transient failures, rotates the bearer in place
   let stops = 0;
   let renewalCalls = 0;
   let mintCalls = 0;
+  const mintParentGrants: string[] = [];
   const handle = { workAttemptId: attempt.work_attempt_id, pid: 9915, providerContinuationId: "renewing-host-grant-continuation", observedState: "working" as const };
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
@@ -1814,8 +1815,9 @@ test("host grant renewal retries transient failures, rotates the bearer in place
         grantGeneration: input.grantGeneration, expiresAt: new Date(clock + 24 * 60 * 60_000).toISOString(),
       };
     },
-    createWorkerSession: async () => {
+    createWorkerSession: async (input) => {
       mintCalls += 1;
+      mintParentGrants.push(input.supervisorGrant);
       if (mintCalls === 2) throw new Error("temporary child-session transport failure");
       return mintCalls === 1
         ? { sessionId: "renewal-session", bearer: "pre-renewal-bearer", bearerId: "pre-renewal-bearer-id", expiresAt: new Date(clock + 30_000).toISOString() }
@@ -1828,6 +1830,7 @@ test("host grant renewal retries transient failures, rotates the bearer in place
       workerBindings: WorkerBindingStore;
       hostGrants: Map<string, { supervisorGrant: string; expiresAt: string }>;
       publishNativeActivity: () => Promise<boolean>;
+      requestConvergence: (entryId: string) => void;
     };
     internals.publishNativeActivity = async () => true;
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -1853,6 +1856,21 @@ test("host grant renewal retries transient failures, rotates the bearer in place
     const afterStale = internals.hostGrants.get("host_grant_renewal_retry")!;
     assert.equal(afterStale.supervisorGrant, "renewed-parent-secret");
     assert.equal(afterStale.expiresAt, renewedExpiry);
+    const mintsBeforeReconnect = mintCalls;
+    let reconnectConvergenceCalls = 0;
+    internals.requestConvergence = () => { reconnectConvergenceCalls += 1; };
+    const credentialOnlyReplay = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      ...staleInstall,
+      credential_only: true,
+    });
+    assert.equal(credentialOnlyReplay.ok, true, credentialOnlyReplay.error);
+    assert.equal((credentialOnlyReplay.result as { status?: string }).status, "installed");
+    await eventually(async () => mintCalls === mintsBeforeReconnect + 1, "credential-only exact-provider rebind");
+    const afterCredentialOnlyReplay = internals.hostGrants.get("host_grant_renewal_retry")!;
+    assert.equal(afterCredentialOnlyReplay.supervisorGrant, "renewed-parent-secret");
+    assert.equal(afterCredentialOnlyReplay.expiresAt, renewedExpiry);
+    assert.equal(mintParentGrants.at(-1), "renewed-parent-secret", "the rebind mints with daemon's newer grant, never stale safeStorage input");
+    assert.equal(reconnectConvergenceCalls, 0, "credential-only rebind never schedules provider convergence");
     const binding = await internals.workerBindings.get("host_grant_renewal_retry");
     assert(binding);
     assert.equal(await internals.workerBindings.credentialFor(binding), "renewed-worker-bearer");
