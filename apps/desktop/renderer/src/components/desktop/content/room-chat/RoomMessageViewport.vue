@@ -36,7 +36,7 @@
           :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
-          :provider-label="resolveMessageProviderLabel(entry.message, participants, presence)"
+          :provider-label="resolveMessageProviderLabel(entry.message, participants, presence, supervisorEntries)"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
@@ -137,7 +137,12 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import type { DesktopAgentPresence, DesktopParticipantSummary, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import type {
+  DesktopAgentPresence,
+  DesktopParticipantSummary,
+  DesktopRoomMessage,
+  DesktopSupervisorManifestEntry,
+} from "../../../../../../electron/ipc-types";
 import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
@@ -182,6 +187,7 @@ const props = defineProps<{
   localAgentWork: ManagedAgentWorkIndicator[];
   participants?: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
+  supervisorEntries?: DesktopSupervisorManifestEntry[];
   deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;

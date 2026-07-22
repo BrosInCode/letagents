@@ -5,6 +5,7 @@ import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
   DesktopRoomMessage,
+  DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types.ts";
 import {
   isGenericAgentProviderLabel,
@@ -76,4 +77,32 @@ test("the exact live session wins when a historical message lacks its agent key"
 
 test("an explicit provider remains authoritative", () => {
   assert.equal(resolveMessageProviderLabel(message({ ideLabel: "Claude Code" }), [participant], []), "Claude Code");
+});
+
+test("the room supervisor manifest resolves partial historical identities", () => {
+  const entry = {
+    roomId: "Focus: Room Agents Rewrite",
+    displayName: "GardenSignal",
+    agentKey: null,
+    agentSessionId: null,
+    provider: "codex",
+  } as DesktopSupervisorManifestEntry;
+  const partialMessage = message({
+    agentKey: null,
+    agentSessionId: null,
+    actorLabel: null,
+  });
+  partialMessage.actorLabel = null;
+  partialMessage.sender = "GardenSignal | EmmyMay's agent | Supervisor worker";
+
+  assert.equal(resolveMessageProviderLabel(partialMessage, [], [], [entry]), "Codex");
+});
+
+test("a room-scoped exact display fallback fails closed when providers disagree", () => {
+  const entries = [
+    { displayName: "GardenSignal", provider: "codex", agentKey: null, agentSessionId: null },
+    { displayName: "GardenSignal", provider: "claude", agentKey: null, agentSessionId: null },
+  ] as DesktopSupervisorManifestEntry[];
+
+  assert.equal(resolveMessageProviderLabel(message({ agentKey: null, agentSessionId: null }), [], [], entries), "Supervisor worker");
 });

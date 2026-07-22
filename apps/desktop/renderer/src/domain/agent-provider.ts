@@ -2,6 +2,7 @@ import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
   DesktopRoomMessage,
+  DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
 
 const genericProviderLabels = new Set([
@@ -78,6 +79,23 @@ function messageOwnerLabel(message: DesktopRoomMessage): string {
     || "";
 }
 
+function supervisorOwnerLabel(entry: DesktopSupervisorManifestEntry): string | null {
+  const agentKey = entry.agentKey?.trim() || "";
+  const separator = agentKey.indexOf("/");
+  return separator > 0 ? agentKey.slice(0, separator) : null;
+}
+
+function supervisorProviderCandidate(entry: DesktopSupervisorManifestEntry): ProviderCandidate {
+  return {
+    agentKey: entry.agentKey,
+    agentSessionId: entry.agentSessionId,
+    displayName: entry.displayName,
+    ownerLabel: supervisorOwnerLabel(entry),
+    ideLabel: providerLabel(entry.provider),
+    runtime: entry.provider,
+  };
+}
+
 /**
  * Resolve a message's provider from the strongest current room identity.
  * Historical message snapshots may legitimately retain a generic
@@ -88,11 +106,16 @@ export function resolveMessageProviderLabel(
   message: DesktopRoomMessage,
   participants: readonly DesktopParticipantSummary[] = [],
   presence: readonly DesktopAgentPresence[] = [],
+  supervisorEntries: readonly DesktopSupervisorManifestEntry[] = [],
 ): string | null {
   const explicit = providerLabel(message.agentIdentity?.ideLabel);
   if (explicit) return explicit;
 
-  const candidates: ProviderCandidate[] = [...presence, ...participants];
+  const candidates: ProviderCandidate[] = [
+    ...supervisorEntries.map(supervisorProviderCandidate),
+    ...presence,
+    ...participants,
+  ];
   const sessionId = message.agentIdentity?.agentSessionId;
   const bySession = uniqueProvider(candidates.filter((candidate) => exact(sessionId, candidate.agentSessionId)));
   if (bySession) return bySession;
@@ -107,10 +130,13 @@ export function resolveMessageProviderLabel(
 
   const displayName = messageDisplayName(message);
   const ownerLabel = normalizedOwner(messageOwnerLabel(message));
-  const byDisplayAndOwner = uniqueProvider(candidates.filter((candidate) =>
-    exact(displayName, candidate.displayName)
-    && (!ownerLabel || ownerLabel === normalizedOwner(candidate.ownerLabel))
-  ));
+  const byDisplayName = candidates.filter((candidate) => exact(displayName, candidate.displayName));
+  const ownerQualifiedCandidates = ownerLabel
+    ? byDisplayName.filter((candidate) => ownerLabel === normalizedOwner(candidate.ownerLabel))
+    : byDisplayName;
+  const byDisplayAndOwner = uniqueProvider(
+    ownerQualifiedCandidates.length > 0 ? ownerQualifiedCandidates : byDisplayName,
+  );
   if (byDisplayAndOwner) return byDisplayAndOwner;
 
   return message.agentIdentity?.ideLabel?.trim() || null;

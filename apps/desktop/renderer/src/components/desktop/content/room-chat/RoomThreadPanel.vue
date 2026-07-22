@@ -57,7 +57,7 @@
         :delivery-receipts="deliveryReceiptsByMessage[parent.id] || []"
         :delivery-recovery-available="deliveryRecoveryAvailable"
         :delivery-retry-keys="deliveryRetryKeys"
-        :provider-label="resolveMessageProviderLabel(parent, participants, presence)"
+        :provider-label="resolveMessageProviderLabel(parent, participants, presence, supervisorEntries)"
         @quote-reply="quoteInThread(parent)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
         @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -95,7 +95,7 @@
           :delivery-receipts="deliveryReceiptsByMessage[reply.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
-          :provider-label="resolveMessageProviderLabel(reply, participants, presence)"
+          :provider-label="resolveMessageProviderLabel(reply, participants, presence, supervisorEntries)"
           @quote-reply="quoteInThread(reply)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
           @jump-to-thread-root="$emit('jump-message', parent.id)"
@@ -210,6 +210,7 @@ import type {
   DesktopRoomMessage,
   DesktopRoomMessageThreadSummary,
   DesktopStagedAttachment,
+  DesktopSupervisorManifestEntry,
 } from "../../../../../../electron/ipc-types";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { resolveMessageProviderLabel } from "../../../../domain/agent-provider";
@@ -233,6 +234,7 @@ const props = defineProps<{
   replies: DesktopRoomMessage[];
   participants: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
+  supervisorEntries?: DesktopSupervisorManifestEntry[];
   roomIdentifier: string | null;
   sending: boolean;
   sendError: string | null;
