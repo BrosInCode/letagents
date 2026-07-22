@@ -331,8 +331,10 @@ export function managedAgentProviderLabel(providerId: string): string {
 }
 
 /**
- * Project bounded native activity into the existing chat work indicator. This
- * is observable lifecycle evidence, never hidden reasoning text.
+ * Project a durable bounded turn into the existing chat work indicator. The
+ * turn owns visibility; native activity only refines the copy. An individual
+ * Codex item may complete while the surrounding room turn is still active, so
+ * item-level idle events must never make the whole agent disappear.
  */
 export function supervisedAgentWorkIndicators(
   entries: readonly DesktopSupervisorManifestEntry[],
@@ -345,16 +347,23 @@ export function supervisedAgentWorkIndicators(
       normalizeManagedAgentRoomIdentifier(entry.roomId) === room &&
       entry.agentSessionBindingState === "active" &&
       entry.desiredState === "running" &&
-      entry.observedState === "working" &&
       entry.condition === "none" &&
-      entry.nativeLiveness.state === "active"
+      entry.roomAgentState?.connection.state === "connected" &&
+      isVisibleRoomTurnState(entry.roomAgentState.turn.state)
     )
     .flatMap((entry) => {
+      const turn = entry.roomAgentState!.turn;
+      const turnStartedAt = currentRoomTurnStartedAt(entry);
+      const turnStartedAtMs = Date.parse(turnStartedAt ?? "");
+      const nativeActivityIsCurrent = entry.observedState === "working"
+        && entry.nativeLiveness.state === "active";
       const latest = [...entry.activity]
         .sort((left, right) => right.sequence - left.sequence)
         .find((event) => isHumanVisibleSupervisorActivity(event)
-          && (event.status === "working" || event.status === "reviewing"));
-      if (!latest) return [];
+          && (event.status === "working" || event.status === "reviewing")
+          && (Number.isFinite(turnStartedAtMs)
+            ? Date.parse(event.observedAt) >= turnStartedAtMs
+            : nativeActivityIsCurrent));
       const boundPresence = entry.agentSessionId
         ? presence.find((candidate) => candidate.agentSessionId === entry.agentSessionId)
         : null;
@@ -369,14 +378,48 @@ export function supervisedAgentWorkIndicators(
           boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
           entry.id,
         ),
-        summary: humanFacingSupervisorActivitySummary(latest),
-        startedAt: latest.observedAt,
+        summary: latest
+          ? humanFacingSupervisorActivitySummary(latest)
+          : roomTurnFallbackSummary(turn.state),
+        startedAt: turnStartedAt
+          ?? latest?.observedAt
+          ?? entry.roomAgentState?.connection.observedAt
+          ?? entry.bindingUpdatedAt
+          ?? entry.createdAt,
         agentSessionId: entry.agentSessionId,
         agentKey: entry.agentKey,
-        sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
+        sourceMessageId: turn.sourceMessageId,
       }];
     })
     .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+}
+
+function isVisibleRoomTurnState(state: string): boolean {
+  return state === "dispatching"
+    || state === "responding"
+    || state === "publishing"
+    || state === "retrying";
+}
+
+function currentRoomTurnStartedAt(entry: DesktopSupervisorManifestEntry): string | null {
+  const turn = entry.roomAgentState?.turn;
+  if (!turn) return null;
+  const receipt = entry.deliveryReceipts?.find((candidate) =>
+    (Boolean(turn.inboxItemId) && candidate.inboxItemId === turn.inboxItemId)
+    || (Boolean(turn.sourceMessageId) && candidate.sourceMessageId === turn.sourceMessageId));
+  if (!receipt) return null;
+  for (let index = receipt.timeline.length - 1; index >= 0; index -= 1) {
+    const event = receipt.timeline[index];
+    if (event?.phase === "turn_started") return event.observedAt;
+  }
+  return null;
+}
+
+function roomTurnFallbackSummary(state: string): string {
+  if (state === "dispatching") return "Preparing a response";
+  if (state === "publishing") return "Sending the response";
+  if (state === "retrying") return "Trying again";
+  return "Thinking";
 }
 
 /** Provider transport/account notifications remain in diagnostics, but they

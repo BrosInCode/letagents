@@ -42,6 +42,30 @@ function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): Desktop
     nativeLiveness: { state: "active", observedAt: null, detail: null },
     restartCount: 0,
     lastTerminal: null,
+    roomAgentState: {
+      connection: { state: "connected", observedAt: "2026-07-17T00:00:00.000Z", detail: null },
+      ingress: { state: "observing", observedAt: "2026-07-17T00:00:00.000Z", detail: null },
+      inbox: { state: "queued", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: {
+        state: "responding",
+        inboxItemId: "inbox_1",
+        sourceMessageId: "message_source",
+        providerTurnId: "turn_1",
+        detail: null,
+      },
+      task: { state: "none", taskId: null, title: null },
+    },
+    deliveryReceipts: [{
+      inboxItemId: "inbox_1",
+      sourceMessageId: "message_source",
+      state: "awaiting_result",
+      attemptCount: 1,
+      providerTurnId: "turn_1",
+      blockedByMessageId: null,
+      error: null,
+      updatedAt: "2026-07-17T00:00:00.500Z",
+      timeline: [{ phase: "turn_started", observedAt: "2026-07-17T00:00:00.500Z", detail: null }],
+    }],
     activity: [{
       observedAt: "2026-07-17T00:00:01.000Z",
       sequence: 5,
@@ -207,7 +231,14 @@ test("supervised indicator echoes a bounded summary and uses a stable per-entry 
 });
 
 test("supervised indicator clears when the agent is only idle-polling (composes with task_67)", () => {
-  const idlePoll = entry({ observedState: "idle" });
+  const idlePoll = entry({
+    observedState: "idle",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+    },
+  });
   assert.deepEqual(supervisedAgentWorkIndicators([idlePoll], [], "room_1"), []);
 });
 
@@ -218,7 +249,14 @@ test("provider account notifications stay in diagnostics but never masquerade as
     method: "account/rateLimits/updated",
     summary: "account/rateLimits/updated",
   };
-  const withNoiseOnly = entry({ activity: [rateLimitEvent] });
+  const withNoiseOnly = entry({
+    activity: [rateLimitEvent],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+    },
+  });
   assert.deepEqual(supervisedAgentWorkIndicators([withNoiseOnly], [], "room_1"), []);
   assert.equal(isHumanVisibleSupervisorActivity(rateLimitEvent), false);
   assert.equal(isHumanVisibleSupervisorActivity({ kind: "turn_lifecycle", method: "turn/completed" }), true);
