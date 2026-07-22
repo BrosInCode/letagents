@@ -37,6 +37,7 @@
           :delivery-retry-keys="deliveryRetryKeys"
           :participants="participants"
           :presence="presence"
+          :supervisor-entries="roomSupervisorEntries"
           @reveal-message="requestMessageReveal"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
@@ -164,6 +165,7 @@
         :delivery-recovery-available="deliveryRecoveryAvailable"
         :delivery-retry-keys="deliveryRetryKeys"
         :presence="presence"
+        :supervisor-entries="roomSupervisorEntries"
         @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
         @close="closeThread"
         @open-image="openImageViewer"
@@ -191,12 +193,14 @@ import type {
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopRoomMessageThreadSummary,
+  DesktopSupervisorManifestEntry,
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
-import type {
-  ManagedAgentPermissionApproval,
-  ManagedAgentWorkIndicator,
+import {
+  normalizeManagedAgentRoomIdentifier,
+  type ManagedAgentPermissionApproval,
+  type ManagedAgentWorkIndicator,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import {
@@ -249,6 +253,7 @@ const props = defineProps<{
   loadingOlderMessages: boolean;
   participants: DesktopParticipantSummary[];
   presence: DesktopAgentPresence[];
+  supervisorEntries?: DesktopSupervisorManifestEntry[];
   resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];
@@ -257,6 +262,18 @@ const props = defineProps<{
   initialDraft?: string;
   initialScrollTop?: number | null;
 }>();
+
+/*
+ * Keep provider resolution anchored to the room currently being rendered.
+ * The manifest is the authoritative local record even when older message and
+ * participant snapshots contain only the generic "Supervisor worker" label.
+ */
+const roomSupervisorEntries = computed(() => {
+  const roomIdentifier = normalizeManagedAgentRoomIdentifier(props.roomIdentifier);
+  return (props.supervisorEntries ?? []).filter((entry) =>
+    normalizeManagedAgentRoomIdentifier(entry.roomId) === roomIdentifier
+  );
+});
 
 const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId?: string | null];
