@@ -1745,7 +1745,7 @@ test("live daemon-inbox agents become canonical mentionable room participants", 
   assert.equal(mention?.insertText, "agent:EmmyMay/desktop-codex-4d8fe3");
 });
 
-test("supervisor reachability preserves server-owned participant attribution", () => {
+test("supervisor reachability preserves server-owned attribution while replacing a generic provider label", () => {
   const participants = mergeDesktopSupervisorAgentParticipants([
     participant({
       participantKey: "agent:EmmyMay/desktop-codex-4d8fe3",
@@ -1779,7 +1779,7 @@ test("supervisor reachability preserves server-owned participant attribution", (
   assert.equal(participants[0]?.participantKey, "desktop-supervisor-agent:supervised_6697e364-62d0-4027-b02d-ee71a8fbf579");
   assert.equal(participants[0]?.ownerLabel, "Emmy May");
   assert.equal(participants[0]?.actorLabel, "GardenWinter | Emmy May's agent | Supervisor Worker");
-  assert.equal(participants[0]?.ideLabel, "Supervisor Worker");
+  assert.equal(participants[0]?.ideLabel, "Codex");
   assert.equal(participants[0]?.activityState, "active");
   assert.deepEqual(participants[0]?.sourceFlags, ["messages", "delivery", "presence"]);
 });
