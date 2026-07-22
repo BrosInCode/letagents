@@ -12,19 +12,46 @@ import claudeCodeIcon from "../../../../assets/harness-icons/claude-code.png";
 import codexIcon from "../../../../assets/harness-icons/codex.png";
 import cursorIcon from "../../../../assets/harness-icons/cursor.png";
 
-const props = defineProps<{ label: string }>();
+const props = defineProps<{ label: string; agentKey?: string | null }>();
 type ProviderKey = "codex" | "claude" | "antigravity" | "cursor" | "open-model" | "other";
 
-const providerKey = computed<ProviderKey>(() => {
-  const normalized = props.label.trim().toLowerCase();
+function providerFromLabel(value: string): ProviderKey {
+  const normalized = value.trim().toLowerCase();
   if (normalized === "codex") return "codex";
   if (normalized === "claude" || normalized === "claude code") return "claude";
   if (normalized === "antigravity") return "antigravity";
   if (normalized === "cursor") return "cursor";
   if (normalized === "open model" || normalized === "open-model") return "open-model";
   return "other";
-});
-const label = computed(() => props.label.trim() || "Other");
+}
+
+function providerFromAgentKey(agentKey: string | null | undefined): ProviderKey | null {
+  const name = (agentKey?.split("/").at(-1) || "").toLowerCase();
+  if (name.startsWith("desktop-codex-")) return "codex";
+  if (name.startsWith("desktop-claude-code-") || name.startsWith("desktop-claude-")) return "claude";
+  if (name.startsWith("desktop-antigravity-")) return "antigravity";
+  if (name.startsWith("desktop-cursor-")) return "cursor";
+  if (name.startsWith("desktop-open-model-") || name.startsWith("desktop-open_model-")) return "open-model";
+  return null;
+}
+
+const inferredProvider = computed<ProviderKey | null>(() =>
+  props.label.trim().toLowerCase() === "supervisor worker"
+    ? providerFromAgentKey(props.agentKey)
+    : null
+);
+const providerKey = computed<ProviderKey>(() => inferredProvider.value || providerFromLabel(props.label));
+const providerLabels: Record<ProviderKey, string> = {
+  codex: "Codex",
+  claude: "Claude Code",
+  antigravity: "Antigravity",
+  cursor: "Cursor",
+  "open-model": "Open Model",
+  other: "Other",
+};
+const label = computed(() => inferredProvider.value
+  ? providerLabels[inferredProvider.value]
+  : props.label.trim() || "Other");
 const iconSources: Record<Exclude<ProviderKey, "open-model" | "other">, string> = {
   codex: codexIcon,
   claude: claudeCodeIcon,
