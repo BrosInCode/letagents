@@ -130,6 +130,12 @@
               Reconnect agent
             </button>
           </div>
+          <div v-else-if="canRecover(selectedTruthfulAgent)" class="desktop-activity-detail-actions">
+            <p>Its previous runtime is no longer available. Recovery starts a new runtime for this saved agent.</p>
+            <button type="button" data-testid="desktop-room-agent-recover" @click="emit('recover-room-agent', selectedTruthfulAgent.id)">
+              Recover agent
+            </button>
+          </div>
           <section v-if="selectedTruthfulReceipt" class="desktop-activity-detail-section"><header><h4>Delivery timeline</h4><span>{{ selectedTruthfulReceipt.state }}</span></header><ol class="desktop-activity-artifact-timeline"><li v-for="event in selectedTruthfulReceipt.timeline" :key="`${event.observedAt}-${event.phase}`" class="desktop-activity-artifact-event"><div class="desktop-activity-artifact-content"><strong>{{ event.phase }}</strong><small>{{ event.detail || event.observedAt }}</small></div></li></ol></section>
         </aside>
         <aside v-else-if="selectedLiveParticipant" class="desktop-activity-detail" data-kind="agent">
@@ -428,7 +434,13 @@ import type {
 import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
-import { roomAgentActivityProjection, roomAgentDeliveryGroup, roomAgentDeliverySummary } from "../../../domain/room-agent-delivery";
+import {
+  canReconnectRoomAgent,
+  canRecoverSavedRoomAgent,
+  roomAgentActivityProjection,
+  roomAgentDeliveryGroup,
+  roomAgentDeliverySummary,
+} from "../../../domain/room-agent-delivery";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import {
   findLinkedPullRequest,
@@ -462,6 +474,7 @@ const emit = defineEmits<{
   "open-agent-detail": [target: AgentModalTarget];
   "refresh-room": [];
   "reconnect-room-agent": [entryId: string];
+  "recover-room-agent": [entryId: string];
   "clear-artifact-task-filter": [];
 }>();
 
@@ -570,9 +583,9 @@ function truthfulTone(agent: DesktopSupervisorManifestEntry): string { return ro
 function truthfulLabel(agent: DesktopSupervisorManifestEntry): string { return supervisedAgentDisplayLabel(agent.displayName, agent.id); }
 function truthfulSummary(agent: DesktopSupervisorManifestEntry): string { return roomAgentDeliverySummary(agent.roomAgentState!); }
 function canReconnect(agent: DesktopSupervisorManifestEntry): boolean {
-  return agent.deliveryMode === "daemon_inbox"
-    && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials";
+  return canReconnectRoomAgent(agent);
 }
+function canRecover(agent: DesktopSupervisorManifestEntry): boolean { return canRecoverSavedRoomAgent(agent); }
 function selectLegacyAgent(key: string): void { selectedTruthfulId.value = null; selectedLiveKey.value = key; }
 const artifactTimeline = computed(() =>
   roomArtifactTimelineItems(props.roomArtifacts, {

@@ -75,7 +75,6 @@ import {
   supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
-import { supervisedAgentShortTag } from "../src/domain/codenames";
 
 function provider(
   overrides: Partial<DesktopAgentProvider> = {},
@@ -1448,6 +1447,19 @@ test("managedAgentSessionDisplayName prefers the worker codename", () => {
   })), "Local agent");
 });
 
+test("managed supervised sessions project legacy identity suffixes out of product labels", () => {
+  const requestId = "6697e364-62d0-4027-b02d-ee71a8fbf579";
+
+  assert.equal(managedAgentSessionDisplayName(session({
+    displayName: `GardenWinter · ${requestId}`,
+    supervisorEntryId: `supervised_${requestId}`,
+  })), "GardenWinter");
+  assert.equal(managedAgentSessionDisplayName(session({
+    displayName: "GardenWinter · 000001",
+    supervisorEntryId: `supervised_${requestId}`,
+  })), "GardenWinter · 000001");
+});
+
 test("managed permission profile helpers present available and gated modes", () => {
   const running = session();
   assert.equal(managedAgentPermissionProfileLabel(running), "Full access");
@@ -1649,7 +1661,7 @@ test("live daemon-inbox agents become canonical mentionable room participants", 
   })], "room_1");
 
   assert.equal(participants.length, 1);
-  assert.equal(participants[0]?.displayName, `GardenWinter · ${supervisedAgentShortTag("6697e364-62d0-4027-b02d-ee71a8fbf579")}`);
+  assert.equal(participants[0]?.displayName, "GardenWinter");
   assert.equal(participants[0]?.agentKey, "EmmyMay/desktop-codex-4d8fe3");
   assert.equal(participants[0]?.activityState, "active");
   assert.deepEqual(participants[0]?.sourceFlags, ["delivery", "presence"]);

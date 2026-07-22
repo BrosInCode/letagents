@@ -1,6 +1,7 @@
 import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
+import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
 /**
@@ -83,6 +84,7 @@ const JOIN_HINT = "The agent will join the room shortly.";
 
 type LaunchFields = Pick<
   DesktopSupervisorManifestEntry,
+  | "id"
   | "displayName"
   | "provider"
   | "desiredState"
@@ -150,6 +152,7 @@ function reachedIndex(entry: LaunchFields): number {
 
 export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchProgress {
   const providerLabel = supervisedLaunchProviderLabel(entry.provider);
+  const agentDisplayName = supervisedAgentDisplayLabel(entry.displayName, entry.id);
   const reached = reachedIndex(entry);
   const ownershipPaused = entry.desiredState === "paused";
   const stopFailed = entry.desiredState === "stopped"
@@ -209,7 +212,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
 
   let headline: string;
   if (ready) {
-    headline = `${entry.displayName} is ready`;
+    headline = `${agentDisplayName} is ready`;
   } else if (ownershipPaused) {
     headline = `${providerLabel} launch needs cleanup`;
   } else if (stopFailed) {
@@ -236,7 +239,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     stopFailed,
     ownershipPaused,
     stopped,
-    agentName: ready ? entry.displayName : null,
+    agentName: ready ? agentDisplayName : null,
     providerLabel,
     headline,
     failureDetail,

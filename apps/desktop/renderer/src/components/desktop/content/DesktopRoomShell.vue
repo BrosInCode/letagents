@@ -226,6 +226,7 @@
         @open-agent-detail="openAgentDetail"
         @refresh-room="emit('refresh-room')"
         @reconnect-room-agent="reconnectRoomAgent"
+        @recover-room-agent="recoverRoomAgent"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
       />
 
@@ -1582,8 +1583,26 @@ async function reconnectRoomAgent(entryId: string): Promise<void> {
     await desktopIpc.supervisor.reconnectAgent({ entryId });
     await refreshManagedAgentSessions();
     pushActionToast("Credential handoff was requested. The existing agent runtime was left running.", "success", 5_000);
-  } catch (error) {
-    pushActionToast(error instanceof Error ? error.message : "Could not reconnect this agent.", "error", 7_000);
+  } catch {
+    await refreshManagedAgentSessions();
+    pushActionToast("Could not reconnect this agent. Its existing runtime was left unchanged. Check its current state and try again.", "error", 7_000);
+  }
+}
+
+async function recoverRoomAgent(entryId: string): Promise<void> {
+  if (!desktopIpc.supervisor?.setDesiredState) {
+    pushActionToast("This desktop build cannot recover supervised agents yet.", "error", 6_000);
+    return;
+  }
+  try {
+    // This is the existing explicit recovery primitive: it keeps the durable
+    // entry id but asks the daemon to converge a new provider runtime.
+    await desktopIpc.supervisor.setDesiredState(entryId, "running");
+    await refreshManagedAgentSessions();
+    pushActionToast("Recovery started for this saved agent.", "success", 5_000);
+  } catch {
+    await refreshManagedAgentSessions();
+    pushActionToast("Could not recover this saved agent. It remains available to try again.", "error", 7_000);
   }
 }
 

@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { roomAgentActivityProjection, roomAgentDeliveryGroup, roomAgentDeliverySummary } from "../src/domain/room-agent-delivery";
+import {
+  canReconnectRoomAgent,
+  canRecoverSavedRoomAgent,
+  roomAgentActivityProjection,
+  roomAgentDeliveryGroup,
+  roomAgentDeliverySummary,
+} from "../src/domain/room-agent-delivery";
 import { roomMessageRevealDestination } from "../src/domain/room-message-reveal";
 
 const rendererRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -31,6 +37,40 @@ describe("durable room delivery UI contracts", () => {
     assert.equal(roomAgentDeliverySummary((state("connected", "waiting_for_desktop_credentials", "idle") as never).roomAgentState), "Waiting for desktop credential handoff");
     assert.equal(roomAgentDeliverySummary((state("reconnecting", "queued", "idle") as never).roomAgentState), "Reconnecting");
     assert.equal(roomAgentDeliverySummary((state("connected", "blocked", "responding") as never).roomAgentState), "Delivery needs attention");
+  });
+
+  it("keeps reconnect exact-runtime-only and labels replacement as explicit recovery", async () => {
+    const exact = {
+      deliveryMode: "daemon_inbox", desiredState: "running",
+      observedState: "working", condition: "none",
+      roomAgentState: { inbox: { state: "waiting_for_desktop_credentials" } },
+      workAttemptId: "attempt_1", agentSessionId: "session_1", agentSessionBindingState: "active",
+      executionGenerationId: "generation_1", providerContinuationId: "continuation_1",
+    };
+    const gone = {
+      ...exact, desiredState: "paused", observedState: "paused", workAttemptId: null, agentSessionId: null,
+      agentSessionBindingState: "none", executionGenerationId: null, providerContinuationId: null,
+    };
+    const starting = {
+      ...gone, desiredState: "running", observedState: "starting", condition: "none",
+    };
+    assert.equal(canReconnectRoomAgent(exact as never), true);
+    assert.equal(canRecoverSavedRoomAgent(exact as never), false);
+    assert.equal(canReconnectRoomAgent(gone as never), false);
+    assert.equal(canRecoverSavedRoomAgent(gone as never), true);
+    assert.equal(canRecoverSavedRoomAgent(starting as never), false,
+      "a normal pre-runtime launch must not be presented as a recovery");
+
+    const [activity, shell] = await Promise.all([
+      source("src/components/desktop/content/RoomActivityTabView.vue"),
+      source("src/components/desktop/content/DesktopRoomShell.vue"),
+    ]);
+    assert.match(activity, /desktop-room-agent-recover/);
+    assert.match(activity, /Recovery starts a new runtime for this saved agent/);
+    assert.match(activity, /recover-room-agent/);
+    assert.match(shell, /@recover-room-agent="recoverRoomAgent"/);
+    assert.match(shell, /supervisor\.setDesiredState\(entryId, "running"\)/);
+    assert.match(shell, /Recovery started for this saved agent/);
   });
 
   it("deduplicates only matching projected legacy roster rows and retains mixed rollout rows", async () => {
@@ -66,6 +106,7 @@ describe("durable room delivery UI contracts", () => {
     assert.match(activity, /Assigned work<\/span>/);
     assert.match(activity, /desktop-room-agent-reconnect/);
     assert.match(activity, /reconnect-room-agent/);
+    assert.match(activity, /canReconnectRoomAgent/);
     assert.match(activity, /supervisedAgentDisplayLabel/);
   });
 
