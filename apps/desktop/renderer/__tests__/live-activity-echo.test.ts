@@ -96,31 +96,43 @@ test("a matching agent reply retires an older progress echo before a pending lab
     ...indicator("agent_a", "2026-07-22T15:00:00.000Z", "Writing a response"),
     agentSessionId: "session_a",
     agentKey: "codex:agent_a",
+    sourceMessageId: "message_source",
+  };
+  const source = {
+    id: "message_source",
+    agentIdentity: null,
   };
   const reply = {
-    timestamp: "2026-07-22T15:00:01.000Z",
+    id: "message_reply",
     agentIdentity: { agentSessionId: "session_a", agentKey: "codex:agent_a" },
   };
-  assert.equal(workIndicatorSupersededByAgentMessage(work, [reply]), true);
-  assert.equal(workIndicatorSupersededByAgentMessage(work, [{
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [source, reply]), true);
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [source, {
     ...reply,
     agentIdentity: { agentSessionId: "session_b", agentKey: "codex:agent_b" },
   }]), false, "one agent replying never clears another agent's work");
-  assert.equal(workIndicatorSupersededByAgentMessage(work, [{
-    ...reply,
-    timestamp: "2026-07-22T14:59:59.000Z",
-  }]), false, "historical messages do not suppress a newer turn");
+  assert.equal(
+    workIndicatorSupersededByAgentMessage(work, [reply, source]),
+    false,
+    "a previous reply cannot suppress progress for a later activating message",
+  );
+  assert.equal(
+    workIndicatorSupersededByAgentMessage({ ...work, sourceMessageId: "message_not_loaded" }, [source, reply]),
+    false,
+    "missing causal context fails safe by keeping progress visible",
+  );
 });
 
 test("agent-key fallback retires stale work only when session identity is unavailable", () => {
   const work: ManagedAgentWorkIndicator = {
     ...indicator("agent_a", "2026-07-22T15:00:00.000Z"),
     agentKey: "CODEX:Agent_A",
+    sourceMessageId: "message_source",
   };
-  assert.equal(workIndicatorSupersededByAgentMessage(work, [{
-    timestamp: "2026-07-22T15:00:01.000Z",
-    agentIdentity: { agentSessionId: null, agentKey: "codex:agent_a" },
-  }]), true);
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [
+    { id: "message_source", agentIdentity: null },
+    { id: "message_reply", agentIdentity: { agentSessionId: null, agentKey: "codex:agent_a" } },
+  ]), true);
 });
 
 test("collapse keeps all indicators when at or under the limit", () => {

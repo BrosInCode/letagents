@@ -686,6 +686,18 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     agentSessionBindingState: "active",
     observedState: "working",
     condition: "none",
+    roomAgentState: {
+      connection: { state: "connected", detail: null },
+      inbox: { state: "responding", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: {
+        state: "responding",
+        inboxItemId: "inbox_1",
+        sourceMessageId: "message_source",
+        providerTurnId: "turn_1",
+        detail: null,
+      },
+      task: { state: "none", taskId: null, title: null },
+    },
     nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
     activity: [{
       observedAt: "2026-07-15T18:00:01.000Z",
@@ -713,6 +725,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
       startedAt: "2026-07-15T18:00:01.000Z",
       agentSessionId: "agent_session_403",
       agentKey: "codex:dawn-harbor",
+      sourceMessageId: "message_source",
     }],
   );
   assert.deepEqual(
