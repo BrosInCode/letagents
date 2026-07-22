@@ -313,7 +313,14 @@ const emit = defineEmits<{
   "retry-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
-const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => receipt.state !== "acknowledged"));
+const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
+  "retryable",
+  "result_recovery",
+  "blocked",
+  "acknowledged_no_reply",
+  "cancelled_by_room_move",
+  "queued_behind_blocked",
+].includes(receipt.state)));
 
 function receiptIsAnimated(state: string): boolean {
   return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery"].includes(state);

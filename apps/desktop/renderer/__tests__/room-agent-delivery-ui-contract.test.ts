@@ -149,8 +149,7 @@ describe("durable room delivery UI contracts", () => {
       source("src/components/desktop/content/DesktopChatMessage.vue"),
     ]);
     assert.match(shell, /\(grouped\[receipt\.sourceMessageId\] \?\?= \[\]\)\.push/);
-    assert.doesNotMatch(shell, /supervisedAgentWorkIndicators/);
-    assert.match(shell, /provider stream belongs in Activity\/diagnostics/);
+    assert.match(shell, /supervisedAgentWorkIndicators/);
     for (const content of [shell, chat, viewport, thread]) {
       assert.match(content, /delivery-receipts/);
     }
@@ -159,7 +158,7 @@ describe("durable room delivery UI contracts", () => {
     assert.match(message, /:disabled="!deliveryRecoveryAvailable \|\| retryingReceipt/);
     assert.match(message, /class="room-message-delivery-dots"/);
     assert.match(message, /aria-live="polite"/);
-    assert.match(message, /receipt\.state !== "acknowledged"/);
+    assert.match(message, /"result_recovery"/);
     assert.doesNotMatch(message, /receiptIcon/);
     assert.match(message, /Retry will be available when delivery recovery is connected/);
     assert.match(message, /scroll-to-message', receipt\.blockedByMessageId/);

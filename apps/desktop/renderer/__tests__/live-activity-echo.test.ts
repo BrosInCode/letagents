@@ -6,6 +6,7 @@ import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
+  humanFacingSupervisorActivitySummary,
   liveActivityEchoText,
   isHumanVisibleSupervisorActivity,
   supervisedAgentWorkIndicators,
@@ -149,7 +150,7 @@ test("echo coalescing drops entries that go idle (cancellation, no stale echo)",
 test("supervised indicator echoes a bounded summary and uses a stable per-entry id", () => {
   const longSummary = "y".repeat(LIVE_ACTIVITY_ECHO_MAX_LENGTH + 20);
   const indicators = supervisedAgentWorkIndicators(
-    [entry({ activity: [{ ...entry().activity[0]!, summary: longSummary }] })],
+    [entry({ activity: [{ ...entry().activity[0]!, kind: "product_progress", method: "progress", summary: longSummary }] })],
     [{ agentSessionId: "agent_session_1", displayName: "MistyMorrow", actorLabel: "MistyMorrow" }],
     "room_1",
   );
@@ -176,4 +177,10 @@ test("provider account notifications stay in diagnostics but never masquerade as
   assert.deepEqual(supervisedAgentWorkIndicators([withNoiseOnly], [], "room_1"), []);
   assert.equal(isHumanVisibleSupervisorActivity(rateLimitEvent), false);
   assert.equal(isHumanVisibleSupervisorActivity({ kind: "turn_lifecycle", method: "turn/completed" }), true);
+});
+
+test("provider protocol summaries become calm product progress labels", () => {
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "item_lifecycle", method: "item/started", summary: "codex · item/started" }), "Thinking");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "text_delta", method: "item/agentMessage/delta", summary: "codex · item/agentMessage/delta" }), "Writing a response");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "command_output", method: "item/commandExecution/outputDelta", summary: "codex · item/commandExecution/outputDelta" }), "Working in the project");
 });

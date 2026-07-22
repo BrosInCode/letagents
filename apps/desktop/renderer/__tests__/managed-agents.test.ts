@@ -26,6 +26,7 @@ import {
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
   hasSupervisedRuntime,
+  humanFacingSupervisorActivitySummary,
   isAgentSetupConfirmationActive,
   isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
@@ -707,7 +708,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     [{
       id: "supervised_working",
       displayName: "DawnHarbor",
-      summary: "Inspecting the workspace",
+      summary: "Using a tool",
       startedAt: "2026-07-15T18:00:01.000Z",
     }],
   );
@@ -736,11 +737,14 @@ test("supervisor native activity drives the chat work indicator for the bound ro
   );
 });
 
-test("raw provider turn lifecycle never becomes a human chat work indicator", () => {
-  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/started" }), false);
-  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/completed" }), false);
+test("provider activity becomes product language instead of a protocol trace", () => {
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/started" }), true);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/completed" }), true);
   assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "thread/read" }), false);
   assert.equal(isHumanVisibleSupervisorActivity({ kind: "tool_lifecycle", method: "item/toolCall/started" }), true);
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "text_delta", method: "item/agentMessage/delta", summary: "codex · item/agentMessage/delta" }), "Writing a response");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "item_lifecycle", method: "item/reasoning/summaryTextDelta", summary: "codex · item/reasoning/summaryTextDelta" }), "Thinking through the request");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "tool_lifecycle", method: "item/mcpToolCall/progress", summary: "codex · item/mcpToolCall/progress" }), "Using a tool");
 });
 
 test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
