@@ -381,7 +381,13 @@ export function isHumanVisibleSupervisorActivity(
   event: Pick<DesktopSupervisorActivityEvent, "kind" | "method">,
 ): boolean {
   const method = event.method.trim().toLowerCase();
-  if (method === "account/ratelimits/updated" || method === "account/ratelimitsupdated") return false;
+  if (
+    method === "account/ratelimits/updated"
+    || method === "account/ratelimitsupdated"
+    || method === "item/started"
+    || method === "item/completed"
+    || method === "thread/read"
+  ) return false;
   return event.kind !== "usage" && event.kind !== "provider_event";
 }
 
