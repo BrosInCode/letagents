@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.42";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.43";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -937,21 +937,24 @@ function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["
   const root = record(value);
   if (!root) return null;
   const connection = record(root.connection);
-  const ingress = record(root.ingress);
+  const hasIngress = Object.hasOwn(root, "ingress");
+  const ingress = hasIngress ? record(root.ingress) : null;
   const inbox = record(root.inbox);
   const turn = record(root.turn);
   const task = record(root.task);
-  if (!connection || !ingress || !inbox || !turn || !task) return null;
+  if (!connection || (hasIngress && !ingress) || !inbox || !turn || !task) return null;
 
   const connectionState = enumValue(connection.state, ["connected", "reconnecting", "disconnected"] as const);
-  const ingressState = enumValue(ingress.state, ["starting", "observing", "backoff", "blocked", "stopped"] as const);
+  const ingressState = ingress
+    ? enumValue(ingress.state, ["starting", "observing", "backoff", "blocked", "stopped"] as const)
+    : connectionState === "connected" ? "observing" as const : "stopped" as const;
   const inboxState = enumValue(inbox.state, ["empty", "queued", "blocked", "waiting_for_desktop_credentials"] as const);
   const turnState = enumValue(turn.state, ["idle", "dispatching", "responding", "publishing", "retrying", "failed"] as const);
   const taskState = enumValue(task.state, ["none", "assigned", "working", "blocked"] as const);
   const observedAt = nullableNonEmptyString(connection.observed_at);
   const connectionDetail = nullableString(connection.detail);
-  const ingressObservedAt = nullableNonEmptyString(ingress.observed_at);
-  const ingressDetail = nullableString(ingress.detail);
+  const ingressObservedAt = ingress ? nullableNonEmptyString(ingress.observed_at) : observedAt;
+  const ingressDetail = ingress ? nullableString(ingress.detail) : null;
   const blockedByMessageId = nullableNonEmptyString(inbox.blocked_by_message_id);
   const inboxDetail = nullableString(inbox.detail);
   const inboxItemId = nullableNonEmptyString(turn.inbox_item_id);

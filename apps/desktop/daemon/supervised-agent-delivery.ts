@@ -1,4 +1,4 @@
-import type { ProviderActionHandle, ProviderActionPort } from "./provider-action-port.js";
+import type { ProviderActionHandle, ProviderActionPort, ProviderRoomTurnResult } from "./provider-action-port.js";
 import { SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
 export type SupervisedIngressAgent = {
@@ -171,6 +171,18 @@ export class SupervisedAgentDelivery {
     // waiting on the shared drain; it must not later install a stale loop.
     this.nextRefreshEpoch(agentId);
     return this.stopForRefresh(agentId);
+  }
+
+  /** Fence old-room observation immediately while allowing the activating
+   * delivery continuation to finish its durable room-move commit. */
+  pauseIngress(agentId: string): void {
+    this.nextRefreshEpoch(agentId);
+    this.polling.get(agentId)?.abort();
+    this.loopControllers.get(agentId)?.abort();
+    // This is called only after the activating inbox row is terminal. Abort
+    // the pump controller as well so it cannot claim a later old-room item
+    // while the durable membership commit is retrying.
+    this.pumpControllers.get(agentId)?.abort();
   }
 
   private stopForRefresh(agentId: string): Promise<void> {
@@ -421,11 +433,28 @@ export class SupervisedAgentDelivery {
       const recovering = Boolean(item.provider_turn_id);
       if (recovering) setActive("responding");
       else setActive("dispatching");
+      const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<void> => {
+        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+        // New turns already checkpoint through checkpointTurnStarted. This
+        // idempotent edge keeps provider-neutral adapters equally strict.
+        if (item.state !== "result_recovery") await this.inbox.checkpointTurnStarted(item.inbox_item_id, result.turnId);
+        const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
+        await this.inbox.checkpointNormalizedTerminal({
+          inbox_item_id: item.inbox_item_id,
+          agent_id: agent.agentId,
+          execution_generation_id: agent.executionGenerationId,
+          provider_turn_id: result.turnId,
+          outcome: result.outcome,
+          text: result.text?.trim() || null,
+          evidence,
+          terminal_evidence: result,
+        });
+      };
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
           providerTurnId: item.provider_turn_id!,
-        }, { detachSignal: controller.signal })
+        }, { detachSignal: controller.signal, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
@@ -451,7 +480,7 @@ export class SupervisedAgentDelivery {
         await this.inbox.checkpointTurnStarted(item.inbox_item_id, turnId);
         // Only an acknowledged exact provider turn is projected responding.
         setActive("responding");
-      }, detachSignal: controller.signal });
+      }, checkpointTerminalResult, detachSignal: controller.signal });
       // Native provider turns are intentionally not cancelable by the daemon:
       // a handoff must retire our authority, not kill a user's Codex process.
       // Do not put this promise in the drain group. Instead, race its result
@@ -461,22 +490,12 @@ export class SupervisedAgentDelivery {
       const result = turn && await this.awaitProviderResultOrRetirement(turn, controller);
       if (!result) throw new Error("Provider does not support bounded room turns.");
       if (!await this.hasExecutionAuthority(agent, controller)) return;
-      // Provider adapters checkpoint before awaiting terminal evidence. This
-      // idempotent confirmation also makes provider-neutral test adapters and
-      // future transports prove the same exact turn before terminal storage.
-      if (item.state !== "result_recovery") await this.inbox.checkpointTurnStarted(item.inbox_item_id, result.turnId);
+      // Real provider adapters invoke this before releasing their in-memory
+      // stream accumulator. The repeat is intentionally idempotent for simple
+      // test adapters and future provider implementations.
+      await checkpointTerminalResult(result);
       const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
       const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
-      await this.inbox.checkpointNormalizedTerminal({
-        inbox_item_id: item.inbox_item_id,
-        agent_id: agent.agentId,
-        execution_generation_id: agent.executionGenerationId,
-        provider_turn_id: result.turnId,
-        outcome: result.outcome,
-        text: result.text?.trim() || null,
-        evidence,
-        terminal_evidence: result,
-      });
       if (!await this.hasExecutionAuthority(agent, controller)) return;
       if (item.state !== "result_recovery") {
         await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
@@ -512,6 +531,15 @@ export class SupervisedAgentDelivery {
       if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply") return;
       if ((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome === "ambiguous") {
         await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
+        return;
+      }
+      if (current.state === "result_recovery") {
+        const retryCount = await this.inbox.recordResultRecoveryRetry(item.inbox_item_id, message);
+        if (retryCount >= 3) {
+          await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: `Result recovery failed ${retryCount} times: ${message}` });
+          return;
+        }
+        await this.sleep(Math.min(2_000, this.retryDelayMs * (2 ** (retryCount - 1))));
         return;
       }
       const receipt = (await this.inbox.receipts(agent.agentId)).find((candidate) => candidate.inbox_item_id === item.inbox_item_id);

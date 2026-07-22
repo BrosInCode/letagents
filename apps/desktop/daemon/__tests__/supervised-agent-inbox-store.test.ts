@@ -116,6 +116,61 @@ test("room move cancels only later old-room work and clears old ingress authorit
   } finally { await env.cleanup(); }
 });
 
+test("prepared room moves remain discoverable across restart until their acknowledged turn is reconciled", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "mover", room_id: "old-room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "move" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-move");
+    await store.transition(item!.inbox_item_id, "awaiting_result");
+    await store.transition(item!.inbox_item_id, "acknowledged_no_reply");
+    const prepared = await store.prepareEffect({
+      agent_id: "mover", room_id: "old-room", execution_generation_id: "run",
+      provider_turn_id: "turn-move", mcp_request_id: "join-1", tool_name: "join_room",
+      request: { name: "new-room" },
+    });
+    await store.stagePreparedEffectResult(prepared.effect.effect_id, {
+      requested_room: "new-room", destination_room: "new-room", phase: "validated",
+    });
+    await store.close();
+
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await reopened.preparedRoomMoves("mover"))[0]?.effect_id, prepared.effect.effect_id);
+    assert.equal((await reopened.inboxForProviderTurn("mover", "turn-move"))?.state, "acknowledged_no_reply");
+    await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
+test("terminal receipts and observed context are bounded while prepared effects remain durable", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    const observed = Array.from({ length: 510 }, (_, index) => ({
+      source_message_id: String(index + 1), source_message: { index }, activation: {}, activation_decision: "silent",
+    }));
+    await store.ingestPoll({ agent_id: "bounded", room_id: "room", last_observed_message_id: "510", messages: [], observed_messages: observed });
+    assert.equal((await store.observedContext("bounded", "room", 200)).at(0)?.source_message_id, "311");
+
+    const messages = Array.from({ length: 205 }, (_, index) => ({
+      source_message_id: String(1000 + index), source_message: { index }, activation: {},
+    }));
+    const items = await store.ingestPoll({ agent_id: "bounded", room_id: "room", last_observed_message_id: "1204", messages });
+    for (const item of items) {
+      await store.transition(item.inbox_item_id, "dispatching");
+      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${item.source_message_id}`);
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, "acknowledged_no_reply");
+    }
+    assert.equal((await store.receipts("bounded")).length, 200);
+    await store.removeAgent("bounded");
+    assert.equal((await store.receipts("bounded")).length, 0);
+    assert.equal((await store.observedContext("bounded", "room")).length, 0);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("effect journal is exactly-once and rejects request-id or turn identity reuse", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");

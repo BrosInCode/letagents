@@ -52,6 +52,7 @@ function withAuthEnv<T>(
     owner?: string | undefined;
     apiUrl?: string | null;
     boundedTurns?: string | undefined;
+    executionProfile?: string | undefined;
   },
   callback: () => T | Promise<T>,
 ): Promise<T> | T {
@@ -59,6 +60,7 @@ function withAuthEnv<T>(
   const previousOwner = process.env.LETAGENTS_TOKEN;
   const previousApiUrl = process.env.LETAGENTS_API_URL;
   const previousBoundedTurns = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
+  const previousExecutionProfile = process.env.LETAGENTS_EXECUTION_PROFILE;
   if (values.bearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
   else process.env.LETAGENTS_AGENT_SESSION_BEARER = values.bearer;
   if (values.owner === undefined) delete process.env.LETAGENTS_TOKEN;
@@ -67,6 +69,9 @@ function withAuthEnv<T>(
   else if (values.apiUrl !== undefined) process.env.LETAGENTS_API_URL = values.apiUrl;
   if (values.boundedTurns === undefined) delete process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
   else process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS = values.boundedTurns;
+  const executionProfile = values.executionProfile ?? (values.boundedTurns === "1" ? "supervised_room_turn" : undefined);
+  if (executionProfile === undefined) delete process.env.LETAGENTS_EXECUTION_PROFILE;
+  else process.env.LETAGENTS_EXECUTION_PROFILE = executionProfile;
   return Promise.resolve(callback()).finally(() => {
     if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
     else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
@@ -76,6 +81,8 @@ function withAuthEnv<T>(
     else process.env.LETAGENTS_API_URL = previousApiUrl;
     if (previousBoundedTurns === undefined) delete process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
     else process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS = previousBoundedTurns;
+    if (previousExecutionProfile === undefined) delete process.env.LETAGENTS_EXECUTION_PROFILE;
+    else process.env.LETAGENTS_EXECUTION_PROFILE = previousExecutionProfile;
   });
 }
 
@@ -188,6 +195,21 @@ test("bounded supervised turns reject a fixed bearer instead of bypassing daemon
     assert.deepEqual(getWorkerBearerRuntime(), {
       mode: "invalid",
       error: "Daemon-supervised bounded turns refuse LETAGENTS_AGENT_SESSION_BEARER; credentials must be borrowed from the exact supervisor generation.",
+    });
+  });
+});
+
+test("supervised runtime flags fail closed when only one half is configured", async () => {
+  await withAuthEnv({ boundedTurns: "1", executionProfile: "autonomous_mcp_worker" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), {
+      mode: "invalid",
+      error: "LETAGENTS_EXECUTION_PROFILE=supervised_room_turn and LETAGENTS_SUPERVISED_BOUNDED_TURNS=1 must be configured together.",
+    });
+  });
+  await withAuthEnv({ boundedTurns: undefined, executionProfile: "supervised_room_turn" }, async () => {
+    assert.deepEqual(getWorkerBearerRuntime(), {
+      mode: "invalid",
+      error: "LETAGENTS_EXECUTION_PROFILE=supervised_room_turn and LETAGENTS_SUPERVISED_BOUNDED_TURNS=1 must be configured together.",
     });
   });
 });

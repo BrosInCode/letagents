@@ -79,6 +79,15 @@ test("an explicit provider remains authoritative", () => {
   assert.equal(resolveMessageProviderLabel(message({ ideLabel: "Claude Code" }), [participant], []), "Claude Code");
 });
 
+test("a human message never inherits an agent provider from a matching display name", () => {
+  const human = message({ ideLabel: null, agentKey: null, agentSessionId: null });
+  human.source = "browser";
+  human.sender = "GardenSignal";
+  human.actorLabel = "GardenSignal";
+  human.agentIdentity = null;
+  assert.equal(resolveMessageProviderLabel(human, [participant], []), null);
+});
+
 test("the room supervisor manifest resolves partial historical identities", () => {
   const entry = {
     roomId: "Focus: Room Agents Rewrite",

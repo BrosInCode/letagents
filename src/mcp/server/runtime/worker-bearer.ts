@@ -22,6 +22,13 @@ export class WorkerBearerRuntimeConfigurationError extends Error {
 export function getWorkerBearerRuntime(): WorkerBearerRuntime {
   const bearer = process.env.LETAGENTS_AGENT_SESSION_BEARER?.trim();
   const supervised = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1";
+  const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
+  if (supervised !== (profile === "supervised_room_turn")) {
+    return {
+      mode: "invalid",
+      error: "LETAGENTS_EXECUTION_PROFILE=supervised_room_turn and LETAGENTS_SUPERVISED_BOUNDED_TURNS=1 must be configured together.",
+    };
+  }
   if (!bearer && !supervised) return { mode: "owner" };
 
   if (bearer && supervised) {

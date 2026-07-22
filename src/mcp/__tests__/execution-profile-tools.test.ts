@@ -18,7 +18,19 @@ test("supervised room turns retain product tools but do not discover execution m
   for (const productTool of ["read_messages", "get_board", "claim_task", "publish_room_artifact", "send_message", "join_room"]) {
     assert.equal(names.has(productTool), true, `${productTool} remains available through daemon mediation`);
   }
-  for (const engineTool of ["wait_for_messages", "register_agent_session", "start_device_auth", "poll_device_auth", "resume_room_session"]) {
+  for (const engineTool of [
+    "wait_for_messages",
+    "register_agent_session",
+    "disconnect_agent_session",
+    "start_local_codex_session",
+    "status_local_codex_session",
+    "stop_local_codex_session",
+    "start_device_auth",
+    "poll_device_auth",
+    "clear_saved_auth",
+    "get_onboarding_status",
+    "resume_room_session",
+  ]) {
     assert.equal(names.has(engineTool), false, `${engineTool} is supervisor-owned`);
   }
 });

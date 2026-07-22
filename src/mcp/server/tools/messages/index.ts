@@ -10,8 +10,8 @@ export function registerStatusTools(server: McpServer): void {
   registerPostReasoningTool(server);
 }
 
-export function registerMessageTools(server: McpServer): void {
+export function registerMessageTools(server: McpServer, options: { includeDeliveryLoop?: boolean } = {}): void {
   registerSendMessageTool(server);
   registerReadMessagesTool(server);
-  registerWaitForMessagesTool(server);
+  if (options.includeDeliveryLoop !== false) registerWaitForMessagesTool(server);
 }

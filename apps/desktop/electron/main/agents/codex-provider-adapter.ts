@@ -563,12 +563,23 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (handle.terminal) throw new Error("Codex continuation is terminal; no bounded room turn can run.");
     if (!request.inboxItemId.trim() || !request.actionId.trim()) throw new Error("Bounded Codex room turn requires durable inbox and action ids.");
     await options.beforeNativeDispatch?.();
-    const started = await handle.client.request<TurnStartResult>("turn/start", {
-      threadId: handle.providerContinuationId,
-      input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
-    });
+    handle.roomTurnResults.beginTurnStart(handle.providerContinuationId);
+    let started: TurnStartResult;
+    try {
+      started = await handle.client.request<TurnStartResult>("turn/start", {
+        threadId: handle.providerContinuationId,
+        input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
+      });
+    } catch (error) {
+      handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      throw error;
+    }
     const turnId = started.turn?.id?.trim();
-    if (!turnId) throw new Error("Codex did not acknowledge the bounded room turn.");
+    if (!turnId) {
+      handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      throw new Error("Codex did not acknowledge the bounded room turn.");
+    }
+    handle.roomTurnResults.bindTurnStart(handle.providerContinuationId, turnId);
     // The durable id must exist before any terminal observation can race it.
     try {
       await options.checkpointTurnStarted?.(turnId);
@@ -576,39 +587,52 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // If terminal evidence raced the checkpoint but persistence failed, do
       // not retain that completed turn for a later unrelated invocation.
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
+      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw error;
     }
     handle.state = "working";
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     handle.state = terminal.status === "failed" ? "failed" : "idle";
-    if (terminal.status !== "completed") throw new Error(`Codex bounded room turn ${turnId} ended ${terminal.status}.`);
+    if (terminal.status !== "completed") {
+      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+      throw new Error(`Codex bounded room turn ${turnId} ended ${terminal.status}.`);
+    }
     const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, terminal.turn);
+    const terminalResult = { turnId, ...result };
+    await options.checkpointTerminalResult?.(terminalResult);
     handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-    return { turnId, ...result };
+    return terminalResult;
   }
 
   /** Reattach only the durable exact turn; never issue a second turn/start. */
   async recoverRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRecoveryRequest,
-    options: { detachSignal?: AbortSignal } = {},
+    options: { detachSignal?: AbortSignal; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> } = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     const turnId = request.providerTurnId.trim();
     if (!turnId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery requires an exact persisted turn id.");
+    handle.roomTurnResults.track(handle.providerContinuationId, turnId);
     const read = await handle.client.request<ThreadReadResult>("thread/read", { threadId: handle.providerContinuationId, includeTurns: true });
     if (read.thread?.id !== handle.providerContinuationId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery resolved a different continuation thread.");
     const turn = read.thread?.turns?.find((candidate) => candidate.id === turnId);
-    if (!turn) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery cannot find the persisted exact turn.");
+    if (!turn) {
+      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+      throw new CodexRoomTurnRecoveryError("Codex room-turn recovery cannot find the persisted exact turn.");
+    }
     const status = String(typeof turn.status === "string" ? turn.status : turn.status?.status ?? "").toLowerCase();
     if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
-      return this.roomTurnResultFromTerminal(handle, turnId, status, turn);
+      return this.roomTurnResultFromTerminal(handle, turnId, status, turn, options.checkpointTerminalResult);
     }
-    if (!isActiveCodexTurnStatus(status)) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
+    if (!isActiveCodexTurnStatus(status)) {
+      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+      throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
+    }
     handle.state = "working";
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn);
+    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
   }
 
   async stop(
@@ -1099,16 +1123,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return { status: readStatus, turn };
   }
 
-  private roomTurnResultFromTerminal(
+  private async roomTurnResultFromTerminal(
     handle: CodexProviderHandle,
     turnId: string,
     status: string,
     turn: ThreadReadTurn,
-  ): ProviderRoomTurnResult {
-    if (status !== "completed") throw new CodexRoomTurnRecoveryError(`Codex bounded room turn ${turnId} ended ${status}.`);
+    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>,
+  ): Promise<ProviderRoomTurnResult> {
+    if (status !== "completed") {
+      handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+      throw new CodexRoomTurnRecoveryError(`Codex bounded room turn ${turnId} ended ${status}.`);
+    }
     const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn);
+    const terminalResult = { turnId, ...result };
+    await checkpointTerminalResult?.(terminalResult);
     handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
-    return { turnId, ...result };
+    return terminalResult;
   }
 
   private waitForExactTurnNotification(handle: CodexProviderHandle, key: string, detachSignal?: AbortSignal): Promise<string> {

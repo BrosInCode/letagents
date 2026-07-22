@@ -305,6 +305,8 @@ export interface ProviderRoomTurnOptions {
   beforeNativeDispatch?: () => Promise<void>;
   /** Persist the exact native turn id before awaiting its terminal state. */
   checkpointTurnStarted?: (turnId: string) => Promise<void>;
+  /** Persist normalized terminal evidence before provider-local evidence is released. */
+  checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
   /** Detach this observer only; never interrupt the provider-native turn. */
   detachSignal?: AbortSignal;
   /** @deprecated compatibility alias; new adapters must call beforeNativeDispatch. */
@@ -352,7 +354,10 @@ export interface ProviderAdapter {
   /** Run one bounded room turn without launching or replacing the provider. */
   runRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult>;
   /** Recover only a persisted exact native turn; it must not start another turn. */
-  recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
+  recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
+    detachSignal?: AbortSignal;
+    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+  }): Promise<ProviderRoomTurnResult>;
 
   /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
   stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;

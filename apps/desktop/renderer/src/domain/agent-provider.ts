@@ -108,6 +108,10 @@ export function resolveMessageProviderLabel(
   presence: readonly DesktopAgentPresence[] = [],
   supervisorEntries: readonly DesktopSupervisorManifestEntry[] = [],
 ): string | null {
+  // Provider badges and agent controls are identity claims, not a fuzzy name
+  // decoration. Human/browser/system messages must never inherit them merely
+  // because their display name matches a current agent.
+  if (message.source !== "agent") return null;
   const explicit = providerLabel(message.agentIdentity?.ideLabel);
   if (explicit) return explicit;
 

@@ -19,7 +19,7 @@ import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActi
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
-import { SupervisedAgentInboxStore, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
+import { SupervisedAgentInboxStore, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
@@ -899,6 +899,7 @@ export class SupervisorDaemon {
     await this.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
     await this.socket.start();
+    await this.reconcilePreparedRoomMoves();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
     }
@@ -1133,22 +1134,22 @@ export class SupervisorDaemon {
     if (input.toolName === "join_room") {
       const destination = typeof args.name === "string" ? args.name.trim() : "";
       if (!destination || destination === context.entry.room_id) throw new Error("A room move requires a different valid destination room.");
-      const response = await fetch(`${context.agent.apiUrl}/rooms/${supervisedRoomPath(destination)}/join`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${context.agent.bearer}`, "content-type": "application/json" },
-        body: "{}",
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) throw new Error(`The destination room could not be prepared (HTTP ${response.status}); the agent remains in its current room.`);
-      const body = await response.json() as Record<string, unknown>;
-      const canonicalDestination = typeof body.room_id === "string" && body.room_id.trim()
-        ? body.room_id.trim()
-        : typeof body.id === "string" && body.id.trim() ? body.id.trim() : destination;
+      const existing = prepared.effect.result && typeof prepared.effect.result === "object"
+        ? prepared.effect.result as Record<string, unknown>
+        : null;
+      const stagedDestination = typeof existing?.destination_room === "string" ? existing.destination_room.trim() : "";
+      if (!prepared.created && stagedDestination) {
+        return { state: "prepared", effect_id: prepared.effect.effect_id, action: "room_move_prepared", destination_room: stagedDestination };
+      }
+      // Preparation is local and reversible. The server-side join is deferred
+      // until the activating reply is durable, so a model tool call cannot
+      // move remote membership before the daemon owns a recoverable commit.
       await this.supervisedInbox.stagePreparedEffectResult(prepared.effect.effect_id, {
-        destination_room: canonicalDestination,
+        destination_room: destination,
         requested_room: destination,
+        phase: "validated",
       });
-      return { state: "prepared", effect_id: prepared.effect.effect_id, action: "room_move_prepared", destination_room: canonicalDestination };
+      return { state: "prepared", effect_id: prepared.effect.effect_id, action: "room_move_prepared", destination_room: destination };
     }
     await this.supervisedInbox.markEffectExecuting(prepared.effect.effect_id);
     return { state: "prepared", effect_id: prepared.effect.effect_id, action: "execute", mutation: input.mutation };
@@ -1178,65 +1179,126 @@ export class SupervisorDaemon {
     if (!item?.provider_turn_id || !["acknowledged", "acknowledged_no_reply"].includes(item.state)) return;
     const effect = await this.supervisedInbox.preparedRoomMove(input.agent.agentId, item.provider_turn_id);
     if (!effect) return;
-    const staged = effect.result && typeof effect.result === "object" ? effect.result as Record<string, unknown> : {};
-    const destination = typeof staged.destination_room === "string" ? staged.destination_room.trim() : "";
-    if (!destination) {
-      await this.supervisedInbox.completeEffect({ effect_id: effect.effect_id, error: "The prepared room move lost its validated destination." });
-      return;
-    }
     try {
-      const entry = await this.store.getEntry(input.agent.agentId);
-      const binding = await this.workerBindings.get(input.agent.agentId);
-      const grant = entry ? this.currentHostGrant(entry) : null;
-      if (!entry || !binding || !grant
-        || entry.room_id !== item.room_id
-        || binding.room_id !== item.room_id
-        || binding.agent_session_id !== input.agent.agentSessionId
-        || binding.execution_generation_id !== input.agent.executionGenerationId) {
-        throw new Error("The original room authority changed before the prepared move could commit.");
+      await this.reconcilePreparedRoomMove(effect);
+    } catch {
+      // The reply is already terminal and ingress is fenced. A transient join
+      // or local-store failure must retry the durable move, not fail or rerun
+      // the completed provider turn.
+      this.scheduleRecoveryConvergence(effect.agent_id, 1_000);
+    }
+  }
+
+  private async reconcilePreparedRoomMoves(agentId?: string): Promise<void> {
+    for (const effect of await this.supervisedInbox.preparedRoomMoves(agentId)) {
+      await this.reconcilePreparedRoomMove(effect).catch(() => {
+        this.scheduleRecoveryConvergence(effect.agent_id, 1_000);
+      });
+    }
+  }
+
+  private async reconcilePreparedRoomMove(effect: SupervisedEffectRecord): Promise<void> {
+    await this.serializeEntryTick(effect.agent_id, async () => {
+      const currentEffect = await this.supervisedInbox.preparedRoomMove(effect.agent_id, effect.provider_turn_id);
+      if (!currentEffect || currentEffect.effect_id !== effect.effect_id) return;
+      const item = await this.supervisedInbox.inboxForProviderTurn(effect.agent_id, effect.provider_turn_id);
+      if (!item || !["acknowledged", "acknowledged_no_reply"].includes(item.state)) return;
+      let staged = currentEffect.result && typeof currentEffect.result === "object" ? currentEffect.result as Record<string, unknown> : {};
+      const requestedDestination = typeof staged.requested_room === "string" ? staged.requested_room.trim() : "";
+      let destination = typeof staged.destination_room === "string" ? staged.destination_room.trim() : requestedDestination;
+      if (!destination) {
+        await this.supervisedInbox.completeEffect({ effect_id: currentEffect.effect_id, error: "The prepared room move lost its validated destination." });
+        return;
       }
-      if (!this.supervisorGrantHttp.endWorkerSession) throw new Error("This supervisor cannot revoke the old room session safely.");
-      // End the exact old-room worker first. If this preparation/revocation
-      // fails, no local membership or queue state has changed.
-      await this.supervisorGrantHttp.endWorkerSession({
-        apiUrl: grant.apiUrl,
-        grantId: grant.grantId,
-        supervisorGrant: grant.supervisorGrant,
-        grantGeneration: grant.grantGeneration,
-        sessionId: binding.agent_session_id,
-      });
-      await this.updateManifestEntry(entry.id, (current) => {
-        if (current.room_id !== item.room_id || current.work_attempt_id !== input.agent.workAttemptId
-          || current.provider_ref?.execution_generation_id !== input.agent.executionGenerationId) {
-          throw new Error("The provider generation changed before the room move committed.");
+      let entry = await this.store.getEntry(effect.agent_id);
+      if (!entry || (entry.room_id !== currentEffect.room_id && entry.room_id !== destination)) {
+        await this.supervisedInbox.completeEffect({ effect_id: currentEffect.effect_id, error: "The room move no longer matches the durable agent membership." });
+        return;
+      }
+      this.supervisedDelivery?.pauseIngress(effect.agent_id);
+      let binding = await this.workerBindings.get(effect.agent_id);
+      const grant = this.hostGrants.get(effect.agent_id) ?? null;
+      if (String(staged.phase ?? "validated") === "validated") {
+        const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
+        if (!binding || !credential || binding.room_id !== currentEffect.room_id) {
+          // A restarted daemon waits for Electron to reinstall the exact old
+          // room authority. The prepared effect remains durable and old ingress
+          // stays fenced until this reconciliation is retried.
+          return;
         }
-        return {
-          ...current,
-          room_id: destination,
-          condition: "coordination_blocked",
-          last_error: "Provider is running; waiting for desktop credential handoff.",
-          workplace_liveness: { state: "unknown", observed_at: new Date().toISOString(), detail: "Room move committed; waiting for destination credentials." },
-          last_worker_binding: null,
+        const response = await fetch(`${binding.api_url}/rooms/${supervisedRoomPath(destination)}/join`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+          body: "{}",
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) {
+          await this.supervisedInbox.completeEffect({ effect_id: currentEffect.effect_id, error: `The destination room could not be joined (HTTP ${response.status}); the agent remains in its original room.` });
+          void this.startSupervisedDelivery(effect.agent_id).catch(() => undefined);
+          return;
+        }
+        const body = await response.json() as Record<string, unknown>;
+        destination = typeof body.room_id === "string" && body.room_id.trim()
+          ? body.room_id.trim()
+          : typeof body.id === "string" && body.id.trim() ? body.id.trim() : destination;
+        staged = {
+          ...staged,
+          phase: "joined_destination",
+          destination_room: destination,
+          old_room: currentEffect.room_id,
+          old_agent_session_id: binding.agent_session_id,
+          old_execution_generation_id: binding.execution_generation_id,
         };
-      });
+        await this.supervisedInbox.stagePreparedEffectResult(currentEffect.effect_id, staged);
+      }
+      entry = await this.store.getEntry(effect.agent_id);
+      if (!entry) return;
+      if (entry.room_id === currentEffect.room_id) {
+        await this.updateManifestEntry(entry.id, (current) => {
+          if (current.room_id !== currentEffect.room_id) return current;
+          return {
+            ...current,
+            room_id: destination,
+            condition: "coordination_blocked",
+            last_error: "Provider is running; waiting for desktop credential handoff.",
+            workplace_liveness: { state: "unknown", observed_at: new Date().toISOString(), detail: "Room move committed; waiting for destination credentials." },
+            last_worker_binding: null,
+          };
+        });
+      }
+      // These local operations are idempotent and can finish after a crash that
+      // occurred immediately after the manifest room changed.
       await this.supervisedInbox.commitRoomMoveQueue({
-        agent_id: entry.id,
-        old_room_id: item.room_id,
+        agent_id: effect.agent_id,
+        old_room_id: currentEffect.room_id,
         after_fifo_sequence: item.fifo_sequence,
       });
-      await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
-      this.liveBindingIdentities.delete(entry.id);
-      this.revokeHostGrantIfCurrent(entry.id, grant);
+      binding = await this.workerBindings.get(effect.agent_id);
+      if (binding?.room_id === currentEffect.room_id) {
+        await this.workerBindings.unbind(effect.agent_id, binding.agent_session_id, binding.execution_generation_id);
+      }
+      this.liveBindingIdentities.delete(effect.agent_id);
+      let oldSessionRevoked = false;
+      const oldSessionId = typeof staged.old_agent_session_id === "string" ? staged.old_agent_session_id : binding?.agent_session_id;
+      if (oldSessionId && grant?.roomId === currentEffect.room_id && this.supervisorGrantHttp.endWorkerSession) {
+        try {
+          await this.supervisorGrantHttp.endWorkerSession({
+            apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+            grantGeneration: grant.grantGeneration, sessionId: oldSessionId,
+          });
+          oldSessionRevoked = true;
+        } catch {
+          // The daemon no longer exposes this old credential to the provider.
+          // Grant rotation/expiry provides the external cleanup fence.
+        }
+      }
+      if (grant) this.revokeHostGrantIfCurrent(effect.agent_id, grant);
       await this.supervisedInbox.completeEffect({
-        effect_id: effect.effect_id,
-        result: { ...staged, moved: true, old_room: item.room_id, destination_room: destination },
+        effect_id: currentEffect.effect_id,
+        result: { ...staged, phase: "committed", moved: true, old_room: currentEffect.room_id, destination_room: destination, old_session_revoked: oldSessionRevoked },
       });
-      // Electron observes the changed durable membership and provisions a new
-      // room-scoped grant. The provider handle/thread/generation are untouched.
-      this.requestConvergence(entry.id);
-    } catch (error) {
-      await this.supervisedInbox.completeEffect({ effect_id: effect.effect_id, error: error instanceof Error ? error.message : String(error) });
-    }
+      this.requestConvergence(effect.agent_id);
+    });
   }
 
   /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
@@ -1253,6 +1315,17 @@ export class SupervisorDaemon {
     if (!entry
       || entry.delivery_mode === "desktop_events"
       || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")) return;
+    // Once the activating response is durable, a prepared room move owns this
+    // agent's ingress transition.  Do not restart polling in either room while
+    // its crash-recoverable commit is waiting for credentials or reconciliation.
+    for (const effect of await this.supervisedInbox.preparedRoomMoves(entryId)) {
+      const activatingItem = await this.supervisedInbox.inboxForProviderTurn(entryId, effect.provider_turn_id);
+      if (!["acknowledged", "acknowledged_no_reply"].includes(activatingItem?.state ?? "")) continue;
+      void this.reconcilePreparedRoomMove(effect).catch(() => {
+        this.scheduleRecoveryConvergence(effect.agent_id, 1_000);
+      });
+      return;
+    }
     const handle = this.liveHandles.get(entryId);
     const binding = await this.workerBindings.get(entryId);
     if (!entry || !binding || !entry.work_attempt_id || !entry.provider_ref) return;
