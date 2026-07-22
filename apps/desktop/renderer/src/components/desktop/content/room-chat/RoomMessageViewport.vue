@@ -324,25 +324,11 @@ watch(
 let echoState: WorkIndicatorEchoState = {};
 let echoFlushTimer: number | null = null;
 const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
-const deliveryTrackedAgentIds = computed(() => {
-  const tracked = new Set<string>();
-  for (const receipts of Object.values(props.deliveryReceiptsByMessage)) {
-    for (const receipt of receipts) {
-      if (["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable"].includes(receipt.state)) {
-        tracked.add(receipt.agentId);
-      }
-    }
-  }
-  return tracked;
-});
-const untrackedLocalAgentWork = computed(() =>
-  props.localAgentWork.filter((work) => !deliveryTrackedAgentIds.value.has(work.id))
-);
 
 function applyEchoCoalescing(): void {
   const { state, indicators, hasPending } = coalesceWorkIndicatorEchoes(
     echoState,
-    untrackedLocalAgentWork.value,
+    props.localAgentWork,
     Date.now(),
     WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   );
@@ -358,7 +344,7 @@ function applyEchoCoalescing(): void {
 }
 
 watch(
-  () => [props.localAgentWork, props.deliveryReceiptsByMessage] as const,
+  () => props.localAgentWork,
   () => applyEchoCoalescing(),
   { immediate: true, deep: true },
 );
