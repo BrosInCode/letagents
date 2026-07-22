@@ -276,6 +276,8 @@ export interface ProviderStreamEvent {
   provider: ProviderAdapterId;
   kind: ProviderStreamEventKind;
   method: string;
+  /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
+  summary?: string | null;
   payload: unknown;
   payloadTruncated: boolean;
   payloadRedacted: boolean;

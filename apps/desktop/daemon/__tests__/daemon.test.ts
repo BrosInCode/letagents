@@ -616,7 +616,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
       liveHandles: Map<string, typeof handle>;
       handleProviderStream: (entryId: string, providerHandle: typeof handle, event: {
         workAttemptId: string; providerContinuationId: string; observedAt: string; sequence: number;
-        provider: string; kind: string; method: string; payload: unknown; payloadTruncated: boolean;
+        provider: string; kind: string; method: string; summary?: string | null; payload: unknown; payloadTruncated: boolean;
         payloadRedacted: boolean; durablePayloadRef: null;
       }) => Promise<void>;
     };
@@ -656,6 +656,27 @@ test("failed room waits remain retryable for one healthy provider execution", as
     current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
     assert.equal(current.observed_state, "working", "the same healthy execution continues after a retryable wait failure");
     assert.equal(current.activity?.at(-1)?.status, "working");
+
+    await internals.handleProviderStream("terminal_stream", handle, {
+      ...base,
+      sequence: 3,
+      kind: "text_delta",
+      method: "item/reasoning/summaryTextDelta",
+      summary: "Checking the durable room delivery path.",
+      payload: {
+        threadId: "thread_exact",
+        turnId: "turn_exact",
+        itemId: "reasoning_exact",
+        summaryIndex: 0,
+        delta: "Checking the durable room delivery path.",
+      },
+    });
+    current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
+    assert.equal(
+      current.activity?.at(-1)?.summary,
+      "Checking the durable room delivery path.",
+      "the daemon preserves the provider-approved display summary instead of replacing it with a protocol method",
+    );
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();

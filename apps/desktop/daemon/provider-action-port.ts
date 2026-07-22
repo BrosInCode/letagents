@@ -56,6 +56,8 @@ export type ProviderActionStreamEvent = {
   provider: string;
   kind: string;
   method: string;
+  /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
+  summary?: string | null;
   payload: unknown;
   payloadTruncated: boolean;
   payloadRedacted: boolean;

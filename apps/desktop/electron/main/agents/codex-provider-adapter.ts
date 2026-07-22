@@ -1006,14 +1006,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (exactTurnId && exactThreadId === handle.providerContinuationId && terminalMatch) {
       this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalMatch[1]!.toLowerCase());
     }
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method));
+    // Build the readable summary once and attach the same value to both the
+    // ordered stream and the compact activity event. In particular, Codex's
+    // approved summaryTextDelta stream is accumulated here; raw reasoning
+    // textDelta content remains hidden by summarizeCodexRuntimeNotification.
+    const summary = summarizeCodexRuntimeNotification(notification);
+    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary);
     const lifecycle = /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
       ? "failed"
       : codexLifecycleStatus(notification.params)
         ?? (/^(?:turn|thread)\/(?:completed|interrupted|stopped)$/i.test(notification.method) ? "idle" : null)
         ?? (/^(?:turn|thread)\/(?:started|resumed)$/i.test(notification.method) ? "working" : null);
     if (lifecycle && (handle.state !== "failed" || lifecycle === "failed")) handle.state = lifecycle;
-    const summary = summarizeCodexRuntimeNotification(notification);
     this.publishActivity(handle, {
       source: "native_harness",
       method: notification.method,
@@ -1151,6 +1155,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     method: string,
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
+    summary: string | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -1161,6 +1166,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       provider: this.id,
       kind,
       method,
+      summary,
       ...safe,
       durablePayloadRef: null,
     };

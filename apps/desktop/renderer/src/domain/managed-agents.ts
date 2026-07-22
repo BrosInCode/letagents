@@ -397,6 +397,16 @@ export function humanFacingSupervisorActivitySummary(
 ): string {
   const kind = event.kind.trim().toLowerCase();
   const method = event.method.trim().toLowerCase();
+  if (method === "item/reasoning/summarytextdelta") {
+    // The Codex adapter places only the provider-approved reasoning summary in
+    // this field. Older/fallback daemon events contain the protocol label, so
+    // keep the calm generic copy until a real summary arrives.
+    const summary = event.summary.trim();
+    if (summary && !/^[\w-]+\s*·\s*item\/reasoning\/summarytextdelta$/i.test(summary)) {
+      return liveActivityEchoText(summary);
+    }
+    return "Thinking through the request";
+  }
   if (method.includes("reasoning") || method.includes("thinking")) return "Thinking through the request";
   if (kind === "text_delta" || method.includes("agentmessage") || method === "assistant") return "Writing a response";
   if (kind === "tool_lifecycle" || /(?:toolcall|tool_use|websearch|filechange)/i.test(method)) return "Using a tool";

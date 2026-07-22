@@ -3442,7 +3442,7 @@ export class SupervisorDaemon {
       provider: event.provider,
       kind: event.kind,
       method: event.method,
-      summary: `${event.provider} · ${event.method}`.slice(0, 500),
+      summary: (event.summary?.trim() || `${event.provider} · ${event.method}`).slice(0, 500),
       status,
       payload: event.payload,
       payload_truncated: event.payloadTruncated,

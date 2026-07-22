@@ -184,3 +184,21 @@ test("provider protocol summaries become calm product progress labels", () => {
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "text_delta", method: "item/agentMessage/delta", summary: "codex · item/agentMessage/delta" }), "Writing a response");
   assert.equal(humanFacingSupervisorActivitySummary({ kind: "command_output", method: "item/commandExecution/outputDelta", summary: "codex · item/commandExecution/outputDelta" }), "Working in the project");
 });
+
+test("provider-approved reasoning summaries replace the generic thinking label", () => {
+  assert.equal(humanFacingSupervisorActivitySummary({
+    kind: "text_delta",
+    method: "item/reasoning/summaryTextDelta",
+    summary: "Checking the delivery boundary before replying",
+  }), "Checking the delivery boundary before replying");
+  assert.equal(humanFacingSupervisorActivitySummary({
+    kind: "text_delta",
+    method: "item/reasoning/summaryTextDelta",
+    summary: "codex · item/reasoning/summaryTextDelta",
+  }), "Thinking through the request");
+  assert.equal(humanFacingSupervisorActivitySummary({
+    kind: "text_delta",
+    method: "item/reasoning/textDelta",
+    summary: "Codex raw reasoning text is streaming.",
+  }), "Thinking through the request");
+});
