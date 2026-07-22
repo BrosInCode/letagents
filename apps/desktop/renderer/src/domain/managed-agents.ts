@@ -362,7 +362,12 @@ export function supervisedAgentWorkIndicators(
         // native stream progresses instead of remounting (and re-animating) on
         // every new activity event.
         id: entry.id,
-        displayName: boundPresence?.displayName || boundPresence?.actorLabel || supervisedAgentDisplayLabel(entry.displayName, entry.id),
+        // Presence carries the worker's post-registration name. Associate it
+        // with this exact durable entry before projecting away a legacy suffix.
+        displayName: supervisedAgentDisplayLabel(
+          boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
+          entry.id,
+        ),
         summary: liveActivityEchoText(latest.summary),
         startedAt: latest.observedAt,
       }];
@@ -986,11 +991,11 @@ export function managedAgentStopResultNeedsAttention(
 }
 
 export function managedAgentSessionDisplayName(
-  session: Pick<DesktopManagedAgentSession, "displayName" | "actorLabel" | "runtime">,
+  session: Pick<DesktopManagedAgentSession, "displayName" | "actorLabel" | "runtime" | "supervisorEntryId">,
 ): string {
   const chosenName = session.displayName?.trim() || session.actorLabel?.trim();
   if (chosenName) {
-    return chosenName;
+    return supervisedAgentDisplayLabel(chosenName, session.supervisorEntryId);
   }
 
   const runtime = session.runtime.trim();

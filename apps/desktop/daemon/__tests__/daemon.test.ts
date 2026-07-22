@@ -1841,6 +1841,7 @@ test("host grant renewal retries transient failures, rotates the bearer in place
     const internals = daemon as unknown as {
       workerBindings: WorkerBindingStore;
       hostGrants: Map<string, { supervisorGrant: string; expiresAt: string }>;
+      cachedWorkerAuthorizations: Map<string, unknown>;
       publishNativeActivity: () => Promise<boolean>;
       requestConvergence: (entryId: string) => void;
     };
@@ -1862,6 +1863,8 @@ test("host grant renewal retries transient failures, rotates the bearer in place
       return renewalCalls >= 2 && mintCalls >= 3 && binding?.credential_ref === "renewed-worker-bearer-id";
     }, "parent renewal and transient child-session retry");
     const beforeStale = internals.hostGrants.get("host_grant_renewal_retry")!;
+    const cachedBeforeStale = internals.cachedWorkerAuthorizations.get("host_grant_renewal_retry");
+    assert.ok(cachedBeforeStale, "the latest successful bearer remains in process memory");
     assert.equal(beforeStale.supervisorGrant, "renewed-parent-secret");
     const renewedExpiry = beforeStale.expiresAt;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", staleInstall)).ok, true);
@@ -1869,6 +1872,8 @@ test("host grant renewal retries transient failures, rotates the bearer in place
     const afterStale = internals.hostGrants.get("host_grant_renewal_retry")!;
     assert.equal(afterStale.supervisorGrant, "renewed-parent-secret");
     assert.equal(afterStale.expiresAt, renewedExpiry);
+    assert.equal(internals.cachedWorkerAuthorizations.get("host_grant_renewal_retry"), cachedBeforeStale,
+      "a stale install retaining the newer effective grant must retain its cached bearer");
     const mintsBeforeReconnect = mintCalls;
     let reconnectConvergenceCalls = 0;
     internals.requestConvergence = () => { reconnectConvergenceCalls += 1; };
@@ -3359,6 +3364,261 @@ test("cursor admission repairs pre-upgrade running and stopped daemon-inbox entr
       await daemon.stop().catch(() => undefined);
       await env.cleanup();
     }
+  }
+});
+
+test("bootstrap and launch reuse one fresh host worker mint before creating one provider generation", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const source = await committedSourceRepository(env.root, "bootstrap_reuse_source");
+  await primeDaemonBareRepository(env.root, source);
+  let mintCalls = 0;
+  let spawns = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async (input) => {
+      spawns += 1;
+      return { workAttemptId: input.workAttemptId, pid: 9211, providerContinuationId: "bootstrap-reuse-continuation", observedState: "working" };
+    },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("fresh bootstrap launch must not resume"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "bootstrap-reuse-continuation" }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    latest: async () => ({ messages: [] }), poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintCalls += 1;
+      return { sessionId: "bootstrap-reuse-session", bearer: "bootstrap-reuse-bearer", bearerId: "bootstrap-reuse-bearer-id", expiresAt: "2099-01-01T00:00:00.000Z" };
+    },
+  });
+  try {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const id = "bootstrap_reuses_mint";
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent", source_repo_path: source,
+    } })).ok, true);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-bootstrap-reuse", supervisor_grant: "bootstrap-reuse-grant",
+      grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", { entry_id: id, daemon_generation: generation })).ok, true);
+    await eventually(async () => spawns === 1, "bootstrap launch provider spawn");
+    assert.equal(mintCalls, 1, "bootstrap tail admission and launch share the same fresh worker mint");
+    const attempt = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+    assert.equal(attempt.execution_generations.length, 1, "only one durable execution generation is created after credential success");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("string-thrown transient worker mint failures redact credentials and automatically reconverge", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "transient_worker_mint_retry");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const durableAttempt = await durability.createAttempt({ taskId: "transient_worker_mint_retry", leaseId: "transient_worker_mint_retry", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  const recovery = fakeRecoveryClock();
+  let mintCalls = 0;
+  let failMints = true;
+  let spawns = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async (input) => {
+      spawns += 1;
+      return { workAttemptId: input.workAttemptId, pid: 9212, providerContinuationId: "transient-mint-continuation", observedState: "working" };
+    },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("transient credential recovery must start only once"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "transient-mint-continuation" }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, recovery.clock, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintCalls += 1;
+      if (failMints) throw "worker mint transport failed; Authorization: Bearer transient-mint-secret";
+      return { sessionId: "transient-mint-session", bearer: "transient-mint-bearer", bearerId: "transient-mint-bearer-id", expiresAt: "2099-01-01T00:00:00.000Z" };
+    },
+  });
+  try {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const id = "transient_worker_mint_retry";
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: durableAttempt.workspace_path, work_attempt_id: durableAttempt.work_attempt_id,
+    } })).ok, true);
+    await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-transient-mint", supervisor_grant: "transient-mint-grant",
+      grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    await eventually(async () => mintCalls === 1, "first transient mint attempt");
+    await recovery.advance(100);
+    await eventually(async () => mintCalls === 2, "second transient mint attempt");
+    await recovery.advance(100);
+    await eventually(async () => mintCalls === 3, "third transient mint attempt");
+    await eventually(async () => recovery.pending() === 1, "automatic convergence timer after exhausted transient mint");
+    const beforeRetry = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+    assert.equal(beforeRetry.execution_generations.length, 0, "no execution generation exists before a credential is successfully minted");
+    const failed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.match(failed.last_error ?? "", /Authorization: Bearer \[REDACTED\]/i, "string-thrown credential evidence is redacted before persistence");
+    assert.doesNotMatch(failed.last_error ?? "", /transient-mint-secret/, "the raw string-thrown credential never reaches durable state");
+    failMints = false;
+    await recovery.advance(10);
+    await eventually(async () => spawns === 1 && mintCalls === 4, "automatic post-failure convergence without another RPC");
+    const recovered = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+    assert.equal(recovered.execution_generations.length, 1, "automatic recovery creates exactly one provider generation");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("429 worker mint failures retry three times and automatically reconverge", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "rate_limited_worker_mint_retry");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const durableAttempt = await durability.createAttempt({ taskId: "rate_limited_worker_mint_retry", leaseId: "rate_limited_worker_mint_retry", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  const recovery = fakeRecoveryClock();
+  let mintCalls = 0;
+  let rateLimited = true;
+  let spawns = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async (input) => {
+      spawns += 1;
+      return { workAttemptId: input.workAttemptId, pid: 9213, providerContinuationId: "rate-limit-mint-continuation", observedState: "working" };
+    },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("rate-limited fresh launch must not resume"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "rate-limit-mint-continuation" }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, recovery.clock, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintCalls += 1;
+      if (rateLimited) throw new SupervisorGrantRequestError(429, "Supervisor worker session mint");
+      return { sessionId: "rate-limit-session", bearer: "rate-limit-bearer", bearerId: "rate-limit-bearer-id", expiresAt: "2099-01-01T00:00:00.000Z" };
+    },
+  });
+  try {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const id = "rate_limited_worker_mint_retry";
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: durableAttempt.workspace_path, work_attempt_id: durableAttempt.work_attempt_id,
+    } })).ok, true);
+    await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-rate-limit-mint", supervisor_grant: "rate-limit-mint-grant",
+      grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    await eventually(async () => mintCalls === 1, "first 429 mint attempt");
+    await recovery.advance(100);
+    await eventually(async () => mintCalls === 2, "second 429 mint attempt");
+    await recovery.advance(100);
+    await eventually(async () => mintCalls === 3, "third 429 mint attempt");
+    await eventually(async () => recovery.pending() === 1, "automatic convergence after exhausted 429 mint attempts");
+    const beforeRecovery = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+    assert.equal(beforeRecovery.execution_generations.length, 0, "rate limiting cannot create a durable execution before credentials exist");
+    rateLimited = false;
+    await recovery.advance(10);
+    await eventually(async () => mintCalls === 4 && spawns === 1, "automatic 429 recovery without another RPC");
+    const recovered = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+    assert.equal(recovered.execution_generations.length, 1, "automatic 429 recovery creates one generation only after mint success");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("definitive worker mint rejection attempts once and never schedules automatic convergence", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, "definitive_worker_mint_rejection");
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const durableAttempt = await durability.createAttempt({ taskId: "definitive_worker_mint_rejection", leaseId: "definitive_worker_mint_rejection", leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  const recovery = fakeRecoveryClock();
+  let mintCalls = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { throw new Error("a definitive credential rejection cannot spawn"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("a definitive credential rejection cannot resume"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, recovery.clock, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      mintCalls += 1;
+      throw new SupervisorGrantRequestError(401, "Supervisor worker session mint");
+    },
+  });
+  try {
+    await daemon.start();
+    const id = "definitive_worker_mint_rejection";
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      workspace_path: durableAttempt.workspace_path, work_attempt_id: durableAttempt.work_attempt_id,
+    } })).ok, true);
+    await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-definitive-mint", supervisor_grant: "definitive-mint-grant",
+      grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    await eventually(async () => mintCalls === 1, "single definitive mint attempt");
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
+      return Boolean(current?.last_error);
+    }, "definitive scheduler failure persistence");
+    assert.equal(mintCalls, 1, "401 is definitive and must not enter the mint retry loop");
+    assert.equal(recovery.pending(), 0, "a definitive mint rejection must not schedule recovery convergence");
+    const failed = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.match(failed.last_error ?? "", /failed after 1 attempt/i, "failure evidence reports the actual single attempt");
+    const attempt = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+    assert.equal(attempt.execution_generations.length, 0, "definitive credential rejection occurs before execution generation creation");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
   }
 });
 
