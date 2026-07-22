@@ -29,6 +29,7 @@ import {
   isAgentSetupConfirmationActive,
   isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
+  isHumanVisibleSupervisorActivity,
   isVisibleManagedAgentSession,
   isBranchScopedGitRoomIdentifier,
   managedAgentRepoDetail,
@@ -733,6 +734,13 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     [],
     "a newer idle poll clears an older working indicator instead of leaving it stuck",
   );
+});
+
+test("raw provider turn lifecycle never becomes a human chat work indicator", () => {
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/started" }), false);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/completed" }), false);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "thread/read" }), false);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "tool_lifecycle", method: "item/toolCall/started" }), true);
 });
 
 test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
