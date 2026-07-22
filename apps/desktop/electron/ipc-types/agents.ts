@@ -450,6 +450,8 @@ export interface DesktopSupervisorManifestEntry {
   id: string;
   roomId: string;
   displayName: string;
+  /** Canonical server-owned room identity. This is routing metadata, never a credential. */
+  agentKey?: string | null;
   provider: string;
   model: string | null;
   charter: string;
@@ -531,6 +533,11 @@ export interface DesktopSupervisorRoomDeliveryRetryInput {
   workAttemptId: string;
   executionGenerationId: string;
   agentSessionId: string;
+}
+
+/** Reinstall Electron-held credentials without touching the provider runtime. */
+export interface DesktopSupervisorReconnectInput {
+  entryId: string;
 }
 
 export interface DesktopSupervisorTurnControlResult {

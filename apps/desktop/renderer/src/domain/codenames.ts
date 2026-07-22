@@ -26,14 +26,20 @@ function normalizeName(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
+/** Short, stable, human-safe identity tag; never a routing key or secret. */
+export function supervisedAgentShortTag(creationRequestId: string): string {
+  return hashSeed(creationRequestId).toString(36).padStart(6, "0").slice(-6);
+}
+
 const CANDIDATES = CODENAME_PREFIXES.flatMap((prefix) =>
   CODENAME_SUFFIXES.map((suffix) => `${prefix}${suffix}`),
 );
 
 /**
  * Selects a deterministic name from the names that already exist in the
- * room. The full request id suffix makes the persisted label globally
- * distinguishable even when two desktop windows read the same stale room list.
+ * room. Durable entry ids resolve the authoritative collision; a compact
+ * stable tag keeps simultaneous human-facing labels distinguishable without
+ * leaking the full launch UUID.
  */
 export function suggestSupervisedCodexCodename(
   existingNames: Iterable<string | null | undefined>,
@@ -48,12 +54,19 @@ export function suggestSupervisedCodexCodename(
   for (let offset = 0; offset < CANDIDATES.length; offset += 1) {
     const candidate = CANDIDATES[(startIndex + offset) % CANDIDATES.length]!;
     if (!usedNames.has(normalizeName(candidate))) {
-      return `${candidate} · ${creationRequestId}`;
+      return `${candidate} · ${supervisedAgentShortTag(creationRequestId)}`;
     }
   }
 
-  // The expanded name is still deterministic and intentionally carries only
-  // a short, human-readable slice of the request id. It is a display label,
-  // never an identity key.
-  return `LumenForge · ${creationRequestId}`;
+  return `LumenForge · ${supervisedAgentShortTag(creationRequestId)}`;
+}
+
+/** Replace a legacy full UUID suffix with the same entry's compact tag. */
+export function supervisedAgentDisplayLabel(displayName: string, entryId?: string | null): string {
+  const name = displayName.trim();
+  const requestId = entryId?.startsWith("supervised_") ? entryId.slice("supervised_".length) : "";
+  const suffix = requestId ? ` · ${requestId}` : "";
+  if (!suffix || !name.endsWith(suffix)) return name;
+  const base = name.slice(0, -suffix.length).trim() || name;
+  return `${base} · ${supervisedAgentShortTag(requestId)}`;
 }

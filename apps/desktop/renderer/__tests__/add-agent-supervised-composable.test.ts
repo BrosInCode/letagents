@@ -12,6 +12,7 @@ import {
   recoveryScanAllowsNewLaunch,
 } from "../src/components/desktop/content/add-agent/useSupervisedLaunchRecovery";
 import { supervisedPermissionBridgeIsUnavailable } from "../src/components/desktop/content/add-agent/useAddAgentPresentation";
+import { supervisedAgentShortTag } from "../src/domain/codenames";
 
 function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): DesktopSupervisorManifestEntry {
   return {
@@ -2077,7 +2078,7 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
   assert.equal(createdInput?.creationRequestId, "request-snapshot");
   assert.equal(createdInput?.providerId, "codex");
   assert.equal(createdInput?.roomIdentifier, "room-before");
-  assert.match(String(createdInput?.displayName), / · request-snapshot$/);
+  assert.equal(createdInput?.displayName, `CloudSignal · ${supervisedAgentShortTag("request-snapshot")}`);
   assert.equal(createdInput?.repoRootPath, "/repo-before");
   assert.equal(createdInput?.charter, "Investigate the failure.");
   assert.equal(createdInput?.permissionProfileId, "read-only");

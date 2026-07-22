@@ -122,7 +122,12 @@ import {
   setAuthInvalidatedHandler,
   startDeviceAuthFlow,
 } from "./auth.js";
-import { getDesktopSupervisorGrantMetadata, provisionDesktopSupervisorGrant, revokeDesktopSupervisorGrant } from "./supervisor-grant.js";
+import {
+  getDesktopSupervisorGrantMetadata,
+  provisionDesktopSupervisorGrant,
+  readDesktopSupervisorGrantAgentKeysForEntries,
+  revokeDesktopSupervisorGrant,
+} from "./supervisor-grant.js";
 import {
   buildMcpInstallState,
   completeMcpOnboarding,
@@ -867,10 +872,18 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle(
     "desktop:supervisor:list-agents",
-    async (_event, roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> =>
-      isDesktopSmokeCheck()
+    async (_event, roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> => {
+      const entries = isDesktopSmokeCheck()
         ? desktopSmokeSupervisorEntries().filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier)
-        : supervisorDaemonClient.list(roomIdentifier ?? null),
+        : await supervisorDaemonClient.list(roomIdentifier ?? null);
+      const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(
+        entries.map((entry) => entry.id),
+      ).catch(() => new Map<string, string>());
+      return entries.map((entry) => ({
+        ...entry,
+        agentKey: entry.agentKey ?? agentKeys.get(entry.id) ?? null,
+      }));
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor:create-agent",
@@ -1045,6 +1058,16 @@ export function registerDesktopIpcHandlers(
     async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomDeliveryRetryInput): Promise<void> => {
       if (isDesktopSmokeCheck()) throw new Error("Room delivery retry is unavailable in the desktop smoke environment.");
       await supervisorDaemonClient.retryRoomDelivery(input);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:reconnect-agent",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorReconnectInput): Promise<DesktopSupervisorManifestEntry> => {
+      if (isDesktopSmokeCheck()) throw new Error("Agent reconnection is unavailable in the desktop smoke environment.");
+      const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+      if (!entry) throw new Error(`Unknown supervised agent: ${input.entryId}`);
+      await supervisorGrantCoordinator.reconnectEntry(entry);
+      return (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId) || entry;
     },
   );
   targetIpcMain.handle(

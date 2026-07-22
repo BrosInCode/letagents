@@ -311,18 +311,24 @@ export async function requireGitRoomAdmin(
   return true;
 }
 
+function resolveScopedWorkerParticipation(
+  req: AuthenticatedRequest,
+  res: Response,
+  project: Project,
+): boolean | null {
+  if (req.authKind !== "agent_session") return null;
+  if (req.agentSession?.room_id === project.id) return true;
+  res.status(403).json({ error: "Worker bearer is scoped to a different room." });
+  return false;
+}
+
 export async function requireParticipant(
   req: AuthenticatedRequest,
   res: Response,
   project: Project
 ): Promise<boolean> {
-  if (req.authKind === "agent_session") {
-    if (req.agentSession?.room_id === project.id) {
-      return true;
-    }
-    res.status(403).json({ error: "Worker bearer is scoped to a different room." });
-    return false;
-  }
+  const workerParticipation = resolveScopedWorkerParticipation(req, res, project);
+  if (workerParticipation !== null) return workerParticipation;
   if (!isRepoBackedProject(project)) {
     return true;
   }
@@ -345,6 +351,14 @@ export async function requireGitRoomParticipant(
   project: Project,
   options: { freshCollaboratorCheck?: boolean } = {}
 ): Promise<boolean> {
+  // Worker bearers are already authenticated, capability-checked, and scoped
+  // to one exact room by the request middleware. They intentionally have no
+  // human session account, so sending them through the GitHub collaborator
+  // check would misclassify a valid worker as an anonymous user and return
+  // 401 for Git-backed Focus rooms.
+  const workerParticipation = resolveScopedWorkerParticipation(req, res, project);
+  if (workerParticipation !== null) return workerParticipation;
+
   const accessDecision = await resolveProjectRepoRoomAccessDecision({
     project,
     sessionAccount: req.sessionAccount,
