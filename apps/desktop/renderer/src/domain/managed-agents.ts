@@ -373,6 +373,7 @@ export function supervisedAgentWorkIndicators(
         startedAt: latest.observedAt,
         agentSessionId: entry.agentSessionId,
         agentKey: entry.agentKey,
+        sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
       }];
     })
     .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
@@ -532,6 +533,8 @@ export interface ManagedAgentWorkIndicator {
   /** Exact room identity used to retire stale progress after this agent speaks. */
   agentSessionId?: string | null;
   agentKey?: string | null;
+  /** Exact activating room message; establishes causal order without comparing host clocks. */
+  sourceMessageId?: string | null;
 }
 
 /** Longest live-activity echo shown in the room work indicator. */
@@ -559,22 +562,24 @@ export function liveActivityEchoText(summary: string | null | undefined): string
 }
 
 /**
- * A room message is a newer public fact than an earlier native progress echo.
- * Retire only the matching exact agent identity; display names are deliberately
- * excluded because two durable agents may share one.
+ * Retire progress only when the same exact agent has published after the room
+ * message that activated this turn. Message order is the causal clock; local
+ * provider and remote server timestamps are deliberately never compared.
+ * Display names are excluded because two durable agents may share one.
  */
 export function workIndicatorSupersededByAgentMessage(
   indicator: ManagedAgentWorkIndicator,
-  messages: readonly Pick<DesktopRoomMessage, "timestamp" | "agentIdentity">[],
+  messages: readonly Pick<DesktopRoomMessage, "id" | "agentIdentity">[],
 ): boolean {
+  const sourceMessageId = indicator.sourceMessageId?.trim() || null;
+  if (!sourceMessageId) return false;
+  const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);
+  if (sourceIndex < 0) return false;
   const indicatorSessionId = indicator.agentSessionId?.trim() || null;
   const indicatorAgentKey = normalizeAgentKey(indicator.agentKey);
   if (!indicatorSessionId && !indicatorAgentKey) return false;
-  const startedAtMs = Date.parse(indicator.startedAt);
-  if (!Number.isFinite(startedAtMs)) return false;
-  return messages.some((message) => {
-    const messageAtMs = Date.parse(message.timestamp);
-    if (!Number.isFinite(messageAtMs) || messageAtMs < startedAtMs) return false;
+  return messages.some((message, messageIndex) => {
+    if (messageIndex <= sourceIndex) return false;
     const messageSessionId = message.agentIdentity?.agentSessionId?.trim() || null;
     if (indicatorSessionId && messageSessionId) return indicatorSessionId === messageSessionId;
     const messageAgentKey = normalizeAgentKey(message.agentIdentity?.agentKey);

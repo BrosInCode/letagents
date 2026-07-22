@@ -326,7 +326,10 @@ let echoState: WorkIndicatorEchoState = {};
 let echoFlushTimer: number | null = null;
 const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
 const currentLocalAgentWork = computed(() => {
-  const visibleMessages = [...props.messages, ...props.threadMessages];
+  // Public room order is the causal clock here. Provider activity timestamps
+  // come from the local host while message timestamps come from the server, so
+  // comparing them can suppress a genuinely new turn when the clocks differ.
+  const visibleMessages = [...props.messages, ...props.threadMessages].sort(compareRoomMessages);
   return props.localAgentWork.filter((work) => !workIndicatorSupersededByAgentMessage(work, visibleMessages));
 });
 
