@@ -43,7 +43,11 @@
           </button>
           <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <ProviderBadge v-if="ideLabel" :label="ideLabel" />
+          <ProviderBadge
+            v-if="ideLabel"
+            :label="ideLabel"
+            :agent-key="message.agentIdentity?.agentKey"
+          />
         </div>
         <div class="room-message-meta-tail">
           <button
@@ -119,10 +123,27 @@
         />
       </div>
 
-      <ul v-if="deliveryReceipts.length" class="room-message-delivery-receipts" aria-label="Agent delivery status">
-        <li v-for="receipt in deliveryReceipts" :key="receipt.agentId" :data-state="receipt.state">
-          <span aria-hidden="true">{{ receiptIcon(receipt.state) }}</span>
-          <span>{{ receiptLabel(receipt) }}</span>
+      <ul
+        v-if="visibleDeliveryReceipts.length"
+        class="room-message-delivery-receipts"
+        aria-label="Agent response status"
+        aria-live="polite"
+      >
+        <li
+          v-for="receipt in visibleDeliveryReceipts"
+          :key="receipt.agentId"
+          :data-state="receipt.state"
+          :aria-label="receiptLabel(receipt)"
+        >
+          <span class="room-message-delivery-indicator" aria-hidden="true">
+            <span v-if="receiptIsAnimated(receipt.state)" class="room-message-delivery-dots">
+              <i></i><i></i><i></i>
+            </span>
+            <CircleAlert v-else-if="receiptNeedsAttention(receipt.state)" :size="14" />
+            <Check v-else :size="14" />
+          </span>
+          <strong>{{ receipt.agentName }}</strong>
+          <small v-if="receiptStateLabel(receipt.state)">{{ receiptStateLabel(receipt.state) }}</small>
           <button
             v-if="receipt.state === 'queued_behind_blocked' && receipt.blockedByMessageId"
             type="button"
@@ -227,7 +248,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
-import { Check, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
+import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
@@ -273,6 +294,7 @@ const props = withDefaults(defineProps<{
   deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;
+  providerLabel?: string | null;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
@@ -296,12 +318,43 @@ const emit = defineEmits<{
   "retry-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
-function receiptIcon(state: string): string { return state === "blocked" ? "!" : state === "awaiting_result" || state === "dispatching" ? "↗" : state === "acknowledged_no_reply" ? "✓" : "•"; }
+const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
+  "retryable",
+  "result_recovery",
+  "blocked",
+  "acknowledged_no_reply",
+  "cancelled_by_room_move",
+  "queued_behind_blocked",
+].includes(receipt.state)));
+
+function receiptIsAnimated(state: string): boolean {
+  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery"].includes(state);
+}
+
+function receiptNeedsAttention(state: string): boolean {
+  return state === "blocked" || state === "queued_behind_blocked";
+}
+
+function receiptStateLabel(state: string): string {
+  if (state === "retryable") return "Retrying";
+  if (state === "result_recovery") return "Recovering reply";
+  if (state === "blocked") return "Needs attention";
+  if (state === "queued_behind_blocked") return "Queued behind an issue";
+  if (state === "acknowledged_no_reply") return "Read · no reply";
+  if (state === "cancelled_by_room_move") return "Moved rooms";
+  return "";
+}
+
 function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null }): string {
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
+  if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
+  if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
+  if (receipt.state === "acknowledged") return `${receipt.agentName} replied`;
   if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
   if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
+  if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
   if (receipt.state === "blocked") return `${receipt.agentName} needs attention`;
+  if (receipt.state === "cancelled_by_room_move") return `${receipt.agentName} moved to another room before handling this`;
   if (receipt.state === "queued_behind_blocked") return `Waiting — ${receipt.agentName} needs attention on ${receipt.blockedByMessageId || "an earlier message"}`;
   return `Waiting for ${receipt.agentName}`;
 }
@@ -326,7 +379,7 @@ const ownerAttribution = computed(() => resolveOwnerAttribution({
   actorLabel: props.message.agentIdentity?.actorLabel || props.message.actorLabel,
   sender: props.message.sender,
 }));
-const ideLabel = computed(() => props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
+const ideLabel = computed(() => props.providerLabel || props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
 const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
 const isAmbientSystem = computed(() =>
   isAmbientSystemMessage(props.message.sender, props.message.text || "")

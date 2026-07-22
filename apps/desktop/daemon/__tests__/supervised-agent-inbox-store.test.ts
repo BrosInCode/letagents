@@ -90,6 +90,138 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
   } finally { await env.cleanup(); }
 });
 
+test("room move cancels only later old-room work and clears old ingress authority", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    await store.bootstrapCursor({ agent_id: "mover", room_id: "old-room", last_observed_message_id: "9" });
+    const [current, later] = await store.ingestPoll({
+      agent_id: "mover", room_id: "old-room", expected_cursor: "9", last_observed_message_id: "11",
+      messages: [
+        { source_message_id: "10", source_message: { text: "move" }, activation: {} },
+        { source_message_id: "11", source_message: { text: "later" }, activation: {} },
+      ],
+    });
+    await store.setIngressHealth({ agent_id: "mover", room_id: "old-room", execution_generation_id: "run", state: "observing" });
+    await store.transition(current!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(current!.inbox_item_id, "turn-move");
+    await store.transition(current!.inbox_item_id, "awaiting_result");
+    await store.transition(current!.inbox_item_id, "acknowledged_no_reply");
+    const cancelled = await store.commitRoomMoveQueue({ agent_id: "mover", old_room_id: "old-room", after_fifo_sequence: current!.fifo_sequence });
+    assert.equal(cancelled, 1);
+    assert.equal((await store.get(later!.inbox_item_id))?.state, "cancelled_by_room_move");
+    assert.equal((await store.receipts("mover"))[1]?.timeline.at(-1)?.phase, "room_move_cancelled");
+    assert.equal(await store.cursor("mover"), null);
+    assert.equal(await store.ingressHealth("mover"), null);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("prepared room moves remain discoverable across restart until their acknowledged turn is reconciled", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "mover", room_id: "old-room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "move" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-move");
+    await store.transition(item!.inbox_item_id, "awaiting_result");
+    await store.transition(item!.inbox_item_id, "acknowledged_no_reply");
+    const prepared = await store.prepareEffect({
+      agent_id: "mover", room_id: "old-room", execution_generation_id: "run",
+      provider_turn_id: "turn-move", mcp_request_id: "join-1", tool_name: "join_room",
+      request: { name: "new-room" },
+    });
+    await store.stagePreparedEffectResult(prepared.effect.effect_id, {
+      requested_room: "new-room", destination_room: "new-room", phase: "validated",
+    });
+    await store.close();
+
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await reopened.preparedRoomMoves("mover"))[0]?.effect_id, prepared.effect.effect_id);
+    assert.equal((await reopened.inboxForProviderTurn("mover", "turn-move"))?.state, "acknowledged_no_reply");
+    await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
+test("terminal receipts and observed context are bounded while prepared effects remain durable", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    const observed = Array.from({ length: 510 }, (_, index) => ({
+      source_message_id: String(index + 1), source_message: { index }, activation: {}, activation_decision: "silent",
+    }));
+    await store.ingestPoll({ agent_id: "bounded", room_id: "room", last_observed_message_id: "510", messages: [], observed_messages: observed });
+    assert.equal((await store.observedContext("bounded", "room", 200)).at(0)?.source_message_id, "311");
+
+    const messages = Array.from({ length: 205 }, (_, index) => ({
+      source_message_id: String(1000 + index), source_message: { index }, activation: {},
+    }));
+    const items = await store.ingestPoll({ agent_id: "bounded", room_id: "room", last_observed_message_id: "1204", messages });
+    for (const item of items) {
+      await store.transition(item.inbox_item_id, "dispatching");
+      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${item.source_message_id}`);
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, "acknowledged_no_reply");
+    }
+    assert.equal((await store.receipts("bounded")).length, 200);
+    await store.close();
+
+    const afterPrune = new DatabaseSync(env.database);
+    assert.equal(
+      (afterPrune.prepare(`SELECT COUNT(*) AS value
+        FROM supervised_agent_inbox_events events
+        LEFT JOIN supervised_agent_inbox inbox ON inbox.inbox_item_id=events.inbox_item_id
+        WHERE inbox.inbox_item_id IS NULL`).get() as { value: number }).value,
+      0,
+      "foreign-key cascading must remove timeline rows with pruned inbox receipts",
+    );
+    afterPrune.close();
+
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    await reopened.removeAgent("bounded");
+    assert.equal((await reopened.receipts("bounded")).length, 0);
+    assert.equal((await reopened.observedContext("bounded", "room")).length, 0);
+    await reopened.close();
+    const afterRemoval = new DatabaseSync(env.database);
+    assert.equal(
+      (afterRemoval.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events").get() as { value: number }).value,
+      0,
+      "agent removal must cascade through its retained timeline",
+    );
+    afterRemoval.close();
+  } finally { await env.cleanup(); }
+});
+
+test("effect journal is exactly-once and rejects request-id or turn identity reuse", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    const authority = {
+      agent_id: "stone", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn",
+      mcp_request_id: "request-1", tool_name: "claim_task", request: { task_id: "task-1" },
+    };
+    const first = await store.prepareEffect(authority);
+    assert.equal(first.created, true);
+    await store.markEffectExecuting(first.effect.effect_id);
+    const completed = await store.completeEffect({
+      effect_id: first.effect.effect_id,
+      result: { claimed: true },
+      expected: { agent_id: "stone", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn" },
+    });
+    assert.equal(completed.state, "completed");
+    assert.deepEqual(completed.result, { claimed: true });
+    const replay = await store.prepareEffect(authority);
+    assert.equal(replay.created, false);
+    assert.equal(replay.effect.effect_id, first.effect.effect_id);
+    assert.deepEqual(replay.effect.result, { claimed: true });
+    await assert.rejects(() => store.prepareEffect({ ...authority, tool_name: "cancel_task" }), /request id was reused/);
+    await assert.rejects(() => store.completeEffect({
+      effect_id: first.effect.effect_id,
+      expected: { agent_id: "stone", room_id: "room", execution_generation_id: "other-run", provider_turn_id: "turn" },
+    }), /exact active turn/);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("delivery timeline records causal phases durably across a daemon restart", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-20T12:00:00.000Z");
@@ -109,15 +241,15 @@ test("delivery timeline records causal phases durably across a daemon restart", 
   } finally { await env.cleanup(); }
 });
 
-test("v6 repair adds a missing causal-event table without rewriting canonical inbox rows", async () => {
+test("v7 repair adds a missing causal-event table without rewriting canonical inbox rows", async () => {
   const env = await fixture(); try {
     const first = new SupervisedAgentInboxStore(env.database);
     const [item] = await first.ingestPoll({ agent_id: "repair", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "msg_1", source_message: { durable: true }, activation: {} }] });
     await first.close();
-    const partialV6 = new DatabaseSync(env.database);
-    partialV6.exec("DROP TABLE supervised_agent_inbox_events");
-    assert.equal((partialV6.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
-    partialV6.close();
+    const partialV7 = new DatabaseSync(env.database);
+    partialV7.exec("DROP TABLE supervised_agent_inbox_events");
+    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
+    partialV7.close();
     const repaired = new SupervisedAgentInboxStore(env.database);
     const preserved = (await repaired.receipts("repair"))[0]!;
     assert.equal(preserved.inbox_item_id, item!.inbox_item_id);
@@ -211,7 +343,7 @@ test("a post-COMMIT v6 scrub interruption leaves a durable marker that a reopen 
     await prepareSecretBearingV5(env);
     const interrupted = new DatabaseSync(env.database);
     assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
-    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
     assert.equal((interrupted.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
     interrupted.close();
     const reopened = new DatabaseSync(env.database);

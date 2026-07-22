@@ -15,6 +15,7 @@ import { DAEMON_PROTOCOL_VERSION } from "../types.js";
 const agent = {
   agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
   handle: { workAttemptId: "attempt", providerContinuationId: "thread", pid: 1, observedState: "working" as const },
+  workAttemptId: "attempt", providerContinuationId: "thread", pid: 1,
 };
 const currentAuthority = async () => true;
 const provider = (runRoomTurn: NonNullable<ProviderActionPort["runRoomTurn"]>, recoverRoomTurn?: NonNullable<ProviderActionPort["recoverRoomTurn"]>) => ({
@@ -62,6 +63,26 @@ test("Codex daemon delivery treats an absent mode as historical mcp_polling", as
     const { deliveryMode: _deliveryMode, ...historicalAgent } = agent;
     await delivery.poll(historicalAgent);
     assert.equal(polls, 0);
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ingress keeps observing and queues routed work without a provider handle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-ingress-only-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let turns = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; return { turnId: "never", outcome: "no_reply", text: null }; }), {
+    poll: async () => ({ messages: [{ id: "1", text: "hello", activation: { for_current_agent: { decision: "activate" } } }] }),
+    publish: async () => {},
+  }, currentAuthority);
+  try {
+    await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: null });
+    await delivery.poll({ ...agent, handle: null, pid: null });
+    assert.equal(turns, 0);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "pending");
+    assert.equal((await store.ingressHealth(agent.agentId))?.state, "observing");
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });
@@ -124,6 +145,30 @@ test("worker-authenticated activation ingress deduplicates replay and publishes 
     assert.equal(polls.length, 2);
     assert.equal((await store.receipts("stone")).length, 1);
     assert.deepEqual(published, ["supervised-room:stone:1:reply:v1"]);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("result recovery uses bounded backoff and blocks instead of hot-looping forever", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-result-recovery-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-unreadable");
+    await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-unreadable" });
+    await store.transition(item.inbox_item_id, "result_recovery", { outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }) });
+    let recoveries = 0;
+    const delays: number[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async () => { throw new Error("must not start a new turn"); },
+      async () => { recoveries += 1; throw new Error("control socket unavailable"); },
+    ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 25, async (ms) => { delays.push(ms); });
+    await delivery.pump(agent);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(recoveries, 3);
+    assert.deepEqual(delays, [25, 50]);
+    assert.equal(receipt.state, "blocked");
+    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

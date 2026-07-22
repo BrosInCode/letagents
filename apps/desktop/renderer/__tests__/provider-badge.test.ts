@@ -24,8 +24,8 @@ after(async () => {
   await vite?.close();
 });
 
-async function renderBadge(label: string): Promise<string> {
-  return renderToString(createSSRApp(ProviderBadge, { label }));
+async function renderBadge(label: string, agentKey?: string): Promise<string> {
+  return renderToString(createSSRApp(ProviderBadge, { label, agentKey }));
 }
 
 test("provider badges render platform artwork with accessible names", async () => {
@@ -52,4 +52,15 @@ test("provider badges preserve meaningful fallback labels", async () => {
   assert.match(unknown, /room-provider-badge--other/);
   assert.match(unknown, /aria-label="Future IDE provider"/);
   assert.doesNotMatch(unknown, /aria-label="Other provider"/);
+});
+
+test("legacy supervised metadata resolves the provider from canonical identity", async () => {
+  const codex = await renderBadge("Supervisor worker", "EmmyMay/desktop-codex-f3c066");
+  assert.match(codex, /room-provider-badge--codex/);
+  assert.match(codex, /aria-label="Codex provider"/);
+  assert.match(codex, /<img/);
+
+  const unknown = await renderBadge("Supervisor worker", "EmmyMay/future-worker");
+  assert.match(unknown, /room-provider-badge--other/);
+  assert.match(unknown, /aria-label="Supervisor worker provider"/);
 });

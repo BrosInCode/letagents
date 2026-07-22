@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.39";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.43";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -101,6 +101,7 @@ type WireEntry = {
   } | null;
   room_agent_state?: {
     connection: { state: string; observed_at: string | null; detail: string | null };
+    ingress: { state: string; observed_at: string | null; detail: string | null };
     inbox: { state: string; pending_count: number; blocked_by_message_id: string | null; detail: string | null };
     turn: { state: string; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
     task: { state: string; task_id: string | null; title: string | null };
@@ -936,17 +937,24 @@ function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["
   const root = record(value);
   if (!root) return null;
   const connection = record(root.connection);
+  const hasIngress = Object.hasOwn(root, "ingress");
+  const ingress = hasIngress ? record(root.ingress) : null;
   const inbox = record(root.inbox);
   const turn = record(root.turn);
   const task = record(root.task);
-  if (!connection || !inbox || !turn || !task) return null;
+  if (!connection || (hasIngress && !ingress) || !inbox || !turn || !task) return null;
 
   const connectionState = enumValue(connection.state, ["connected", "reconnecting", "disconnected"] as const);
+  const ingressState = ingress
+    ? enumValue(ingress.state, ["starting", "observing", "backoff", "blocked", "stopped"] as const)
+    : connectionState === "connected" ? "observing" as const : "stopped" as const;
   const inboxState = enumValue(inbox.state, ["empty", "queued", "blocked", "waiting_for_desktop_credentials"] as const);
   const turnState = enumValue(turn.state, ["idle", "dispatching", "responding", "publishing", "retrying", "failed"] as const);
   const taskState = enumValue(task.state, ["none", "assigned", "working", "blocked"] as const);
   const observedAt = nullableNonEmptyString(connection.observed_at);
   const connectionDetail = nullableString(connection.detail);
+  const ingressObservedAt = ingress ? nullableNonEmptyString(ingress.observed_at) : observedAt;
+  const ingressDetail = ingress ? nullableString(ingress.detail) : null;
   const blockedByMessageId = nullableNonEmptyString(inbox.blocked_by_message_id);
   const inboxDetail = nullableString(inbox.detail);
   const inboxItemId = nullableNonEmptyString(turn.inbox_item_id);
@@ -955,13 +963,14 @@ function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["
   const turnDetail = nullableString(turn.detail);
   const taskId = nullableNonEmptyString(task.task_id);
   const title = nullableString(task.title);
-  if (!connectionState || !inboxState || !turnState || !taskState
-    || observedAt === undefined || connectionDetail === undefined || blockedByMessageId === undefined || inboxDetail === undefined
+  if (!connectionState || !ingressState || !inboxState || !turnState || !taskState
+    || observedAt === undefined || connectionDetail === undefined || ingressObservedAt === undefined || ingressDetail === undefined || blockedByMessageId === undefined || inboxDetail === undefined
     || inboxItemId === undefined || sourceMessageId === undefined || providerTurnId === undefined || turnDetail === undefined
     || taskId === undefined || title === undefined
     || typeof inbox.pending_count !== "number" || !Number.isFinite(inbox.pending_count) || !Number.isInteger(inbox.pending_count) || inbox.pending_count < 0) return null;
   return {
     connection: { state: connectionState, observedAt, detail: connectionDetail },
+    ingress: { state: ingressState, observedAt: ingressObservedAt, detail: ingressDetail },
     inbox: { state: inboxState, pendingCount: inbox.pending_count, blockedByMessageId, detail: inboxDetail },
     turn: { state: turnState, inboxItemId, sourceMessageId, providerTurnId, detail: turnDetail },
     task: { state: taskState, taskId, title },
@@ -975,7 +984,7 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
     if (!receipt) return [];
     const inboxItemId = nonEmptyString(receipt.inbox_item_id);
     const sourceMessageId = nonEmptyString(receipt.source_message_id);
-    const state = enumValue(receipt.state, ["queued", "dispatching", "awaiting_result", "publishing", "acknowledged", "acknowledged_no_reply", "retryable", "blocked", "queued_behind_blocked"] as const);
+    const state = enumValue(receipt.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "acknowledged", "acknowledged_no_reply", "retryable", "blocked", "cancelled_by_room_move", "queued_behind_blocked"] as const);
     const providerTurnId = nullableNonEmptyString(receipt.provider_turn_id);
     const blockedByMessageId = nullableNonEmptyString(receipt.blocked_by_message_id);
     const error = nullableString(receipt.error);
@@ -987,7 +996,7 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
     for (const event of receipt.timeline) {
       const value = record(event);
       if (!value) return [];
-      const phase = enumValue(value.phase, ["received", "queued", "turn_started", "turn_finished", "publish_started", "published", "no_reply", "retry_scheduled", "blocked"] as const);
+      const phase = enumValue(value.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled"] as const);
       const observedAt = nonEmptyString(value.observed_at);
       const detail = nullableString(value.detail);
       if (!phase || !observedAt || detail === undefined) return [];

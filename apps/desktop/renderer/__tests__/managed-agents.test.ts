@@ -26,9 +26,11 @@ import {
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
   hasSupervisedRuntime,
+  humanFacingSupervisorActivitySummary,
   isAgentSetupConfirmationActive,
   isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
+  isHumanVisibleSupervisorActivity,
   isVisibleManagedAgentSession,
   isBranchScopedGitRoomIdentifier,
   managedAgentRepoDetail,
@@ -74,7 +76,7 @@ import {
   supervisedRecoveryDetail,
   supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
-import { isMentionableRoomParticipant } from "../src/domain/participants";
+import { isMentionableRoomParticipant, roomMentionCandidates } from "../src/domain/participants";
 
 function provider(
   overrides: Partial<DesktopAgentProvider> = {},
@@ -679,10 +681,35 @@ test("provider identity remains exact while a relaunch temporarily clears its ro
 test("supervisor native activity drives the chat work indicator for the bound room identity", () => {
   const working = supervisorEntry({
     id: "supervised_working",
+    agentKey: "codex:dawn-harbor",
     agentSessionId: "agent_session_403",
     agentSessionBindingState: "active",
     observedState: "working",
     condition: "none",
+    roomAgentState: {
+      connection: { state: "connected", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
+      ingress: { state: "observing", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
+      inbox: { state: "queued", pendingCount: 1, blockedByMessageId: null, detail: null },
+      turn: {
+        state: "responding",
+        inboxItemId: "inbox_1",
+        sourceMessageId: "message_source",
+        providerTurnId: "turn_1",
+        detail: null,
+      },
+      task: { state: "none", taskId: null, title: null },
+    },
+    deliveryReceipts: [{
+      inboxItemId: "inbox_1",
+      sourceMessageId: "message_source",
+      state: "awaiting_result",
+      attemptCount: 1,
+      providerTurnId: "turn_1",
+      blockedByMessageId: null,
+      error: null,
+      updatedAt: "2026-07-15T18:00:00.500Z",
+      timeline: [{ phase: "turn_started", observedAt: "2026-07-15T18:00:00.500Z", detail: null }],
+    }],
     nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
     activity: [{
       observedAt: "2026-07-15T18:00:01.000Z",
@@ -701,13 +728,25 @@ test("supervisor native activity drives the chat work indicator for the bound ro
   assert.deepEqual(
     supervisedAgentWorkIndicators([
       working,
-      { ...working, id: "supervised_stale", agentSessionId: "agent_session_404", nativeLiveness: { state: "stale", observedAt: working.nativeLiveness.observedAt, detail: null } },
+      {
+        ...working,
+        id: "supervised_disconnected",
+        agentSessionId: "agent_session_404",
+        nativeLiveness: { state: "stale", observedAt: working.nativeLiveness.observedAt, detail: null },
+        roomAgentState: {
+          ...working.roomAgentState!,
+          connection: { state: "disconnected", observedAt: "2026-07-15T18:00:02.000Z", detail: "Provider exited" },
+        },
+      },
     ], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
     [{
       id: "supervised_working",
       displayName: "DawnHarbor",
-      summary: "Inspecting the workspace",
-      startedAt: "2026-07-15T18:00:01.000Z",
+      summary: "Using a tool",
+      startedAt: "2026-07-15T18:00:00.500Z",
+      agentSessionId: "agent_session_403",
+      agentKey: "codex:dawn-harbor",
+      sourceMessageId: "message_source",
     }],
   );
   assert.deepEqual(
@@ -730,9 +769,41 @@ test("supervisor native activity drives the chat work indicator for the bound ro
         status: "idle",
       }],
     }], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
-    [],
-    "a newer idle poll clears an older working indicator instead of leaving it stuck",
+    [{
+      id: "supervised_working",
+      displayName: "DawnHarbor",
+      summary: "Using a tool",
+      startedAt: "2026-07-15T18:00:00.500Z",
+      agentSessionId: "agent_session_403",
+      agentKey: "codex:dawn-harbor",
+      sourceMessageId: "message_source",
+    }],
+    "an internal item completing cannot hide an active room turn",
   );
+  assert.deepEqual(
+    supervisedAgentWorkIndicators([{
+      ...working,
+      observedState: "idle",
+      nativeLiveness: { state: "idle", observedAt: "2026-07-15T18:00:03.000Z", detail: "codex · turn/completed" },
+      roomAgentState: {
+        ...working.roomAgentState!,
+        inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+        turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      },
+    }], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
+    [],
+    "the durable room turn completing removes the indicator",
+  );
+});
+
+test("provider activity becomes product language instead of a protocol trace", () => {
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/started" }), true);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "item/completed" }), true);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "item_lifecycle", method: "thread/read" }), false);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "tool_lifecycle", method: "item/toolCall/started" }), true);
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "text_delta", method: "item/agentMessage/delta", summary: "codex · item/agentMessage/delta" }), "Writing a response");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "item_lifecycle", method: "item/reasoning/summaryTextDelta", summary: "codex · item/reasoning/summaryTextDelta" }), "Thinking through the request");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "tool_lifecycle", method: "item/mcpToolCall/progress", summary: "codex · item/mcpToolCall/progress" }), "Using a tool");
 });
 
 test("a successful first supervised Start has an immediate non-recovery runtime label", () => {
@@ -1137,6 +1208,8 @@ test("activeManagedAgentWorkIndicators only exposes running room work", () => {
     displayName: "LumenRiver",
     summary: "Checking the attachment path.",
     startedAt: "2026-06-14T12:10:00.000Z",
+    agentSessionId: "agent_1",
+    agentKey: "codex",
   }]);
 });
 
@@ -1663,9 +1736,52 @@ test("live daemon-inbox agents become canonical mentionable room participants", 
   assert.equal(participants.length, 1);
   assert.equal(participants[0]?.displayName, "GardenWinter");
   assert.equal(participants[0]?.agentKey, "EmmyMay/desktop-codex-4d8fe3");
+  assert.equal(participants[0]?.ownerLabel, "EmmyMay");
   assert.equal(participants[0]?.activityState, "active");
   assert.deepEqual(participants[0]?.sourceFlags, ["delivery", "presence"]);
   assert.equal(isMentionableRoomParticipant(participants[0]!), true);
+  const mention = roomMentionCandidates(participants, "garden")[0];
+  assert.equal(mention?.label, "EmmyMay's agent");
+  assert.equal(mention?.insertText, "agent:EmmyMay/desktop-codex-4d8fe3");
+});
+
+test("supervisor reachability preserves server-owned attribution while replacing a generic provider label", () => {
+  const participants = mergeDesktopSupervisorAgentParticipants([
+    participant({
+      participantKey: "agent:EmmyMay/desktop-codex-4d8fe3",
+      kind: "agent",
+      displayName: "GardenWinter",
+      actorLabel: "GardenWinter | Emmy May's agent | Supervisor Worker",
+      agentKey: "EmmyMay/desktop-codex-4d8fe3",
+      githubLogin: null,
+      ownerLabel: "Emmy May",
+      ideLabel: "Supervisor Worker",
+      activityState: "away",
+      sourceFlags: ["messages"],
+    }),
+  ], [supervisorEntry({
+    id: "supervised_6697e364-62d0-4027-b02d-ee71a8fbf579",
+    roomId: "room_1",
+    displayName: "GardenWinter",
+    agentKey: "EmmyMay/desktop-codex-4d8fe3",
+    desiredState: "running",
+    observedState: "working",
+    condition: "none",
+    roomAgentState: {
+      connection: { state: "connected", detail: null },
+      inbox: { state: "idle", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      task: { state: "none", taskId: null, title: null },
+    },
+  })], "room_1");
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0]?.participantKey, "desktop-supervisor-agent:supervised_6697e364-62d0-4027-b02d-ee71a8fbf579");
+  assert.equal(participants[0]?.ownerLabel, "Emmy May");
+  assert.equal(participants[0]?.actorLabel, "GardenWinter | Emmy May's agent | Supervisor Worker");
+  assert.equal(participants[0]?.ideLabel, "Codex");
+  assert.equal(participants[0]?.activityState, "active");
+  assert.deepEqual(participants[0]?.sourceFlags, ["messages", "delivery", "presence"]);
 });
 
 test("supervisor mention projection excludes disconnected, stopped, and other-room agents", () => {

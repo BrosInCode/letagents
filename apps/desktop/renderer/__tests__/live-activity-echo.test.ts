@@ -6,9 +6,11 @@ import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
+  humanFacingSupervisorActivitySummary,
   liveActivityEchoText,
   isHumanVisibleSupervisorActivity,
   supervisedAgentWorkIndicators,
+  workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
 } from "../src/domain/managed-agents";
 import type { DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
@@ -40,6 +42,30 @@ function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): Desktop
     nativeLiveness: { state: "active", observedAt: null, detail: null },
     restartCount: 0,
     lastTerminal: null,
+    roomAgentState: {
+      connection: { state: "connected", observedAt: "2026-07-17T00:00:00.000Z", detail: null },
+      ingress: { state: "observing", observedAt: "2026-07-17T00:00:00.000Z", detail: null },
+      inbox: { state: "queued", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: {
+        state: "responding",
+        inboxItemId: "inbox_1",
+        sourceMessageId: "message_source",
+        providerTurnId: "turn_1",
+        detail: null,
+      },
+      task: { state: "none", taskId: null, title: null },
+    },
+    deliveryReceipts: [{
+      inboxItemId: "inbox_1",
+      sourceMessageId: "message_source",
+      state: "awaiting_result",
+      attemptCount: 1,
+      providerTurnId: "turn_1",
+      blockedByMessageId: null,
+      error: null,
+      updatedAt: "2026-07-17T00:00:00.500Z",
+      timeline: [{ phase: "turn_started", observedAt: "2026-07-17T00:00:00.500Z", detail: null }],
+    }],
     activity: [{
       observedAt: "2026-07-17T00:00:01.000Z",
       sequence: 5,
@@ -87,6 +113,50 @@ test("echo falls back for empty/whitespace/nullish input", () => {
   assert.equal(liveActivityEchoText("   "), "Working in the room.");
   assert.equal(liveActivityEchoText(null), "Working in the room.");
   assert.equal(liveActivityEchoText(undefined), "Working in the room.");
+});
+
+test("a matching agent reply retires an older progress echo before a pending label can replay", () => {
+  const work: ManagedAgentWorkIndicator = {
+    ...indicator("agent_a", "2026-07-22T15:00:00.000Z", "Writing a response"),
+    agentSessionId: "session_a",
+    agentKey: "codex:agent_a",
+    sourceMessageId: "message_source",
+  };
+  const source = {
+    id: "message_source",
+    agentIdentity: null,
+  };
+  const reply = {
+    id: "message_reply",
+    agentIdentity: { agentSessionId: "session_a", agentKey: "codex:agent_a" },
+  };
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [source, reply]), true);
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [source, {
+    ...reply,
+    agentIdentity: { agentSessionId: "session_b", agentKey: "codex:agent_b" },
+  }]), false, "one agent replying never clears another agent's work");
+  assert.equal(
+    workIndicatorSupersededByAgentMessage(work, [reply, source]),
+    false,
+    "a previous reply cannot suppress progress for a later activating message",
+  );
+  assert.equal(
+    workIndicatorSupersededByAgentMessage({ ...work, sourceMessageId: "message_not_loaded" }, [source, reply]),
+    false,
+    "missing causal context fails safe by keeping progress visible",
+  );
+});
+
+test("agent-key fallback retires stale work only when session identity is unavailable", () => {
+  const work: ManagedAgentWorkIndicator = {
+    ...indicator("agent_a", "2026-07-22T15:00:00.000Z"),
+    agentKey: "CODEX:Agent_A",
+    sourceMessageId: "message_source",
+  };
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [
+    { id: "message_source", agentIdentity: null },
+    { id: "message_reply", agentIdentity: { agentSessionId: null, agentKey: "codex:agent_a" } },
+  ]), true);
 });
 
 test("collapse keeps all indicators when at or under the limit", () => {
@@ -149,7 +219,7 @@ test("echo coalescing drops entries that go idle (cancellation, no stale echo)",
 test("supervised indicator echoes a bounded summary and uses a stable per-entry id", () => {
   const longSummary = "y".repeat(LIVE_ACTIVITY_ECHO_MAX_LENGTH + 20);
   const indicators = supervisedAgentWorkIndicators(
-    [entry({ activity: [{ ...entry().activity[0]!, summary: longSummary }] })],
+    [entry({ activity: [{ ...entry().activity[0]!, kind: "product_progress", method: "progress", summary: longSummary }] })],
     [{ agentSessionId: "agent_session_1", displayName: "MistyMorrow", actorLabel: "MistyMorrow" }],
     "room_1",
   );
@@ -161,7 +231,14 @@ test("supervised indicator echoes a bounded summary and uses a stable per-entry 
 });
 
 test("supervised indicator clears when the agent is only idle-polling (composes with task_67)", () => {
-  const idlePoll = entry({ observedState: "idle" });
+  const idlePoll = entry({
+    observedState: "idle",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+    },
+  });
   assert.deepEqual(supervisedAgentWorkIndicators([idlePoll], [], "room_1"), []);
 });
 
@@ -172,8 +249,39 @@ test("provider account notifications stay in diagnostics but never masquerade as
     method: "account/rateLimits/updated",
     summary: "account/rateLimits/updated",
   };
-  const withNoiseOnly = entry({ activity: [rateLimitEvent] });
+  const withNoiseOnly = entry({
+    activity: [rateLimitEvent],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+    },
+  });
   assert.deepEqual(supervisedAgentWorkIndicators([withNoiseOnly], [], "room_1"), []);
   assert.equal(isHumanVisibleSupervisorActivity(rateLimitEvent), false);
   assert.equal(isHumanVisibleSupervisorActivity({ kind: "turn_lifecycle", method: "turn/completed" }), true);
+});
+
+test("provider protocol summaries become calm product progress labels", () => {
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "item_lifecycle", method: "item/started", summary: "codex · item/started" }), "Thinking");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "text_delta", method: "item/agentMessage/delta", summary: "codex · item/agentMessage/delta" }), "Writing a response");
+  assert.equal(humanFacingSupervisorActivitySummary({ kind: "command_output", method: "item/commandExecution/outputDelta", summary: "codex · item/commandExecution/outputDelta" }), "Working in the project");
+});
+
+test("provider-approved reasoning summaries replace the generic thinking label", () => {
+  assert.equal(humanFacingSupervisorActivitySummary({
+    kind: "text_delta",
+    method: "item/reasoning/summaryTextDelta",
+    summary: "Checking the delivery boundary before replying",
+  }), "Checking the delivery boundary before replying");
+  assert.equal(humanFacingSupervisorActivitySummary({
+    kind: "text_delta",
+    method: "item/reasoning/summaryTextDelta",
+    summary: "codex · item/reasoning/summaryTextDelta",
+  }), "Thinking through the request");
+  assert.equal(humanFacingSupervisorActivitySummary({
+    kind: "text_delta",
+    method: "item/reasoning/textDelta",
+    summary: "Codex raw reasoning text is streaming.",
+  }), "Thinking through the request");
 });
