@@ -368,7 +368,7 @@ export function supervisedAgentWorkIndicators(
           boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
           entry.id,
         ),
-        summary: liveActivityEchoText(latest.summary),
+        summary: humanFacingSupervisorActivitySummary(latest),
         startedAt: latest.observedAt,
       }];
     })
@@ -384,11 +384,26 @@ export function isHumanVisibleSupervisorActivity(
   if (
     method === "account/ratelimits/updated"
     || method === "account/ratelimitsupdated"
-    || method === "item/started"
-    || method === "item/completed"
     || method === "thread/read"
   ) return false;
   return event.kind !== "usage" && event.kind !== "provider_event";
+}
+
+/** Translate provider-native events into stable product language. The exact
+ * provider method remains available in Activity/diagnostics, but Chat should
+ * describe what the agent is doing rather than expose a protocol trace. */
+export function humanFacingSupervisorActivitySummary(
+  event: Pick<DesktopSupervisorActivityEvent, "kind" | "method" | "summary">,
+): string {
+  const kind = event.kind.trim().toLowerCase();
+  const method = event.method.trim().toLowerCase();
+  if (method.includes("reasoning") || method.includes("thinking")) return "Thinking through the request";
+  if (kind === "text_delta" || method.includes("agentmessage") || method === "assistant") return "Writing a response";
+  if (kind === "tool_lifecycle" || /(?:toolcall|tool_use|websearch|filechange)/i.test(method)) return "Using a tool";
+  if (kind === "command_output" || /(?:command|process|terminal)/i.test(method)) return "Working in the project";
+  if (kind === "approval") return "Waiting for approval";
+  if (kind === "turn_lifecycle" || kind === "item_lifecycle") return "Thinking";
+  return liveActivityEchoText(event.summary);
 }
 
 /**

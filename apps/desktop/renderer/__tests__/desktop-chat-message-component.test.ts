@@ -141,9 +141,8 @@ test("one room message groups delivery receipts for every activated agent", asyn
   });
 
   const html = await renderToString(app);
-  assert.match(html, /aria-label="StoneRidge is responding"/);
-  assert.match(html, /class="room-message-delivery-dots"/);
-  assert.match(html, />StoneRidge<\/strong>/);
+  assert.doesNotMatch(html, /aria-label="StoneRidge is responding"/);
+  assert.doesNotMatch(html, />StoneRidge<\/strong>/);
   assert.doesNotMatch(html, /Waiting for StoneRidge/);
   assert.match(html, /aria-label="Waiting — DawnPeak needs attention on msg_blocked"/);
   assert.match(html, /Queued behind an issue/);

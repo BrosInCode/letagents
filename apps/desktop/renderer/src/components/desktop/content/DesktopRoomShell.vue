@@ -329,6 +329,7 @@ import {
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   pendingManagedAgentPermissionApprovals,
+  supervisedAgentWorkIndicators,
   managedAgentRootPathForRoom,
   type ManagedAgentPermissionApproval,
   managedAgentSessionListsEqual,
@@ -656,14 +657,14 @@ const roomParticipants = computed(() =>
     props.room.identifier,
   )
 );
-// Supervised room turns already have durable, message-anchored receipts. Their
-// provider stream belongs in Activity/diagnostics; projecting it here would
-// create a second, less trustworthy response indicator in Chat.
 const localAgentWork = computed(() =>
-  activeManagedAgentWorkIndicators(
-    roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
-    props.room.identifier,
-  )
+  [
+    ...activeManagedAgentWorkIndicators(
+      roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
+      props.room.identifier,
+    ),
+    ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier),
+  ]
 );
 const pendingPermissionApprovals = computed(() =>
   pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)
