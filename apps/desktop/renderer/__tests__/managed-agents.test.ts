@@ -681,6 +681,7 @@ test("provider identity remains exact while a relaunch temporarily clears its ro
 test("supervisor native activity drives the chat work indicator for the bound room identity", () => {
   const working = supervisorEntry({
     id: "supervised_working",
+    agentKey: "codex:dawn-harbor",
     agentSessionId: "agent_session_403",
     agentSessionBindingState: "active",
     observedState: "working",
@@ -710,6 +711,8 @@ test("supervisor native activity drives the chat work indicator for the bound ro
       displayName: "DawnHarbor",
       summary: "Using a tool",
       startedAt: "2026-07-15T18:00:01.000Z",
+      agentSessionId: "agent_session_403",
+      agentKey: "codex:dawn-harbor",
     }],
   );
   assert.deepEqual(
@@ -1149,6 +1152,8 @@ test("activeManagedAgentWorkIndicators only exposes running room work", () => {
     displayName: "LumenRiver",
     summary: "Checking the attachment path.",
     startedAt: "2026-06-14T12:10:00.000Z",
+    agentSessionId: "agent_1",
+    agentKey: "codex",
   }]);
 });
 

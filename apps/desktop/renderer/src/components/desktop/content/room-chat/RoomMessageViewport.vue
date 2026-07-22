@@ -49,7 +49,7 @@
       </template>
 
       <div
-        v-if="localAgentWork.length && !roomLoading"
+        v-if="displayedAgentWork.length && !roomLoading"
         class="room-local-agent-work-list"
         data-testid="room-local-agent-work-list"
       >
@@ -96,7 +96,7 @@
         </div>
       </div>
 
-      <article v-else-if="!messages.length && !localAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
+      <article v-else-if="!messages.length && !displayedAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
         <h3>{{ emptyStateTitle }}</h3>
         <p>{{ emptyStateDescription }}</p>
       </article>
@@ -141,6 +141,7 @@ import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
+  workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,
 } from "../../../../domain/managed-agents";
@@ -324,11 +325,15 @@ watch(
 let echoState: WorkIndicatorEchoState = {};
 let echoFlushTimer: number | null = null;
 const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
+const currentLocalAgentWork = computed(() => {
+  const visibleMessages = [...props.messages, ...props.threadMessages];
+  return props.localAgentWork.filter((work) => !workIndicatorSupersededByAgentMessage(work, visibleMessages));
+});
 
 function applyEchoCoalescing(): void {
   const { state, indicators, hasPending } = coalesceWorkIndicatorEchoes(
     echoState,
-    props.localAgentWork,
+    currentLocalAgentWork.value,
     Date.now(),
     WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   );
@@ -344,7 +349,7 @@ function applyEchoCoalescing(): void {
 }
 
 watch(
-  () => props.localAgentWork,
+  currentLocalAgentWork,
   () => applyEchoCoalescing(),
   { immediate: true, deep: true },
 );

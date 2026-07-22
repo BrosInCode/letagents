@@ -32,3 +32,9 @@ test("scroll effects share the coalesced cadence, not the raw prop", () => {
   assert.match(viewportSource, /\(\) => displayedAgentWork\.value\.map\(\(work\) => `\$\{work\.id\}:\$\{work\.summary\}`\)/);
   assert.doesNotMatch(viewportSource, /\(\) => props\.localAgentWork\.map\(\(work\) => `\$\{work\.id\}:\$\{work\.summary\}`\)/);
 });
+
+test("an agent's visible reply cancels its older coalesced progress echo", () => {
+  assert.match(viewportSource, /workIndicatorSupersededByAgentMessage/);
+  assert.match(viewportSource, /currentLocalAgentWork/);
+  assert.match(viewportSource, /v-if="displayedAgentWork\.length && !roomLoading"/);
+});

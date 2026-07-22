@@ -13,6 +13,7 @@ import type {
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomInfo,
+  DesktopRoomMessage,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorActivityEvent,
   RepoStatus,
@@ -370,6 +371,8 @@ export function supervisedAgentWorkIndicators(
         ),
         summary: humanFacingSupervisorActivitySummary(latest),
         startedAt: latest.observedAt,
+        agentSessionId: entry.agentSessionId,
+        agentKey: entry.agentKey,
       }];
     })
     .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
@@ -526,6 +529,9 @@ export interface ManagedAgentWorkIndicator {
   displayName: string;
   summary: string;
   startedAt: string;
+  /** Exact room identity used to retire stale progress after this agent speaks. */
+  agentSessionId?: string | null;
+  agentKey?: string | null;
 }
 
 /** Longest live-activity echo shown in the room work indicator. */
@@ -550,6 +556,30 @@ export function liveActivityEchoText(summary: string | null | undefined): string
   if (!collapsed) return "Working in the room.";
   if (collapsed.length <= LIVE_ACTIVITY_ECHO_MAX_LENGTH) return collapsed;
   return `${collapsed.slice(0, LIVE_ACTIVITY_ECHO_MAX_LENGTH - 1).trimEnd()}…`;
+}
+
+/**
+ * A room message is a newer public fact than an earlier native progress echo.
+ * Retire only the matching exact agent identity; display names are deliberately
+ * excluded because two durable agents may share one.
+ */
+export function workIndicatorSupersededByAgentMessage(
+  indicator: ManagedAgentWorkIndicator,
+  messages: readonly Pick<DesktopRoomMessage, "timestamp" | "agentIdentity">[],
+): boolean {
+  const indicatorSessionId = indicator.agentSessionId?.trim() || null;
+  const indicatorAgentKey = normalizeAgentKey(indicator.agentKey);
+  if (!indicatorSessionId && !indicatorAgentKey) return false;
+  const startedAtMs = Date.parse(indicator.startedAt);
+  if (!Number.isFinite(startedAtMs)) return false;
+  return messages.some((message) => {
+    const messageAtMs = Date.parse(message.timestamp);
+    if (!Number.isFinite(messageAtMs) || messageAtMs < startedAtMs) return false;
+    const messageSessionId = message.agentIdentity?.agentSessionId?.trim() || null;
+    if (indicatorSessionId && messageSessionId) return indicatorSessionId === messageSessionId;
+    const messageAgentKey = normalizeAgentKey(message.agentIdentity?.agentKey);
+    return Boolean(indicatorAgentKey && messageAgentKey && indicatorAgentKey === messageAgentKey);
+  });
 }
 
 export interface CollapsedWorkIndicators {
@@ -1103,6 +1133,8 @@ export function activeManagedAgentWorkIndicators(
       displayName: managedAgentSessionDisplayName(session),
       summary: session.activeWork?.summary?.trim() || "Working in the room.",
       startedAt: session.activeWork?.startedAt || session.updatedAt,
+      agentSessionId: session.agentSessionId,
+      agentKey: session.agentKey,
     }))
     .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
 }
