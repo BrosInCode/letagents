@@ -164,10 +164,31 @@ test("terminal receipts and observed context are bounded while prepared effects 
       await store.transition(item.inbox_item_id, "acknowledged_no_reply");
     }
     assert.equal((await store.receipts("bounded")).length, 200);
-    await store.removeAgent("bounded");
-    assert.equal((await store.receipts("bounded")).length, 0);
-    assert.equal((await store.observedContext("bounded", "room")).length, 0);
     await store.close();
+
+    const afterPrune = new DatabaseSync(env.database);
+    assert.equal(
+      (afterPrune.prepare(`SELECT COUNT(*) AS value
+        FROM supervised_agent_inbox_events events
+        LEFT JOIN supervised_agent_inbox inbox ON inbox.inbox_item_id=events.inbox_item_id
+        WHERE inbox.inbox_item_id IS NULL`).get() as { value: number }).value,
+      0,
+      "foreign-key cascading must remove timeline rows with pruned inbox receipts",
+    );
+    afterPrune.close();
+
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    await reopened.removeAgent("bounded");
+    assert.equal((await reopened.receipts("bounded")).length, 0);
+    assert.equal((await reopened.observedContext("bounded", "room")).length, 0);
+    await reopened.close();
+    const afterRemoval = new DatabaseSync(env.database);
+    assert.equal(
+      (afterRemoval.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events").get() as { value: number }).value,
+      0,
+      "agent removal must cascade through its retained timeline",
+    );
+    afterRemoval.close();
   } finally { await env.cleanup(); }
 });
 

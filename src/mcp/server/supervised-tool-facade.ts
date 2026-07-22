@@ -15,7 +15,7 @@ const READ_TOOLS = new Set([
   "get_board_settings",
   "get_room_artifacts",
   "get_onboarding_status",
-  "get_repo_visibility",
+  "check_repo_visibility",
 ]);
 
 function instruction(text: string, data: Record<string, unknown> = {}): CallToolResult {
