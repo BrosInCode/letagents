@@ -10,6 +10,7 @@ import {
   liveActivityEchoText,
   isHumanVisibleSupervisorActivity,
   supervisedAgentWorkIndicators,
+  workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
 } from "../src/domain/managed-agents";
 import type { DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
@@ -88,6 +89,38 @@ test("echo falls back for empty/whitespace/nullish input", () => {
   assert.equal(liveActivityEchoText("   "), "Working in the room.");
   assert.equal(liveActivityEchoText(null), "Working in the room.");
   assert.equal(liveActivityEchoText(undefined), "Working in the room.");
+});
+
+test("a matching agent reply retires an older progress echo before a pending label can replay", () => {
+  const work: ManagedAgentWorkIndicator = {
+    ...indicator("agent_a", "2026-07-22T15:00:00.000Z", "Writing a response"),
+    agentSessionId: "session_a",
+    agentKey: "codex:agent_a",
+  };
+  const reply = {
+    timestamp: "2026-07-22T15:00:01.000Z",
+    agentIdentity: { agentSessionId: "session_a", agentKey: "codex:agent_a" },
+  };
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [reply]), true);
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [{
+    ...reply,
+    agentIdentity: { agentSessionId: "session_b", agentKey: "codex:agent_b" },
+  }]), false, "one agent replying never clears another agent's work");
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [{
+    ...reply,
+    timestamp: "2026-07-22T14:59:59.000Z",
+  }]), false, "historical messages do not suppress a newer turn");
+});
+
+test("agent-key fallback retires stale work only when session identity is unavailable", () => {
+  const work: ManagedAgentWorkIndicator = {
+    ...indicator("agent_a", "2026-07-22T15:00:00.000Z"),
+    agentKey: "CODEX:Agent_A",
+  };
+  assert.equal(workIndicatorSupersededByAgentMessage(work, [{
+    timestamp: "2026-07-22T15:00:01.000Z",
+    agentIdentity: { agentSessionId: null, agentKey: "codex:agent_a" },
+  }]), true);
 });
 
 test("collapse keeps all indicators when at or under the limit", () => {
