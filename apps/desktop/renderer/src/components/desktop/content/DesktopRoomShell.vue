@@ -225,6 +225,7 @@
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetail"
         @refresh-room="emit('refresh-room')"
+        @reconnect-room-agent="reconnectRoomAgent"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
       />
 
@@ -323,6 +324,7 @@ import {
   managedAgentSessionMatchesRoom,
   managedAgentRepoStatusForRoom,
   mergeDesktopManagedAgentParticipants,
+  mergeDesktopSupervisorAgentParticipants,
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   pendingManagedAgentPermissionApprovals,
@@ -335,6 +337,7 @@ import {
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
+import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
@@ -481,7 +484,7 @@ const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
 const deliveryReceiptsByMessage = computed(() => {
   const grouped: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>> = {};
   for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
-    (grouped[receipt.sourceMessageId] ??= []).push({ agentId: entry.id, agentName: entry.displayName, state: receipt.state, blockedByMessageId: receipt.blockedByMessageId });
+    (grouped[receipt.sourceMessageId] ??= []).push({ agentId: entry.id, agentName: supervisedAgentDisplayLabel(entry.displayName, entry.id), state: receipt.state, blockedByMessageId: receipt.blockedByMessageId });
   }
   return grouped;
 });
@@ -644,7 +647,11 @@ const roomPresence = computed(() =>
 );
 const roomParticipants = computed(() =>
   mergeReachableAgentPresenceParticipants(
-    mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier),
+    mergeDesktopSupervisorAgentParticipants(
+      mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier),
+      supervisorEntries.value,
+      props.room.identifier,
+    ),
     roomPresence.value,
     props.room.identifier,
   )
@@ -1564,6 +1571,20 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
     result.value?.state === "blocked" ? "error" : "success",
     5_000,
   );
+}
+
+async function reconnectRoomAgent(entryId: string): Promise<void> {
+  if (!desktopIpc.supervisor?.reconnectAgent) {
+    pushActionToast("This desktop build cannot reconnect supervised agents yet.", "error", 6_000);
+    return;
+  }
+  try {
+    await desktopIpc.supervisor.reconnectAgent({ entryId });
+    await refreshManagedAgentSessions();
+    pushActionToast("Credential handoff was requested. The existing agent runtime was left running.", "success", 5_000);
+  } catch (error) {
+    pushActionToast(error instanceof Error ? error.message : "Could not reconnect this agent.", "error", 7_000);
+  }
 }
 
 async function revealRoomMessage(messageId: string): Promise<void> {

@@ -10,6 +10,15 @@ import {
 
 const ipcSource = readFileSync(fileURLToPath(new URL("../main/ipc.ts", import.meta.url)), "utf8");
 
+test("supervisor list projects canonical agent keys for renderer mention routing", () => {
+  const listHandler = ipcSource.slice(
+    ipcSource.indexOf('"desktop:supervisor:list-agents"'),
+    ipcSource.indexOf('"desktop:supervisor:create-agent"'),
+  );
+  assert.match(listHandler, /readDesktopSupervisorGrantAgentKeysForEntries/);
+  assert.match(listHandler, /agentKey:/);
+});
+
 test("paused launch recovery reuses the guarded ownership transfer path", () => {
   const resumeHandler = ipcSource.slice(
     ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),

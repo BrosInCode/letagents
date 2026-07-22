@@ -461,6 +461,22 @@ export async function readDesktopSupervisorGrantAgentKeyForEntry(entryId: string
   return agentKey?.trim() ? canonicalSupervisorGrantAgentKey(agentKey) : null;
 }
 
+/** Read the renderer-safe identity projection with one Keychain decrypt per manifest refresh. */
+export async function readDesktopSupervisorGrantAgentKeysForEntries(
+  entryIds: readonly string[],
+): Promise<Map<string, string>> {
+  const registry = await readRegistry();
+  const result = new Map<string, string>();
+  for (const rawEntryId of entryIds) {
+    const entryId = rawEntryId.trim();
+    const agentKey = registry?.entryAgentKeys[entryId];
+    if (entryId && agentKey?.trim()) {
+      result.set(entryId, canonicalSupervisorGrantAgentKey(agentKey));
+    }
+  }
+  return result;
+}
+
 /**
  * Resolve (or create once) the server-owned identity used by a daemon-inbox
  * Codex entry.  The stable name is derived from the immutable entry id, while

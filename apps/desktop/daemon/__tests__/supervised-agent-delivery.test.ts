@@ -116,7 +116,7 @@ test("worker-authenticated activation ingress deduplicates replay and publishes 
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const polls: unknown[] = []; const published: string[] = [];
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "hello" })), {
-      poll: async (input) => { polls.push(input); return { last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: { reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
+      poll: async (input) => { polls.push(input); return { messages: [{ id: "1", activation: { for_current_agent: { decision: "activate", reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
       publish: async (input) => { published.push(input.clientMessageId); },
     }, currentAuthority, 0);
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
@@ -128,12 +128,157 @@ test("worker-authenticated activation ingress deduplicates replay and publishes 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a fresh agent observes history at the tail, advances across silent messages, and dispatches only exact activation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bootstrap-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const dispatched: string[] = [];
+    const cursors: Array<string | null> = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      dispatched.push(request.sourceMessage.id as string);
+      return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+    }), {
+      // msg_99 is an old @everyone activation. It predates this agent and
+      // must establish the boundary rather than become its first work item.
+      latest: async () => ({ messages: [{ id: "99", activation: { for_current_agent: { decision: "activate" } } }] }),
+      poll: async ({ afterMessageId }) => {
+        cursors.push(afterMessageId);
+        if (afterMessageId === "99") return {
+          messages: [
+            { id: "100", text: "ordinary room context", activation: { for_current_agent: { decision: "unaddressed" } } },
+            { id: "101", text: "@StoneRidge investigate", activation: { for_current_agent: { decision: "activate", reason: "mention" } } },
+          ],
+          has_more: false,
+        };
+        return { messages: [] };
+      },
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0);
+    await delivery.poll(agent);
+    assert.deepEqual(cursors, ["99"]);
+    assert.deepEqual(dispatched, ["101"]);
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "101");
+    assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.source_message_id), ["101"]);
+    await delivery.fenceAndDrain();
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("production delivery never establishes a first cursor lazily after activation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-admission-cursor-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let tailReads = 0;
+    let polls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      admissionOwnsInitialCursor: true,
+      latest: async () => { tailReads += 1; return { messages: [{ id: "historical" }] }; },
+      poll: async () => { polls += 1; return { messages: [] }; },
+      publish: async () => {},
+    }, currentAuthority, 0);
+    await assert.rejects(delivery.poll(agent), /admission cursor/i);
+    assert.equal(tailReads, 0, "a running provider cannot move its own first-tail boundary");
+    assert.equal(polls, 0);
+    assert.equal(await store.cursor(agent.agentId), null);
+    await delivery.fenceAndDrain();
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("bootstrap is one-time and a successor resumes its persisted cursor instead of skipping handoff messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bootstrap-handoff-"));
+  try {
+    const path = join(root, "daemon.sqlite");
+    const first = new SupervisedAgentInboxStore(path);
+    await first.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "41" });
+    await first.close();
+    const reopened = new SupervisedAgentInboxStore(path);
+    let tailReads = 0;
+    const delivery = new SupervisedAgentDelivery(reopened, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
+      latest: async () => { tailReads += 1; return { messages: [{ id: "999" }] }; },
+      poll: async ({ afterMessageId }) => {
+        assert.equal(afterMessageId, "41");
+        return { messages: [{ id: "42", activation: { for_current_agent: { decision: "activate", reason: "everyone" } } }] };
+      },
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0);
+    await delivery.poll({ ...agent, daemonGeneration: 2, bearer: "replacement" });
+    assert.equal(tailReads, 0);
+    assert.equal((await reopened.cursor(agent.agentId))?.last_observed_message_id, "42");
+    assert.deepEqual((await reopened.receipts(agent.agentId)).map((item) => item.source_message_id), ["42"]);
+    await delivery.fenceAndDrain();
+    await reopened.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a retiring generation commits its observed bootstrap tail before a successor can poll", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bootstrap-fence-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let authority = true;
+    const first = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      latest: async () => { authority = false; return { messages: [{ id: "50" }] }; },
+      poll: async () => { throw new Error("retired generation must not poll"); },
+      publish: async () => {},
+    }, async () => authority, 0);
+    await first.poll(agent);
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "50");
+    const after: Array<string | null> = [];
+    const successor = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
+      latest: async () => ({ messages: [{ id: "999" }] }),
+      poll: async ({ afterMessageId }) => {
+        after.push(afterMessageId);
+        return { messages: [{ id: "51", activation: { for_current_agent: { decision: "activate" } } }] };
+      },
+      publish: async () => {},
+    }, currentAuthority, 0);
+    await successor.poll({ ...agent, daemonGeneration: 2, bearer: "successor" });
+    assert.deepEqual(after, ["50"], "the successor inherits the predecessor boundary rather than re-tailing at 999");
+    await first.fenceAndDrain(); await successor.fenceAndDrain(); await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("silent messages advance the cursor but never enter FIFO, and paginated poll pages drain once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-silent-pages-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "10" });
+    const after: Array<string | null> = [];
+    const turns: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      turns.push((request.sourceMessage as { id: string }).id);
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+    }), {
+      poll: async ({ afterMessageId }) => {
+        after.push(afterMessageId);
+        if (afterMessageId === "10") return { has_more: true, messages: [
+          { id: "11", activation: { for_current_agent: { decision: "silent" } } },
+          { id: "12", activation: { for_current_agent: { decision: "activate", reason: "mention" } } },
+        ] };
+        if (afterMessageId === "12") return { has_more: false, messages: [
+          { id: "13", activation: { for_current_agent: { decision: "unaddressed" } } },
+          { id: "14", activation: { for_current_agent: { decision: "activate", reason: "everyone" } } },
+        ] };
+        return { messages: [] };
+      },
+      publish: async () => {},
+    }, currentAuthority, 0);
+    await delivery.poll(agent);
+    await delivery.poll(agent);
+    assert.deepEqual(after, ["10", "12"]);
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "14");
+    assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.source_message_id), ["12", "14"]);
+    assert.deepEqual(turns, ["12", "14"]);
+    await delivery.fenceAndDrain(); await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a publish retry reuses the persisted terminal reply without rerunning the turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let turns = 0; let publishes = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), { poll: async () => ({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] }), publish: async () => { if (++publishes === 1) throw new Error("crash before ack"); } }, currentAuthority, 0);
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), { poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }), publish: async () => { if (++publishes === 1) throw new Error("crash before ack"); } }, currentAuthority, 0);
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(turns, 1); assert.equal(publishes, 2);
     assert.equal((await store.receipts("stone"))[0]?.state, "acknowledged");
@@ -147,7 +292,7 @@ test("handoff fences an in-flight ingress poll and drains it before returning", 
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const entered = deferred<void>(); let aborted = false;
     const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
-      poll: ({ signal }) => new Promise((resolve) => { entered.resolve(); signal.addEventListener("abort", () => { aborted = true; resolve({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] }); }, { once: true }); }),
+      poll: ({ signal }) => new Promise((resolve) => { entered.resolve(); signal.addEventListener("abort", () => { aborted = true; resolve({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }); }, { once: true }); }),
       publish: async () => { throw new Error("must not publish"); },
     }, currentAuthority);
     const poll = delivery.poll(agent); await entered.promise;
@@ -319,10 +464,10 @@ test("the supervised runtime continuously polls and delivers a later activation"
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
       poll: ({ signal }) => {
         polls += 1;
-        if (polls === 1) return Promise.resolve({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] });
+        if (polls === 1) return Promise.resolve({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] });
         if (polls === 2) {
           secondPoll.resolve();
-          return Promise.resolve({ last_observed_message_id: "2", messages: [{ id: "2", activation: { for_current_agent: {} } }] });
+          return Promise.resolve({ messages: [{ id: "2", activation: { for_current_agent: { decision: "activate" } } }] });
         }
         return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
       },
@@ -346,7 +491,7 @@ test("the supervised runtime backs off after a poll error and resumes intake", a
       poll: ({ signal }) => {
         polls += 1;
         if (polls === 1) return Promise.reject(new Error("temporary poll failure"));
-        if (polls === 2) return Promise.resolve({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] });
+        if (polls === 2) return Promise.resolve({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] });
         return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
       },
       publish: async () => { throw new Error("no-reply must not publish"); },
@@ -486,7 +631,7 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
     }), {
       poll: ({ signal }) => {
         polls += 1;
-        if (polls === 1) return Promise.resolve({ last_observed_message_id: "1", messages: [{ id: "1", activation: { for_current_agent: {} } }] });
+        if (polls === 1) return Promise.resolve({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] });
         successorPoll.resolve();
         return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
       },
@@ -525,8 +670,8 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
       poll: ({ signal }) => {
         polls += 1;
         if (polls === 1) return Promise.resolve({ last_observed_message_id: "2", messages: [
-          { id: "1", activation: { for_current_agent: {} } },
-          { id: "2", activation: { for_current_agent: {} } },
+          { id: "1", activation: { for_current_agent: { decision: "activate" } } },
+          { id: "2", activation: { for_current_agent: { decision: "activate" } } },
         ] });
         currentPoll.resolve();
         return new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true }));
@@ -564,7 +709,7 @@ test("an external stop invalidates a refresh reservation still waiting on drain"
       turns += 1;
       return { turnId: "unexpected", outcome: "no_reply", text: null };
     }), {
-      poll: async () => { polls += 1; return { messages: [{ id: "1", activation: { for_current_agent: {} } }] }; },
+      poll: async () => { polls += 1; return { messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }; },
       publish: async () => { throw new Error("must not publish"); },
     }, currentAuthority);
     await delivery.start(agent); await ingestEntered.promise;

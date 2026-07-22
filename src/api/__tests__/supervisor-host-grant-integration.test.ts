@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { eq } from "drizzle-orm";
+import express from "express";
 
 const testDatabaseUrl = process.env.TEST_DB_URL;
 const requiresDatabase = !testDatabaseUrl;
@@ -21,6 +22,7 @@ const { isSupervisorGrantRouteAllowed } = await import("../request/supervisor-gr
 const { registerHttpMiddleware } = await import("../http/middleware.js");
 const { registerSupervisorHostGrantRoutes, respondToStaleSupervisorGrantFence } = await import("../routes/supervisor-host-grants.js");
 const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
+const { requireGitRoomParticipant } = await import("../rooms/access.js");
 
 async function reset() {
   if (!client) throw new Error("DB-backed supervisor tests require TEST_DB_URL");
@@ -117,6 +119,44 @@ test("lifecycle mint enforces room and agent allowlists through the actual route
   const agentDenied = recorder();
   await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: otherAgent.canonical_key, agent_instance_id: "worker_route_1" } }, agentDenied);
   assert.equal(agentDenied.statusCode, 403);
+});
+
+test("a freshly minted supervisor bearer can immediately read its Git-backed Focus room through HTTP", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions");
+  assert.ok(mint);
+  const minted = recorder();
+  await mint({ ...reqBase, body: {
+    generation: 1,
+    room_id: room.id,
+    agent_key: agent.canonical_key,
+    agent_instance_id: "http-tail-bootstrap-worker",
+  } }, minted);
+  assert.equal(minted.statusCode, 201);
+
+  const app = express();
+  registerHttpMiddleware(app, { resolveRequestAuth });
+  app.get(`/rooms/${room.id}/messages`, async (req, res) => {
+    const allowed = await requireGitRoomParticipant(req as never, res, {
+      ...room,
+      parent_room_id: "github.com/BrosInCode/letagents",
+    });
+    if (allowed) res.json({ messages: [] });
+  });
+  const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
+  });
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const response = await fetch(`http://127.0.0.1:${address.port}/rooms/${room.id}/messages?limit=1&before=latest`, {
+      headers: { authorization: `Bearer ${(minted.body as any).worker_bearer}` },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { messages: [] });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test("idempotent supervisor worker creation rotates one session and revokes its old bearer", { skip: requiresDatabase }, async () => {

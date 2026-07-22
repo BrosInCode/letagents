@@ -64,6 +64,9 @@ describe("durable room delivery UI contracts", () => {
     assert.match(activity, /Inbox<\/span>/);
     assert.match(activity, /Current turn<\/span>/);
     assert.match(activity, /Assigned work<\/span>/);
+    assert.match(activity, /desktop-room-agent-reconnect/);
+    assert.match(activity, /reconnect-room-agent/);
+    assert.match(activity, /supervisedAgentDisplayLabel/);
   });
 
   it("routes loaded main and thread links directly, then requests bounded history for an unloaded target", () => {

@@ -45,7 +45,8 @@ function agentMentionInsertText(
   duplicateDisplayName: boolean,
 ): string | null {
   const displayName = normalizeDisplayName(participant.displayName);
-  if (!duplicateDisplayName && isParserCompatibleMentionHandle(displayName)) {
+  const requiresCanonicalRouting = participant.participantKey.startsWith("desktop-supervisor-agent:");
+  if (!requiresCanonicalRouting && !duplicateDisplayName && isParserCompatibleMentionHandle(displayName)) {
     return displayName;
   }
   const canonical = participant.agentKey ? `agent:${participant.agentKey.trim()}` : "";

@@ -51,6 +51,7 @@ import {
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,
   mergeDesktopManagedAgentParticipants,
+  mergeDesktopSupervisorAgentParticipants,
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   exactSupervisorEntriesForManagedSessions,
@@ -74,6 +75,7 @@ import {
   supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
+import { supervisedAgentShortTag } from "../src/domain/codenames";
 
 function provider(
   overrides: Partial<DesktopAgentProvider> = {},
@@ -1626,6 +1628,53 @@ test("managed desktop agents become mentionable room participants", () => {
   assert.equal(participants[0].displayName, "SummitGrove");
   assert.equal(participants[0].activityState, "active");
   assert.deepEqual(participants[0].sourceFlags, ["delivery", "presence"]);
+});
+
+test("live daemon-inbox agents become canonical mentionable room participants", () => {
+  const participants = mergeDesktopSupervisorAgentParticipants([], [supervisorEntry({
+    id: "supervised_6697e364-62d0-4027-b02d-ee71a8fbf579",
+    roomId: "room_1",
+    displayName: "GardenWinter · 6697e364-62d0-4027-b02d-ee71a8fbf579",
+    agentKey: "EmmyMay/desktop-codex-4d8fe3",
+    desiredState: "running",
+    observedState: "working",
+    condition: "none",
+    bindingUpdatedAt: "2026-07-21T11:27:00.000Z",
+    roomAgentState: {
+      connection: { state: "connected", detail: null },
+      inbox: { state: "idle", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      task: { state: "none", taskId: null, title: null },
+    },
+  })], "room_1");
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0]?.displayName, `GardenWinter · ${supervisedAgentShortTag("6697e364-62d0-4027-b02d-ee71a8fbf579")}`);
+  assert.equal(participants[0]?.agentKey, "EmmyMay/desktop-codex-4d8fe3");
+  assert.equal(participants[0]?.activityState, "active");
+  assert.deepEqual(participants[0]?.sourceFlags, ["delivery", "presence"]);
+  assert.equal(isMentionableRoomParticipant(participants[0]!), true);
+});
+
+test("supervisor mention projection excludes disconnected, stopped, and other-room agents", () => {
+  const connectedState = {
+    connection: { state: "connected" as const, detail: null },
+    inbox: { state: "idle" as const, pendingCount: 0, blockedByMessageId: null, detail: null },
+    turn: { state: "idle" as const, inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+    task: { state: "none" as const, taskId: null, title: null },
+  };
+  const participants = mergeDesktopSupervisorAgentParticipants([], [
+    supervisorEntry({ agentKey: "owner/live", roomAgentState: connectedState }),
+    supervisorEntry({ id: "supervised_stopped", agentKey: "owner/stopped", desiredState: "stopped", observedState: "stopped", roomAgentState: connectedState }),
+    supervisorEntry({ id: "supervised_other", agentKey: "owner/other", roomId: "room_2", roomAgentState: connectedState }),
+    supervisorEntry({
+      id: "supervised_disconnected",
+      agentKey: "owner/disconnected",
+      roomAgentState: { ...connectedState, connection: { state: "disconnected", detail: null } },
+    }),
+  ], "room_1");
+
+  assert.deepEqual(participants.map((participant) => participant.agentKey), ["owner/live"]);
 });
 
 test("reachable worker presence becomes mentionable when room participants lag", () => {

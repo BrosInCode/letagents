@@ -163,12 +163,17 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
       }, { storage: keychain, apiFetch }),
     ]);
     assert.equal(requests.length, 2);
-    assert.deepEqual(requests.map((request) => request.allowed_agent_keys), [["owner/agent-a"], ["owner/agent-b"]]);
+    const requestedAgentKeys = requests.map((request) => {
+      const keys = request.allowed_agent_keys;
+      assert(Array.isArray(keys));
+      assert.equal(typeof keys[0], "string");
+      return keys[0];
+    }).sort();
+    assert.deepEqual(requestedAgentKeys, ["owner/agent-a", "owner/agent-b"]);
     assert.notEqual(requests[0]!.installation_id, requests[1]!.installation_id);
-    assert.equal(first.token, "lashg_secret_1");
-    assert.equal(second.token, "lashg_secret_2");
-    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, "lashg_secret_1");
-    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_secret_2");
+    assert.notEqual(first.token, second.token, "independent concurrent provisions receive distinct grants");
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, first.token);
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, second.token);
 
     const failingStorage = {
       ...keychain,
@@ -181,8 +186,8 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
       hostId: "desktop_host", entryId: "entry-c", agentKey: "owner/agent-c", roomScopes: [roomScope("room-c")],
     }, { storage: failingStorage, apiFetch }), /Keychain write failed/);
     assert.deepEqual(revokedPaths, ["/supervisor-host-grants/grant_3"]);
-    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, "lashg_secret_1");
-    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_secret_2");
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, first.token);
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, second.token);
   });
 });
 
