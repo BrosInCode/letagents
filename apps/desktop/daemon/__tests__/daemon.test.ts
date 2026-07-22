@@ -3399,6 +3399,8 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
   await primeDaemonBareRepository(env.root, source);
   let mintCalls = 0;
   let spawns = 0;
+  let mintedProvider: string | null = null;
+  let mintedDisplayName: string | null = null;
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async (input) => {
@@ -3413,8 +3415,10 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     latest: async () => ({ messages: [] }), poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
-    createWorkerSession: async () => {
+    createWorkerSession: async (input) => {
       mintCalls += 1;
+      mintedProvider = input.provider;
+      mintedDisplayName = input.displayName;
       return { sessionId: "bootstrap-reuse-session", bearer: "bootstrap-reuse-bearer", bearerId: "bootstrap-reuse-bearer-id", expiresAt: "2099-01-01T00:00:00.000Z" };
     },
   });
@@ -3434,6 +3438,8 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", { entry_id: id, daemon_generation: generation })).ok, true);
     await eventually(async () => spawns === 1, "bootstrap launch provider spawn");
     assert.equal(mintCalls, 1, "bootstrap tail admission and launch share the same fresh worker mint");
+    assert.equal(mintedProvider, "codex", "the worker session retains its real provider identity");
+    assert.equal(mintedDisplayName, "Agent", "the worker session retains its agent display name");
     const attempt = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
     assert.equal(attempt.execution_generations.length, 1, "only one durable execution generation is created after credential success");
   } finally {

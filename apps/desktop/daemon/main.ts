@@ -40,7 +40,8 @@ type RecoveryClock = {
 };
 export interface SupervisorGrantHttp {
   createWorkerSession(input: {
-    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string; signal?: AbortSignal;
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
+    provider: string; displayName: string; signal?: AbortSignal;
   }): Promise<{ sessionId: string; bearer: string; bearerId: string; expiresAt: string | null }>;
   endWorkerSession?(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; sessionId: string;
@@ -88,6 +89,19 @@ const WORKER_MINT_TIMEOUT_MS = 2_000;
 const WORKER_MINT_MAX_ATTEMPTS = 3;
 const WORKER_MINT_RETRY_DELAY_MS = 100;
 const WORKER_MINT_FALLBACK_FRESH_MS = 2 * 60_000;
+
+function supervisedProviderLabel(provider: string): string {
+  switch (provider.trim().toLowerCase()) {
+    case "codex": return "Codex";
+    case "claude":
+    case "claude-code": return "Claude Code";
+    case "antigravity": return "Antigravity";
+    case "cursor": return "Cursor";
+    case "open-model":
+    case "open_model": return "Open Model";
+    default: return provider.trim() || "Agent";
+  }
+}
 
 function schedulerErrorDetail(error: unknown, depth = 0): string {
   if (depth > 3) return "nested error omitted";
@@ -177,10 +191,19 @@ const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
 /** Host grants and worker bearers are process-memory values, never daemon state. */
 const productionSupervisorGrantHttp: SupervisorGrantHttp = {
   async createWorkerSession(input) {
+    const ideLabel = supervisedProviderLabel(input.provider);
     const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
-      body: JSON.stringify({ generation: input.grantGeneration, room_id: input.roomId, agent_key: input.agentKey, agent_instance_id: input.agentInstanceId, runtime: "supervisor" }),
+      body: JSON.stringify({
+        generation: input.grantGeneration,
+        room_id: input.roomId,
+        agent_key: input.agentKey,
+        agent_instance_id: input.agentInstanceId,
+        display_name: input.displayName,
+        runtime: input.provider,
+        ide_label: ideLabel,
+      }),
       signal: input.signal,
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session mint");
@@ -3894,7 +3917,8 @@ export class SupervisorDaemon {
         return await Promise.race([this.supervisorGrantHttp.createWorkerSession({
           apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
           grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
-          agentInstanceId: `daemon:${entry.id}`, signal: controller.signal,
+          agentInstanceId: `daemon:${entry.id}`, provider: entry.provider,
+          displayName: entry.display_name, signal: controller.signal,
         }), timedOut]);
       } catch (error) {
         lastError = error;

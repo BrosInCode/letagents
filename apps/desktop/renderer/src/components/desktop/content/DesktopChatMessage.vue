@@ -43,7 +43,11 @@
           </button>
           <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <ProviderBadge v-if="ideLabel" :label="ideLabel" />
+          <ProviderBadge
+            v-if="ideLabel"
+            :label="ideLabel"
+            :agent-key="message.agentIdentity?.agentKey"
+          />
         </div>
         <div class="room-message-meta-tail">
           <button
