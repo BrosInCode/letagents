@@ -296,12 +296,14 @@ const emit = defineEmits<{
   "retry-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
-function receiptIcon(state: string): string { return state === "blocked" ? "!" : state === "awaiting_result" || state === "dispatching" ? "↗" : state === "acknowledged_no_reply" ? "✓" : "•"; }
+function receiptIcon(state: string): string { return state === "blocked" || state === "result_recovery" ? "!" : state === "awaiting_result" || state === "dispatching" ? "↗" : state === "acknowledged_no_reply" || state === "cancelled_by_room_move" ? "✓" : "•"; }
 function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null }): string {
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
   if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
   if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
+  if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
   if (receipt.state === "blocked") return `${receipt.agentName} needs attention`;
+  if (receipt.state === "cancelled_by_room_move") return `${receipt.agentName} moved to another room before handling this`;
   if (receipt.state === "queued_behind_blocked") return `Waiting — ${receipt.agentName} needs attention on ${receipt.blockedByMessageId || "an earlier message"}`;
   return `Waiting for ${receipt.agentName}`;
 }

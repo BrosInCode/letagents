@@ -20,7 +20,7 @@ import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { SupervisedAgentInboxStore, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
-import { SupervisedAgentDelivery, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
+import { SupervisedAgentDelivery, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
@@ -42,6 +42,9 @@ export interface SupervisorGrantHttp {
   createWorkerSession(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string; signal?: AbortSignal;
   }): Promise<{ sessionId: string; bearer: string; bearerId: string; expiresAt: string | null }>;
+  endWorkerSession?(input: {
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; sessionId: string;
+  }): Promise<void>;
   renewHostGrant?(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
     hostId: string; installationId: string; ttlMs: number;
@@ -192,6 +195,14 @@ const productionSupervisorGrantHttp: SupervisorGrantHttp = {
       expiresAt: typeof body.worker_bearer_expires_at === "string" ? body.worker_bearer_expires_at : null,
     };
   },
+  async endWorkerSession(input) {
+    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/end`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
+      body: JSON.stringify({ generation: input.grantGeneration }),
+    });
+    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session end");
+  },
   async renewHostGrant(input) {
     const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/renew`, {
       method: "POST",
@@ -297,6 +308,12 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
   if (/^(?:result(?:\/success)?|turn\/completed|thread\/completed)$/i.test(method)) return "terminal";
   if (/(?:completed|finished|idle|stopped|interrupted)$/i.test(method)) return "idle";
   return "working";
+}
+
+function isHumanRoomActivityEvent(event: ProviderActionStreamEvent): boolean {
+  const method = event.method.trim().toLowerCase();
+  return method !== "thread/read"
+    && method !== "account/ratelimits/updated";
 }
 
 /**
@@ -636,7 +653,16 @@ export class SupervisorDaemon {
     // authority for delivery receipts.
     this.supervisedInbox = new SupervisedAgentInboxStore(paths.manifestPath);
     this.supervisedDelivery = providerPort
-      ? new SupervisedAgentDelivery(this.supervisedInbox, providerPort, supervisedDeliveryHttp, (authority) => this.isExactSupervisedDeliveryAuthority(authority))
+      ? new SupervisedAgentDelivery(
+        this.supervisedInbox,
+        providerPort,
+        supervisedDeliveryHttp,
+        (authority) => this.isExactSupervisedDeliveryAuthority(authority),
+        undefined,
+        undefined,
+        undefined,
+        (input) => this.commitPreparedRoomMove(input),
+      )
       : null;
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
       await this.singleton.assertCurrent();
@@ -672,6 +698,24 @@ export class SupervisorDaemon {
           daemonGeneration: Number(params.daemon_generation ?? NaN),
         });
         return { accepted: true };
+      }
+      if (request.method === "supervisor.prepare_bounded_effect") {
+        const params = this.paramsRecord(request.params);
+        return this.prepareBoundedEffect({
+          entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
+          executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
+          mcpRequestId: String(params.mcp_request_id ?? ""), toolName: String(params.tool_name ?? ""),
+          input: params.input, mutation: params.mutation === true,
+        });
+      }
+      if (request.method === "supervisor.complete_bounded_effect") {
+        const params = this.paramsRecord(request.params);
+        return this.completeBoundedEffect({
+          entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
+          executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
+          effectId: String(params.effect_id ?? ""), result: params.result,
+          error: typeof params.error === "string" ? params.error : undefined,
+        });
       }
       if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
       if (request.method === "manifest.set_desired_state") {
@@ -994,6 +1038,9 @@ export class SupervisorDaemon {
     const agent = {
       agentId: entry.id, roomId: binding.room_id, provider: entry.provider, apiUrl: binding.api_url,
       agentSessionId: binding.agent_session_id, bearer: credential, handle,
+      workAttemptId: binding.work_attempt_id,
+      providerContinuationId: handle.providerContinuationId,
+      pid: handle.pid,
       executionGenerationId: binding.execution_generation_id, daemonGeneration: this.singleton.currentGeneration,
       deliveryMode: entry.delivery_mode ?? "mcp_polling",
     };
@@ -1004,6 +1051,169 @@ export class SupervisorDaemon {
       daemonGeneration: agent.daemonGeneration, providerContinuationId: agent.handle.providerContinuationId, pid: agent.handle.pid,
     })) throw new Error("The room delivery binding is no longer current; refresh before retrying.");
     await this.supervisedDelivery.retry(agent, input.sourceMessageId);
+  }
+
+  private async exactActiveBoundedContext(input: {
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+  }) {
+    if (!input.entryId || !input.workAttemptId || !input.executionGenerationId || input.daemonGeneration !== this.singleton.currentGeneration) {
+      throw new Error("The supervised effect coordinates are stale.");
+    }
+    if (!this.supervisedDelivery) throw new Error("Supervised bounded turns are unavailable.");
+    const entry = await this.store.getEntry(input.entryId);
+    const handle = this.liveHandles.get(input.entryId);
+    const binding = await this.workerBindings.get(input.entryId);
+    const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
+    if (!entry || !handle || !binding || !credential
+      || entry.work_attempt_id !== input.workAttemptId
+      || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
+      || binding.work_attempt_id !== input.workAttemptId
+      || binding.execution_generation_id !== input.executionGenerationId) {
+      throw new Error("The supervised effect no longer belongs to the exact live execution generation.");
+    }
+    const agent = {
+      agentId: entry.id, roomId: entry.room_id, provider: entry.provider, deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      apiUrl: binding.api_url, agentSessionId: binding.agent_session_id, bearer: credential, handle,
+      workAttemptId: binding.work_attempt_id,
+      providerContinuationId: handle.providerContinuationId,
+      pid: handle.pid,
+      executionGenerationId: binding.execution_generation_id, daemonGeneration: this.singleton.currentGeneration,
+    };
+    const active = this.supervisedDelivery.activeTurn(agent);
+    if (!active) throw new Error("No exact bounded room turn is currently active for this agent.");
+    const inbox = await this.supervisedInbox.get(active.inboxItemId);
+    if (!inbox?.provider_turn_id) throw new Error("The bounded room turn has not checkpointed its provider turn id yet.");
+    return { entry, agent, active, inbox };
+  }
+
+  private async prepareBoundedEffect(input: {
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
+  }): Promise<Record<string, unknown>> {
+    if (!input.mcpRequestId.trim() || !input.toolName.trim()) throw new Error("A supervised effect requires MCP request and tool identities.");
+    const context = await this.exactActiveBoundedContext(input);
+    const prepared = await this.supervisedInbox.prepareEffect({
+      agent_id: input.entryId, room_id: context.entry.room_id, execution_generation_id: input.executionGenerationId,
+      provider_turn_id: context.inbox.provider_turn_id!, mcp_request_id: input.mcpRequestId,
+      tool_name: input.toolName, request: input.input,
+    });
+    if (!prepared.created) {
+      if (prepared.effect.state === "completed") return { state: "completed", result: prepared.effect.result };
+      if (prepared.effect.state === "failed") throw new Error(prepared.effect.error || "The prior supervised effect failed.");
+      if (prepared.effect.state === "executing") throw new Error("The prior supervised effect is still executing; refusing a duplicate side effect.");
+    }
+    const args = input.input && typeof input.input === "object" && !Array.isArray(input.input) ? input.input as Record<string, unknown> : {};
+    const targetMessage = typeof args.thread_parent_id === "string" ? args.thread_parent_id : typeof args.reply_to === "string" ? args.reply_to : null;
+    if ((input.toolName === "send_message" || input.toolName === "send_thread_message") && targetMessage === context.active.sourceMessageId) {
+      return { state: "prepared", effect_id: prepared.effect.effect_id, action: "use_final_answer", source_message_id: context.active.sourceMessageId };
+    }
+    if (input.toolName === "join_room") {
+      const destination = typeof args.name === "string" ? args.name.trim() : "";
+      if (!destination || destination === context.entry.room_id) throw new Error("A room move requires a different valid destination room.");
+      const response = await fetch(`${context.agent.apiUrl}/rooms/${supervisedRoomPath(destination)}/join`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${context.agent.bearer}`, "content-type": "application/json" },
+        body: "{}",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`The destination room could not be prepared (HTTP ${response.status}); the agent remains in its current room.`);
+      const body = await response.json() as Record<string, unknown>;
+      const canonicalDestination = typeof body.room_id === "string" && body.room_id.trim()
+        ? body.room_id.trim()
+        : typeof body.id === "string" && body.id.trim() ? body.id.trim() : destination;
+      await this.supervisedInbox.stagePreparedEffectResult(prepared.effect.effect_id, {
+        destination_room: canonicalDestination,
+        requested_room: destination,
+      });
+      return { state: "prepared", effect_id: prepared.effect.effect_id, action: "room_move_prepared", destination_room: canonicalDestination };
+    }
+    await this.supervisedInbox.markEffectExecuting(prepared.effect.effect_id);
+    return { state: "prepared", effect_id: prepared.effect.effect_id, action: "execute", mutation: input.mutation };
+  }
+
+  private async completeBoundedEffect(input: {
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    effectId: string; result?: unknown; error?: string;
+  }): Promise<{ completed: true }> {
+    const context = await this.exactActiveBoundedContext(input);
+    await this.supervisedInbox.completeEffect({
+      effect_id: input.effectId,
+      result: input.result,
+      error: input.error,
+      expected: {
+        agent_id: input.entryId,
+        room_id: context.entry.room_id,
+        execution_generation_id: input.executionGenerationId,
+        provider_turn_id: context.inbox.provider_turn_id!,
+      },
+    });
+    return { completed: true };
+  }
+
+  private async commitPreparedRoomMove(input: { agent: SupervisedIngressAgent; inboxItemId: string }): Promise<void> {
+    const item = await this.supervisedInbox.get(input.inboxItemId);
+    if (!item?.provider_turn_id || !["acknowledged", "acknowledged_no_reply"].includes(item.state)) return;
+    const effect = await this.supervisedInbox.preparedRoomMove(input.agent.agentId, item.provider_turn_id);
+    if (!effect) return;
+    const staged = effect.result && typeof effect.result === "object" ? effect.result as Record<string, unknown> : {};
+    const destination = typeof staged.destination_room === "string" ? staged.destination_room.trim() : "";
+    if (!destination) {
+      await this.supervisedInbox.completeEffect({ effect_id: effect.effect_id, error: "The prepared room move lost its validated destination." });
+      return;
+    }
+    try {
+      const entry = await this.store.getEntry(input.agent.agentId);
+      const binding = await this.workerBindings.get(input.agent.agentId);
+      const grant = entry ? this.currentHostGrant(entry) : null;
+      if (!entry || !binding || !grant
+        || entry.room_id !== item.room_id
+        || binding.room_id !== item.room_id
+        || binding.agent_session_id !== input.agent.agentSessionId
+        || binding.execution_generation_id !== input.agent.executionGenerationId) {
+        throw new Error("The original room authority changed before the prepared move could commit.");
+      }
+      if (!this.supervisorGrantHttp.endWorkerSession) throw new Error("This supervisor cannot revoke the old room session safely.");
+      // End the exact old-room worker first. If this preparation/revocation
+      // fails, no local membership or queue state has changed.
+      await this.supervisorGrantHttp.endWorkerSession({
+        apiUrl: grant.apiUrl,
+        grantId: grant.grantId,
+        supervisorGrant: grant.supervisorGrant,
+        grantGeneration: grant.grantGeneration,
+        sessionId: binding.agent_session_id,
+      });
+      await this.updateManifestEntry(entry.id, (current) => {
+        if (current.room_id !== item.room_id || current.work_attempt_id !== input.agent.workAttemptId
+          || current.provider_ref?.execution_generation_id !== input.agent.executionGenerationId) {
+          throw new Error("The provider generation changed before the room move committed.");
+        }
+        return {
+          ...current,
+          room_id: destination,
+          condition: "coordination_blocked",
+          last_error: "Provider is running; waiting for desktop credential handoff.",
+          workplace_liveness: { state: "unknown", observed_at: new Date().toISOString(), detail: "Room move committed; waiting for destination credentials." },
+          last_worker_binding: null,
+        };
+      });
+      await this.supervisedInbox.commitRoomMoveQueue({
+        agent_id: entry.id,
+        old_room_id: item.room_id,
+        after_fifo_sequence: item.fifo_sequence,
+      });
+      await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
+      this.liveBindingIdentities.delete(entry.id);
+      this.revokeHostGrantIfCurrent(entry.id, grant);
+      await this.supervisedInbox.completeEffect({
+        effect_id: effect.effect_id,
+        result: { ...staged, moved: true, old_room: item.room_id, destination_room: destination },
+      });
+      // Electron observes the changed durable membership and provisions a new
+      // room-scoped grant. The provider handle/thread/generation are untouched.
+      this.requestConvergence(entry.id);
+    } catch (error) {
+      await this.supervisedInbox.completeEffect({ effect_id: effect.effect_id, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
@@ -1022,17 +1232,21 @@ export class SupervisorDaemon {
       || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")) return;
     const handle = this.liveHandles.get(entryId);
     const binding = await this.workerBindings.get(entryId);
-    if (!entry || !handle || !binding) return;
+    if (!entry || !binding || !entry.work_attempt_id || !entry.provider_ref) return;
     const credential = await this.workerBindings.credentialFor(binding);
     if (!credential) return;
     const agent = {
       agentId: entryId,
       roomId: binding.room_id,
       provider: entry.provider,
+      charter: entry.charter,
       apiUrl: binding.api_url,
       agentSessionId: binding.agent_session_id,
       bearer: credential,
-      handle,
+      handle: handle ?? null,
+      workAttemptId: binding.work_attempt_id,
+      providerContinuationId: entry.provider_ref.provider_continuation_id,
+      pid: handle?.pid ?? null,
       executionGenerationId: binding.execution_generation_id,
       daemonGeneration: this.singleton.currentGeneration,
       deliveryMode: entry.delivery_mode ?? "mcp_polling",
@@ -1040,11 +1254,11 @@ export class SupervisorDaemon {
     if (!await this.isExactSupervisedDeliveryAuthority({
       agentId: agent.agentId, roomId: agent.roomId, provider: agent.provider,
       apiUrl: agent.apiUrl, agentSessionId: agent.agentSessionId, bearer: agent.bearer,
-      handle: agent.handle, workAttemptId: agent.handle.workAttemptId,
+      handle: agent.handle, workAttemptId: agent.workAttemptId,
       executionGenerationId: agent.executionGenerationId,
       daemonGeneration: agent.daemonGeneration,
-      providerContinuationId: agent.handle.providerContinuationId,
-      pid: agent.handle.pid,
+      providerContinuationId: agent.providerContinuationId,
+      pid: agent.pid,
     })) return;
     // Rebinding replaces the prior loop only after it has been cancelled and
     // joined. The new loop pumps durable work before its first long poll.
@@ -1296,22 +1510,17 @@ export class SupervisorDaemon {
     if (authority.daemonGeneration !== this.singleton.currentGeneration) return false;
     const entry = await this.store.getEntry(authority.agentId);
     const handle = this.liveHandles.get(authority.agentId);
-    if (!entry || !handle
+    if (!entry
       || entry.id !== authority.agentId
       || entry.room_id !== authority.roomId
       || entry.desired_state !== "running"
-      || entry.condition !== "none"
       || entry.delivery_mode === "desktop_events"
       || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")
       || entry.provider !== authority.provider
       || entry.work_attempt_id !== authority.workAttemptId
       || entry.provider_ref?.work_attempt_id !== authority.workAttemptId
       || entry.provider_ref?.execution_generation_id !== authority.executionGenerationId
-      || entry.provider_ref?.provider_continuation_id !== authority.providerContinuationId
-      || handle !== authority.handle
-      || handle.workAttemptId !== authority.workAttemptId
-      || handle.providerContinuationId !== authority.providerContinuationId
-      || handle.pid !== authority.pid) return false;
+      || entry.provider_ref?.provider_continuation_id !== authority.providerContinuationId) return false;
     const binding = await this.workerBindings.get(authority.agentId);
     if (!binding
       || binding.entry_id !== authority.agentId
@@ -1320,7 +1529,15 @@ export class SupervisorDaemon {
       || binding.work_attempt_id !== authority.workAttemptId
       || binding.execution_generation_id !== authority.executionGenerationId
       || binding.agent_session_id !== authority.agentSessionId) return false;
-    return (await this.workerBindings.credentialFor(binding)) === authority.bearer;
+    if ((await this.workerBindings.credentialFor(binding)) !== authority.bearer) return false;
+    // Ingress authority deliberately survives loss of provider execution. A
+    // bounded turn requires the exact live handle in addition to this route.
+    if (!authority.handle) return true;
+    return Boolean(handle
+      && handle === authority.handle
+      && handle.workAttemptId === authority.workAttemptId
+      && handle.providerContinuationId === authority.providerContinuationId
+      && handle.pid === authority.pid);
   }
 
   private status() {
@@ -2143,16 +2360,11 @@ export class SupervisorDaemon {
       ? await this.workerBindings.credentialFor(binding)
       : null;
     const deliveryReceipts = projectDeliveryReceipts(receipts);
-    const nonfinal = receipts.filter((receipt) => receipt.state !== "acknowledged" && receipt.state !== "acknowledged_no_reply");
+    const nonfinal = receipts.filter((receipt) => !["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"].includes(receipt.state));
     const head = nonfinal[0] ?? null;
     const blocked = receipts.find((receipt) => receipt.receipt_state === "blocked") ?? null;
     const hasCurrentBinding = Boolean(bindingMatchesCurrentGeneration && binding);
     const waitingForDesktopGrant = this.requiresHostGrant(entry) && !this.currentHostGrant(entry);
-    const connection = hasCurrentBinding
-      ? { state: "connected" as const, observed_at: binding!.updated_at, detail: "supervised worker session bound" }
-      : entry.desired_state === "running" && ["starting", "recovering"].includes(entry.observed_state)
-        ? { state: "reconnecting" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: waitingForDesktopGrant ? "Waiting for desktop credential handoff." : "Awaiting the current worker binding." }
-        : { state: "disconnected" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: "No current supervised worker binding." };
     const cutoverNeedsAttention = entry.provider === "codex"
       && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
       && entry.delivery_cutover?.phase === "uncertain";
@@ -2177,10 +2389,30 @@ export class SupervisorDaemon {
       && liveHandle.providerContinuationId === entry.provider_ref?.provider_continuation_id
       && entry.provider_ref?.execution_generation_id === binding?.execution_generation_id,
     );
+    const connection = hasLiveDeliveryOwner
+      ? { state: "connected" as const, observed_at: binding!.updated_at, detail: "Live provider and exact worker binding are available." }
+      : entry.desired_state === "running" && ["starting", "recovering"].includes(entry.observed_state)
+        ? { state: "reconnecting" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: waitingForDesktopGrant ? "Waiting for desktop credential handoff." : "Restoring the provider and exact worker binding." }
+        : { state: "disconnected" as const, observed_at: entry.native_liveness?.observed_at ?? null, detail: liveHandle ? "The current worker binding or credential is unavailable." : "No live provider handle." };
+    const persistedIngress = await this.supervisedInbox.ingressHealth(entry.id);
+    const ingressMatches = Boolean(persistedIngress
+      && persistedIngress.room_id === entry.room_id
+      && persistedIngress.execution_generation_id === entry.provider_ref?.execution_generation_id);
+    const hasLiveIngressOwner = Boolean(hasCurrentBinding && credential && ingressMatches);
+    const ingress = hasLiveIngressOwner
+      ? { state: persistedIngress!.state, observed_at: persistedIngress!.state === "stopped" ? null : binding!.updated_at, detail: persistedIngress!.detail }
+      : {
+          state: "stopped" as const,
+          observed_at: entry.native_liveness?.observed_at ?? null,
+          detail: hasCurrentBinding && credential ? "The room observation loop has not started." : "Room observation is stopped because its exact binding or credential is unavailable.",
+        };
     const activeTurn = hasLiveDeliveryOwner && binding && credential && liveHandle
       ? this.supervisedDelivery?.activeTurn({
           agentId: entry.id, roomId: binding.room_id, provider: entry.provider, apiUrl: binding.api_url,
           agentSessionId: binding.agent_session_id, bearer: credential, handle: liveHandle,
+          workAttemptId: binding.work_attempt_id,
+          providerContinuationId: liveHandle.providerContinuationId,
+          pid: liveHandle.pid,
           executionGenerationId: binding.execution_generation_id, daemonGeneration: this.singleton.currentGeneration,
           deliveryMode: entry.delivery_mode ?? "mcp_polling",
         }) ?? null
@@ -2215,6 +2447,7 @@ export class SupervisorDaemon {
       } : null,
       room_agent_state: {
         connection,
+        ingress,
         inbox,
         turn,
         task: { state: "none", task_id: null, title: null },
@@ -3216,7 +3449,9 @@ export class SupervisorDaemon {
       payload_redacted: event.payloadRedacted,
       durable_payload_ref: event.durablePayloadRef,
     });
-    await this.appendActivity(entryId, sanitizedEvent);
+    // Transcript probes and account telemetry remain in provider diagnostics;
+    // they are transport facts, not human-readable agent activity.
+    if (isHumanRoomActivityEvent(event)) await this.appendActivity(entryId, sanitizedEvent);
     const waitEvidence = supervisedWaitEvidenceFromProviderEvent(event);
     if (waitEvidence) {
       const pending = this.pendingResumeBindings.get(entryId);
@@ -4110,12 +4345,15 @@ export class SupervisorDaemon {
 
   private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, executionGenerationId: string, _terminalBinding: LiveBindingIdentity | undefined, terminal: ProviderActionTerminal): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
-    void this.supervisedDelivery?.stop(entryId).catch(() => undefined);
     this.pendingResumeBindings.delete(entryId);
     this.liveHandles.delete(entryId);
     this.liveBindingIdentities.delete(entryId);
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveDisposers.delete(entryId);
+    // Provider execution and room observation are separate authorities. Keep
+    // the exact worker binding polling so routed work is durably queued while
+    // convergence restores the native runtime.
+    void this.startSupervisedDelivery(entryId).catch(() => undefined);
     await this.serializeEntryTick(entryId, async () => {
       const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
       const successorHandle = this.liveHandles.get(entryId);
@@ -4588,7 +4826,7 @@ function projectDeliveryTurn(head: SupervisedInboxReceiptWithTimeline | null, ac
   // until an exact live handle, current binding, and memory credential exist.
   if (!activeTurn || activeTurn.inboxItemId !== head.inbox_item_id) {
     return {
-      state: head.state === "blocked" ? "failed" : "idle",
+      state: head.state === "blocked" ? "failed" : head.state === "result_recovery" ? "retrying" : "idle",
       inbox_item_id: head.inbox_item_id,
       source_message_id: head.source_message_id,
       provider_turn_id: head.provider_turn_id,

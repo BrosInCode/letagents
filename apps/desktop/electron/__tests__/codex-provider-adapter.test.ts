@@ -533,6 +533,7 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
     turnId: "turn-bounded",
     outcome: "reply",
     text: "Final answer, part one.\nPart two.",
+    evidence: "transcript",
   });
   assert.equal(handle.pid, 4100);
   assert.equal(handle.providerContinuationId, "thread-1", "the bounded delivery retains the original app-server thread");
@@ -551,10 +552,10 @@ test("Codex bounded room turn consumes a fast exact terminal cached before its w
   };
   assert.deepEqual(await adapter.runRoomTurn!(handle, { inboxItemId: "inbox-fast", actionId: "action-fast", sourceMessage: {}, activation: {} }, {
     beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {},
-  }), { turnId: "turn-fast", outcome: "no_reply", text: null });
+  }), { turnId: "turn-fast", outcome: "no_reply", text: null, evidence: "transcript" });
 });
 
-test("Codex bounded room turn rejects an empty final answer", async () => {
+test("Codex bounded room turn preserves an unreadable completed result without throwing", async () => {
   const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
   client.request = async <T>(method: string, params?: unknown): Promise<T> => {
@@ -564,7 +565,7 @@ test("Codex bounded room turn rejects an empty final answer", async () => {
   };
   const pending = adapter.runRoomTurn!(handle, { inboxItemId: "inbox-empty", actionId: "action-empty", sourceMessage: {}, activation: {} }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
   await flush(); client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-empty" } });
-  await assert.rejects(pending, /completed without a final answer/);
+  assert.deepEqual(await pending, { turnId: "turn-empty", outcome: "unreadable", text: null, evidence: "none" });
 });
 
 test("Codex bounded room turn does not treat a sentinel with extra text as no-reply", async () => {
@@ -577,7 +578,7 @@ test("Codex bounded room turn does not treat a sentinel with extra text as no-re
   };
   const pending = adapter.runRoomTurn!(handle, { inboxItemId: "inbox-sentinel-extra", actionId: "action-sentinel-extra", sourceMessage: {}, activation: {} }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
   await flush(); client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-sentinel-extra" } });
-  assert.deepEqual(await pending, { turnId: "turn-sentinel-extra", outcome: "reply", text: "LETAGENTS_NO_ROOM_REPLY\nextra" });
+  assert.deepEqual(await pending, { turnId: "turn-sentinel-extra", outcome: "reply", text: "LETAGENTS_NO_ROOM_REPLY\nextra", evidence: "transcript" });
 });
 
 test("Codex room-turn recovery reattaches only the persisted exact active turn and never starts another", async () => {
@@ -595,7 +596,7 @@ test("Codex room-turn recovery reattaches only the persisted exact active turn a
   client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "other-turn" } });
   await flush(); status = "completed";
   client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-recover" } });
-  assert.deepEqual(await pending, { turnId: "turn-recover", outcome: "reply", text: "Recovered reply." });
+  assert.deepEqual(await pending, { turnId: "turn-recover", outcome: "reply", text: "Recovered reply.", evidence: "transcript" });
   assert.equal(client.requests.filter((request) => request.method === "turn/start").length, startsBefore);
 });
 
@@ -607,7 +608,7 @@ test("Codex room-turn recovery returns already-terminal exact output without sta
     return originalRequest<T>(method, params);
   };
   const startsBefore = client.requests.filter((request) => request.method === "turn/start").length;
-  assert.deepEqual(await adapter.recoverRoomTurn!(handle, { inboxItemId: "inbox-done", providerTurnId: "turn-done" }), { turnId: "turn-done", outcome: "reply", text: "Already durable." });
+  assert.deepEqual(await adapter.recoverRoomTurn!(handle, { inboxItemId: "inbox-done", providerTurnId: "turn-done" }), { turnId: "turn-done", outcome: "reply", text: "Already durable.", evidence: "transcript" });
   assert.equal(client.requests.filter((request) => request.method === "turn/start").length, startsBefore);
 });
 
@@ -640,7 +641,7 @@ test("Codex retirement detaches only its waiter so a successor recovers the same
   const successor = adapter.recoverRoomTurn!(handle, { inboxItemId: "successor", providerTurnId: "turn-retired" });
   await flush(); status = "completed";
   client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-retired" } });
-  assert.deepEqual(await successor, { turnId: "turn-retired", outcome: "reply", text: "successor reply" });
+  assert.deepEqual(await successor, { turnId: "turn-retired", outcome: "reply", text: "successor reply", evidence: "transcript" });
   assert.equal(handle.pid, 4100); assert.equal(handle.providerContinuationId, "thread-1");
   assert.equal(client.requests.filter((request) => request.method === "turn/interrupt").length, 0);
 });
@@ -658,7 +659,7 @@ test("Codex caches a terminal racing observer detach for successor recovery", as
   await flush(); controller.abort(); await assert.rejects(old, /observation detached/);
   status = "completed";
   client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-race" } });
-  assert.deepEqual(await adapter.recoverRoomTurn!(handle, { inboxItemId: "next-race", providerTurnId: "turn-race" }), { turnId: "turn-race", outcome: "reply", text: "raced" });
+  assert.deepEqual(await adapter.recoverRoomTurn!(handle, { inboxItemId: "next-race", providerTurnId: "turn-race" }), { turnId: "turn-race", outcome: "reply", text: "raced", evidence: "transcript" });
 });
 
 test("Codex supervised launch passes only its daemon generation binding to the MCP child", async () => {
@@ -674,6 +675,7 @@ test("Codex supervised launch passes only its daemon generation binding to the M
     LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+    LETAGENTS_EXECUTION_PROFILE: "interactive_desktop",
   });
   assert.deepEqual(harness.supervisorBridgeContexts, [{
     cwd: "/tmp/letagents-work-attempt",
@@ -709,6 +711,7 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
     LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
     LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent_session_exact",
     LETAGENTS_SUPERVISOR_ROOM_ID: "focus_37",
     LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "LanternSparrow",

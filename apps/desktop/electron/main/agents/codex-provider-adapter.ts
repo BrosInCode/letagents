@@ -19,6 +19,7 @@ import {
   summarizeCodexRuntimeSnapshot,
 } from "./codex-runtime-reasoning.js";
 import { isActiveCodexTurnStatus } from "./codex-session-status.js";
+import { CodexTurnResultAccumulator } from "./codex-turn-result.js";
 import {
   buildCodexStartPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
@@ -213,22 +214,17 @@ function exactTurnKey(threadId: string, turnId: string): string {
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
-    "A daemon-owned room inbox item is assigned to this exact bounded turn.",
-    "Do not call wait_for_messages or start a polling loop. Respond only to this item.",
+    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
+    `Your durable charter: ${request.charter?.trim() || "Help thoughtfully within the room."}`,
+    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
+    "Answer the activating message in your final response; do not send that same reply with a message tool.",
     "If no response should be published, return exactly LETAGENTS_NO_ROOM_REPLY with no other text.",
     `Inbox item: ${request.inboxItemId}`,
+    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
     `Source message: ${JSON.stringify(request.sourceMessage)}`,
     `Activation: ${JSON.stringify(request.activation)}`,
   ].join("\n");
-}
-
-function exactTurnFinalText(turn: ThreadReadTurn): string {
-  const item = [...(turn.output ?? []), ...(turn.items ?? [])]
-    .filter((candidate) => candidate.type === "agentMessage" && candidate.phase === "final")
-    .at(-1);
-  if (!item) return "";
-  if (typeof item.text === "string") return item.text.trim();
-  return (item.content ?? []).flatMap((content) => typeof content.text === "string" ? [content.text] : []).join("\n").trim();
 }
 
 class CodexRoomTurnRecoveryError extends Error {
@@ -314,6 +310,7 @@ class CodexProviderHandle implements ProviderHandle {
   /** At most one terminal fact per recent native turn; never infer a latest turn. */
   readonly terminalTurns = new Map<string, string>();
   readonly turnWaiters = new Map<string, { owner: symbol; resolve: (status: string) => void; reject: (error: Error) => void }>();
+  readonly roomTurnResults = new CodexTurnResultAccumulator();
 
   constructor(
     readonly workAttemptId: string,
@@ -585,10 +582,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     handle.state = terminal.status === "failed" ? "failed" : "idle";
     if (terminal.status !== "completed") throw new Error(`Codex bounded room turn ${turnId} ended ${terminal.status}.`);
-    const text = exactTurnFinalText(terminal.turn);
-    if (text === "LETAGENTS_NO_ROOM_REPLY") return { turnId, outcome: "no_reply", text: null };
-    if (!text.trim()) throw new Error("Codex bounded room turn completed without a final answer.");
-    return { turnId, outcome: "reply", text: text.trim() };
+    const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, terminal.turn);
+    handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+    return { turnId, ...result };
   }
 
   /** Reattach only the durable exact turn; never issue a second turn/start. */
@@ -607,12 +603,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const status = String(typeof turn.status === "string" ? turn.status : turn.status?.status ?? "").toLowerCase();
     if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
-      return this.roomTurnResultFromTerminal(turnId, status, turn);
+      return this.roomTurnResultFromTerminal(handle, turnId, status, turn);
     }
     if (!isActiveCodexTurnStatus(status)) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
     handle.state = "working";
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    return this.roomTurnResultFromTerminal(turnId, terminal.status, terminal.turn);
+    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn);
   }
 
   async stop(
@@ -731,7 +727,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
               LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: req.agentDisplayName.trim(),
             } : {}),
           } : {}),
-          ...(req.deliveryMode === "daemon_inbox" ? { LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1" } : {}),
+          ...(req.deliveryMode === "daemon_inbox" ? {
+            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+            LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+          } : { LETAGENTS_EXECUTION_PROFILE: "interactive_desktop" }),
         },
       } : {}),
     });
@@ -998,6 +997,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle: CodexProviderHandle,
     notification: RpcNotification,
   ): void {
+    handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
     const terminalMatch = /^turn\/(completed|interrupted|failed|cancelled|stopped)$/i.exec(notification.method);
@@ -1095,12 +1095,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return { status: readStatus, turn };
   }
 
-  private roomTurnResultFromTerminal(turnId: string, status: string, turn: ThreadReadTurn): ProviderRoomTurnResult {
+  private roomTurnResultFromTerminal(
+    handle: CodexProviderHandle,
+    turnId: string,
+    status: string,
+    turn: ThreadReadTurn,
+  ): ProviderRoomTurnResult {
     if (status !== "completed") throw new CodexRoomTurnRecoveryError(`Codex bounded room turn ${turnId} ended ${status}.`);
-    const text = exactTurnFinalText(turn);
-    if (text === "LETAGENTS_NO_ROOM_REPLY") return { turnId, outcome: "no_reply", text: null };
-    if (!text) throw new CodexRoomTurnRecoveryError("Codex bounded room turn completed without a final answer.");
-    return { turnId, outcome: "reply", text };
+    const result = handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn);
+    handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+    return { turnId, ...result };
   }
 
   private waitForExactTurnNotification(handle: CodexProviderHandle, key: string, detachSignal?: AbortSignal): Promise<string> {
@@ -1223,6 +1227,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     handle.turnWaiters.clear();
     handle.terminalTurns.clear();
+    handle.roomTurnResults.clearAll();
     if (this.handles.get(handle.workAttemptId) === handle) {
       this.handles.delete(handle.workAttemptId);
     }

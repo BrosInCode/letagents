@@ -8,6 +8,7 @@ import type {
   ThreadReadTurn,
   ThreadReadTurnItem,
 } from "./codex-rpc-client.js";
+import { finalCodexAgentText, isFinalCodexAgentPhase } from "./codex-turn-result.js";
 
 export const STARTUP_POLL_INTERVAL_MS = 500;
 const DEFAULT_STARTUP_OBSERVATION_MS = 90_000;
@@ -117,12 +118,12 @@ export function finalPublicAgentMessageText(
       continue;
     }
     fallback = text;
-    if (phase === "final") {
+    if (isFinalCodexAgentPhase(phase)) {
       final = text;
     }
   }
 
-  return final ?? fallback;
+  return final ?? finalCodexAgentText(items) ?? fallback;
 }
 
 export function deriveCodexLiveSessionStatus(

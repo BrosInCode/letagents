@@ -71,6 +71,89 @@ export type SupervisedCredentialBorrowResult =
   | { state: "deferred"; code: "SUPERVISED_CREDENTIAL_UNAVAILABLE" }
   | { state: "stale"; code: "SUPERVISED_CREDENTIAL_STALE" };
 
+export type PreparedSupervisedEffect =
+  | { state: "completed"; result: unknown }
+  | { state: "prepared"; effectId: string; action: "execute" }
+  | { state: "prepared"; effectId: string; action: "use_final_answer"; sourceMessageId: string }
+  | { state: "prepared"; effectId: string; action: "room_move_prepared"; destinationRoom: string };
+
+export async function prepareCurrentSupervisedEffect(input: {
+  toolName: string;
+  input: unknown;
+  mcpRequestId: string;
+  mutation: boolean;
+}, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<PreparedSupervisedEffect> {
+  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
+  if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: negotiated.protocolVersion,
+    id: randomUUID(),
+    method: "supervisor.prepare_bounded_effect",
+    params: {
+      entry_id: coordinates.entryId,
+      work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId,
+      daemon_generation: negotiated.generation,
+      mcp_request_id: input.mcpRequestId,
+      tool_name: input.toolName,
+      input: input.input,
+      mutation: input.mutation,
+    },
+  }, timeoutMs);
+  if (!response.ok) throw new Error(response.error || "The supervised effect was rejected.");
+  const result = response.result && typeof response.result === "object" ? response.result as Record<string, unknown> : {};
+  if (result.state === "completed") return { state: "completed", result: result.result };
+  const effectId = typeof result.effect_id === "string" ? result.effect_id : "";
+  if (!effectId) throw new Error("The supervised effect journal did not return an effect id.");
+  if (result.action === "use_final_answer" && typeof result.source_message_id === "string") {
+    return { state: "prepared", effectId, action: "use_final_answer", sourceMessageId: result.source_message_id };
+  }
+  if (result.action === "room_move_prepared" && typeof result.destination_room === "string") {
+    return { state: "prepared", effectId, action: "room_move_prepared", destinationRoom: result.destination_room };
+  }
+  return { state: "prepared", effectId, action: "execute" };
+}
+
+export async function completeCurrentSupervisedEffect(input: {
+  effectId: string;
+  result?: unknown;
+  error?: string;
+}, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<void> {
+  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
+  if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: negotiated.protocolVersion,
+    id: randomUUID(),
+    method: "supervisor.complete_bounded_effect",
+    params: {
+      entry_id: coordinates.entryId,
+      work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId,
+      daemon_generation: negotiated.generation,
+      effect_id: input.effectId,
+      result: input.result,
+      error: input.error,
+    },
+  }, timeoutMs);
+  if (!response.ok) throw new Error(response.error || "The supervised effect completion was rejected.");
+}
+
+async function requireCurrentSupervisedCoordinates(
+  env: NodeJS.ProcessEnv,
+  options: SupervisorBridgeOptions,
+): Promise<ResolvedSupervisorCoordinates> {
+  if (env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_room_turn") {
+    throw new Error("Supervised effects require the supervised_room_turn execution profile.");
+  }
+  const coordinates = await resolveSupervisorCoordinates(supervisedContextSession(), env, options);
+  if (!coordinates) throw new Error("The exact supervised daemon coordinates are unavailable.");
+  return coordinates;
+}
+
 /**
  * Resolve and borrow for the MCP process itself. Unlike registration, this
  * never reads local agent state: the daemon-owned launch context is the sole

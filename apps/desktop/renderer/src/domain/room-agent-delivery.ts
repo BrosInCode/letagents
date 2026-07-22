@@ -1,5 +1,6 @@
 import type {
   DesktopRoomAgentConnectionState,
+  DesktopRoomAgentIngressState,
   DesktopRoomAgentInboxState,
   DesktopRoomAgentTurnState,
   DesktopSupervisorManifestEntry,
@@ -39,8 +40,14 @@ export function roomAgentDeliveryGroup(
 ): RoomAgentDeliveryGroup {
   const state = agent.roomAgentState;
   if (!state) return "disconnected";
+  // Additive protocol compatibility while Electron hands an older daemon to
+  // 2.0.40. The successor always supplies the explicit ingress axis.
+  const ingressState = state.ingress?.state ?? (state.connection.state === "connected" ? "observing" : "stopped");
   if (state.inbox.state === "waiting_for_desktop_credentials") return "attention";
   if (state.connection.state !== "connected") return "disconnected";
+  if (ingressState === "backoff") return "disconnected";
+  if (ingressState === "blocked") return "attention";
+  if (ingressState !== "observing") return "disconnected";
   if (state.inbox.state === "blocked" || state.turn.state === "failed") return "attention";
   if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "responding";
   return "listening";
@@ -49,13 +56,18 @@ export function roomAgentDeliveryGroup(
 export function roomAgentDeliverySummary(
   state: {
     connection: { state: DesktopRoomAgentConnectionState };
+    ingress?: { state: DesktopRoomAgentIngressState };
     inbox: { state: DesktopRoomAgentInboxState };
     turn: { state: DesktopRoomAgentTurnState };
   },
 ): string {
+  const ingressState = state.ingress?.state ?? (state.connection.state === "connected" ? "observing" : "stopped");
   if (state.inbox.state === "waiting_for_desktop_credentials") return "Waiting for desktop credential handoff";
   if (state.connection.state === "reconnecting") return "Reconnecting";
   if (state.connection.state === "disconnected") return "Disconnected";
+  if (ingressState === "backoff") return "Reconnecting to room messages";
+  if (ingressState === "blocked") return "Room observation needs attention";
+  if (ingressState !== "observing") return "Starting room observation";
   if (state.inbox.state === "blocked" || state.turn.state === "failed") return "Delivery needs attention";
   if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "Responding to a room message";
   return "Connected · Listening";

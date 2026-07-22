@@ -387,22 +387,25 @@ export interface DesktopSupervisorActivityEvent {
 }
 
 export type DesktopRoomAgentConnectionState = "connected" | "reconnecting" | "disconnected";
+export type DesktopRoomAgentIngressState = "starting" | "observing" | "backoff" | "blocked" | "stopped";
 export type DesktopRoomAgentInboxState = "empty" | "queued" | "blocked" | "waiting_for_desktop_credentials";
 export type DesktopRoomAgentTurnState = "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed";
 export type DesktopRoomAgentTaskState = "none" | "assigned" | "working" | "blocked";
 export type DesktopRoomAgentReceiptState =
-  | "queued"
+  | "pending"
   | "dispatching"
   | "awaiting_result"
+  | "result_recovery"
   | "publishing"
   | "acknowledged"
   | "acknowledged_no_reply"
   | "retryable"
   | "blocked"
+  | "cancelled_by_room_move"
   | "queued_behind_blocked";
 
 export interface DesktopRoomAgentCausalEvent {
-  phase: "received" | "queued" | "turn_started" | "turn_finished" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked";
+  phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled";
   observedAt: string;
   detail: string | null;
 }
@@ -423,6 +426,11 @@ export interface DesktopRoomAgentDeliveryReceipt {
 export interface DesktopRoomAgentStateProjection {
   connection: {
     state: DesktopRoomAgentConnectionState;
+    observedAt: string | null;
+    detail: string | null;
+  };
+  ingress: {
+    state: DesktopRoomAgentIngressState;
     observedAt: string | null;
     detail: string | null;
   };

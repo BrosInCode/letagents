@@ -288,13 +288,14 @@ export interface ProviderRoomTurnRequest {
   sourceMessage: unknown;
   activation: Record<string, unknown>;
   actionId: string;
+  charter?: string;
+  observedContext?: unknown[];
 }
 
-export interface ProviderRoomTurnResult {
-  turnId: string;
-  outcome: "reply" | "no_reply";
-  text: string | null;
-}
+export type ProviderRoomTurnResult =
+  | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream" }
+  | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream" }
+  | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none" };
 export interface ProviderRoomTurnRecoveryRequest { inboxItemId: string; providerTurnId: string; }
 
 export interface ProviderRoomTurnOptions {
