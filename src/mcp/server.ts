@@ -5,6 +5,7 @@ import { registerRoomResources } from "./server/resources.js";
 import { registerTools } from "./server/register-tools.js";
 import { attachMcpServer, autoJoinFromContext, shutdownRuntime } from "./server/runtime.js";
 import { requireValidWorkerBearerRuntime } from "./server/runtime/worker-bearer.js";
+import { executionProfile } from "./server/runtime/execution-profile.js";
 
 const server = new McpServer({
   name: "letagents",
@@ -13,7 +14,8 @@ const server = new McpServer({
 
 attachMcpServer(server);
 registerRoomResources(server);
-registerTools(server);
+const profile = executionProfile();
+registerTools(server, profile);
 
 async function main() {
   requireValidWorkerBearerRuntime();

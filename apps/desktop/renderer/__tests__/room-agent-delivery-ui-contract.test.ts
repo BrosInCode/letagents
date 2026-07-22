@@ -10,6 +10,12 @@ import {
   roomAgentDeliverySummary,
 } from "../src/domain/room-agent-delivery";
 import { roomMessageRevealDestination } from "../src/domain/room-message-reveal";
+import type {
+  DesktopRoomAgentConnectionState,
+  DesktopRoomAgentInboxState,
+  DesktopRoomAgentTurnState,
+  DesktopSupervisorManifestEntry,
+} from "../../electron/ipc-types";
 
 const rendererRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -19,24 +25,33 @@ async function source(relativePath: string): Promise<string> {
 
 describe("durable room delivery UI contracts", () => {
   it("classifies connection, inbox, and turn facts without inferring work from connection", () => {
-    const state = (connection: string, inbox: string, turn: string) => ({
+    const state = (
+      connection: DesktopRoomAgentConnectionState,
+      inbox: DesktopRoomAgentInboxState,
+      turn: DesktopRoomAgentTurnState,
+    ): Pick<DesktopSupervisorManifestEntry, "roomAgentState"> => ({
       roomAgentState: {
-        connection: { state: connection, detail: null },
-        inbox: { state: inbox, pendingCount: 0 },
-        turn: { state: turn, detail: null, sourceMessageId: null },
-        task: { state: "none", title: null },
+        connection: { state: connection, observedAt: null, detail: null },
+        ingress: {
+          state: connection === "connected" ? "observing" : "stopped",
+          observedAt: null,
+          detail: null,
+        },
+        inbox: { state: inbox, pendingCount: 0, blockedByMessageId: null, detail: null },
+        turn: { state: turn, inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+        task: { state: "none", taskId: null, title: null },
       },
     });
-    assert.equal(roomAgentDeliveryGroup(state("connected", "empty", "idle") as never), "listening");
-    assert.equal(roomAgentDeliveryGroup(state("connected", "queued", "responding") as never), "responding");
-    assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "idle") as never), "attention");
-    assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "responding") as never), "attention");
-    assert.equal(roomAgentDeliveryGroup(state("connected", "waiting_for_desktop_credentials", "idle") as never), "attention");
-    assert.equal(roomAgentDeliveryGroup(state("reconnecting", "queued", "responding") as never), "disconnected");
-    assert.equal(roomAgentDeliveryGroup(state("disconnected", "queued", "responding") as never), "disconnected");
-    assert.equal(roomAgentDeliverySummary((state("connected", "waiting_for_desktop_credentials", "idle") as never).roomAgentState), "Waiting for desktop credential handoff");
-    assert.equal(roomAgentDeliverySummary((state("reconnecting", "queued", "idle") as never).roomAgentState), "Reconnecting");
-    assert.equal(roomAgentDeliverySummary((state("connected", "blocked", "responding") as never).roomAgentState), "Delivery needs attention");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "empty", "idle")), "listening");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "queued", "responding")), "responding");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "idle")), "attention");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "responding")), "attention");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "waiting_for_desktop_credentials", "idle")), "attention");
+    assert.equal(roomAgentDeliveryGroup(state("reconnecting", "queued", "responding")), "disconnected");
+    assert.equal(roomAgentDeliveryGroup(state("disconnected", "queued", "responding")), "disconnected");
+    assert.equal(roomAgentDeliverySummary(state("connected", "waiting_for_desktop_credentials", "idle").roomAgentState!), "Waiting for desktop credential handoff");
+    assert.equal(roomAgentDeliverySummary(state("reconnecting", "queued", "idle").roomAgentState!), "Reconnecting");
+    assert.equal(roomAgentDeliverySummary(state("connected", "blocked", "responding").roomAgentState!), "Delivery needs attention");
   });
 
   it("keeps reconnect exact-runtime-only and labels replacement as explicit recovery", async () => {
@@ -149,12 +164,17 @@ describe("durable room delivery UI contracts", () => {
       source("src/components/desktop/content/DesktopChatMessage.vue"),
     ]);
     assert.match(shell, /\(grouped\[receipt\.sourceMessageId\] \?\?= \[\]\)\.push/);
+    assert.match(shell, /supervisedAgentWorkIndicators/);
     for (const content of [shell, chat, viewport, thread]) {
       assert.match(content, /delivery-receipts/);
     }
     assert.match(shell, /desktopIpc\.supervisor\?\.retryRoomDelivery/);
     assert.match(shell, /Delivery retry accepted\. The agent is resuming delivery/);
     assert.match(message, /:disabled="!deliveryRecoveryAvailable \|\| retryingReceipt/);
+    assert.match(message, /class="room-message-delivery-dots"/);
+    assert.match(message, /aria-live="polite"/);
+    assert.match(message, /"result_recovery"/);
+    assert.doesNotMatch(message, /receiptIcon/);
     assert.match(message, /Retry will be available when delivery recovery is connected/);
     assert.match(message, /scroll-to-message', receipt\.blockedByMessageId/);
     assert.match(viewport, /emit\("reveal-message", messageId\)/);

@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 6;
+export const DAEMON_STATE_SCHEMA_VERSION = 7;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -51,11 +51,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV5ToV6(database);
     return;
   }
+  if (existingVersion === 6) {
+    this.migrateV6ToV7(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV6Shape(database);
+    this.repairAndValidateV7Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -328,6 +332,8 @@ createSchema(database: DatabaseSync): void {
     this.applyV3Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
+    this.applyV7Shape(database);
+    this.validateV7Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -521,6 +527,25 @@ migrateV5ToV6(database: DatabaseSync): void {
   }
 }
 
+migrateV6ToV7(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV2Shape(database);
+    this.validateV3Shape(database);
+    this.validateV6Shape(database);
+    this.validateBoundedDeliveryV6Shape(database);
+    this.applyV7Shape(database);
+    this.validateV7Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
 /**
  * Older-version test fixtures can carry a newer physical worker table after a
  * version-marker rollback.  Prefer its already-secret-free v6 shape; real
@@ -535,11 +560,65 @@ private migrateWorkerShapeToV6(database: DatabaseSync): boolean {
   }
   this.applyV5Shape(database);
   this.validateV5Shape(database);
+  // Test fixtures and interrupted version-marker repairs may already carry
+  // the secret-free v7 delivery shape. Never try to validate that expanded
+  // state machine against the narrower v6 CHECK constraints.
+  if (this.tableColumns(database, "supervised_agent_terminal_results").size) {
+    if (requiresScrub) this.applyV6Shape(database);
+    this.validateV7Shape(database);
+    return requiresScrub;
+  }
   this.applyV6Shape(database);
   this.validateV6Shape(database);
   this.applyBoundedDeliveryV6Shape(database);
   this.validateBoundedDeliveryV6Shape(database);
+  this.applyV7Shape(database);
+  this.validateV7Shape(database);
   return requiresScrub;
+}
+
+repairAndValidateV7Shape(database: DatabaseSync): void {
+  if (this.tableColumns(database, "worker_session_bindings").has("agent_session_token")) {
+    throw new Error("Daemon state v7 must not persist agent_session_token.");
+  }
+  const needsLegacyPresenceRepair = this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")
+    && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
+  const needsV2AdditiveRepair = !this.tableColumns(database, "agent_configurations").has("provider_launch_policy_undefined")
+    || !this.tableColumns(database, "runtime_deployments").has("provider_process_identity_present");
+  const needsBoundedDeliveryRepair = !this.tableColumns(database, "agent_configurations").has("delivery_mode")
+    || !this.tableColumns(database, "agent_configurations").has("delivery_cutover_json")
+    || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id");
+  const needsV7AdditiveRepair = !this.tableColumns(database, "supervised_agent_terminal_results").size
+    || !this.tableColumns(database, "supervised_agent_inbox_events").size;
+  if (!needsLegacyPresenceRepair && !needsV2AdditiveRepair && !needsBoundedDeliveryRepair && !needsV7AdditiveRepair) {
+    this.validateV2Shape(database);
+    this.validateV3Shape(database);
+    this.validateV6Shape(database, false);
+    this.validateBoundedDeliveryV6Shape(database);
+    this.validateV7Shape(database);
+    this.finishPendingV6SecretScrub(database);
+    return;
+  }
+  if (this.hasPendingV6SecretScrub(database)) {
+    throw new Error("Daemon state v7 cannot repair additive schema state while a credential scrub is pending.");
+  }
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (needsLegacyPresenceRepair || needsV2AdditiveRepair) this.applyV2Shape(database, true);
+    this.validateV2Shape(database);
+    // Current-version repair never synthesizes or rewrites authority tables.
+    // Corruption in work-attempt or worker fencing remains a hard failure.
+    this.validateV3Shape(database);
+    this.validateV6Shape(database, false);
+    if (needsBoundedDeliveryRepair) this.applyBoundedDeliveryV6Shape(database);
+    this.validateBoundedDeliveryV6Shape(database);
+    if (needsV7AdditiveRepair) this.applyV7Shape(database);
+    this.validateV7Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
 }
 
 repairAndValidateV6Shape(database: DatabaseSync): void {
@@ -969,7 +1048,158 @@ applyV6Shape(database: DatabaseSync): void {
   `);
 }
 
-validateV6Shape(database: DatabaseSync): void {
+applyV7Shape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "supervised_agent_terminal_results").size) {
+    database.exec(`
+      ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v6;
+      CREATE TABLE supervised_agent_inbox (
+        inbox_item_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        source_message_id TEXT NOT NULL,
+        source_message_json TEXT NOT NULL,
+        activation_json TEXT NOT NULL,
+        fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
+        state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move')),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+        action_id TEXT NOT NULL,
+        reply_client_message_id TEXT NOT NULL,
+        provider_turn_id TEXT,
+        outcome TEXT,
+        last_error TEXT,
+        blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
+        next_attempt_at_ms INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        UNIQUE(agent_id, source_message_id),
+        UNIQUE(agent_id, fifo_sequence)
+      ) STRICT;
+      INSERT INTO supervised_agent_inbox
+        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+      SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
+      FROM supervised_agent_inbox_v6;
+
+      CREATE TABLE supervised_agent_inbox_events_v7 (
+        inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+        event_sequence INTEGER NOT NULL CHECK(event_sequence > 0),
+        idempotency_key TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled')),
+        observed_at TEXT NOT NULL,
+        detail TEXT,
+        PRIMARY KEY(inbox_item_id,event_sequence),
+        UNIQUE(inbox_item_id,idempotency_key)
+      ) STRICT;
+      INSERT INTO supervised_agent_inbox_events_v7
+        (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+      SELECT inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail
+      FROM supervised_agent_inbox_events;
+      DROP TABLE supervised_agent_inbox_events;
+      DROP TABLE supervised_agent_inbox_v6;
+      ALTER TABLE supervised_agent_inbox_events_v7 RENAME TO supervised_agent_inbox_events;
+      CREATE INDEX supervised_agent_inbox_head ON supervised_agent_inbox(agent_id,fifo_sequence);
+      CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
+
+      CREATE TABLE supervised_agent_terminal_results (
+        inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL,
+        execution_generation_id TEXT NOT NULL,
+        provider_turn_id TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
+        normalized_text TEXT,
+        evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
+        terminal_evidence_json TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX supervised_agent_terminal_result_turn
+        ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
+
+      CREATE TABLE supervised_agent_observed_messages (
+        agent_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        source_message_id TEXT NOT NULL,
+        source_message_json TEXT NOT NULL,
+        activation_json TEXT NOT NULL,
+        activation_decision TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        PRIMARY KEY(agent_id,source_message_id)
+      ) STRICT;
+      CREATE INDEX supervised_agent_observed_context
+        ON supervised_agent_observed_messages(agent_id,room_id,source_message_id);
+
+      CREATE TABLE supervised_agent_effects (
+        effect_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        execution_generation_id TEXT NOT NULL,
+        provider_turn_id TEXT NOT NULL,
+        mcp_request_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('prepared','executing','completed','failed')),
+        result_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
+      ) STRICT;
+      CREATE INDEX supervised_agent_effects_turn
+        ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
+
+      CREATE TABLE supervised_agent_ingress_health (
+        agent_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        execution_generation_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('starting','observing','backoff','blocked','stopped')),
+        detail TEXT,
+        observed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+    `);
+  }
+  if (!this.tableColumns(database, "supervised_agent_inbox_events").size) {
+    database.exec(`
+      CREATE TABLE supervised_agent_inbox_events (
+        inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+        event_sequence INTEGER NOT NULL CHECK(event_sequence > 0),
+        idempotency_key TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled')),
+        observed_at TEXT NOT NULL,
+        detail TEXT,
+        PRIMARY KEY(inbox_item_id,event_sequence),
+        UNIQUE(inbox_item_id,idempotency_key)
+      ) STRICT;
+      CREATE INDEX supervised_agent_inbox_events_timeline
+        ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
+    `);
+  }
+}
+
+validateV7Shape(database: DatabaseSync): void {
+  const required: Record<string, string[]> = {
+    supervised_agent_inbox: ["inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "fifo_sequence", "state", "attempt_count", "action_id", "reply_client_message_id", "provider_turn_id", "outcome", "last_error", "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at"],
+    supervised_agent_inbox_events: ["inbox_item_id", "event_sequence", "idempotency_key", "phase", "observed_at", "detail"],
+    supervised_agent_terminal_results: ["inbox_item_id", "agent_id", "execution_generation_id", "provider_turn_id", "outcome", "normalized_text", "evidence_source", "terminal_evidence_json", "observed_at", "updated_at"],
+    supervised_agent_observed_messages: ["agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "activation_decision", "observed_at"],
+    supervised_agent_effects: ["effect_id", "agent_id", "room_id", "execution_generation_id", "provider_turn_id", "mcp_request_id", "tool_name", "request_json", "state", "result_json", "error", "created_at", "updated_at"],
+    supervised_agent_ingress_health: ["agent_id", "room_id", "execution_generation_id", "state", "detail", "observed_at", "updated_at"],
+  };
+  for (const [table, expected] of Object.entries(required)) {
+    const details = database.prepare(`PRAGMA table_xinfo(${table})`).all() as Array<{ name: string; hidden: number }>;
+    const columns = details.map((column) => String(column.name));
+    const info = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === table && row.type === "table");
+    if (!info || Number(info.strict) !== 1 || expected.some((column) => !columns.includes(column))
+      || columns.some((column) => !expected.includes(column)) || details.some((column) => Number(column.hidden) !== 0)) {
+      throw new Error(`Daemon state v7 table ${table} has an invalid strict schema.`);
+    }
+  }
+  if (this.tableColumns(database, "worker_session_bindings").has("agent_session_token")) {
+    throw new Error("Daemon state v7 must not persist agent_session_token.");
+  }
+}
+
+validateV6Shape(database: DatabaseSync, includeDeliveryTables = true): void {
   const canonical: Record<string, string> = {
     worker_session_bindings: `CREATE TABLE worker_session_bindings (entry_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,work_attempt_id TEXT NOT NULL,execution_generation_id TEXT NOT NULL,agent_session_id TEXT NOT NULL,credential_ref TEXT NOT NULL,api_url TEXT NOT NULL,room_cursor TEXT,last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0),last_observed_at_ms INTEGER NOT NULL CHECK(last_observed_at_ms >= 0),binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),updated_at TEXT NOT NULL) STRICT`,
     supervised_agent_inbox: `CREATE TABLE supervised_agent_inbox (inbox_item_id TEXT PRIMARY KEY,agent_id TEXT NOT NULL,room_id TEXT NOT NULL,source_message_id TEXT NOT NULL,source_message_json TEXT NOT NULL,activation_json TEXT NOT NULL,fifo_sequence INTEGER NOT NULL CHECK(fifo_sequence > 0),state TEXT NOT NULL CHECK(state IN ('pending','dispatching','awaiting_result','publishing','retryable','blocked','acknowledged','acknowledged_no_reply')),attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),action_id TEXT NOT NULL,reply_client_message_id TEXT NOT NULL,provider_turn_id TEXT,outcome TEXT,last_error TEXT,blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),next_attempt_at_ms INTEGER,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,acknowledged_at TEXT,UNIQUE(agent_id,source_message_id),UNIQUE(agent_id,fifo_sequence)) STRICT`,
@@ -980,6 +1210,12 @@ validateV6Shape(database: DatabaseSync): void {
     worker_generation_verifications: `CREATE TABLE worker_generation_verifications (reservation_id TEXT PRIMARY KEY,entry_id TEXT NOT NULL,binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),from_execution_generation_id TEXT NOT NULL,to_execution_generation_id TEXT NOT NULL,agent_session_id TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence > 0),observed_at TEXT NOT NULL,observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),state TEXT NOT NULL CHECK(state IN ('reserved','accepted','failed','lost_race')),created_at TEXT NOT NULL,finalized_at TEXT,UNIQUE(entry_id,sequence)) STRICT`,
     worker_binding_watermarks: `CREATE TABLE worker_binding_watermarks (entry_id TEXT PRIMARY KEY,binding_epoch INTEGER NOT NULL CHECK(binding_epoch >= 1),last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0),last_observed_at_ms INTEGER NOT NULL CHECK(last_observed_at_ms >= 0),updated_at TEXT NOT NULL) STRICT`,
   };
+  if (!includeDeliveryTables) {
+    delete canonical.supervised_agent_inbox;
+    delete canonical.supervised_agent_inbox_events;
+    delete canonical.supervised_agent_ingress_cursors;
+    delete canonical.supervised_worker_sessions;
+  }
   const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replaceAll('"', "").replaceAll("`", "").replaceAll("[", "").replaceAll("]", "").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").replace(/\)\s*strict$/i, ")strict").trim().toLowerCase();
   for (const [table, expected] of Object.entries(canonical)) {
     const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
@@ -992,6 +1228,12 @@ validateV6Shape(database: DatabaseSync): void {
     supervised_agent_ingress_cursors: ["agent_id", "room_id", "last_observed_message_id", "updated_at"],
     supervised_worker_sessions: ["agent_id", "room_id", "agent_session_id", "execution_generation_id", "credential_ref", "expires_at", "updated_at"],
   };
+  if (!includeDeliveryTables) {
+    delete required.supervised_agent_inbox;
+    delete required.supervised_agent_inbox_events;
+    delete required.supervised_agent_ingress_cursors;
+    delete required.supervised_worker_sessions;
+  }
   for (const [table, expected] of Object.entries(required)) {
     const details = database.prepare(`PRAGMA table_xinfo(${table})`).all() as Array<{ name: string; hidden: number }>;
     const columns = details.map((column) => String(column.name));
@@ -1005,8 +1247,10 @@ validateV6Shape(database: DatabaseSync): void {
   if (this.tableColumns(database, "worker_session_bindings").has("agent_session_token")) {
     throw new Error("Daemon state v6 must not persist agent_session_token.");
   }
-  const duplicateInbox = database.prepare(`SELECT 1 FROM supervised_agent_inbox GROUP BY agent_id, source_message_id HAVING COUNT(*) > 1 LIMIT 1`).get();
-  if (duplicateInbox) throw new Error("Daemon state v6 inbox uniqueness is invalid.");
+  if (includeDeliveryTables) {
+    const duplicateInbox = database.prepare(`SELECT 1 FROM supervised_agent_inbox GROUP BY agent_id, source_message_id HAVING COUNT(*) > 1 LIMIT 1`).get();
+    if (duplicateInbox) throw new Error("Daemon state v6 inbox uniqueness is invalid.");
+  }
   const indexes: Record<string, { table: string; unique: number; columns: string[] }> = {
     worker_session_binding_authority: { table: "worker_session_bindings", unique: 1, columns: ["entry_id", "binding_epoch", "execution_generation_id", "agent_session_id"] },
     worker_binding_publications_current: { table: "worker_binding_publications", unique: 0, columns: ["entry_id", "binding_epoch", "sequence"] },
@@ -1014,6 +1258,10 @@ validateV6Shape(database: DatabaseSync): void {
     supervised_agent_inbox_head: { table: "supervised_agent_inbox", unique: 0, columns: ["agent_id", "fifo_sequence"] },
     supervised_agent_inbox_events_timeline: { table: "supervised_agent_inbox_events", unique: 0, columns: ["inbox_item_id", "event_sequence"] },
   };
+  if (!includeDeliveryTables) {
+    delete indexes.supervised_agent_inbox_head;
+    delete indexes.supervised_agent_inbox_events_timeline;
+  }
   for (const [name, expected] of Object.entries(indexes)) {
     const listed = (database.prepare(`PRAGMA index_list(${expected.table})`).all() as Row[]).find((row) => row.name === name);
     const terms = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Row[]).filter((row) => Number(row.key) === 1).sort((a, b) => Number(a.seqno) - Number(b.seqno));

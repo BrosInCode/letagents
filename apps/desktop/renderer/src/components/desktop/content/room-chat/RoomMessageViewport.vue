@@ -36,6 +36,7 @@
           :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
+          :provider-label="resolveMessageProviderLabel(entry.message, participants, presence, supervisorEntries)"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
@@ -49,7 +50,7 @@
       </template>
 
       <div
-        v-if="localAgentWork.length && !roomLoading"
+        v-if="displayedAgentWork.length && !roomLoading"
         class="room-local-agent-work-list"
         data-testid="room-local-agent-work-list"
       >
@@ -96,7 +97,7 @@
         </div>
       </div>
 
-      <article v-else-if="!messages.length && !localAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
+      <article v-else-if="!messages.length && !displayedAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
         <h3>{{ emptyStateTitle }}</h3>
         <p>{{ emptyStateDescription }}</p>
       </article>
@@ -136,11 +137,17 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import type {
+  DesktopAgentPresence,
+  DesktopParticipantSummary,
+  DesktopRoomMessage,
+  DesktopSupervisorManifestEntry,
+} from "../../../../../../electron/ipc-types";
 import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
+  workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,
 } from "../../../../domain/managed-agents";
@@ -149,6 +156,7 @@ import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
+import { resolveMessageProviderLabel } from "../../../../domain/agent-provider";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
 import { buildMessageTimelineEntries } from "./timeline";
@@ -177,6 +185,9 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  participants?: DesktopParticipantSummary[];
+  presence?: DesktopAgentPresence[];
+  supervisorEntries?: DesktopSupervisorManifestEntry[];
   deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;
@@ -324,11 +335,18 @@ watch(
 let echoState: WorkIndicatorEchoState = {};
 let echoFlushTimer: number | null = null;
 const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
+const currentLocalAgentWork = computed(() => {
+  // Public room order is the causal clock here. Provider activity timestamps
+  // come from the local host while message timestamps come from the server, so
+  // comparing them can suppress a genuinely new turn when the clocks differ.
+  const visibleMessages = [...props.messages, ...props.threadMessages].sort(compareRoomMessages);
+  return props.localAgentWork.filter((work) => !workIndicatorSupersededByAgentMessage(work, visibleMessages));
+});
 
 function applyEchoCoalescing(): void {
   const { state, indicators, hasPending } = coalesceWorkIndicatorEchoes(
     echoState,
-    props.localAgentWork,
+    currentLocalAgentWork.value,
     Date.now(),
     WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   );
@@ -344,7 +362,7 @@ function applyEchoCoalescing(): void {
 }
 
 watch(
-  () => props.localAgentWork,
+  currentLocalAgentWork,
   () => applyEchoCoalescing(),
   { immediate: true, deep: true },
 );

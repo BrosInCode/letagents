@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.39";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.43";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -246,15 +246,16 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   /** Ephemeral causal delivery projection; never persisted in the manifest. */
   room_agent_state?: {
     connection: { state: "connected" | "reconnecting" | "disconnected"; observed_at: string | null; detail: string | null };
+    ingress: { state: "starting" | "observing" | "backoff" | "blocked" | "stopped"; observed_at: string | null; detail: string | null };
     inbox: { state: "empty" | "queued" | "blocked" | "waiting_for_desktop_credentials"; pending_count: number; blocked_by_message_id: string | null; detail: string | null };
     turn: { state: "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed"; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
     task: { state: "none" | "assigned" | "working" | "blocked"; task_id: string | null; title: string | null };
   } | null;
   delivery_receipts?: Array<{
     inbox_item_id: string; source_message_id: string;
-    state: "pending" | "dispatching" | "awaiting_result" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "retryable" | "blocked" | "queued_behind_blocked";
+    state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "retryable" | "blocked" | "cancelled_by_room_move" | "queued_behind_blocked";
     attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; updated_at: string;
-    timeline: Array<{ phase: "received" | "queued" | "turn_started" | "turn_finished" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked"; observed_at: string; detail: string | null }>;
+    timeline: Array<{ phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled"; observed_at: string; detail: string | null }>;
   }>;
 };
 

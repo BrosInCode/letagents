@@ -1,28 +1,33 @@
-import type { ProviderActionHandle, ProviderActionPort } from "./provider-action-port.js";
+import type { ProviderActionHandle, ProviderActionPort, ProviderRoomTurnResult } from "./provider-action-port.js";
 import { SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
 export type SupervisedIngressAgent = {
   agentId: string;
   roomId: string;
   provider: string;
+  charter?: string;
   /** Codex daemon ingress is legal only after the durable cutover commits. */
   deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   /** Bound worker API origin; never inferred from a persisted credential. */
   apiUrl: string;
   agentSessionId: string;
   bearer: string;
-  handle: ProviderActionHandle;
+  /** Provider execution is optional: ingress may continue observing and
+   * queueing routed work after the native runtime exits. */
+  handle: ProviderActionHandle | null;
+  workAttemptId: string;
+  providerContinuationId: string | null;
+  pid: number | null;
   /** Exact daemon generation that owns this room worker binding. */
   executionGenerationId: string;
   daemonGeneration: number;
 };
 
 /** The bearer is intentionally memory-only and must never be persisted or logged. */
-export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent, "agentId" | "roomId" | "provider" | "apiUrl" | "agentSessionId" | "bearer" | "executionGenerationId" | "daemonGeneration" | "handle"> & {
-  workAttemptId: string;
-  providerContinuationId: string | null;
-  pid: number | null;
-};
+export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent,
+  "agentId" | "roomId" | "provider" | "apiUrl" | "agentSessionId" | "bearer" |
+  "executionGenerationId" | "daemonGeneration" | "workAttemptId" |
+  "providerContinuationId" | "pid" | "handle">;
 export type SupervisedAuthorityRevalidator = (authority: SupervisedDeliveryAuthority) => Promise<boolean> | boolean;
 
 export type SupervisedPollResponse = {
@@ -45,6 +50,10 @@ export interface SupervisedDeliveryHttp {
 }
 
 export type SupervisedPollWait = (delayMs: number, signal: AbortSignal) => Promise<void>;
+export type SupervisedRoomMoveCommitter = (input: {
+  agent: SupervisedIngressAgent;
+  inboxItemId: string;
+}) => Promise<void>;
 
 const SUCCESSFUL_POLL_PACE_MS = 25;
 const POLL_ERROR_BACKOFF_BASE_MS = 250;
@@ -86,6 +95,7 @@ export class SupervisedAgentDelivery {
     private readonly retryDelayMs = 50,
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     private readonly waitForPollDelay: SupervisedPollWait = abortablePollDelay,
+    private readonly commitPreparedRoomMove?: SupervisedRoomMoveCommitter,
   ) {}
 
   fence(): void {
@@ -118,11 +128,12 @@ export class SupervisedAgentDelivery {
     // The authority can change while a coalesced drain is settling. Verify the
     // exact route immediately before installation, then re-check the reserved
     // epoch after that await so a newer rebind or external stop wins.
-    if (!await this.hasAuthority(agent)
+    if (!await this.hasIngressAuthority(agent)
       || this.fenced
       || this.stoppingAgents.has(agent.agentId)
       || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)
       || this.loops.has(agent.agentId)) return;
+    await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId, state: "starting" });
     const controller = new AbortController();
     this.loopControllers.set(agent.agentId, controller);
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.pollLoop(agent, controller)));
@@ -162,6 +173,18 @@ export class SupervisedAgentDelivery {
     return this.stopForRefresh(agentId);
   }
 
+  /** Fence old-room observation immediately while allowing the activating
+   * delivery continuation to finish its durable room-move commit. */
+  pauseIngress(agentId: string): void {
+    this.nextRefreshEpoch(agentId);
+    this.polling.get(agentId)?.abort();
+    this.loopControllers.get(agentId)?.abort();
+    // This is called only after the activating inbox row is terminal. Abort
+    // the pump controller as well so it cannot claim a later old-room item
+    // while the durable membership commit is retrying.
+    this.pumpControllers.get(agentId)?.abort();
+  }
+
   private stopForRefresh(agentId: string): Promise<void> {
     const prior = this.stoppingOperations.get(agentId);
     if (prior) return prior;
@@ -195,18 +218,21 @@ export class SupervisedAgentDelivery {
     }
     this.startupRecovered.delete(agentId);
     this.activeTurns.delete(agentId);
+    const health = await this.inbox.ingressHealth(agentId);
+    if (health) await this.inbox.setIngressHealth({ agent_id: agentId, room_id: health.room_id, execution_generation_id: health.execution_generation_id, state: "stopped", detail: "Ingress stopped by the supervisor." });
   }
 
   private async pollLoop(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     // Recovery must not wait for a potentially hours-long first network poll.
     await this.pump(agent);
     let consecutivePollErrors = 0;
-    while (await this.hasAuthority(agent, controller)) {
+    while (await this.hasIngressAuthority(agent, controller)) {
       try {
         await this.pollOnce(agent, controller);
         consecutivePollErrors = 0;
-      } catch {
+      } catch (error) {
         consecutivePollErrors += 1;
+        await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId, state: "backoff", detail: error instanceof Error ? error.message : "Room observation failed." });
       }
       const delayMs = consecutivePollErrors
         ? pollErrorBackoffMs(consecutivePollErrors)
@@ -241,7 +267,7 @@ export class SupervisedAgentDelivery {
 
   private async pollOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     try {
-      if (!await this.hasAuthority(agent, controller)) return;
+      if (!await this.hasIngressAuthority(agent, controller)) return;
       let cursor = await this.inbox.cursor(agent.agentId);
       if (!cursor) {
         if (this.http.admissionOwnsInitialCursor) {
@@ -266,10 +292,10 @@ export class SupervisedAgentDelivery {
         // messages that raced this observation.
         await this.inbox.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: tailId });
         cursor = await this.inbox.cursor(agent.agentId);
-        if (!cursor || !await this.hasAuthority(agent, controller)) return;
+        if (!cursor || !await this.hasIngressAuthority(agent, controller)) return;
       }
       const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal });
-      if (!await this.hasAuthority(agent, controller)) return;
+      if (!await this.hasIngressAuthority(agent, controller)) return;
       const messages = activatedMessages(response.messages ?? []);
       await this.inbox.ingestPoll({
         agent_id: agent.agentId,
@@ -281,10 +307,12 @@ export class SupervisedAgentDelivery {
         // becoming paid model work.
         last_observed_message_id: lastMessageId(response.messages ?? []),
         messages,
+        observed_messages: observedMessages(response.messages ?? []),
       });
+      await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId, state: "observing" });
       // Ingest can be deliberately slow. Do not create detached delivery work
       // after a stop/rebind changed authority while its commit was pending.
-      if (!await this.hasAuthority(agent, controller)) return;
+      if (!await this.hasIngressAuthority(agent, controller)) return;
       await this.pump(agent);
     } finally {
       if (this.polling.get(agent.agentId) === controller) this.polling.delete(agent.agentId);
@@ -318,17 +346,17 @@ export class SupervisedAgentDelivery {
   }
 
   private async retryOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
-    if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+    if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
     const receipts = await this.inbox.receipts(agent.agentId);
-    if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+    if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
     const item = receipts.find((receipt) => receipt.source_message_id === sourceMessageId && receipt.state === "blocked");
     if (!item) throw new Error("The blocked room delivery is no longer available for this exact agent.");
-    if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+    if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
     await this.inbox.retryBlocked(item.inbox_item_id);
     // The row is now truthfully pending; if authority changed during the
     // durable transition, reject the stale control request rather than claim
     // it began provider work. The successor will recover this pending head.
-    if (!await this.hasAuthority(agent, controller)) {
+    if (!await this.hasExecutionAuthority(agent, controller)) {
       throw new Error("The room delivery binding changed before retry could start.");
     }
     // The control RPC acknowledges the durable blocked -> pending transition
@@ -365,15 +393,15 @@ export class SupervisedAgentDelivery {
 
   private async pumpOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     try {
-      if (!await this.hasAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, controller)) return;
       const recoveryContext = this.recoveryContext(agent);
       if (this.startupRecovered.get(agent.agentId) !== recoveryContext) {
         await this.inbox.normalizeStartupRecovery(agent.agentId);
-        if (!await this.hasAuthority(agent, controller)) return;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
         this.startupRecovered.set(agent.agentId, recoveryContext);
       }
       for (;;) {
-        if (!await this.hasAuthority(agent, controller)) return;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
         const item = await this.inbox.claimHead(agent.agentId);
         if (!item) return; // blocked, in-flight, or empty: FIFO remains intact.
         await this.deliver(agent, item, controller);
@@ -382,6 +410,7 @@ export class SupervisedAgentDelivery {
   }
 
   private async deliver(agent: SupervisedIngressAgent, item: SupervisedInboxItem, controller: AbortController): Promise<void> {
+    if (!agent.handle || !await this.hasExecutionAuthority(agent, controller)) return;
     const recoveryContext = this.recoveryContext(agent);
     const setActive = (phase: "dispatching" | "responding" | "publishing") => {
       this.activeTurns.set(agent.agentId, { recoveryContext, inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id, phase });
@@ -390,31 +419,51 @@ export class SupervisedAgentDelivery {
       const persistedReply = persistedReplyText(item.outcome);
       if (persistedReply) {
         setActive("publishing");
-        if (!await this.hasAuthority(agent, controller)) return;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: item.outcome });
-        if (!await this.hasAuthority(agent, controller)) return;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: item.outcome });
         if (!await this.publish(agent, item, persistedReply, controller)) return;
-        if (!await this.hasAuthority(agent, controller)) return;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged");
+        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
-      if (!await this.hasAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, controller)) return;
       const recovering = Boolean(item.provider_turn_id);
       if (recovering) setActive("responding");
       else setActive("dispatching");
+      const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<void> => {
+        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+        // New turns already checkpoint through checkpointTurnStarted. This
+        // idempotent edge keeps provider-neutral adapters equally strict.
+        if (item.state !== "result_recovery") await this.inbox.checkpointTurnStarted(item.inbox_item_id, result.turnId);
+        const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
+        await this.inbox.checkpointNormalizedTerminal({
+          inbox_item_id: item.inbox_item_id,
+          agent_id: agent.agentId,
+          execution_generation_id: agent.executionGenerationId,
+          provider_turn_id: result.turnId,
+          outcome: result.outcome,
+          text: result.text?.trim() || null,
+          evidence,
+          terminal_evidence: result,
+        });
+      };
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
           providerTurnId: item.provider_turn_id!,
-        }, { detachSignal: controller.signal })
+        }, { detachSignal: controller.signal, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
         activation: item.activation,
         actionId: item.action_id,
+        charter: agent.charter,
+        observedContext: (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message),
       }, { beforeNativeDispatch: async () => {
-        if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
         // The provider cannot call turn/start until this durable causal edge
         // has committed. Dispatching remains truthful until its exact native
         // turn id has also been checkpointed below.
@@ -423,15 +472,15 @@ export class SupervisedAgentDelivery {
         // Compatibility only for a pre-checkpoint adapter during upgrade. It
         // retains the truthful activity projection but cannot replace the
         // exact turn-id callback implemented by bounded Codex.
-        if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
         setActive("responding");
       }, checkpointTurnStarted: async (turnId) => {
-        if (!await this.hasAuthority(agent, controller)) throw new AuthorityLostError();
+        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
         await this.inbox.checkpointTurnStarted(item.inbox_item_id, turnId);
         // Only an acknowledged exact provider turn is projected responding.
         setActive("responding");
-      }, detachSignal: controller.signal });
+      }, checkpointTerminalResult, detachSignal: controller.signal });
       // Native provider turns are intentionally not cancelable by the daemon:
       // a handoff must retire our authority, not kill a user's Codex process.
       // Do not put this promise in the drain group. Instead, race its result
@@ -440,16 +489,29 @@ export class SupervisedAgentDelivery {
       // no path back into this delivery continuation after retirement.
       const result = turn && await this.awaitProviderResultOrRetirement(turn, controller);
       if (!result) throw new Error("Provider does not support bounded room turns.");
-      if (!await this.hasAuthority(agent, controller)) return;
-      const outcome = result.outcome === "reply" && result.text?.trim()
-        ? JSON.stringify({ kind: "reply", text: result.text.trim() })
-        : result.outcome === "no_reply" ? JSON.stringify({ kind: "no_reply" }) : null;
-      if (outcome) await this.inbox.checkpointTerminalOutcome(item.inbox_item_id, outcome);
-      if (!await this.hasAuthority(agent, controller)) return;
-      await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
+      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      // Real provider adapters invoke this before releasing their in-memory
+      // stream accumulator. The repeat is intentionally idempotent for simple
+      // test adapters and future provider implementations.
+      await checkpointTerminalResult(result);
+      const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
+      const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
+      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      if (item.state !== "result_recovery") {
+        await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
+      }
+      if (result.outcome === "unreadable") {
+        if (item.state === "result_recovery") {
+          await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "Codex completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
+        } else {
+          await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "Codex completed, but its final answer could not be read. Re-reading the same completed turn." });
+        }
+        return;
+      }
       if (result.outcome === "no_reply") {
-        if (!await this.hasAuthority(agent, controller)) return;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
       const text = result.text?.trim();
@@ -459,8 +521,9 @@ export class SupervisedAgentDelivery {
       await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
       setActive("publishing");
       if (!await this.publish(agent, item, text, controller)) return;
-      if (!await this.hasAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, controller)) return;
       await this.inbox.transition(item.inbox_item_id, "acknowledged");
+      await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
     } catch (error) {
       if (error instanceof AuthorityLostError || this.fenced || controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : "Room delivery failed.";
@@ -470,7 +533,18 @@ export class SupervisedAgentDelivery {
         await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
         return;
       }
-      if (current.attempt_count >= 3) {
+      if (current.state === "result_recovery") {
+        const retryCount = await this.inbox.recordResultRecoveryRetry(item.inbox_item_id, message);
+        if (retryCount >= 3) {
+          await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: `Result recovery failed ${retryCount} times: ${message}` });
+          return;
+        }
+        await this.sleep(Math.min(2_000, this.retryDelayMs * (2 ** (retryCount - 1))));
+        return;
+      }
+      const receipt = (await this.inbox.receipts(agent.agentId)).find((candidate) => candidate.inbox_item_id === item.inbox_item_id);
+      const retryCount = receipt?.timeline.filter((event) => event.phase === "retry_scheduled").length ?? 0;
+      if (current.attempt_count >= 3 || retryCount >= 2) {
         await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
         return;
       }
@@ -479,7 +553,7 @@ export class SupervisedAgentDelivery {
       }
       await this.sleep(this.retryDelayMs);
       const retryable = await this.inbox.get(item.inbox_item_id);
-      if (await this.hasAuthority(agent, controller) && retryable?.state === "retryable") await this.inbox.transition(item.inbox_item_id, "pending");
+      if (await this.hasExecutionAuthority(agent, controller) && retryable?.state === "retryable") await this.inbox.transition(item.inbox_item_id, "pending");
     } finally {
       const active = this.activeTurns.get(agent.agentId);
       if (active?.recoveryContext === recoveryContext && active.inboxItemId === item.inbox_item_id) this.activeTurns.delete(agent.agentId);
@@ -487,13 +561,13 @@ export class SupervisedAgentDelivery {
   }
 
   private async publish(agent: SupervisedIngressAgent, item: SupervisedInboxItem, text: string, parent: AbortController): Promise<boolean> {
-    if (!await this.hasAuthority(agent, parent)) return false;
+    if (!await this.hasExecutionAuthority(agent, parent)) return false;
     const controller = new AbortController();
     const relayAbort = () => controller.abort();
     parent.signal.addEventListener("abort", relayAbort, { once: true });
     try {
       await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
-      return this.hasAuthority(agent, parent);
+      return this.hasExecutionAuthority(agent, parent);
     } finally { parent.signal.removeEventListener("abort", relayAbort); }
   }
 
@@ -522,7 +596,7 @@ export class SupervisedAgentDelivery {
     });
   }
 
-  private async hasAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
+  private async hasIngressAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
     if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || controller?.signal.aborted) return false;
     const allowed = await this.revalidateAuthority({
       agentId: agent.agentId,
@@ -531,17 +605,22 @@ export class SupervisedAgentDelivery {
       provider: agent.provider,
       agentSessionId: agent.agentSessionId,
       bearer: agent.bearer,
-      workAttemptId: agent.handle.workAttemptId,
+      workAttemptId: agent.workAttemptId,
       executionGenerationId: agent.executionGenerationId,
       daemonGeneration: agent.daemonGeneration,
-      providerContinuationId: agent.handle.providerContinuationId,
-      pid: agent.handle.pid,
+      providerContinuationId: agent.providerContinuationId,
+      pid: agent.pid,
       handle: agent.handle,
     });
     return allowed && !this.fenced && !this.stoppingAgents.has(agent.agentId) && !controller?.signal.aborted;
   }
 
+  private async hasExecutionAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
+    return Boolean(agent.handle) && await this.hasIngressAuthority(agent, controller);
+  }
+
   private recoveryContext(agent: SupervisedIngressAgent): string {
+    if (!agent.handle) return [agent.daemonGeneration, agent.executionGenerationId, agent.roomId, agent.agentSessionId, "no-provider"].join("\u0000");
     let handleId = this.handleContextIds.get(agent.handle);
     if (!handleId) {
       handleId = this.nextHandleContextId++;
@@ -549,8 +628,8 @@ export class SupervisedAgentDelivery {
     }
     return [
       agent.daemonGeneration, agent.executionGenerationId, agent.roomId, agent.apiUrl,
-      agent.agentSessionId, agent.handle.workAttemptId, agent.handle.providerContinuationId,
-      agent.handle.pid, handleId,
+      agent.agentSessionId, agent.workAttemptId, agent.providerContinuationId,
+      agent.pid, handleId,
     ].join("\u0000");
   }
 
@@ -605,6 +684,22 @@ function activatedMessages(messages: readonly Record<string, unknown>[]): Ingres
     if (!id || !current || typeof current !== "object" || Array.isArray(current)
       || (current as Record<string, unknown>).decision !== "activate") return [];
     return [{ source_message_id: id, source_message: message, activation: current as InboxActivation }];
+  });
+}
+
+function observedMessages(messages: readonly Record<string, unknown>[]) {
+  return messages.flatMap((message) => {
+    const id = stringOrNull(message.id);
+    if (!id) return [];
+    const activation = message.activation;
+    const current = activation && typeof activation === "object" && !Array.isArray(activation)
+      ? (activation as Record<string, unknown>).for_current_agent
+      : null;
+    const normalized = current && typeof current === "object" && !Array.isArray(current)
+      ? current as InboxActivation
+      : {};
+    const decision = typeof normalized.decision === "string" ? normalized.decision : "unknown";
+    return [{ source_message_id: id, source_message: message, activation: normalized, activation_decision: decision }];
   });
 }
 

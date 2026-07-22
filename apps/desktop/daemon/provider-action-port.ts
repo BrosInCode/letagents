@@ -56,6 +56,8 @@ export type ProviderActionStreamEvent = {
   provider: string;
   kind: string;
   method: string;
+  /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
+  summary?: string | null;
   payload: unknown;
   payloadTruncated: boolean;
   payloadRedacted: boolean;
@@ -71,12 +73,13 @@ export type ProviderRoomTurnRequest = {
   sourceMessage: unknown;
   activation: Record<string, unknown>;
   actionId: string;
+  charter?: string;
+  observedContext?: unknown[];
 };
-export type ProviderRoomTurnResult = {
-  turnId: string;
-  outcome: "reply" | "no_reply";
-  text: string | null;
-};
+export type ProviderRoomTurnResult =
+  | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream" }
+  | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream" }
+  | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none" };
 export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 
@@ -100,13 +103,18 @@ export interface ProviderActionPort {
     beforeNativeDispatch?: () => Promise<void>;
     /** Durable exact turn checkpoint; completes after turn/start returns and before terminal observation. */
     checkpointTurnStarted?: (turnId: string) => Promise<void>;
+    /** Release provider-local output only after this durable terminal checkpoint succeeds. */
+    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
     /** Detach this local observation without interrupting the native turn. */
     detachSignal?: AbortSignal;
     /** @deprecated compatibility alias; new providers must use beforeNativeDispatch. */
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderRoomTurnResult>;
   /** Recover only this persisted native turn; implementations must never call turn/start. */
-  recoverRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
+  recoverRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
+    detachSignal?: AbortSignal;
+    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+  }): Promise<ProviderRoomTurnResult>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;

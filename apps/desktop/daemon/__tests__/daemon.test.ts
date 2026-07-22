@@ -616,7 +616,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
       liveHandles: Map<string, typeof handle>;
       handleProviderStream: (entryId: string, providerHandle: typeof handle, event: {
         workAttemptId: string; providerContinuationId: string; observedAt: string; sequence: number;
-        provider: string; kind: string; method: string; payload: unknown; payloadTruncated: boolean;
+        provider: string; kind: string; method: string; summary?: string | null; payload: unknown; payloadTruncated: boolean;
         payloadRedacted: boolean; durablePayloadRef: null;
       }) => Promise<void>;
     };
@@ -656,6 +656,27 @@ test("failed room waits remain retryable for one healthy provider execution", as
     current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
     assert.equal(current.observed_state, "working", "the same healthy execution continues after a retryable wait failure");
     assert.equal(current.activity?.at(-1)?.status, "working");
+
+    await internals.handleProviderStream("terminal_stream", handle, {
+      ...base,
+      sequence: 3,
+      kind: "text_delta",
+      method: "item/reasoning/summaryTextDelta",
+      summary: "Checking the durable room delivery path.",
+      payload: {
+        threadId: "thread_exact",
+        turnId: "turn_exact",
+        itemId: "reasoning_exact",
+        summaryIndex: 0,
+        delta: "Checking the durable room delivery path.",
+      },
+    });
+    current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
+    assert.equal(
+      current.activity?.at(-1)?.summary,
+      "Checking the durable room delivery path.",
+      "the daemon preserves the provider-approved display summary instead of replacing it with a protocol method",
+    );
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
@@ -3378,6 +3399,8 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
   await primeDaemonBareRepository(env.root, source);
   let mintCalls = 0;
   let spawns = 0;
+  let mintedProvider: string | null = null;
+  let mintedDisplayName: string | null = null;
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async (input) => {
@@ -3392,8 +3415,10 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     latest: async () => ({ messages: [] }), poll: async () => ({ messages: [] }), publish: async () => {},
   }, {
-    createWorkerSession: async () => {
+    createWorkerSession: async (input) => {
       mintCalls += 1;
+      mintedProvider = input.provider;
+      mintedDisplayName = input.displayName;
       return { sessionId: "bootstrap-reuse-session", bearer: "bootstrap-reuse-bearer", bearerId: "bootstrap-reuse-bearer-id", expiresAt: "2099-01-01T00:00:00.000Z" };
     },
   });
@@ -3413,6 +3438,8 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", { entry_id: id, daemon_generation: generation })).ok, true);
     await eventually(async () => spawns === 1, "bootstrap launch provider spawn");
     assert.equal(mintCalls, 1, "bootstrap tail admission and launch share the same fresh worker mint");
+    assert.equal(mintedProvider, "codex", "the worker session retains its real provider identity");
+    assert.equal(mintedDisplayName, "Agent", "the worker session retains its agent display name");
     const attempt = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
     assert.equal(attempt.execution_generations.length, 1, "only one durable execution generation is created after credential success");
   } finally {

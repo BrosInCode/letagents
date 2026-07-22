@@ -13,11 +13,13 @@ import type {
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomInfo,
+  DesktopRoomMessage,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorActivityEvent,
   RepoStatus,
   RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
+import { isGenericAgentProviderLabel } from "./agent-provider";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
 import { supervisedAgentDisplayLabel } from "./codenames";
@@ -330,8 +332,10 @@ export function managedAgentProviderLabel(providerId: string): string {
 }
 
 /**
- * Project bounded native activity into the existing chat work indicator. This
- * is observable lifecycle evidence, never hidden reasoning text.
+ * Project a durable bounded turn into the existing chat work indicator. The
+ * turn owns visibility; native activity only refines the copy. An individual
+ * Codex item may complete while the surrounding room turn is still active, so
+ * item-level idle events must never make the whole agent disappear.
  */
 export function supervisedAgentWorkIndicators(
   entries: readonly DesktopSupervisorManifestEntry[],
@@ -344,16 +348,23 @@ export function supervisedAgentWorkIndicators(
       normalizeManagedAgentRoomIdentifier(entry.roomId) === room &&
       entry.agentSessionBindingState === "active" &&
       entry.desiredState === "running" &&
-      entry.observedState === "working" &&
       entry.condition === "none" &&
-      entry.nativeLiveness.state === "active"
+      entry.roomAgentState?.connection.state === "connected" &&
+      isVisibleRoomTurnState(entry.roomAgentState.turn.state)
     )
     .flatMap((entry) => {
+      const turn = entry.roomAgentState!.turn;
+      const turnStartedAt = currentRoomTurnStartedAt(entry);
+      const turnStartedAtMs = Date.parse(turnStartedAt ?? "");
+      const nativeActivityIsCurrent = entry.observedState === "working"
+        && entry.nativeLiveness.state === "active";
       const latest = [...entry.activity]
         .sort((left, right) => right.sequence - left.sequence)
         .find((event) => isHumanVisibleSupervisorActivity(event)
-          && (event.status === "working" || event.status === "reviewing"));
-      if (!latest) return [];
+          && (event.status === "working" || event.status === "reviewing")
+          && (Number.isFinite(turnStartedAtMs)
+            ? Date.parse(event.observedAt) >= turnStartedAtMs
+            : nativeActivityIsCurrent));
       const boundPresence = entry.agentSessionId
         ? presence.find((candidate) => candidate.agentSessionId === entry.agentSessionId)
         : null;
@@ -368,11 +379,48 @@ export function supervisedAgentWorkIndicators(
           boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
           entry.id,
         ),
-        summary: liveActivityEchoText(latest.summary),
-        startedAt: latest.observedAt,
+        summary: latest
+          ? humanFacingSupervisorActivitySummary(latest)
+          : roomTurnFallbackSummary(turn.state),
+        startedAt: turnStartedAt
+          ?? latest?.observedAt
+          ?? entry.roomAgentState?.connection.observedAt
+          ?? entry.bindingUpdatedAt
+          ?? entry.createdAt,
+        agentSessionId: entry.agentSessionId,
+        agentKey: entry.agentKey,
+        sourceMessageId: turn.sourceMessageId,
       }];
     })
     .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+}
+
+function isVisibleRoomTurnState(state: string): boolean {
+  return state === "dispatching"
+    || state === "responding"
+    || state === "publishing"
+    || state === "retrying";
+}
+
+function currentRoomTurnStartedAt(entry: DesktopSupervisorManifestEntry): string | null {
+  const turn = entry.roomAgentState?.turn;
+  if (!turn) return null;
+  const receipt = entry.deliveryReceipts?.find((candidate) =>
+    (Boolean(turn.inboxItemId) && candidate.inboxItemId === turn.inboxItemId)
+    || (Boolean(turn.sourceMessageId) && candidate.sourceMessageId === turn.sourceMessageId));
+  if (!receipt) return null;
+  for (let index = receipt.timeline.length - 1; index >= 0; index -= 1) {
+    const event = receipt.timeline[index];
+    if (event?.phase === "turn_started") return event.observedAt;
+  }
+  return null;
+}
+
+function roomTurnFallbackSummary(state: string): string {
+  if (state === "dispatching") return "Preparing a response";
+  if (state === "publishing") return "Sending the response";
+  if (state === "retrying") return "Trying again";
+  return "Thinking";
 }
 
 /** Provider transport/account notifications remain in diagnostics, but they
@@ -381,8 +429,39 @@ export function isHumanVisibleSupervisorActivity(
   event: Pick<DesktopSupervisorActivityEvent, "kind" | "method">,
 ): boolean {
   const method = event.method.trim().toLowerCase();
-  if (method === "account/ratelimits/updated" || method === "account/ratelimitsupdated") return false;
+  if (
+    method === "account/ratelimits/updated"
+    || method === "account/ratelimitsupdated"
+    || method === "thread/read"
+  ) return false;
   return event.kind !== "usage" && event.kind !== "provider_event";
+}
+
+/** Translate provider-native events into stable product language. The exact
+ * provider method remains available in Activity/diagnostics, but Chat should
+ * describe what the agent is doing rather than expose a protocol trace. */
+export function humanFacingSupervisorActivitySummary(
+  event: Pick<DesktopSupervisorActivityEvent, "kind" | "method" | "summary">,
+): string {
+  const kind = event.kind.trim().toLowerCase();
+  const method = event.method.trim().toLowerCase();
+  if (method === "item/reasoning/summarytextdelta") {
+    // The Codex adapter places only the provider-approved reasoning summary in
+    // this field. Older/fallback daemon events contain the protocol label, so
+    // keep the calm generic copy until a real summary arrives.
+    const summary = event.summary.trim();
+    if (summary && !/^[\w-]+\s*·\s*item\/reasoning\/summarytextdelta$/i.test(summary)) {
+      return liveActivityEchoText(summary);
+    }
+    return "Thinking through the request";
+  }
+  if (method.includes("reasoning") || method.includes("thinking")) return "Thinking through the request";
+  if (kind === "text_delta" || method.includes("agentmessage") || method === "assistant") return "Writing a response";
+  if (kind === "tool_lifecycle" || /(?:toolcall|tool_use|websearch|filechange)/i.test(method)) return "Using a tool";
+  if (kind === "command_output" || /(?:command|process|terminal)/i.test(method)) return "Working in the project";
+  if (kind === "approval") return "Waiting for approval";
+  if (kind === "turn_lifecycle" || kind === "item_lifecycle") return "Thinking";
+  return liveActivityEchoText(event.summary);
 }
 
 /**
@@ -495,6 +574,11 @@ export interface ManagedAgentWorkIndicator {
   displayName: string;
   summary: string;
   startedAt: string;
+  /** Exact room identity used to retire stale progress after this agent speaks. */
+  agentSessionId?: string | null;
+  agentKey?: string | null;
+  /** Exact activating room message; establishes causal order without comparing host clocks. */
+  sourceMessageId?: string | null;
 }
 
 /** Longest live-activity echo shown in the room work indicator. */
@@ -519,6 +603,32 @@ export function liveActivityEchoText(summary: string | null | undefined): string
   if (!collapsed) return "Working in the room.";
   if (collapsed.length <= LIVE_ACTIVITY_ECHO_MAX_LENGTH) return collapsed;
   return `${collapsed.slice(0, LIVE_ACTIVITY_ECHO_MAX_LENGTH - 1).trimEnd()}…`;
+}
+
+/**
+ * Retire progress only when the same exact agent has published after the room
+ * message that activated this turn. Message order is the causal clock; local
+ * provider and remote server timestamps are deliberately never compared.
+ * Display names are excluded because two durable agents may share one.
+ */
+export function workIndicatorSupersededByAgentMessage(
+  indicator: ManagedAgentWorkIndicator,
+  messages: readonly Pick<DesktopRoomMessage, "id" | "agentIdentity">[],
+): boolean {
+  const sourceMessageId = indicator.sourceMessageId?.trim() || null;
+  if (!sourceMessageId) return false;
+  const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);
+  if (sourceIndex < 0) return false;
+  const indicatorSessionId = indicator.agentSessionId?.trim() || null;
+  const indicatorAgentKey = normalizeAgentKey(indicator.agentKey);
+  if (!indicatorSessionId && !indicatorAgentKey) return false;
+  return messages.some((message, messageIndex) => {
+    if (messageIndex <= sourceIndex) return false;
+    const messageSessionId = message.agentIdentity?.agentSessionId?.trim() || null;
+    if (indicatorSessionId && messageSessionId) return indicatorSessionId === messageSessionId;
+    const messageAgentKey = normalizeAgentKey(message.agentIdentity?.agentKey);
+    return Boolean(indicatorAgentKey && messageAgentKey && indicatorAgentKey === messageAgentKey);
+  });
 }
 
 export interface CollapsedWorkIndicators {
@@ -1072,6 +1182,8 @@ export function activeManagedAgentWorkIndicators(
       displayName: managedAgentSessionDisplayName(session),
       summary: session.activeWork?.summary?.trim() || "Working in the room.",
       startedAt: session.activeWork?.startedAt || session.updatedAt,
+      agentSessionId: session.agentSessionId,
+      agentKey: session.agentKey,
     }))
     .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
 }
@@ -1114,10 +1226,17 @@ export function mergeDesktopSupervisorAgentParticipants(
       merged.push(projected);
       continue;
     }
+    const existing = merged[existingIndex];
     merged[existingIndex] = {
-      ...merged[existingIndex],
+      ...existing,
       ...projected,
-      sourceFlags: [...new Set([...merged[existingIndex].sourceFlags, ...projected.sourceFlags])],
+      // The supervisor projection owns reachability, but the room API owns
+      // participant identity. Do not replace a server-provided owner label
+      // or composite actor label with local runtime fallback metadata.
+      actorLabel: existing.actorLabel || projected.actorLabel,
+      ownerLabel: existing.ownerLabel || projected.ownerLabel,
+      ideLabel: isGenericAgentProviderLabel(existing.ideLabel) ? projected.ideLabel : existing.ideLabel,
+      sourceFlags: [...new Set([...existing.sourceFlags, ...projected.sourceFlags])],
     };
   }
   return merged;
@@ -1132,7 +1251,8 @@ function supervisorEntryIsMentionable(
   }
   if (!entry.agentKey?.trim() || !entry.roomAgentState) return false;
   if (entry.desiredState === "stopped" && entry.observedState === "stopped") return false;
-  return entry.roomAgentState.connection.state === "connected";
+  return entry.roomAgentState.connection.state === "connected"
+    && (entry.roomAgentState.ingress?.state ?? "observing") === "observing";
 }
 
 function desktopSupervisorEntryToParticipant(
@@ -1147,7 +1267,10 @@ function desktopSupervisorEntryToParticipant(
     actorLabel: entry.displayName,
     agentKey: entry.agentKey ?? null,
     githubLogin: null,
-    ownerLabel: "Local desktop",
+    // Canonical agent keys are server-owned `<owner login>/<agent name>`
+    // identities. They are a truthful fallback while the room participant
+    // snapshot catches up; "Local desktop" describes a host, not an owner.
+    ownerLabel: supervisorOwnerLabelFromAgentKey(entry.agentKey),
     ideLabel: entry.provider === "codex" ? "Codex" : entry.provider,
     hiddenAt: null,
     activityState: "active",
@@ -1156,6 +1279,13 @@ function desktopSupervisorEntryToParticipant(
     lastLiveHeartbeatAt: entry.workplaceLiveness.observedAt || timestamp,
     sourceFlags: ["delivery", "presence"],
   };
+}
+
+function supervisorOwnerLabelFromAgentKey(agentKey: string | null | undefined): string | null {
+  const normalized = agentKey?.trim() || "";
+  const separator = normalized.indexOf("/");
+  if (separator <= 0) return null;
+  return normalized.slice(0, separator).trim() || null;
 }
 
 export function mergeDesktopManagedAgentPresence(

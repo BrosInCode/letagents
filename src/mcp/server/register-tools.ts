@@ -11,17 +11,21 @@ import {
   registerRoomResumeTool,
 } from "./tools/rooms.js";
 import { registerTaskTools } from "./tools/tasks.js";
+import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
+import { profileAwareToolServer } from "./supervised-tool-facade.js";
 
-export function registerTools(server: McpServer): void {
-  registerRoomJoinTools(server);
-  registerAgentSessionTools(server);
-  registerRoomInspectionTools(server);
-  registerStatusTools(server);
-  registerTaskTools(server);
-  registerRepoInitializationTool(server);
-  registerMessageTools(server);
-  registerOnboardingTools(server);
-  registerRoomResumeTool(server);
-  registerRentalTools(server);
-  registerRepoVisibilityTool(server);
+export function registerTools(server: McpServer, profile: LetAgentsExecutionProfile = "autonomous_mcp_worker"): void {
+  const tools = profileAwareToolServer(server, profile);
+  const supervised = profile === "supervised_room_turn";
+  registerRoomJoinTools(tools);
+  if (!supervised) registerAgentSessionTools(tools);
+  registerRoomInspectionTools(tools);
+  registerStatusTools(tools);
+  registerTaskTools(tools);
+  registerRepoInitializationTool(tools);
+  registerMessageTools(tools, { includeDeliveryLoop: !supervised });
+  if (!supervised) registerOnboardingTools(tools);
+  if (!supervised) registerRoomResumeTool(tools);
+  registerRentalTools(tools);
+  registerRepoVisibilityTool(tools);
 }

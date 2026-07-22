@@ -33,6 +33,7 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
     created_by: "user", created_at: "2026-01-01T00:00:00.000Z",
     room_agent_state: {
       connection: { state: "connected", observed_at: "2026-01-01T00:00:00.000Z", detail: null },
+      ingress: { state: "observing", observed_at: "2026-01-01T00:00:00.000Z", detail: null },
       inbox: { state: "blocked", pending_count: 2, blocked_by_message_id: "msg_1", detail: null },
       turn: { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null },
       task: { state: "none", task_id: null, title: null },
@@ -281,6 +282,18 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
     providerTurnId: null, blockedByMessageId: null, error: "failed", updatedAt: "2026-01-01T00:00:00.000Z",
     timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
+});
+
+test("causal manifest projection synthesizes ingress only for an older daemon that omitted the axis", () => {
+  const legacy = wireEntryWithCausalProjection();
+  delete (legacy.room_agent_state as Record<string, unknown>).ingress;
+  const projected = mapEntry(legacy);
+  assert.equal(projected.roomAgentState?.connection.state, "connected");
+  assert.deepEqual(projected.roomAgentState?.ingress, {
+    state: "observing",
+    observedAt: "2026-01-01T00:00:00.000Z",
+    detail: null,
+  });
 });
 
 test("causal manifest projection drops malformed nested state and malformed receipt rows without coercion", () => {
