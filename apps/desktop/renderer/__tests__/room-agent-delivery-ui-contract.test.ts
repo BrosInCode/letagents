@@ -149,6 +149,8 @@ describe("durable room delivery UI contracts", () => {
       source("src/components/desktop/content/DesktopChatMessage.vue"),
     ]);
     assert.match(shell, /\(grouped\[receipt\.sourceMessageId\] \?\?= \[\]\)\.push/);
+    assert.doesNotMatch(shell, /supervisedAgentWorkIndicators/);
+    assert.match(shell, /provider stream belongs in Activity\/diagnostics/);
     for (const content of [shell, chat, viewport, thread]) {
       assert.match(content, /delivery-receipts/);
     }
