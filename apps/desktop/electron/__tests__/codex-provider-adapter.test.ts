@@ -1331,6 +1331,50 @@ test("native notifications and transcript tail become activity evidence", async 
   );
 });
 
+test("native stream carries accumulated readable reasoning summaries but never raw reasoning text", async () => {
+  const harness = createHarness();
+  const nativeStream: ProviderStreamEvent[] = [];
+  const adapter = new CodexProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => nativeStream.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const identity = {
+    threadId: handle.providerContinuationId,
+    turnId: "turn-readable-summary",
+    itemId: "item-readable-summary",
+    summaryIndex: 0,
+  };
+
+  harness.clients[0]!.emit({
+    method: "item/reasoning/summaryTextDelta",
+    params: { ...identity, delta: "Checking the room " },
+  });
+  harness.clients[0]!.emit({
+    method: "item/reasoning/summaryTextDelta",
+    params: { ...identity, delta: "delivery path." },
+  });
+  harness.clients[0]!.emit({
+    method: "item/reasoning/textDelta",
+    params: { ...identity, delta: "private chain of thought must not become UI copy" },
+  });
+
+  const readable = nativeStream.filter((event) => event.method === "item/reasoning/summaryTextDelta");
+  assert.deepEqual(readable.map((event) => event.summary), [
+    "Checking the room",
+    "Checking the room delivery path.",
+  ]);
+  assert.equal(
+    nativeStream.find((event) => event.method === "item/reasoning/textDelta")?.summary,
+    "Codex raw reasoning text is streaming.",
+  );
+  assert.equal(
+    nativeStream.some((event) => event.summary?.includes("private chain of thought")),
+    false,
+    "raw reasoning content never enters the human-readable stream summary",
+  );
+});
+
 test("native terminal failure status changes the Codex handle to failed", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
