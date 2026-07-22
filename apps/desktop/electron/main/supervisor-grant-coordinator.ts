@@ -174,7 +174,14 @@ export class SupervisorGrantCoordinator {
     this.requestedDaemonGeneration = status.generation;
     const entries = await this.daemon.list(null);
     await Promise.all(entries
-      .filter((entry) => entry.provider === "codex" && entry.deliveryMode === "daemon_inbox" && entry.desiredState === "running")
+      // A pre-admission desktop can have a live running provider, or a
+      // deliberately stopped one, without a durable daemon-inbox cursor.
+      // Both need a generation-fenced tail boundary on upgrade. This is
+      // admission first: installHostGrant cannot converge a cursorless entry,
+      // bootstrapRoomIngress writes the boundary before running convergence,
+      // and stopped entries remain stopped.
+      .filter((entry) => entry.provider === "codex" && entry.deliveryMode === "daemon_inbox"
+        && (entry.desiredState === "running" || entry.desiredState === "stopped"))
       .map((entry) => this.reconcileEntry(entry, status.generation)));
     this.lastReconciledDaemonGeneration = status.generation;
   }
@@ -302,10 +309,13 @@ export class SupervisorGrantCoordinator {
       throw new Error("The previous provider runtime is unavailable. Reconnect cannot start a replacement; create a new agent or explicitly recover it.");
     }
     if (installed !== "installed") throw new Error("Background agent management changed generation before the host grant could be installed.");
-    // Fresh launches are paused at this point. Establish the immutable first
-    // inbox boundary before Electron activates provider ownership. For an
-    // existing/recovered cursor this is a no-op and cannot move it forward.
-    if (entry.desiredState === "paused" && entry.deliveryMode === "daemon_inbox") {
+    // Establish the immutable first inbox boundary before a fresh paused
+    // launch activates provider ownership. The same one-time admission also
+    // repairs pre-upgrade running/stopped entries that have no cursor yet.
+    // For an existing/recovered cursor this is a no-op and cannot move it
+    // forward. Bootstrap admits the cursor before any running convergence and
+    // never converges a stopped provider.
+    if (entry.deliveryMode === "daemon_inbox") {
       const bootstrapped = await this.daemon.bootstrapRoomIngress(entry.id, daemonGeneration);
       if (bootstrapped === "stale") throw new Error("Background agent management changed generation before room delivery could be initialized.");
     }
