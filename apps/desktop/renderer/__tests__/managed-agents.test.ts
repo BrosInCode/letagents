@@ -689,7 +689,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     roomAgentState: {
       connection: { state: "connected", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
       ingress: { state: "observing", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
-      inbox: { state: "responding", pendingCount: 0, blockedByMessageId: null, detail: null },
+      inbox: { state: "queued", pendingCount: 1, blockedByMessageId: null, detail: null },
       turn: {
         state: "responding",
         inboxItemId: "inbox_1",

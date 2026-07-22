@@ -11,7 +11,11 @@ import {
 
 const result = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
 
-function registeredHandler(dependencies: SupervisedToolFacadeDependencies, callback: () => Promise<CallToolResult>) {
+function registeredHandler(
+  dependencies: SupervisedToolFacadeDependencies,
+  callback: () => Promise<CallToolResult>,
+  toolName = "send_message",
+) {
   let handler: ((input: unknown, extra: { requestId?: string }) => Promise<CallToolResult>) | null = null;
   const server = {
     tool(_name: string, ...registration: unknown[]) {
@@ -20,7 +24,7 @@ function registeredHandler(dependencies: SupervisedToolFacadeDependencies, callb
     },
   } as unknown as McpServer;
   const facade = profileAwareToolServer(server, "supervised_room_turn", dependencies);
-  (facade.tool as (...args: unknown[]) => unknown)("send_message", "description", {}, callback);
+  (facade.tool as (...args: unknown[]) => unknown)(toolName, "description", {}, callback);
   assert.ok(handler);
   return handler;
 }
@@ -58,4 +62,17 @@ test("failure-reporting errors do not mask the original callback error", async (
     completeEffect: async () => { throw new Error("journal unavailable"); },
   }, async () => { throw new Error("tool failed first"); });
   await assert.rejects(() => handler({}, { requestId: "request_failed" }), /tool failed first/);
+});
+
+test("check_repo_visibility is classified as a read-only supervised effect", async () => {
+  let mutation: boolean | null = null;
+  const handler = registeredHandler({
+    prepareEffect: async (input) => {
+      mutation = input.mutation;
+      return { state: "prepared", effectId: "effect_read", action: "execute" };
+    },
+    completeEffect: async () => {},
+  }, async () => result("visible"), "check_repo_visibility");
+  assert.deepEqual(await handler({}, { requestId: "request_read" }), result("visible"));
+  assert.equal(mutation, false);
 });
