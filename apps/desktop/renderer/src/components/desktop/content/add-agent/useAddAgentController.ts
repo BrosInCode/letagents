@@ -245,7 +245,7 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   isCurrentRequest: (version) => props.open && version === setup.currentVersion(),
   onChooseRepo: () => emit("choose-repo"),
   onCopyAuthCommand: (command) => void setupActions.copyAgentAuthCommand(command),
-  onRetry: () => void startManagedAgent(),
+  onRetry: () => void retrySupervisedLaunch(),
   onMessage: setSetupMessage,
 });
 const launchStarted = supervisedLaunch.launchStarted;
@@ -314,6 +314,39 @@ const {
   copyAgentAuthCommand,
   copyExternalJoinPrompt,
 } = setupActions;
+
+/**
+ * A launch card with a manifest entry represents a durable saved agent. Its
+ * retry is an explicit same-entry convergence request, not another create
+ * request that happens to reuse the user's form values. Only a failure that
+ * never made a durable entry falls back to the ordinary new-agent flow.
+ */
+async function retrySupervisedLaunch(): Promise<void> {
+  if (startOperationInFlight) return;
+  const entry = supervisedLaunch.conflict.value;
+  if (!entry) {
+    await startManagedAgent();
+    return;
+  }
+  startOperationInFlight = true;
+  startingAgent.value = true;
+  setSetupMessage(null);
+  try {
+    const updated = await desktopIpc.supervisor.setDesiredState(entry.id, "running");
+    supervisedLaunch.complete(updated);
+    await managedSessionsContext.refresh();
+  } catch (error) {
+    await supervisedLaunch.recoverFailedCreation(error);
+    setSetupMessage(contextualAddAgentError(
+      `Couldn't retry the saved ${entry.displayName} agent`,
+      error,
+      "The saved agent was not replaced. Try again when its connection is available.",
+    ), "error");
+  } finally {
+    startOperationInFlight = false;
+    startingAgent.value = false;
+  }
+}
 
 async function startManagedAgent(): Promise<void> {
   if (!selectedProviderId.value || !props.repoRootPath || startOperationInFlight) return;

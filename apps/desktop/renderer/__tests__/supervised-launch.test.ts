@@ -191,6 +191,17 @@ test("a bound, working, reachable, unblocked entry is ready and resolves the rea
   assert.match(progress.headline, /QuartzMeadow/);
 });
 
+test("launch success projects a legacy entry-owned suffix out of its label", () => {
+  const requestId = "6697e364-62d0-4027-b02d-ee71a8fbf579";
+  const progress = supervisedLaunchProgress(readyEntry({
+    id: `supervised_${requestId}`,
+    displayName: `QuartzMeadow · ${requestId}`,
+  }));
+
+  assert.equal(progress.agentName, "QuartzMeadow");
+  assert.equal(progress.headline, "QuartzMeadow is ready");
+});
+
 test("an idle bound reachable entry is also ready", () => {
   assert.equal(supervisedLaunchProgress(readyEntry({ observedState: "idle" })).ready, true);
 });

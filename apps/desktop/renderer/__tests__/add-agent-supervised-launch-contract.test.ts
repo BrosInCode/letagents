@@ -105,6 +105,19 @@ test("the sign-in recovery performs a real provider-auth action and does not sta
   assert.match(recoverBody, /creationRequestId\.value = activeLaunchId\.value;[\s\S]*?options\.onRetry\(\)/);
 });
 
+test("Try again converges a durable launch entry instead of creating a second agent", () => {
+  assert.match(controllerSource, /onRetry: \(\) => void retrySupervisedLaunch\(\)/);
+  const retryBody = controllerSource.slice(
+    controllerSource.indexOf("async function retrySupervisedLaunch"),
+    controllerSource.indexOf("async function startManagedAgent"),
+  );
+  assert.match(retryBody, /const entry = supervisedLaunch\.conflict\.value/);
+  assert.match(retryBody, /if \(!entry\) \{[\s\S]*?await startManagedAgent\(\)/);
+  assert.match(retryBody, /supervisor\.setDesiredState\(entry\.id, "running"\)/);
+  assert.match(retryBody, /supervisedLaunch\.complete\(updated\)/);
+  assert.match(retryBody, /managedSessionsContext\.refresh\(\)/);
+});
+
 test("Add Agent modal safely contextualizes supervised lookup errors outside the product card", () => {
   // The card stays event-backed; the adjacent feedback owns a scrubbed,
   // contextual daemon error and an explicit retry.

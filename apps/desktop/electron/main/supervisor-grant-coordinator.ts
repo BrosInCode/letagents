@@ -204,6 +204,14 @@ export class SupervisorGrantCoordinator {
     if (entry.deliveryMode !== "daemon_inbox") {
       throw new Error("This supervised provider does not support credential reconnection.");
     }
+    // Reconnect is deliberately narrower than recovery. It can only rotate
+    // credentials for the exact provider generation and worker binding the
+    // manifest still proves live. A paused/unbound entry must be resumed by
+    // the explicit desired-state action instead; this method must never turn
+    // a helpful-looking button into an implicit replacement launch.
+    if (!hasExactReconnectTarget(entry)) {
+      throw new Error("This agent no longer has a live runtime to reconnect. Recover the saved agent to start it again.");
+    }
     const status = await this.daemon.ensureRunning();
     await this.reconcileEntry(entry, status.generation, true);
   }
@@ -327,6 +335,15 @@ export class SupervisorGrantCoordinator {
       lastInstalledDaemonGeneration: daemonGeneration,
     });
   }
+}
+
+function hasExactReconnectTarget(entry: DesktopSupervisorManifestEntry): boolean {
+  return entry.desiredState === "running"
+    && entry.agentSessionBindingState === "active"
+    && Boolean(entry.workAttemptId)
+    && Boolean(entry.agentSessionId)
+    && Boolean(entry.executionGenerationId)
+    && Boolean(entry.providerContinuationId);
 }
 
 export const supervisorGrantCoordinator = new SupervisorGrantCoordinator();

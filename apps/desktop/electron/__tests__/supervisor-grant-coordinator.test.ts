@@ -112,6 +112,21 @@ test("Reconnect repairs only the exact credential binding and does not restart t
   assert.equal(entry().providerPid, 4242, "Reconnect retains the existing provider runtime/continuation.");
 });
 
+test("Reconnect refuses a paused entry with no current provider or worker binding", async () => {
+  const h = harness();
+  const unavailable = {
+    ...entry(), desiredState: "paused" as const, observedState: "paused" as const,
+    workAttemptId: null, agentSessionId: null, agentSessionBindingState: "none" as const,
+    executionGenerationId: null, providerContinuationId: null, providerPid: null,
+  };
+  await assert.rejects(
+    h.coordinator.reconnectEntry(unavailable),
+    /no longer has a live runtime to reconnect/,
+  );
+  assert.equal(h.events.some((event) => event.startsWith("install:")), false);
+  assert.equal(h.events.some((event) => event === "ensure"), false);
+});
+
 test("restart recovery repairs a lowercase mapping before provisioning and installing", async () => {
   const h = harness();
   const exactKey = "EmmyMay/desktop-codex-canonical";

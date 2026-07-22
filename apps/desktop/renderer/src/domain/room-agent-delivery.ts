@@ -60,3 +60,39 @@ export function roomAgentDeliverySummary(
   if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "Responding to a room message";
   return "Connected · Listening";
 }
+
+/**
+ * Credential reconnect never creates a replacement. Render it only when the
+ * renderer still has an exact current provider generation and worker binding
+ * to rebind. The daemon repeats the stricter live-handle check at execution.
+ */
+export function canReconnectRoomAgent(
+  agent: Pick<DesktopSupervisorManifestEntry,
+    "deliveryMode" | "desiredState" | "roomAgentState" | "workAttemptId"
+    | "agentSessionId" | "agentSessionBindingState" | "executionGenerationId"
+    | "providerContinuationId">,
+): boolean {
+  return agent.deliveryMode === "daemon_inbox"
+    && agent.desiredState === "running"
+    && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials"
+    && agent.agentSessionBindingState === "active"
+    && Boolean(agent.workAttemptId)
+    && Boolean(agent.agentSessionId)
+    && Boolean(agent.executionGenerationId)
+    && Boolean(agent.providerContinuationId);
+}
+
+/** Explicit recovery restarts the same durable agent entry, never a reconnect fallback. */
+export function canRecoverSavedRoomAgent(
+  agent: Pick<DesktopSupervisorManifestEntry,
+    "deliveryMode" | "desiredState" | "observedState" | "condition"
+    | "executionGenerationId" | "providerContinuationId">,
+): boolean {
+  const recoveryState = ["absent", "paused", "failed", "recovering"].includes(agent.observedState)
+    || agent.condition === "coordination_blocked"
+    || agent.condition === "auth_blocked";
+  return agent.deliveryMode === "daemon_inbox"
+    && agent.desiredState !== "stopped"
+    && recoveryState
+    && (!agent.executionGenerationId || !agent.providerContinuationId);
+}
