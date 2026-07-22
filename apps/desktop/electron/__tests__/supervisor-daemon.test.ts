@@ -284,6 +284,18 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   }]);
 });
 
+test("causal manifest projection synthesizes ingress only for an older daemon that omitted the axis", () => {
+  const legacy = wireEntryWithCausalProjection();
+  delete (legacy.room_agent_state as Record<string, unknown>).ingress;
+  const projected = mapEntry(legacy);
+  assert.equal(projected.roomAgentState?.connection.state, "connected");
+  assert.deepEqual(projected.roomAgentState?.ingress, {
+    state: "observing",
+    observedAt: "2026-01-01T00:00:00.000Z",
+    detail: null,
+  });
+});
+
 test("causal manifest projection drops malformed nested state and malformed receipt rows without coercion", () => {
   const malformed = wireEntryWithCausalProjection() as unknown as {
     room_agent_state: unknown; delivery_receipts: unknown;

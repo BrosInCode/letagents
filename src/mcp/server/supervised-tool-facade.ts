@@ -5,17 +5,8 @@ import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
 import {
   completeCurrentSupervisedEffect,
   prepareCurrentSupervisedEffect,
+  type PreparedSupervisedEffect,
 } from "./runtime/supervisor-bridge.js";
-
-const ENGINE_TOOLS = new Set([
-  "wait_for_messages",
-  "register_agent_session",
-  "renew_agent_session",
-  "start_device_auth",
-  "poll_device_auth",
-  "clear_saved_auth",
-  "resume_room_session",
-]);
 
 const READ_TOOLS = new Set([
   "get_current_room",
@@ -40,7 +31,26 @@ function instruction(text: string, data: Record<string, unknown> = {}): CallTool
  * execution with an exact-turn daemon fence and durable effect journal.
  * Engine mechanics are not registered, so they are absent from discovery.
  */
-export function profileAwareToolServer(server: McpServer, profile: LetAgentsExecutionProfile): McpServer {
+export interface SupervisedToolFacadeDependencies {
+  prepareEffect: (input: {
+    toolName: string;
+    input: unknown;
+    mcpRequestId: string;
+    mutation: boolean;
+  }) => Promise<PreparedSupervisedEffect>;
+  completeEffect: (input: { effectId: string; result?: unknown; error?: string }) => Promise<void>;
+}
+
+const productionDependencies: SupervisedToolFacadeDependencies = {
+  prepareEffect: prepareCurrentSupervisedEffect,
+  completeEffect: completeCurrentSupervisedEffect,
+};
+
+export function profileAwareToolServer(
+  server: McpServer,
+  profile: LetAgentsExecutionProfile,
+  dependencies: SupervisedToolFacadeDependencies = productionDependencies,
+): McpServer {
   if (profile !== "supervised_room_turn") return server;
   return new Proxy(server, {
     get(target, property, receiver) {
@@ -49,16 +59,18 @@ export function profileAwareToolServer(server: McpServer, profile: LetAgentsExec
         return typeof value === "function" ? value.bind(target) : value;
       }
       return (name: string, ...registration: unknown[]) => {
-        if (ENGINE_TOOLS.has(name)) return {};
         const callback = registration.at(-1);
         if (typeof callback !== "function") throw new Error(`Tool ${name} has no callback.`);
         const wrapped = async (...call: unknown[]): Promise<CallToolResult> => {
           const extra = (call.at(-1) ?? {}) as { requestId?: string | number };
           const input = call.length > 1 ? call[0] : {};
-          const prepared = await prepareCurrentSupervisedEffect({
+          if (extra.requestId === undefined || extra.requestId === null || String(extra.requestId).trim() === "") {
+            throw new Error(`Supervised tool ${name} is missing its MCP request id; refusing an effect that cannot be deduplicated safely.`);
+          }
+          const prepared = await dependencies.prepareEffect({
             toolName: name,
             input,
-            mcpRequestId: String(extra.requestId ?? "missing-request-id"),
+            mcpRequestId: String(extra.requestId),
             mutation: !READ_TOOLS.has(name),
           });
           if (prepared.state === "completed") return prepared.result as CallToolResult;
@@ -74,19 +86,25 @@ export function profileAwareToolServer(server: McpServer, profile: LetAgentsExec
               destination_room: prepared.destinationRoom,
             });
           }
+          let result: CallToolResult;
           try {
-            const result = await callback(...call) as CallToolResult;
-            await completeCurrentSupervisedEffect({ effectId: prepared.effectId, result });
-            return result;
+            result = await callback(...call) as CallToolResult;
           } catch (error) {
-            await completeCurrentSupervisedEffect({ effectId: prepared.effectId, error: error instanceof Error ? error.message : String(error) });
+            try {
+              await dependencies.completeEffect({ effectId: prepared.effectId, error: error instanceof Error ? error.message : String(error) });
+            } catch {
+              // Preserve the callback error. An unacknowledged journal entry
+              // remains executing, which is safer than repeating the effect.
+            }
             throw error;
           }
+          // Completion transport is deliberately outside the callback catch.
+          // A reporting failure must never relabel a successful action failed.
+          await dependencies.completeEffect({ effectId: prepared.effectId, result });
+          return result;
         };
         return (target.tool as (...args: unknown[]) => unknown).call(target, name, ...registration.slice(0, -1), wrapped);
       };
     },
   }) as McpServer;
 }
-
-export const supervisedEngineToolNames = ENGINE_TOOLS;

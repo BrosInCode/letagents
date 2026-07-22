@@ -149,6 +149,30 @@ test("worker-authenticated activation ingress deduplicates replay and publishes 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("result recovery uses bounded backoff and blocks instead of hot-looping forever", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-result-recovery-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-unreadable");
+    await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-unreadable" });
+    await store.transition(item.inbox_item_id, "result_recovery", { outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }) });
+    let recoveries = 0;
+    const delays: number[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async () => { throw new Error("must not start a new turn"); },
+      async () => { recoveries += 1; throw new Error("control socket unavailable"); },
+    ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 25, async (ms) => { delays.push(ms); });
+    await delivery.pump(agent);
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(recoveries, 3);
+    assert.deepEqual(delays, [25, 50]);
+    assert.equal(receipt.state, "blocked");
+    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a fresh agent observes history at the tail, advances across silent messages, and dispatches only exact activation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bootstrap-"));
   try {

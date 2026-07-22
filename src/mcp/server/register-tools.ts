@@ -16,15 +16,16 @@ import { profileAwareToolServer } from "./supervised-tool-facade.js";
 
 export function registerTools(server: McpServer, profile: LetAgentsExecutionProfile = "autonomous_mcp_worker"): void {
   const tools = profileAwareToolServer(server, profile);
+  const supervised = profile === "supervised_room_turn";
   registerRoomJoinTools(tools);
-  registerAgentSessionTools(tools);
+  if (!supervised) registerAgentSessionTools(tools);
   registerRoomInspectionTools(tools);
   registerStatusTools(tools);
   registerTaskTools(tools);
   registerRepoInitializationTool(tools);
-  registerMessageTools(tools);
-  registerOnboardingTools(tools);
-  registerRoomResumeTool(tools);
+  registerMessageTools(tools, { includeDeliveryLoop: !supervised });
+  if (!supervised) registerOnboardingTools(tools);
+  if (!supervised) registerRoomResumeTool(tools);
   registerRentalTools(tools);
   registerRepoVisibilityTool(tools);
 }

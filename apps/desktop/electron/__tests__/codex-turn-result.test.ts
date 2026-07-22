@@ -15,6 +15,7 @@ test("normalizes recorded final and final_answer transcript variants", () => {
 
 test("normalizes exact-turn delta-only output when the terminal snapshot has no answer item", () => {
   const results = new CodexTurnResultAccumulator();
+  results.track("thread-1", "turn-1");
   results.observe("item/agentMessage/delta", {
     threadId: "thread-1",
     turnId: "turn-1",
@@ -59,6 +60,7 @@ test("preserves unknown and empty completed shapes as unreadable evidence", () =
 
 test("never mixes stream evidence between turns", () => {
   const results = new CodexTurnResultAccumulator();
+  results.track("thread-1", "other-turn");
   results.observe("item/agentMessage/delta", {
     threadId: "thread-1",
     turnId: "other-turn",
@@ -67,6 +69,20 @@ test("never mixes stream evidence between turns", () => {
   });
   assert.deepEqual(results.normalize("thread-1", "target-turn", {
     id: "target-turn",
+    status: "completed",
+  }), { outcome: "unreadable", text: null, evidence: "none" });
+});
+
+test("ignores interactive turn streams that were never claimed as bounded work", () => {
+  const results = new CodexTurnResultAccumulator();
+  results.observe("item/agentMessage/delta", {
+    threadId: "interactive-thread",
+    turnId: "interactive-turn",
+    itemId: "answer",
+    delta: "must not be retained",
+  });
+  assert.deepEqual(results.normalize("interactive-thread", "interactive-turn", {
+    id: "interactive-turn",
     status: "completed",
   }), { outcome: "unreadable", text: null, evidence: "none" });
 });

@@ -38,6 +38,20 @@ function classify(text: string | null, evidence: "transcript" | "stream"): Norma
 /** Correlates streamed answer evidence by exact thread and turn. */
 export class CodexTurnResultAccumulator {
   private readonly turns = new Map<string, { deltas: Map<string, string>; completed: Map<string, string> }>();
+  private readonly pendingThreads = new Set<string>();
+  private readonly trackedTurns = new Set<string>();
+
+  beginTurnStart(threadId: string): void { this.pendingThreads.add(threadId); }
+  bindTurnStart(threadId: string, turnId: string): void {
+    this.pendingThreads.delete(threadId);
+    this.trackedTurns.add(this.key(threadId, turnId));
+    this.clearThreadExceptTracked(threadId);
+  }
+  abandonTurnStart(threadId: string): void {
+    this.pendingThreads.delete(threadId);
+    this.clearThreadExceptTracked(threadId);
+  }
+  track(threadId: string, turnId: string): void { this.trackedTurns.add(this.key(threadId, turnId)); }
 
   observe(method: string, params: unknown): void {
     const root = params && typeof params === "object" && !Array.isArray(params)
@@ -48,6 +62,8 @@ export class CodexTurnResultAccumulator {
     const turnId = typeof root.turnId === "string" ? root.turnId : null;
     if (!threadId || !turnId) return;
     const key = this.key(threadId, turnId);
+    if (!this.pendingThreads.has(threadId) && !this.trackedTurns.has(key)) return;
+    if (!/^item\/(?:agentMessage\/delta|completed)$/i.test(method)) return;
     const current = this.turns.get(key) ?? { deltas: new Map<string, string>(), completed: new Map<string, string>() };
 
     if (/^item\/agentMessage\/delta$/i.test(method)) {
@@ -78,7 +94,21 @@ export class CodexTurnResultAccumulator {
     return classify(streamed, "stream");
   }
 
-  clear(threadId: string, turnId: string): void { this.turns.delete(this.key(threadId, turnId)); }
-  clearAll(): void { this.turns.clear(); }
+  clear(threadId: string, turnId: string): void {
+    const key = this.key(threadId, turnId);
+    this.turns.delete(key);
+    this.trackedTurns.delete(key);
+  }
+  clearAll(): void {
+    this.turns.clear();
+    this.pendingThreads.clear();
+    this.trackedTurns.clear();
+  }
+  private clearThreadExceptTracked(threadId: string): void {
+    const prefix = `${threadId}\u0000`;
+    for (const key of this.turns.keys()) {
+      if (key.startsWith(prefix) && !this.trackedTurns.has(key)) this.turns.delete(key);
+    }
+  }
   private key(threadId: string, turnId: string): string { return `${threadId}\u0000${turnId}`; }
 }

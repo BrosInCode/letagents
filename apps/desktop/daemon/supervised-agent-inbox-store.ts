@@ -30,6 +30,8 @@ export type SupervisedEffectRecord = {
 type Row = Record<string, unknown>;
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
 const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"]);
+const RETAINED_TERMINAL_RECEIPTS_PER_AGENT = 200;
+const RETAINED_OBSERVED_MESSAGES_PER_AGENT = 500;
 const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInboxState[]>> = {
   pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "retryable", "blocked"],
   awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "retryable", "blocked"],
@@ -119,6 +121,7 @@ export class SupervisedAgentInboxStore {
         ? currentCursor : input.last_observed_message_id;
       run(database.prepare(`INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)
         ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,last_observed_message_id=excluded.last_observed_message_id,updated_at=excluded.updated_at`), input.agent_id, input.room_id, nextCursor, timestamp);
+      this.pruneAgentHistory(database, input.agent_id);
       return created;
     }));
   }
@@ -162,6 +165,7 @@ export class SupervisedAgentInboxStore {
           : updated.attempt_count;
         this.recordEvent(database, inboxItemId, `${event}:${ordinal}`, event, timestamp, updated.last_error);
       }
+      if (finalStates.has(next)) this.pruneAgentHistory(database, item.agent_id);
       return updated;
     }));
   }
@@ -241,6 +245,22 @@ export class SupervisedAgentInboxStore {
         this.recordEvent(database, input.inbox_item_id, `result_unreadable:${input.provider_turn_id}`, "result_unreadable", timestamp, "Re-reading the same completed provider turn.");
       }
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row);
+    }));
+  }
+
+  async recordResultRecoveryRetry(inboxItemId: string, error: string): Promise<number> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
+      const item = rowToItem(row);
+      if (item.state !== "result_recovery") throw new Error("Only an unreadable terminal result may record a result-recovery retry.");
+      this.assertCurrentHead(database, item);
+      const prior = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='retry_scheduled'").get(inboxItemId) as Row).value);
+      const attempt = prior + 1;
+      const timestamp = this.now();
+      run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?"), error, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, `result_recovery_retry:${attempt}`, "retry_scheduled", timestamp, `Re-reading the same completed turn (${attempt}/3): ${error}`);
+      return attempt;
     }));
   }
 
@@ -324,6 +344,25 @@ export class SupervisedAgentInboxStore {
         WHERE agent_id=? AND provider_turn_id=? AND tool_name='join_room' AND state='prepared'
         ORDER BY created_at LIMIT 1`).get(agentId, providerTurnId) as Row | undefined;
       return row ? rowToEffect(row) : null;
+    });
+  }
+
+  async preparedRoomMoves(agentId?: string): Promise<SupervisedEffectRecord[]> {
+    return this.read(async (database) => {
+      const rows = agentId
+        ? database.prepare(`SELECT * FROM supervised_agent_effects
+          WHERE agent_id=? AND tool_name='join_room' AND state='prepared' ORDER BY created_at`).all(agentId) as Row[]
+        : database.prepare(`SELECT * FROM supervised_agent_effects
+          WHERE tool_name='join_room' AND state='prepared' ORDER BY created_at`).all() as Row[];
+      return rows.map(rowToEffect);
+    });
+  }
+
+  async inboxForProviderTurn(agentId: string, providerTurnId: string): Promise<SupervisedInboxItem | null> {
+    return this.read(async (database) => {
+      const row = database.prepare(`SELECT * FROM supervised_agent_inbox
+        WHERE agent_id=? AND provider_turn_id=? ORDER BY fifo_sequence LIMIT 1`).get(agentId, providerTurnId) as Row | undefined;
+      return row ? rowToItem(row) : null;
     });
   }
 
@@ -442,20 +481,65 @@ export class SupervisedAgentInboxStore {
       return recovered;
     }));
   }
-  async receipts(agentId: string): Promise<SupervisedInboxReceiptWithTimeline[]> {
+  /**
+   * Return every actionable receipt plus a bounded terminal history. Timeline
+   * events are loaded in one joined query so status polling is O(rows), not an
+   * ever-growing N+1 query fan-out.
+   */
+  async receipts(agentId: string, terminalLimit = RETAINED_TERMINAL_RECEIPTS_PER_AGENT): Promise<SupervisedInboxReceiptWithTimeline[]> {
     return this.read(async (database) => {
-      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence").all(agentId) as Row[];
+      const limit = Math.max(0, Math.min(Math.trunc(terminalLimit), RETAINED_TERMINAL_RECEIPTS_PER_AGENT));
+      const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
+        WHERE agent_id=? AND (
+          state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+          OR inbox_item_id IN (
+            SELECT inbox_item_id FROM supervised_agent_inbox
+            WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+            ORDER BY fifo_sequence DESC LIMIT ?
+          )
+        ) ORDER BY fifo_sequence`).all(agentId, agentId, limit) as Row[];
+      const selected = new Set(rows.map((row) => String(row.inbox_item_id)));
+      const timelines = new Map<string, SupervisedInboxEvent[]>();
+      for (const event of database.prepare(`SELECT e.inbox_item_id,e.phase,e.observed_at,e.detail
+        FROM supervised_agent_inbox_events e
+        JOIN supervised_agent_inbox i ON i.inbox_item_id=e.inbox_item_id
+        WHERE i.agent_id=? ORDER BY i.fifo_sequence,e.event_sequence`).all(agentId) as Row[]) {
+        const inboxItemId = String(event.inbox_item_id);
+        if (!selected.has(inboxItemId)) continue;
+        const timeline = timelines.get(inboxItemId) ?? [];
+        timeline.push({
+          phase: String(event.phase) as SupervisedInboxEvent["phase"],
+          observed_at: String(event.observed_at),
+          detail: event.detail === null ? null : String(event.detail),
+        });
+        timelines.set(inboxItemId, timeline);
+      }
       const head = rows.find((row) => !finalStates.has(String(row.state) as SupervisedInboxState));
       const firstBlocked = head && String(head.state) === "blocked" ? head : undefined;
       return rows.map((row) => {
         const item = rowToItem(row);
-        const timeline = this.events(database, item.inbox_item_id);
+        const timeline = timelines.get(item.inbox_item_id) ?? [];
         if (firstBlocked && item.fifo_sequence > Number(firstBlocked.fifo_sequence) && !finalStates.has(item.state)) {
           return { ...item, timeline, receipt_state: "queued_behind_blocked" as const, blocked_by_inbox_item_id: String(firstBlocked.inbox_item_id) };
         }
         return { ...item, timeline, receipt_state: item.state };
       });
     });
+  }
+
+  /** Remove all daemon-owned delivery history for an agent being discarded. */
+  async removeAgent(agentId: string): Promise<void> {
+    await this.exclusive(async (database) => this.transaction(database, () => {
+      run(database.prepare("DELETE FROM supervised_agent_effects WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_agent_observed_messages WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_agent_inbox WHERE agent_id=?"), agentId);
+    }));
+  }
+
+  async pruneHistory(agentId: string): Promise<void> {
+    await this.exclusive(async (database) => this.transaction(database, () => this.pruneAgentHistory(database, agentId)));
   }
 
   private async read<T>(operation: (database: DatabaseSync) => Promise<T> | T): Promise<T> { return operation(await this.getDatabase()); }
@@ -486,10 +570,28 @@ export class SupervisedAgentInboxStore {
         SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key=?
       )`), inboxItemId, inboxItemId, idempotencyKey, phase, observedAt, detail, inboxItemId, idempotencyKey);
   }
-  private events(database: DatabaseSync, inboxItemId: string): SupervisedInboxEvent[] {
-    return (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence").all(inboxItemId) as Row[]).map((row) => ({
-      phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail),
-    }));
+  private pruneAgentHistory(database: DatabaseSync, agentId: string): void {
+    const stale = database.prepare(`SELECT i.inbox_item_id,i.provider_turn_id
+      FROM supervised_agent_inbox i
+      WHERE i.agent_id=?
+        AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+        AND NOT EXISTS (
+          SELECT 1 FROM supervised_agent_effects e
+          WHERE e.agent_id=i.agent_id AND e.provider_turn_id=i.provider_turn_id
+            AND e.state IN ('prepared','executing')
+        )
+      ORDER BY i.fifo_sequence DESC LIMIT -1 OFFSET ?`).all(agentId, RETAINED_TERMINAL_RECEIPTS_PER_AGENT) as Row[];
+    const deleteEffects = database.prepare("DELETE FROM supervised_agent_effects WHERE agent_id=? AND provider_turn_id=? AND state IN ('completed','failed')");
+    const deleteInbox = database.prepare("DELETE FROM supervised_agent_inbox WHERE inbox_item_id=?");
+    for (const row of stale) {
+      if (row.provider_turn_id !== null) run(deleteEffects, agentId, String(row.provider_turn_id));
+      run(deleteInbox, String(row.inbox_item_id));
+    }
+    run(database.prepare(`DELETE FROM supervised_agent_observed_messages
+      WHERE agent_id=? AND rowid NOT IN (
+        SELECT rowid FROM supervised_agent_observed_messages
+        WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
+      )`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
   }
 }
 

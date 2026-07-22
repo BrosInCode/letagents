@@ -568,6 +568,34 @@ test("Codex bounded room turn preserves an unreadable completed result without t
   assert.deepEqual(await pending, { turnId: "turn-empty", outcome: "unreadable", text: null, evidence: "none" });
 });
 
+test("Codex retains stream-only terminal evidence until the daemon durably checkpoints it", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: "turn-stream-checkpoint" } } as T;
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{ id: "turn-stream-checkpoint", status: "completed" }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-stream-checkpoint", actionId: "action-stream-checkpoint", sourceMessage: {}, activation: {},
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async () => {},
+    checkpointTerminalResult: async () => { throw new Error("SQLite checkpoint unavailable"); },
+  });
+  await flush();
+  client.emit({ method: "item/agentMessage/delta", params: { threadId: handle.providerContinuationId, turnId: "turn-stream-checkpoint", itemId: "answer", delta: "Retained answer" } });
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-stream-checkpoint" } });
+  await assert.rejects(pending, /SQLite checkpoint unavailable/);
+  let checkpointed: unknown = null;
+  assert.deepEqual(await adapter.recoverRoomTurn!(handle, {
+    inboxItemId: "inbox-stream-checkpoint", providerTurnId: "turn-stream-checkpoint",
+  }, {
+    checkpointTerminalResult: async (result) => { checkpointed = result; },
+  }), { turnId: "turn-stream-checkpoint", outcome: "reply", text: "Retained answer", evidence: "stream" });
+  assert.deepEqual(checkpointed, { turnId: "turn-stream-checkpoint", outcome: "reply", text: "Retained answer", evidence: "stream" });
+});
+
 test("Codex bounded room turn does not treat a sentinel with extra text as no-reply", async () => {
   const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
