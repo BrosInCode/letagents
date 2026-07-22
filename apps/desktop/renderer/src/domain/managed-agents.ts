@@ -1132,7 +1132,8 @@ function supervisorEntryIsMentionable(
   }
   if (!entry.agentKey?.trim() || !entry.roomAgentState) return false;
   if (entry.desiredState === "stopped" && entry.observedState === "stopped") return false;
-  return entry.roomAgentState.connection.state === "connected";
+  return entry.roomAgentState.connection.state === "connected"
+    && (entry.roomAgentState.ingress?.state ?? "observing") === "observing";
 }
 
 function desktopSupervisorEntryToParticipant(

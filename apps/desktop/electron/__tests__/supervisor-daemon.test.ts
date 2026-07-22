@@ -33,6 +33,7 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
     created_by: "user", created_at: "2026-01-01T00:00:00.000Z",
     room_agent_state: {
       connection: { state: "connected", observed_at: "2026-01-01T00:00:00.000Z", detail: null },
+      ingress: { state: "observing", observed_at: "2026-01-01T00:00:00.000Z", detail: null },
       inbox: { state: "blocked", pending_count: 2, blocked_by_message_id: "msg_1", detail: null },
       turn: { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null },
       task: { state: "none", task_id: null, title: null },

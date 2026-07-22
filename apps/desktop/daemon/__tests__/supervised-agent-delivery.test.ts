@@ -15,6 +15,7 @@ import { DAEMON_PROTOCOL_VERSION } from "../types.js";
 const agent = {
   agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
   handle: { workAttemptId: "attempt", providerContinuationId: "thread", pid: 1, observedState: "working" as const },
+  workAttemptId: "attempt", providerContinuationId: "thread", pid: 1,
 };
 const currentAuthority = async () => true;
 const provider = (runRoomTurn: NonNullable<ProviderActionPort["runRoomTurn"]>, recoverRoomTurn?: NonNullable<ProviderActionPort["recoverRoomTurn"]>) => ({
@@ -62,6 +63,26 @@ test("Codex daemon delivery treats an absent mode as historical mcp_polling", as
     const { deliveryMode: _deliveryMode, ...historicalAgent } = agent;
     await delivery.poll(historicalAgent);
     assert.equal(polls, 0);
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ingress keeps observing and queues routed work without a provider handle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-ingress-only-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let turns = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; return { turnId: "never", outcome: "no_reply", text: null }; }), {
+    poll: async () => ({ messages: [{ id: "1", text: "hello", activation: { for_current_agent: { decision: "activate" } } }] }),
+    publish: async () => {},
+  }, currentAuthority);
+  try {
+    await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: null });
+    await delivery.poll({ ...agent, handle: null, pid: null });
+    assert.equal(turns, 0);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "pending");
+    assert.equal((await store.ingressHealth(agent.agentId))?.state, "observing");
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });

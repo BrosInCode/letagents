@@ -71,12 +71,13 @@ export type ProviderRoomTurnRequest = {
   sourceMessage: unknown;
   activation: Record<string, unknown>;
   actionId: string;
+  charter?: string;
+  observedContext?: unknown[];
 };
-export type ProviderRoomTurnResult = {
-  turnId: string;
-  outcome: "reply" | "no_reply";
-  text: string | null;
-};
+export type ProviderRoomTurnResult =
+  | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream" }
+  | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream" }
+  | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none" };
 export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 
