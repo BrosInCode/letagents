@@ -58,6 +58,12 @@ type InstalledHostGrant = {
   grantGeneration: number; apiUrl: string; daemonGeneration: number;
   hostId: string; installationId: string; expiresAt: string;
 };
+/** A short-lived, process-only worker bearer.  It is intentionally never durable. */
+type CachedWorkerAuthorization = {
+  entryId: string; roomId: string; agentKey: string; workAttemptId: string | null;
+  grantId: string; grantGeneration: number; daemonGeneration: number; apiUrl: string;
+  agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; mintedAtMs: number;
+};
 type BootstrapOperation = {
   controller: AbortController;
   phase: "observing" | "committing";
@@ -75,6 +81,44 @@ const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 // admission boundary inside that window: after Electron gives up, a late
 // first-tail write would be both surprising and hard to surface to the user.
 const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 2_500;
+const WORKER_MINT_TIMEOUT_MS = 2_000;
+const WORKER_MINT_MAX_ATTEMPTS = 3;
+const WORKER_MINT_RETRY_DELAY_MS = 100;
+const WORKER_MINT_FALLBACK_FRESH_MS = 2 * 60_000;
+
+function schedulerErrorDetail(error: unknown, depth = 0): string {
+  if (depth > 3) return "nested error omitted";
+  if (!(error instanceof Error)) return redactCredentialText(String(error || "unknown error")).value;
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const detail = cause === undefined ? error.message : `${error.message}; cause: ${schedulerErrorDetail(cause, depth + 1)}`;
+  return redactCredentialText(detail).value;
+}
+
+function retryableWorkerMintFailure(error: unknown): boolean {
+  if (!(error instanceof SupervisorGrantRequestError)) return true;
+  return error.status >= 500 || [408, 425, 429].includes(error.status);
+}
+
+class WorkerCredentialMintError extends Error {
+  constructor(
+    readonly attempts: number,
+    readonly retryable: boolean,
+    cause: unknown,
+  ) {
+    super(`Worker credential mint failed after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${schedulerErrorDetail(cause)}`, { cause });
+    this.name = "WorkerCredentialMintError";
+  }
+}
+
+function exhaustedTransientWorkerMint(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (current instanceof WorkerCredentialMintError) return current.retryable;
+    if (!(current instanceof Error)) return false;
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 function supervisedRoomPath(roomId: string): string {
   return roomId.split("/").map(encodeURIComponent).join("/");
@@ -539,6 +583,8 @@ export class SupervisorDaemon {
   private readonly pendingResumeBindings = new Map<string, PendingResumeBinding>();
   /** Installed by the desktop over the local socket; intentionally never serialized. */
   private readonly hostGrants = new Map<string, InstalledHostGrant>();
+  /** Latest successful bootstrap/launch mint, fenced to one effective grant and attempt. */
+  private readonly cachedWorkerAuthorizations = new Map<string, CachedWorkerAuthorization>();
   /** Initial-tail reads are authority-bearing admission operations. */
   private readonly bootstrapOperations = new Set<BootstrapOperation>();
   private readonly nowMs: () => number;
@@ -827,6 +873,7 @@ export class SupervisorDaemon {
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
     this.hostGrants.clear();
+    this.cachedWorkerAuthorizations.clear();
     await this.fenceAndDrainDeliveryCutovers();
     await this.supervisedDelivery?.fenceAndDrain();
     for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
@@ -862,6 +909,7 @@ export class SupervisorDaemon {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
     this.hostGrants.clear();
+    this.cachedWorkerAuthorizations.clear();
     const failures: unknown[] = [];
     try { await this.fenceAndDrainDeliveryCutovers(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
@@ -3409,6 +3457,7 @@ export class SupervisorDaemon {
 
   private async blockHostGrantAuthority(entry: DaemonManifestEntry, grant: InstalledHostGrant, detail: string): Promise<void> {
     this.revokeHostGrantIfCurrent(entry.id, grant);
+    this.cachedWorkerAuthorizations.delete(entry.id);
     await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
     const binding = await this.workerBindings.get(entry.id);
     if (binding) await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
@@ -3427,6 +3476,7 @@ export class SupervisorDaemon {
   }
 
   private async blockExpiredWorkerAuthority(entry: DaemonManifestEntry, detail: string): Promise<void> {
+    this.cachedWorkerAuthorizations.delete(entry.id);
     await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
     const binding = await this.workerBindings.get(entry.id);
     if (binding) await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
@@ -3531,6 +3581,7 @@ export class SupervisorDaemon {
   private async ownsDaemonGeneration(expectedGeneration: number): Promise<boolean> {
     if (this.handoffScheduled) {
       this.hostGrants.clear();
+      this.cachedWorkerAuthorizations.clear();
       return false;
     }
     if (expectedGeneration !== this.singleton.currentGeneration) return false;
@@ -3538,6 +3589,7 @@ export class SupervisorDaemon {
       await this.singleton.assertCurrent();
       if (this.handoffScheduled) {
         this.hostGrants.clear();
+        this.cachedWorkerAuthorizations.clear();
         return false;
       }
       return expectedGeneration === this.singleton.currentGeneration;
@@ -3545,37 +3597,112 @@ export class SupervisorDaemon {
       // A successor acquired the singleton without this process completing its
       // normal handoff path. Drop every process-memory credential immediately.
       this.hostGrants.clear();
+      this.cachedWorkerAuthorizations.clear();
       return false;
     }
   }
 
   private revokeHostGrantIfCurrent(entryId: string, grant: InstalledHostGrant): void {
-    if (this.hostGrants.get(entryId) === grant) this.hostGrants.delete(entryId);
+    if (this.hostGrants.get(entryId) === grant) {
+      this.hostGrants.delete(entryId);
+      this.cachedWorkerAuthorizations.delete(entryId);
+    }
+  }
+
+  private cachedWorkerAuthorization(entry: DaemonManifestEntry, grant: InstalledHostGrant): CachedWorkerAuthorization | null {
+    const cached = this.cachedWorkerAuthorizations.get(entry.id);
+    if (!cached) return null;
+    const expiresAt = cached.expiresAt ? Date.parse(cached.expiresAt) : Number.NaN;
+    const fresh = Number.isFinite(expiresAt)
+      ? expiresAt > this.nowMs() + WORKER_BEARER_ROTATION_LEAD_MS
+      : cached.mintedAtMs + WORKER_MINT_FALLBACK_FRESH_MS > this.nowMs();
+    const exact = cached.entryId === entry.id
+      && cached.roomId === entry.room_id
+      && cached.agentKey === grant.agentKey
+      && cached.grantId === grant.grantId
+      && cached.grantGeneration === grant.grantGeneration
+      && cached.daemonGeneration === grant.daemonGeneration
+      && cached.apiUrl === grant.apiUrl;
+    if (!fresh || !exact) {
+      this.cachedWorkerAuthorizations.delete(entry.id);
+      return null;
+    }
+    // Bootstrap necessarily mints before ensureWorkAttempt. The first launch
+    // claims that one-use pre-attempt credential into its newly durable attempt;
+    // subsequent use is fenced to that exact attempt.
+    if (cached.workAttemptId === null && entry.work_attempt_id) cached.workAttemptId = entry.work_attempt_id;
+    if (cached.workAttemptId !== entry.work_attempt_id) {
+      this.cachedWorkerAuthorizations.delete(entry.id);
+      return null;
+    }
+    return cached;
+  }
+
+  private async mintWorkerSessionWithRetry(entry: DaemonManifestEntry, grant: InstalledHostGrant, signal?: AbortSignal): Promise<Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>> {
+    let lastError: unknown = null;
+    let attempts = 0;
+    let lastRetryable = false;
+    for (let attempt = 1; attempt <= WORKER_MINT_MAX_ATTEMPTS; attempt += 1) {
+      if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
+      attempts = attempt;
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      let timeoutReject!: (error: Error) => void;
+      const timedOut = new Promise<never>((_resolve, reject) => { timeoutReject = reject; });
+      const timeout = this.setRecoveryTimeout(() => {
+        controller.abort();
+        timeoutReject(new Error(`Worker credential mint timed out after ${WORKER_MINT_TIMEOUT_MS}ms.`));
+      }, WORKER_MINT_TIMEOUT_MS);
+      timeout.unref();
+      try {
+        return await Promise.race([this.supervisorGrantHttp.createWorkerSession({
+          apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+          grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
+          agentInstanceId: `daemon:${entry.id}`, signal: controller.signal,
+        }), timedOut]);
+      } catch (error) {
+        lastError = error;
+        const retryable = retryableWorkerMintFailure(error);
+        lastRetryable = retryable && !signal?.aborted;
+        if (!retryable || signal?.aborted || attempt === WORKER_MINT_MAX_ATTEMPTS) break;
+        await new Promise<void>((resolve) => this.setRecoveryTimeout(resolve, WORKER_MINT_RETRY_DELAY_MS));
+      } finally {
+        this.clearRecoveryTimeout(timeout);
+        signal?.removeEventListener("abort", abort);
+      }
+    }
+    throw new WorkerCredentialMintError(attempts, lastRetryable, lastError);
   }
 
   /** Remote authorization happens before starting a durable provider generation. */
-  private async mintHostWorkerAuthorization(entry: DaemonManifestEntry): Promise<{
+  private async mintHostWorkerAuthorization(entry: DaemonManifestEntry, signal?: AbortSignal, forceFresh = false): Promise<{
     agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string;
   } | null> {
     const grant = this.currentHostGrant(entry);
-    if (!grant || !entry.work_attempt_id) return null;
+    if (!grant) return null;
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) {
       this.revokeHostGrantIfCurrent(entry.id, grant);
       return null;
     }
-    const minted = await this.supervisorGrantHttp.createWorkerSession({
-      apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
-      grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
-      // This is stable for the exact durable attempt, so server-side idempotence
-      // rotates rather than creates a second worker on daemon recovery.
-      agentInstanceId: `daemon:${entry.id}`,
-    });
+    const cached = forceFresh ? null : this.cachedWorkerAuthorization(entry, grant);
+    if (cached) return {
+      agentSessionId: cached.agentSessionId, bearer: cached.bearer, bearerId: cached.bearerId,
+      expiresAt: cached.expiresAt, apiUrl: cached.apiUrl,
+    };
+    const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal);
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) {
       this.revokeHostGrantIfCurrent(entry.id, grant);
       return null;
     }
     const current = await this.store.getEntry(entry.id);
-    if (!current || current.work_attempt_id !== entry.work_attempt_id || !this.currentHostGrant(current)) return null;
+    if (!current || current.work_attempt_id !== entry.work_attempt_id || this.currentHostGrant(current) !== grant) return null;
+    this.cachedWorkerAuthorizations.set(entry.id, {
+      entryId: entry.id, roomId: entry.room_id, agentKey: grant.agentKey,
+      workAttemptId: entry.work_attempt_id ?? null, grantId: grant.grantId, grantGeneration: grant.grantGeneration,
+      daemonGeneration: grant.daemonGeneration, apiUrl: grant.apiUrl, agentSessionId: minted.sessionId,
+      bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, mintedAtMs: this.nowMs(),
+    });
     return { agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, apiUrl: grant.apiUrl };
   }
 
@@ -3603,10 +3730,10 @@ export class SupervisorDaemon {
     return { ...minted, executionGenerationId };
   }
 
-  private async mintHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string): Promise<{
+  private async mintHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string, forceFresh = false): Promise<{
     agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
   } | null> {
-    const minted = await this.mintHostWorkerAuthorization(entry);
+    const minted = await this.mintHostWorkerAuthorization(entry, undefined, forceFresh);
     return minted ? this.recordMintedHostWorkerSession(entry, executionGenerationId, minted) : null;
   }
 
@@ -3669,6 +3796,13 @@ export class SupervisorDaemon {
         daemonGeneration: input.daemon_generation, hostId: input.host_id,
         installationId: input.installation_id, expiresAt: input.grant_expires_at,
       };
+      // Compare the *effective* grant after stale-install resolution. A stale
+      // Electron resend deliberately retains the daemon's newer grant and its
+      // cache; an actual grant id/generation replacement cannot reuse it.
+      if (currentGrant && (currentGrant.grantId !== grant.grantId
+        || currentGrant.grantGeneration !== grant.grantGeneration)) {
+        this.cachedWorkerAuthorizations.delete(entry.id);
+      }
       // Recovery must not signal, restart, or migrate a live provider. It only
       // rotates the worker bearer against the persisted exact generation.
       const live = this.liveHandles.get(entry.id);
@@ -3690,7 +3824,7 @@ export class SupervisorDaemon {
         }
         const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === entry.provider_ref!.execution_generation_id);
         if (execution && !execution.terminal) {
-          const minted = await this.mintHostWorkerSession(entry, execution.execution_generation_id);
+          const minted = await this.mintHostWorkerSession(entry, execution.execution_generation_id, input.credential_only === true);
           if (minted) {
             await this.bindMintedHostWorkerSession(entry.id, minted);
             if (!await this.ownsDaemonGeneration(input.daemon_generation) || this.hostGrants.get(entry.id) !== grant) {
@@ -3753,15 +3887,12 @@ export class SupervisorDaemon {
         if (operation.phase === "observing") operation.controller.abort();
       }, BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS);
       timeout.unref();
-      let minted: Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>;
+      let minted: NonNullable<Awaited<ReturnType<typeof this.mintHostWorkerAuthorization>>>;
       let tail: { messages?: Array<Record<string, unknown>> };
       try {
-        minted = await this.supervisorGrantHttp.createWorkerSession({
-          apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
-          grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
-          agentInstanceId: `daemon:${entry.id}`,
-          signal: operation.controller.signal,
-        });
+        const authorization = await this.mintHostWorkerAuthorization(entry, operation.controller.signal);
+        if (!authorization) throw new Error("Room ingress bootstrap lost host grant authority before minting a worker credential.");
+        minted = authorization;
         if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
         tail = await latest({ roomId: entry.room_id, apiUrl: grant.apiUrl, bearer: minted.bearer, signal: operation.controller.signal });
         if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
@@ -4409,7 +4540,7 @@ export class SupervisorDaemon {
   }
 
   private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {
-    const message = error instanceof Error ? error.message : "unknown scheduler failure";
+    const message = schedulerErrorDetail(error);
     await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
       const manifest = await this.store.load();
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
@@ -4423,6 +4554,11 @@ export class SupervisorDaemon {
         : entry.observed_state;
       await this.transitionOnce(entryId, observedState, condition, `convergence scheduler failure: ${message}`, actor, undefined, "coordination_escalation");
     }));
+    // A transient mint failure must converge again without waiting for another
+    // Electron RPC. The per-entry timer coalesces this into one bounded retry.
+    if (exhaustedTransientWorkerMint(error)) {
+      this.scheduleRecoveryConvergence(entryId, this.nativeHeartbeatIntervalMs);
+    }
   }
 }
 

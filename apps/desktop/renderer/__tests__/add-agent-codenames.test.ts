@@ -14,25 +14,41 @@ test("sequential Codex creation requests receive distinct persisted display name
   assert.doesNotMatch(secondDisplayName, /supervised agent/i);
 });
 
-test("concurrent codename collisions stay visibly distinct without leaking launch UUIDs", () => {
-  // These seeds select the same friendly base candidate. Concurrent launches
-  // are still separated by their supervised entry id; the visible label is
-  // deliberately allowed to remain human-sized.
+test("concurrent codename collisions keep friendly labels while durable ids remain authoritative", () => {
+  // These seeds select the same friendly base candidate. The durable entry id,
+  // not the product label, separates simultaneous launches.
   const firstRequestId = "request_00000005";
   const secondRequestId = "request_00000070";
   const firstDisplayName = suggestSupervisedCodexCodename([], firstRequestId);
   const secondDisplayName = suggestSupervisedCodexCodename([], secondRequestId);
 
   assert.equal(firstDisplayName.split(" · ")[0], secondDisplayName.split(" · ")[0]);
-  assert.notEqual(firstDisplayName, secondDisplayName);
+  assert.equal(firstDisplayName, secondDisplayName);
   assert.doesNotMatch(firstDisplayName, /000000/);
   assert.equal(
     supervisedAgentDisplayLabel(`CloudHaven · ${firstRequestId}`, `supervised_${firstRequestId}`),
-    `CloudHaven · ${supervisedAgentShortTag(firstRequestId)}`,
+    "CloudHaven",
+  );
+  assert.equal(
+    supervisedAgentDisplayLabel(`CloudHaven · ${supervisedAgentShortTag(firstRequestId)}`, `supervised_${firstRequestId}`),
+    "CloudHaven",
   );
   assert.equal(
     supervisedAgentDisplayLabel(`CloudHaven · ${firstRequestId}`, `supervised_${secondRequestId}`),
     `CloudHaven · ${firstRequestId}`,
     "only the exact entry-owned suffix is hidden",
+  );
+});
+
+test("name projection preserves punctuation that is not owned by the exact durable entry", () => {
+  const entryId = "supervised_request_00000005";
+
+  assert.equal(
+    supervisedAgentDisplayLabel("Ava · 000001", entryId),
+    "Ava · 000001",
+  );
+  assert.equal(
+    supervisedAgentDisplayLabel("Ava · request_00000070", entryId),
+    "Ava · request_00000070",
   );
 });
