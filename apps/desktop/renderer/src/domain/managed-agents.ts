@@ -19,6 +19,7 @@ import type {
   RepoStatus,
   RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
+import { isGenericAgentProviderLabel } from "./agent-provider";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
 import { supervisedAgentDisplayLabel } from "./codenames";
@@ -1234,7 +1235,7 @@ export function mergeDesktopSupervisorAgentParticipants(
       // or composite actor label with local runtime fallback metadata.
       actorLabel: existing.actorLabel || projected.actorLabel,
       ownerLabel: existing.ownerLabel || projected.ownerLabel,
-      ideLabel: existing.ideLabel || projected.ideLabel,
+      ideLabel: isGenericAgentProviderLabel(existing.ideLabel) ? projected.ideLabel : existing.ideLabel,
       sourceFlags: [...new Set([...existing.sourceFlags, ...projected.sourceFlags])],
     };
   }

@@ -294,6 +294,7 @@ const props = withDefaults(defineProps<{
   deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;
+  providerLabel?: string | null;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
@@ -378,7 +379,7 @@ const ownerAttribution = computed(() => resolveOwnerAttribution({
   actorLabel: props.message.agentIdentity?.actorLabel || props.message.actorLabel,
   sender: props.message.sender,
 }));
-const ideLabel = computed(() => props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
+const ideLabel = computed(() => props.providerLabel || props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
 const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
 const isAmbientSystem = computed(() =>
   isAmbientSystemMessage(props.message.sender, props.message.text || "")
