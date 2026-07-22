@@ -1225,10 +1225,17 @@ export function mergeDesktopSupervisorAgentParticipants(
       merged.push(projected);
       continue;
     }
+    const existing = merged[existingIndex];
     merged[existingIndex] = {
-      ...merged[existingIndex],
+      ...existing,
       ...projected,
-      sourceFlags: [...new Set([...merged[existingIndex].sourceFlags, ...projected.sourceFlags])],
+      // The supervisor projection owns reachability, but the room API owns
+      // participant identity. Do not replace a server-provided owner label
+      // or composite actor label with local runtime fallback metadata.
+      actorLabel: existing.actorLabel || projected.actorLabel,
+      ownerLabel: existing.ownerLabel || projected.ownerLabel,
+      ideLabel: existing.ideLabel || projected.ideLabel,
+      sourceFlags: [...new Set([...existing.sourceFlags, ...projected.sourceFlags])],
     };
   }
   return merged;
@@ -1259,7 +1266,10 @@ function desktopSupervisorEntryToParticipant(
     actorLabel: entry.displayName,
     agentKey: entry.agentKey ?? null,
     githubLogin: null,
-    ownerLabel: "Local desktop",
+    // Canonical agent keys are server-owned `<owner login>/<agent name>`
+    // identities. They are a truthful fallback while the room participant
+    // snapshot catches up; "Local desktop" describes a host, not an owner.
+    ownerLabel: supervisorOwnerLabelFromAgentKey(entry.agentKey),
     ideLabel: entry.provider === "codex" ? "Codex" : entry.provider,
     hiddenAt: null,
     activityState: "active",
@@ -1268,6 +1278,13 @@ function desktopSupervisorEntryToParticipant(
     lastLiveHeartbeatAt: entry.workplaceLiveness.observedAt || timestamp,
     sourceFlags: ["delivery", "presence"],
   };
+}
+
+function supervisorOwnerLabelFromAgentKey(agentKey: string | null | undefined): string | null {
+  const normalized = agentKey?.trim() || "";
+  const separator = normalized.indexOf("/");
+  if (separator <= 0) return null;
+  return normalized.slice(0, separator).trim() || null;
 }
 
 export function mergeDesktopManagedAgentPresence(
