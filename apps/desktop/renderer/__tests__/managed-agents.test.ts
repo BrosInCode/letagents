@@ -687,7 +687,8 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     observedState: "working",
     condition: "none",
     roomAgentState: {
-      connection: { state: "connected", detail: null },
+      connection: { state: "connected", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
+      ingress: { state: "observing", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
       inbox: { state: "responding", pendingCount: 0, blockedByMessageId: null, detail: null },
       turn: {
         state: "responding",
@@ -698,6 +699,17 @@ test("supervisor native activity drives the chat work indicator for the bound ro
       },
       task: { state: "none", taskId: null, title: null },
     },
+    deliveryReceipts: [{
+      inboxItemId: "inbox_1",
+      sourceMessageId: "message_source",
+      state: "awaiting_result",
+      attemptCount: 1,
+      providerTurnId: "turn_1",
+      blockedByMessageId: null,
+      error: null,
+      updatedAt: "2026-07-15T18:00:00.500Z",
+      timeline: [{ phase: "turn_started", observedAt: "2026-07-15T18:00:00.500Z", detail: null }],
+    }],
     nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
     activity: [{
       observedAt: "2026-07-15T18:00:01.000Z",
@@ -716,13 +728,22 @@ test("supervisor native activity drives the chat work indicator for the bound ro
   assert.deepEqual(
     supervisedAgentWorkIndicators([
       working,
-      { ...working, id: "supervised_stale", agentSessionId: "agent_session_404", nativeLiveness: { state: "stale", observedAt: working.nativeLiveness.observedAt, detail: null } },
+      {
+        ...working,
+        id: "supervised_disconnected",
+        agentSessionId: "agent_session_404",
+        nativeLiveness: { state: "stale", observedAt: working.nativeLiveness.observedAt, detail: null },
+        roomAgentState: {
+          ...working.roomAgentState!,
+          connection: { state: "disconnected", observedAt: "2026-07-15T18:00:02.000Z", detail: "Provider exited" },
+        },
+      },
     ], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
     [{
       id: "supervised_working",
       displayName: "DawnHarbor",
       summary: "Using a tool",
-      startedAt: "2026-07-15T18:00:01.000Z",
+      startedAt: "2026-07-15T18:00:00.500Z",
       agentSessionId: "agent_session_403",
       agentKey: "codex:dawn-harbor",
       sourceMessageId: "message_source",
@@ -748,8 +769,30 @@ test("supervisor native activity drives the chat work indicator for the bound ro
         status: "idle",
       }],
     }], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
+    [{
+      id: "supervised_working",
+      displayName: "DawnHarbor",
+      summary: "Using a tool",
+      startedAt: "2026-07-15T18:00:00.500Z",
+      agentSessionId: "agent_session_403",
+      agentKey: "codex:dawn-harbor",
+      sourceMessageId: "message_source",
+    }],
+    "an internal item completing cannot hide an active room turn",
+  );
+  assert.deepEqual(
+    supervisedAgentWorkIndicators([{
+      ...working,
+      observedState: "idle",
+      nativeLiveness: { state: "idle", observedAt: "2026-07-15T18:00:03.000Z", detail: "codex · turn/completed" },
+      roomAgentState: {
+        ...working.roomAgentState!,
+        inbox: { state: "empty", pendingCount: 0, blockedByMessageId: null, detail: null },
+        turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      },
+    }], [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })], "room_1"),
     [],
-    "a newer idle poll clears an older working indicator instead of leaving it stuck",
+    "the durable room turn completing removes the indicator",
   );
 });
 
