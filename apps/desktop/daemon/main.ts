@@ -2355,6 +2355,10 @@ export class SupervisorDaemon {
       // provider (or even a new work execution) until Electron installs the
       // exact host grant over the local daemon socket.
       if (this.requiresHostGrant(entry) && !this.currentHostGrant(entry)) return;
+      // A running provider from before cursor admission must not attach,
+      // resume, or spawn in the grant-install/bootstrap gap. Bootstrap owns
+      // the first-tail boundary and queues this convergence only afterwards.
+      if (this.requiresHostGrant(entry) && !await this.supervisedInbox.cursor(entry.id)) return;
       if (this.requiresHostGrant(entry) && !await this.ensureHostGrantFresh(entry)) return;
       entry = await this.launchEntryIfCurrent(entry.id, launchControlEpoch) ?? entry;
       if (entry.desired_state !== "running" || this.currentEntryControlEpoch(entry.id) !== launchControlEpoch || this.handoffScheduled) return;
@@ -3647,7 +3651,13 @@ export class SupervisorDaemon {
         // Electron may still hold the pre-renewal safeStorage value. It may
         // confirm installation, but must never roll the daemon's newer
         // memory-only token/expiry backwards in the same generation.
-        this.requestConvergence(entry.id);
+        // A cursorless daemon-inbox entry is waiting for Electron's separate
+        // admission RPC. Do not queue provider work in the gap between this
+        // grant install and the durable first-tail boundary.
+        if (entry.desired_state === "running"
+          && (!this.requiresHostGrant(entry) || await this.supervisedInbox.cursor(entry.id))) {
+          this.requestConvergence(entry.id);
+        }
         return { status: "installed" };
       }
       // Credential-only reconnect is a rebind request, not a credential
@@ -3704,27 +3714,38 @@ export class SupervisorDaemon {
         this.revokeHostGrantIfCurrent(entry.id, grant);
         return { status: "stale" };
       }
-      this.requestConvergence(entry.id);
+      // For daemon-inbox entries, bootstrapRoomIngress is the only path that
+      // may queue a running convergence after the first cursor exists. A
+      // stopped entry never queues lifecycle work merely because its host
+      // grant was repaired.
+      if (entry.desired_state === "running"
+        && (!this.requiresHostGrant(entry) || await this.supervisedInbox.cursor(entry.id))) {
+        this.requestConvergence(entry.id);
+      }
       return { status: "installed" };
     });
   }
 
   /**
-   * Establish the first daemon-inbox cursor while the entry is still paused.
-   * This is deliberately before provider start/reachability: a fresh agent
-   * must not be advertised and then have its initial tail move past a message
-   * already addressed to it. The cursor is durable even if this generation
-   * loses authority after the HTTP read, so a successor resumes this exact
-   * boundary instead of reading a newer tail and skipping the intervening
-   * message.
+   * Establish the first daemon-inbox cursor. Fresh entries call this while
+   * paused, before provider start/reachability. Upgrade recovery may call it
+   * for an already-running or stopped entry that predates cursor admission.
+   * It observes the current tail and durably records that boundary before any
+   * running convergence is queued. Stopped entries remain stopped. The cursor
+   * remains durable even if this generation loses authority after the HTTP
+   * read, so a successor resumes this exact boundary instead of reading a
+   * newer tail and skipping the intervening message.
    */
   private async bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
     return this.serializeEntryTick(input.entry_id, async () => {
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
       const entry = await this.store.getEntry(input.entry_id);
-      if (!entry || !this.requiresHostGrant(entry) || entry.desired_state !== "paused") return { status: "stale", last_observed_message_id: null };
+      if (!entry || !this.requiresHostGrant(entry)) return { status: "stale", last_observed_message_id: null };
       const existing = await this.supervisedInbox.cursor(entry.id);
-      if (existing) return { status: "existing", last_observed_message_id: existing.last_observed_message_id };
+      if (existing) {
+        await this.requestAdmittedRunningConvergence(entry.id, input.daemon_generation);
+        return { status: "existing", last_observed_message_id: existing.last_observed_message_id };
+      }
       const grant = this.currentHostGrant(entry);
       const latest = this.supervisedDeliveryHttp.latest;
       if (!grant || !latest) throw new Error("A supervised room tail reader is required before activation.");
@@ -3755,9 +3776,19 @@ export class SupervisorDaemon {
       const result = await this.supervisedInbox.bootstrapCursor({
         agent_id: entry.id, room_id: entry.room_id, last_observed_message_id: tailId,
       });
+      await this.requestAdmittedRunningConvergence(entry.id, input.daemon_generation);
       if (!result.created) return { status: "existing", last_observed_message_id: result.last_observed_message_id };
       return { status: "bootstrapped", last_observed_message_id: tailId };
     });
+  }
+
+  /** Queue provider work only after this generation has durably admitted ingress. */
+  private async requestAdmittedRunningConvergence(entryId: string, daemonGeneration: number): Promise<void> {
+    if (!await this.ownsDaemonGeneration(daemonGeneration)) return;
+    const entry = await this.store.getEntry(entryId);
+    if (!entry || !this.requiresHostGrant(entry) || entry.desired_state !== "running") return;
+    if (!await this.supervisedInbox.cursor(entryId)) return;
+    this.requestConvergence(entryId);
   }
 
   private async verifyWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {

@@ -403,6 +403,12 @@ async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }
   return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); } };
 }
 
+/** Set up the already-admitted ingress assumed by provider-lifecycle tests. */
+async function admitDaemonInboxForProviderTest(daemon: SupervisorDaemon, agentId: string, roomId: string): Promise<void> {
+  const internals = daemon as unknown as { supervisedInbox: SupervisedAgentInboxStore };
+  await internals.supervisedInbox.bootstrapCursor({ agent_id: agentId, room_id: roomId, last_observed_message_id: null });
+}
+
 async function within<T>(promise: Promise<T>, label: string, timeoutMs = 2_000): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -996,6 +1002,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     } });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(spawns, 0, "daemon_inbox Codex cannot spawn without the desktop grant");
+    await admitDaemonInboxForProviderTest(daemon, "host_grant_bind_retry", entry.room_id);
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const install = { entry_id: "host_grant_bind_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-1", supervisor_grant: "host-grant-secret", grant_generation: 7, api_url: "http://127.0.0.1:3000", host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation };
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", install)).ok, true);
@@ -1059,6 +1066,7 @@ test("handoff during delayed host-grant mint creates no generation and the succe
       ...entry, id: "delayed_host_grant_handoff", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitDaemonInboxForProviderTest(first, "delayed_host_grant_handoff", entry.room_id);
     const firstGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: "delayed_host_grant_handoff", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-delayed",
@@ -1144,6 +1152,7 @@ test("pause fences a launch waiting on host-grant mint before any generation or 
       ...entry, id: "pause_during_host_grant_mint", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitDaemonInboxForProviderTest(daemon, "pause_during_host_grant_mint", entry.room_id);
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: "pause_during_host_grant_mint", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-pause",
@@ -1262,6 +1271,7 @@ test("stop during grant mint and pause during capabilities both fence before pro
         workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
       } });
       if (boundary === "mint") {
+        await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
         const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
         assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
           entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: `grant-${id}`,
@@ -1683,6 +1693,7 @@ test("pause during post-install worker bind fences the exact provider before del
       ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-pause-bind",
@@ -1748,6 +1759,7 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
       ...entry, id: "host_grant_expiry_rotation", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitDaemonInboxForProviderTest(daemon, "host_grant_expiry_rotation", entry.room_id);
     const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
       entry_id: "host_grant_expiry_rotation", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-rotation",
@@ -1837,6 +1849,7 @@ test("host grant renewal retries transient failures, rotates the bearer in place
       ...entry, id: "host_grant_renewal_retry", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } });
+    await admitDaemonInboxForProviderTest(daemon, "host_grant_renewal_retry", entry.room_id);
     const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const staleInstall = {
       entry_id: "host_grant_renewal_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-renewal",
@@ -1936,6 +1949,7 @@ test("expired and definitively rejected host grants become auth-blocked without 
         ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
         workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
       } });
+      await admitDaemonInboxForProviderTest(daemon, id, entry.room_id);
       const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
       assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
         entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: `grant-${id}`,
@@ -3274,6 +3288,77 @@ test("credential-only reconnect rejects a missing exact provider without retaini
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
+  }
+});
+
+test("cursor admission repairs pre-upgrade running and stopped daemon-inbox entries without provider lifecycle work", async () => {
+  for (const desiredState of ["running", "stopped"] as const) {
+    const env = await fixture();
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    };
+    const lifecycle = { spawn: 0, resume: 0, stop: 0, converge: 0, mint: 0, tail: 0 };
+    const tailId = desiredState === "running" ? "101" : "202";
+    const port: ProviderActionPort = {
+      capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+      spawn: async () => { lifecycle.spawn += 1; throw new Error("cursor admission must not spawn"); },
+      attach: async () => null, attachAction: async () => ({ state: "absent" }),
+      resume: async () => { lifecycle.resume += 1; throw new Error("cursor admission must not resume"); }, poke: async () => {},
+      stop: async () => { lifecycle.stop += 1; throw new Error("cursor admission must not stop"); },
+      onExit: async () => () => {}, onStream: async () => () => {},
+    };
+    const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+      latest: async () => { lifecycle.tail += 1; return { messages: [{ id: tailId }] }; },
+      poll: async () => ({ messages: [] }), publish: async () => {},
+    }, {
+      createWorkerSession: async () => {
+        lifecycle.mint += 1;
+        return { sessionId: `admission-${desiredState}`, bearer: "admission-bearer", bearerId: "admission-bearer-id", expiresAt: null };
+      },
+    });
+    try {
+      await daemon.start();
+      const internals = daemon as unknown as { requestConvergence: (entryId: string) => void; supervisedInbox: SupervisedAgentInboxStore };
+      const id = `cursorless_${desiredState}`;
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry, id, provider: "codex", delivery_mode: "daemon_inbox", desired_state: desiredState,
+        observed_state: desiredState === "running" ? "working" : "stopped",
+      } })).ok, true);
+      let cursorObservedByConvergence: string | null | undefined;
+      internals.requestConvergence = (entryId) => {
+        lifecycle.converge += 1;
+        void internals.supervisedInbox.cursor(entryId).then((cursor) => {
+          cursorObservedByConvergence = cursor?.last_observed_message_id ?? null;
+        });
+      };
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: `grant-${desiredState}`,
+        supervisor_grant: "admission-secret", grant_generation: 1, api_url: "https://letagents.example",
+        host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation,
+      })).ok, true);
+      assert.deepEqual(lifecycle, { spawn: 0, resume: 0, stop: 0, converge: 0, mint: 0, tail: 0 }, "grant install cannot queue cursorless provider convergence");
+      assert.equal(await internals.supervisedInbox.cursor(id), null, "no provider work is admitted before the first tail boundary");
+      const admitted = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", { entry_id: id, daemon_generation: generation });
+      assert.equal(admitted.ok, true, admitted.error);
+      assert.deepEqual(admitted.result, { status: "bootstrapped", last_observed_message_id: tailId });
+      assert.equal((await internals.supervisedInbox.cursor(id))?.last_observed_message_id, tailId, "history is skipped at the observed tail");
+      if (desiredState === "running") {
+        await eventually(async () => cursorObservedByConvergence !== undefined, "post-admission running convergence");
+        assert.equal(cursorObservedByConvergence, tailId, "running convergence observes the committed admission cursor");
+      } else {
+        assert.equal(cursorObservedByConvergence, undefined, "stopped admission never queues provider convergence");
+      }
+      assert.deepEqual(lifecycle, {
+        spawn: 0, resume: 0, stop: 0,
+        converge: desiredState === "running" ? 1 : 0,
+        mint: 1, tail: 1,
+      }, "admission mints only a tail-reader session and never starts, resumes, or stops a provider");
+    } finally {
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
   }
 });
 

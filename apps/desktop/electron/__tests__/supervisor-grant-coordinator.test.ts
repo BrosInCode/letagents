@@ -85,7 +85,21 @@ test("app restart same daemon generation reinstalls idempotently without a hando
   h.grants.set("owner/supervised_launch_1234567", { metadata: metadata("owner/supervised_launch_1234567"), token: "secret_same", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 7 });
   await h.coordinator.reconcileDesiredRunning();
   assert.equal(h.events.some((event) => event === "install:7"), true);
+  assert.equal(h.events.some((event) => event === "bootstrap:supervised_launch_1234567:7"), true, "a cursorless pre-upgrade running entry is admitted without provider recovery");
   assert.equal(h.events.some((event) => event.includes("provision")), false);
+});
+
+test("reconciliation admits a cursorless stopped entry without changing its lifecycle", async () => {
+  const h = harness();
+  const stopped = { ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const, providerPid: null };
+  h.grants.set("owner/supervised_launch_1234567", { metadata: metadata("owner/supervised_launch_1234567"), token: "secret_same", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 7 });
+  const daemon = { ...h.daemon, async list() { h.events.push("list"); return [stopped]; } };
+  const coordinator = new SupervisorGrantCoordinator(daemon as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", h.operations, async () => "room_1");
+  await coordinator.reconcileDesiredRunning();
+  assert.deepEqual(h.events.filter((event) => event.startsWith("install:") || event.startsWith("bootstrap:") || event.startsWith("create:")), [
+    "install:7", "bootstrap:supervised_launch_1234567:7",
+  ]);
+  assert.equal(stopped.desiredState, "stopped", "cursor admission does not revive a stopped provider");
 });
 
 test("Reconnect repairs only the exact credential binding and does not restart the provider", async () => {
