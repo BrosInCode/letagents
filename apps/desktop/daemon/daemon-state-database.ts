@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 9;
+export const DAEMON_STATE_SCHEMA_VERSION = 10;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -63,11 +63,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV8ToV9(database);
     return;
   }
+  if (existingVersion === 9) {
+    this.migrateV9ToV10(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV9Shape(database);
+    this.repairAndValidateV10Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -341,6 +345,8 @@ createSchema(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -364,6 +370,8 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -388,6 +396,8 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -412,6 +422,8 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.applyV4Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -472,6 +484,8 @@ migrateV4ToV5(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -522,6 +536,8 @@ migrateV5ToV6(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -544,6 +560,8 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.validateV6Shape(database);
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -562,6 +580,8 @@ migrateV7ToV8(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -578,6 +598,8 @@ migrateV8ToV9(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -586,6 +608,68 @@ migrateV8ToV9(database: DatabaseSync): void {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
   }
+}
+
+/** V10 adds revisioned Inspector configuration and durable room-move journals. */
+migrateV9ToV10(database: DatabaseSync): void {
+  this.repairAndValidateV9Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV10Shape(database);
+    this.validateV10Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+private applyV10Shape(database: DatabaseSync): void {
+  const columns = this.tableColumns(database, "agent_configurations");
+  if (!columns.has("reasoning_effort")) database.exec("ALTER TABLE agent_configurations ADD COLUMN reasoning_effort TEXT");
+  if (!columns.has("config_revision")) database.exec("ALTER TABLE agent_configurations ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 1 CHECK(config_revision >= 1)");
+  if (!columns.has("runtime_configuration_revision")) database.exec("ALTER TABLE agent_configurations ADD COLUMN runtime_configuration_revision INTEGER NOT NULL DEFAULT 1 CHECK(runtime_configuration_revision >= 1)");
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS agent_room_moves (
+      operation_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
+      source_room_id TEXT NOT NULL,
+      destination_room_id TEXT NOT NULL,
+      daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),
+      phase TEXT NOT NULL CHECK(phase IN ('prepared','waiting_for_current_turn','joining_destination','membership_committed','rotating_credentials','bootstrapping_destination_tail','active','failed','rollback_required')),
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, destination_room_id, phase)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS agent_room_moves_agent_updated ON agent_room_moves(agent_id, updated_at);
+  `);
+}
+
+private validateV10Shape(database: DatabaseSync): void {
+  const columns = this.tableColumns(database, "agent_configurations");
+  for (const column of ["reasoning_effort", "config_revision", "runtime_configuration_revision"]) {
+    if (!columns.has(column)) throw new Error(`Daemon state v10 is missing agent configuration column ${column}.`);
+  }
+  const moves = this.tableColumns(database, "agent_room_moves");
+  for (const column of ["operation_id", "agent_id", "source_room_id", "destination_room_id", "daemon_generation", "phase", "created_at", "updated_at"]) {
+    if (!moves.has(column)) throw new Error(`Daemon state v10 is missing room-move column ${column}.`);
+  }
+}
+
+repairAndValidateV10Shape(database: DatabaseSync): void {
+  this.repairAndValidateV9Shape(database);
+  const columns = this.tableColumns(database, "agent_configurations");
+  if (columns.has("reasoning_effort") && columns.has("config_revision") && columns.has("runtime_configuration_revision") && this.tableColumns(database, "agent_room_moves").size) {
+    this.validateV10Shape(database);
+    return;
+  }
+  database.exec("BEGIN IMMEDIATE");
+  try { this.applyV10Shape(database); this.validateV10Shape(database); database.exec("COMMIT"); }
+  catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
 }
 
 private applyV8Shape(database: DatabaseSync): void {

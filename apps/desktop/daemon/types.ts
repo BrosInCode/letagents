@@ -83,8 +83,14 @@ export type DaemonAgentConfiguration = {
   agent_id: string;
   provider: string;
   model: string | null;
+  /** Provider-native reasoning setting, applied when a provider runtime starts. */
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   charter: string;
   permission_profile_id: string | null;
+  /** Monotonic editor revision. Configuration is never inferred from runtime. */
+  config_revision?: number;
+  /** Revision most recently consumed by the current provider runtime. */
+  runtime_configuration_revision?: number;
   /** Explicit inbox owner; never infer daemon delivery from native policy. */
   delivery_mode?: DaemonAgentDeliveryMode;
   /** Present only while a legacy Codex polling turn is being fenced. */
@@ -213,7 +219,10 @@ export type DaemonManifestEntry = {
   display_name: string;
   provider: string;
   model: string | null;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   charter: string;
+  config_revision?: number;
+  runtime_configuration_revision?: number;
   desired_state: DesiredState;
   observed_state: ObservedState;
   condition: PolicyCondition;

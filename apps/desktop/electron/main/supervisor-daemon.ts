@@ -50,6 +50,9 @@ type WireEntry = {
   display_name: string;
   provider: string;
   model: string | null;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  config_revision?: number;
+  runtime_configuration_revision?: number;
   charter: string;
   desired_state: DesktopSupervisorDesiredState;
   observed_state: DesktopSupervisorManifestEntry["observedState"];
@@ -476,6 +479,36 @@ export class SupervisorDaemonClient {
     return mapAgentInspectorDetail(detail, input);
   }
 
+  async getAgentConfiguration(entryId: string, daemonGeneration: number): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration> {
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    const value = await this.request<Record<string, unknown>>("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration });
+    return mapAgentConfiguration(value, entryId, daemonGeneration);
+  }
+
+  async updateAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateResult> {
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
+      model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
+      permission_profile_id: input.configuration.permissionProfileId, provider_launch_policy: input.configuration.providerLaunchPolicy,
+    } });
+    if (result.outcome === "invalid") return { outcome: "invalid", error: String(result.error ?? "Invalid agent configuration.") };
+    if (result.outcome !== "updated" && result.outcome !== "conflict") throw new Error("Supervisor returned an invalid configuration update result.");
+    return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, input.entryId, input.daemonGeneration) };
+  }
+
+  async retireAgent(entryId: string, daemonGeneration: number): Promise<void> {
+    await this.ensureRunning();
+    await this.request("supervisor.retire_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
+  }
+
+  async purgeAgent(entryId: string, daemonGeneration: number): Promise<{ outcome: "purged" | "invalid"; error?: string }> {
+    await this.ensureRunning();
+    const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
+    return result.outcome === "purged" ? { outcome: "purged" } : { outcome: "invalid", error: String(result.error ?? "Purge preconditions are not met.") };
+  }
+
   async appendActivity(id: string, event: DesktopSupervisorActivityEvent): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.append_activity", { id, event: wireActivity(event) }));
@@ -842,11 +875,22 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
     implementationVersion: String(value.implementation_version ?? "unknown"),
-    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"), agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1") },
+    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"), agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1"), agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1") },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
   };
+}
+
+function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, daemonGeneration: number): import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration {
+  if (value.entry_id !== entryId || Number(value.daemon_generation) !== daemonGeneration || typeof value.provider !== "string" || typeof value.charter !== "string"
+    || !Number.isSafeInteger(value.config_revision) || !Number.isSafeInteger(value.runtime_configuration_revision)) throw new Error("Supervisor returned an invalid agent configuration response.");
+  const effort = value.reasoning_effort;
+  if (effort !== null && !["low", "medium", "high", "xhigh", "max"].includes(String(effort))) throw new Error("Supervisor returned an invalid reasoning effort.");
+  return { entryId, daemonGeneration, provider: value.provider, model: typeof value.model === "string" ? value.model : null,
+    reasoningEffort: effort as import("../ipc-types/agents.js").DesktopManagedAgentEffort | null, charter: value.charter,
+    permissionProfileId: typeof value.permission_profile_id === "string" ? value.permission_profile_id : null,
+    providerLaunchPolicy: value.provider_launch_policy ?? null, configRevision: Number(value.config_revision), runtimeConfigurationRevision: Number(value.runtime_configuration_revision) };
 }
 
 function booleanField(value: unknown, key: string): boolean {
