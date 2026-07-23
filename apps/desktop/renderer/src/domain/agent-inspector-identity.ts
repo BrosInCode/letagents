@@ -20,6 +20,39 @@ export interface AgentInspectorSupervisorEntryUpdate {
   inspectorRequestVersion: number;
 }
 
+export interface AgentInspectorOperationContext {
+  modalStateVersion: number;
+  roomIdentifier: string;
+  inspectorRequestVersion: number;
+}
+
+export interface AgentInspectorOperationToken {
+  operationId: string;
+  entryId: string;
+  providerActionId: string | null;
+  context: AgentInspectorOperationContext;
+}
+
+/**
+ * Async inspector controls may finish after close/reopen, room navigation, or
+ * a different control beginning. Only the exact still-active operation may
+ * mutate UI state or release the in-flight lock.
+ */
+export function isCurrentAgentInspectorOperation(
+  expected: AgentInspectorOperationToken,
+  current: AgentInspectorOperationToken | null,
+  context: AgentInspectorOperationContext,
+  active: boolean,
+): boolean {
+  return active
+    && current?.operationId === expected.operationId
+    && current.entryId === expected.entryId
+    && current.providerActionId === expected.providerActionId
+    && context.modalStateVersion === expected.context.modalStateVersion
+    && context.roomIdentifier === expected.context.roomIdentifier
+    && context.inspectorRequestVersion === expected.context.inspectorRequestVersion;
+}
+
 export function isCurrentAgentInspectorSupervisorUpdate(
   update: AgentInspectorSupervisorEntryUpdate,
   currentRoomIdentifier: string,

@@ -75,6 +75,24 @@ test("open, manual refresh, and turn control leave supervisor listing to the she
   assert.doesNotMatch(turnControl, /listAgents|managedSessionsContext\.refresh/);
 });
 
+test("every async supervisor control fences success, failure, and unlock with an operation token", () => {
+  const functionPairs = [
+    ["async function setSupervisorDesiredState", "function turnControlCapability"],
+    ["async function runTurnControl", "async function resolveTurnControl"],
+    ["async function resolveTurnControl", "// Destructive Stop agent"],
+    ["async function confirmStopSupervisedAgent", "// A fresh stop asks"],
+  ] as const;
+  for (const [start, end] of functionPairs) {
+    const implementation = modal.slice(modal.indexOf(start), modal.indexOf(end));
+    assert.match(implementation, /createSupervisorOperationToken\(/);
+    assert.ok(
+      (implementation.match(/isCurrentSupervisorOperation\(/g) ?? []).length >= 3,
+      `${start} must fence success, catch, and finally`,
+    );
+  }
+  assert.match(modal, /shallowRef<AgentInspectorOperationToken \| null>/);
+});
+
 test("truthful Activity opens the exact durable entry", () => {
   assert.match(activity, /supervisedAgentInspectorRequest\(selectedTruthfulAgent/);
   assert.match(activity, /data-testid="desktop-activity-open-supervised-agent-controls"/);
