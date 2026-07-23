@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.50";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.51";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -113,7 +113,7 @@ type WireEntry = {
     task: { state: string; task_id: string | null; title: string | null };
   } | null;
   delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string; state: string; attempt_count: number;
+    inbox_item_id: string; source_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
     provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; updated_at: string;
     timeline?: Array<{ phase: string; observed_at: string; detail: string | null }>;
   }>;
@@ -1212,12 +1212,15 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
     if (!receipt) return [];
     const inboxItemId = nonEmptyString(receipt.inbox_item_id);
     const sourceMessageId = nonEmptyString(receipt.source_message_id);
+    const canonicalMessageId = receipt.canonical_message_id === undefined
+      ? null
+      : nullableNonEmptyString(receipt.canonical_message_id);
     const state = enumValue(receipt.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "acknowledged", "acknowledged_no_reply", "retryable", "blocked", "cancelled_by_room_move", "queued_behind_blocked"] as const);
     const providerTurnId = nullableNonEmptyString(receipt.provider_turn_id);
     const blockedByMessageId = nullableNonEmptyString(receipt.blocked_by_message_id);
     const error = nullableString(receipt.error);
     const updatedAt = nonEmptyString(receipt.updated_at);
-    if (!inboxItemId || !sourceMessageId || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || !updatedAt
+    if (!inboxItemId || !sourceMessageId || canonicalMessageId === undefined || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || !updatedAt
       || typeof receipt.attempt_count !== "number" || !Number.isFinite(receipt.attempt_count) || !Number.isInteger(receipt.attempt_count) || receipt.attempt_count < 0
       || !Array.isArray(receipt.timeline)) return [];
     const timeline: NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"] = [];
@@ -1230,7 +1233,7 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       if (!phase || !observedAt || detail === undefined) return [];
       timeline.push({ phase, observedAt, detail });
     }
-    return [{ inboxItemId, sourceMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, updatedAt, timeline }];
+    return [{ inboxItemId, sourceMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, updatedAt, timeline }];
   });
 }
 
