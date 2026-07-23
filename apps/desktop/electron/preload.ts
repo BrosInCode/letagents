@@ -254,6 +254,7 @@ const api: DesktopApi = {
     prepareRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:prepare-room-move", input),
     commitRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:commit-room-move", input),
     getRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-room-move", input),
+    getCurrentRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-current-room-move", input),
     retireAgent: (input) => ipcRenderer.invoke("desktop:supervisor:retire-agent", input),
     purgeAgent: (input) => ipcRenderer.invoke("desktop:supervisor:purge-agent", input),
     onActivity: (callback) => {

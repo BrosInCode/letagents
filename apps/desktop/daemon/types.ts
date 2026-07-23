@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.47";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.48";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -117,6 +117,8 @@ export type DaemonPurgeRecord = {
   attached_work_attempt_id: string | null;
   /** Filesystem location retained after its durable attempt row is removed. */
   preserved_workspace_path: string | null;
+  /** Exact worker session whose bearer must be ended before purge commit. */
+  agent_session_id: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
