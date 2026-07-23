@@ -8,6 +8,8 @@
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
         @status="participantAnnouncement = $event"
+        @session-updated="emit('session-updated', $event)"
+        @open-reasoning="emit('open-reasoning', $event)"
         @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
@@ -33,12 +35,16 @@
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
         @status="participantAnnouncement = $event"
+        @session-updated="emit('session-updated', $event)"
+        @open-reasoning="emit('open-reasoning', $event)"
         @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </Teleport>
-  <p v-if="open" class="agent-inspector-live-region" aria-live="polite" aria-atomic="true">{{ liveAnnouncement }}</p>
+  <Teleport to="body">
+    <p v-if="open" class="agent-inspector-live-region" aria-live="polite" aria-atomic="true">{{ liveAnnouncement }}</p>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -51,8 +57,18 @@ import type {
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorConfigurationDraft, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
-import type { DesktopAgentProvider, DesktopFocusRoomInfo, DesktopManagedAgentSession } from "../../../../../../electron/ipc-types";
-import { projectAgentInspectorParticipant } from "../../../../domain/agent-inspector-participant";
+import type {
+  DesktopAgentProvider,
+  DesktopFocusRoomInfo,
+  DesktopManagedAgentSession,
+  DesktopReasoningSession,
+} from "../../../../../../electron/ipc-types";
+import {
+  projectAgentInspectorParticipant,
+  type AgentInspectorParticipantSessionUpdate,
+} from "../../../../domain/agent-inspector-participant";
+import { agentInspectorRequestResetKey } from "../../../../domain/agent-inspector-identity";
+import { latestReasoningSessionForExactIdentity } from "../../../../domain/reasoning";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
 import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
 import AgentInspectorParticipantSurface from "./AgentInspectorParticipantSurface.vue";
@@ -74,7 +90,10 @@ const props = defineProps<{
   providers: readonly DesktopAgentProvider[];
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
+  roomIdentifier: string;
+  requestVersion: number;
   managedSessions: readonly DesktopManagedAgentSession[];
+  reasoningSessions: readonly DesktopReasoningSession[];
 }>();
 const emit = defineEmits<{
   close: [];
@@ -92,12 +111,33 @@ const emit = defineEmits<{
   "room-move-commit": [];
   retire: [];
   purge: [];
+  "session-updated": [update: AgentInspectorParticipantSessionUpdate];
+  "open-reasoning": [sessionId: string];
 }>();
 
 const compact = ref(false);
 const surfaceComponent = ref<{ focusInitial: () => void; containsFocus: () => boolean } | null>(null);
 const participantAnnouncement = ref<string | null>(null);
-const participantProjection = computed(() => projectAgentInspectorParticipant(props.selection, props.managedSessions));
+const participantProjection = computed(() =>
+  projectAgentInspectorParticipant(props.selection, props.managedSessions, props.roomIdentifier)
+);
+const participantSelectionKey = computed(() =>
+  agentInspectorRequestResetKey(props.selection, props.requestVersion)
+);
+const participantReasoning = computed(() => {
+  const participant = participantProjection.value;
+  if (!participant) return null;
+  if (participant.kind === "local_managed" && participant.session.reasoningSessionId) {
+    const linked = props.reasoningSessions.find((session) =>
+      session.id === participant.session.reasoningSessionId
+    );
+    if (linked) return linked;
+  }
+  const identity = participant.kind === "local_managed"
+    ? participant.session
+    : props.selection;
+  return latestReasoningSessionForExactIdentity(identity, props.reasoningSessions);
+});
 const surfaceKind = computed(() => props.projection ? "projection" : participantProjection.value ? "participant" : "status");
 const surfaceComponentType = computed<Component>(() => props.projection
   ? AgentInspectorSurface
@@ -113,6 +153,14 @@ const statusPresentation = computed(() => {
   if (props.selection.kind === "unavailable" && props.selection.unavailableReason === "load_error") {
     return { title, eyebrow: "Agent", heading: "Agent state unavailable", detail: props.selection.unavailableDetail || "The desktop supervisor could not be reached." };
   }
+  if (props.selection.kind === "unavailable" && props.selection.unavailableReason === "ambiguous") {
+    return {
+      title,
+      eyebrow: "Agent",
+      heading: "Agent identity unavailable",
+      detail: "Conflicting exact supervised identities were found. Controls are withheld until the identity is unambiguous.",
+    };
+  }
   if (props.selection.kind === "external") {
     return { title, eyebrow: "Room participant", heading: "Externally managed agent", detail: "This participant is visible in the room, but it is not controlled by this desktop supervisor." };
   }
@@ -125,10 +173,16 @@ const liveAnnouncement = computed(() => {
   if (participantProjection.value?.kind === "local_managed") {
     return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
   }
+  if (participantProjection.value?.kind === "unavailable") {
+    return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
+  }
   if (participantProjection.value?.kind === "external") return `${participantProjection.value.title}: externally managed agent.`;
   return `${statusPresentation.value.title}: ${statusPresentation.value.heading}.`;
 });
-watch(() => props.selection, () => { participantAnnouncement.value = null; });
+watch(
+  () => [props.roomIdentifier, props.requestVersion, participantSelectionKey.value],
+  () => { participantAnnouncement.value = null; },
+);
 function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   if (props.projection) {
     return {
@@ -151,6 +205,10 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       projection: participantProjection.value,
       compact: compactPresentation,
       busy: false,
+      roomIdentifier: props.roomIdentifier,
+      requestVersion: props.requestVersion,
+      selectionKey: participantSelectionKey.value,
+      reasoning: participantReasoning.value,
     };
   }
   return { ...statusPresentation.value, compact: compactPresentation };

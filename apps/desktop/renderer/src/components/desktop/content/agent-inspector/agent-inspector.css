@@ -245,6 +245,10 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
 .agent-inspector-participant-transcript { display: grid; gap: 8px; margin: 11px 0 0; padding: 0; list-style: none; }
 .agent-inspector-participant-transcript li { padding-left: 11px; border-left: 1px solid rgba(96,165,250,.38); color: var(--text-secondary, #a1a1aa); font-size: .73rem; line-height: 1.45; }
 .agent-inspector-inline-action { min-height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #bfdbfe; font: inherit; font-size: .7rem; font-weight: 680; cursor: pointer; }
+.agent-inspector-participant-reasoning { display: grid; gap: 8px; margin-top: 10px; }
+.agent-inspector-participant-reasoning > strong { font-size: .82rem; line-height: 1.35; }
+.agent-inspector-participant-reasoning > p { margin: 0; color: var(--text-secondary, #a1a1aa); font-size: .76rem; line-height: 1.5; }
+.agent-inspector-participant-reasoning > small { color: var(--text-secondary, #a1a1aa); font-size: .69rem; line-height: 1.4; }
 
 @media (min-width: 560px) and (max-width: 919px) {
   .agent-inspector-surface[data-compact="true"] {

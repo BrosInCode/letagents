@@ -33,13 +33,13 @@ test("the foundation stays dark and owns no runtime work while disabled", () => 
 
 test("flag ON has one exclusive inspector for durable, external, loading, and error selections", () => {
   assert.match(host, /AgentInspectorParticipantSurface/);
-  assert.match(host, /projectAgentInspectorParticipant\(props\.selection, props\.managedSessions\)/);
+  assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
   assert.match(host, /surfaceComponentType/);
   assert.match(host, /selection\.kind === "resolving"/);
   assert.match(host, /unavailableReason === "load_error"/);
   assert.match(host, /selection\.kind === "external"/);
   assert.match(participantSurface, /Room participant/);
-  assert.match(participantSurface, /useManagedAgentSessionsContext/);
+  assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
   assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
   assert.doesNotMatch(participantSurface, /aria-live/);
   assert.doesNotMatch(activity, /v-if="selectedTruthfulAgent" class="desktop-activity-detail"/);

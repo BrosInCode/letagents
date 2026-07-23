@@ -279,9 +279,14 @@
       :providers="agentInspectorProviders"
       :destinations="focusRooms.filter((candidate) => candidate.identifier !== room.identifier)"
       :settings-conflict="agentInspectorSettingsConflict"
-      :managed-sessions="managedAgentSessions"
+      :room-identifier="room.identifier"
+      :request-version="selectedAgentDetailRequestVersion"
+      :managed-sessions="roomManagedAgentSessions"
+      :reasoning-sessions="reasoningSessions"
       @close="closeAgentDetail"
       @action="runAgentInspectorAction"
+      @session-updated="applyAgentInspectorParticipantSessionUpdate"
+      @open-reasoning="openReasoningFromAgentDetail"
       @presentation-change="agentInspectorCompact = $event"
       @work-selected="openAgentInspectorWork"
       @work-retry="loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true)"
@@ -396,6 +401,10 @@ import {
   AGENT_INSPECTOR_FOUNDATION_ENABLED,
   projectAgentInspectorsWhenEnabled,
 } from "../../../domain/agent-inspector-feature";
+import {
+  isCurrentAgentInspectorParticipantSessionUpdate,
+  type AgentInspectorParticipantSessionUpdate,
+} from "../../../domain/agent-inspector-participant";
 import {
   agentInspectorActionStateForEntry,
   type AgentInspectorActionIntent,
@@ -2008,6 +2017,18 @@ function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
     managedAgentSessions.value,
     session,
   );
+}
+
+function applyAgentInspectorParticipantSessionUpdate(
+  update: AgentInspectorParticipantSessionUpdate,
+): void {
+  if (!isCurrentAgentInspectorParticipantSessionUpdate(update, {
+    roomIdentifier: props.room.identifier,
+    inspectorRequestVersion: selectedAgentDetailRequestVersion.value,
+    selection: selectedAgentDetailTarget.value,
+    sessions: roomManagedAgentSessions.value,
+  })) return;
+  upsertManagedAgentSession(update.session);
 }
 
 function upsertSupervisorEntry(update: AgentInspectorSupervisorEntryUpdate): void {
