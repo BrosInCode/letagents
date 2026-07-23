@@ -485,14 +485,17 @@ import {
   isVisibleManagedAgentSession,
   managedAgentProviderIdentityForEntry,
   managedAgentSessionDisplayName,
-  managedAgentSessionMatchesReasoning,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSummary,
   managedAgentSessionStatusLabel,
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
-import type { SupervisorEntriesResource } from "../../../domain/agent-inspector-identity";
+import {
+  resolveAgentInspectorManagedSessions,
+  type AgentInspectorSupervisorEntryUpdate,
+  type SupervisorEntriesResource,
+} from "../../../domain/agent-inspector-identity";
 import { formatShortDateTime } from "../../../domain/time";
 import type { AgentInspectorSelection } from "./desktop-chat-message/types";
 import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
@@ -515,6 +518,7 @@ const props = defineProps<{
   open: boolean;
   roomIdentifier: string;
   target: AgentInspectorSelection | null;
+  requestVersion: number;
   reasoningSessions: DesktopReasoningSession[];
   supervisorResource: SupervisorEntriesResource;
   supervisorStatus: DesktopSupervisorDaemonStatus | null;
@@ -525,7 +529,7 @@ const emit = defineEmits<{
   "open-add-agent": [];
   "open-reasoning": [sessionId: string];
   "refresh-supervisor": [];
-  "supervisor-entry-updated": [entry: DesktopSupervisorManifestEntry];
+  "supervisor-entry-updated": [update: AgentInspectorSupervisorEntryUpdate];
 }>();
 
 const dialogElement = ref<HTMLElement | null>(null);
@@ -591,23 +595,10 @@ const matchingSupervisorEntries = computed(() => {
   return supervisorEntries.value.filter((entry) => entry.id === target.supervisorEntryId);
 });
 const matchingManagedSessions = computed(() => {
-  const target = props.target;
-  if (!target) return [];
   const eligible = managedSessions.value.filter((session) =>
     isVisibleManagedAgentSession(session) || Boolean(session.supervisorEntryId)
   );
-  if (target.kind === "supervised") {
-    return eligible.filter((session) => session.supervisorEntryId === target.supervisorEntryId);
-  }
-  if (target.kind !== "external") return [];
-  const targetSessionId = target.agentSessionId?.trim() || null;
-  const targetAgentKey = target.agentKey?.trim() || null;
-  const specificAgentKey = targetAgentKey && /[/:]/.test(targetAgentKey) ? targetAgentKey : null;
-  return eligible.filter((session) =>
-    Boolean(targetSessionId && session.agentSessionId?.trim() === targetSessionId) ||
-    Boolean(specificAgentKey && session.agentKey?.trim() === specificAgentKey) ||
-    managedAgentSessionMatchesReasoning(session, latestReasoning.value)
-  );
+  return resolveAgentInspectorManagedSessions(eligible, props.target);
 });
 watch(supervisorEntries, (entries) => {
   for (const entry of entries) {
@@ -745,6 +736,38 @@ function isCurrentModalState(version: number): boolean {
   return props.open && version === modalStateVersion;
 }
 
+interface SupervisorActionContext {
+  modalStateVersion: number;
+  roomIdentifier: string;
+  inspectorRequestVersion: number;
+}
+
+function currentSupervisorActionContext(): SupervisorActionContext {
+  return {
+    modalStateVersion,
+    roomIdentifier: props.roomIdentifier,
+    inspectorRequestVersion: props.requestVersion,
+  };
+}
+
+function isCurrentSupervisorActionContext(context: SupervisorActionContext): boolean {
+  return isCurrentModalState(context.modalStateVersion)
+    && props.roomIdentifier === context.roomIdentifier
+    && props.requestVersion === context.inspectorRequestVersion;
+}
+
+function emitSupervisorEntryUpdated(
+  entry: DesktopSupervisorManifestEntry,
+  context: SupervisorActionContext,
+): void {
+  if (!isCurrentSupervisorActionContext(context)) return;
+  emit("supervisor-entry-updated", {
+    entry,
+    roomIdentifier: context.roomIdentifier,
+    inspectorRequestVersion: context.inspectorRequestVersion,
+  });
+}
+
 function handleDialogTab(event: KeyboardEvent): void {
   trapFocusInDialog(event, dialogElement.value);
 }
@@ -752,7 +775,6 @@ function handleDialogTab(event: KeyboardEvent): void {
 async function loadManagedSessions(options: {
   quiet?: boolean;
   refreshChanges?: boolean;
-  refreshSessions?: boolean;
 } = {}): Promise<void> {
   if (!props.open) return;
   const requestVersion = modalStateVersion;
@@ -761,8 +783,6 @@ async function loadManagedSessions(options: {
   }
   managedSessionError.value = null;
   try {
-    await (options.refreshSessions === false ? Promise.resolve() : managedSessionsContext.refresh());
-    if (!isCurrentModalState(requestVersion)) return;
     await refreshMatchingManagedSessionDetails({
       quiet: options.quiet,
       version: requestVersion,
@@ -785,15 +805,20 @@ function refreshAgentStatus(): void {
 
 async function setSupervisorDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<void> {
   if (updatingSupervisorEntryId.value) return;
+  const actionContext = currentSupervisorActionContext();
   updatingSupervisorEntryId.value = id;
   supervisorError.value = null;
   try {
     const updated = await desktopIpc.supervisor.setDesiredState(id, desiredState);
-    emit("supervisor-entry-updated", updated);
+    emitSupervisorEntryUpdated(updated, actionContext);
   } catch (error) {
-    supervisorError.value = error instanceof Error ? error.message : "Could not update desired state.";
+    if (isCurrentSupervisorActionContext(actionContext)) {
+      supervisorError.value = error instanceof Error ? error.message : "Could not update desired state.";
+    }
   } finally {
-    updatingSupervisorEntryId.value = null;
+    if (isCurrentSupervisorActionContext(actionContext) && updatingSupervisorEntryId.value === id) {
+      updatingSupervisorEntryId.value = null;
+    }
   }
 }
 
@@ -899,6 +924,7 @@ async function resolveTurnControl(
 ): Promise<void> {
   const control = entry.turnControl;
   if (!control || control.status !== "uncertain" || resolvingTurnControlEntryId.value) return;
+  const actionContext = currentSupervisorActionContext();
   resolvingTurnControlEntryId.value = entry.id;
   supervisorError.value = null;
   try {
@@ -909,11 +935,15 @@ async function resolveTurnControl(
       actionId: control.actionId,
       resolution,
     });
-    emit("supervisor-entry-updated", updated);
+    emitSupervisorEntryUpdated(updated, actionContext);
   } catch (error) {
-    supervisorError.value = error instanceof Error ? error.message : "Could not resolve the uncertain turn control.";
+    if (isCurrentSupervisorActionContext(actionContext)) {
+      supervisorError.value = error instanceof Error ? error.message : "Could not resolve the uncertain turn control.";
+    }
   } finally {
-    resolvingTurnControlEntryId.value = null;
+    if (isCurrentSupervisorActionContext(actionContext) && resolvingTurnControlEntryId.value === entry.id) {
+      resolvingTurnControlEntryId.value = null;
+    }
   }
 }
 
@@ -922,16 +952,21 @@ async function resolveTurnControl(
 // same-label peer is never affected; idempotent while a stop is in flight.
 async function confirmStopSupervisedAgent(id: string): Promise<void> {
   if (stoppingSupervisorEntryId.value) return;
+  const actionContext = currentSupervisorActionContext();
   stoppingSupervisorEntryId.value = id;
   stopAgentConfirmEntryId.value = null;
   supervisorError.value = null;
   try {
     const updated = await desktopIpc.supervisor.setDesiredState(id, "stopped");
-    emit("supervisor-entry-updated", updated);
+    emitSupervisorEntryUpdated(updated, actionContext);
   } catch (error) {
-    supervisorError.value = error instanceof Error ? error.message : "Could not stop this agent.";
+    if (isCurrentSupervisorActionContext(actionContext)) {
+      supervisorError.value = error instanceof Error ? error.message : "Could not stop this agent.";
+    }
   } finally {
-    stoppingSupervisorEntryId.value = null;
+    if (isCurrentSupervisorActionContext(actionContext) && stoppingSupervisorEntryId.value === id) {
+      stoppingSupervisorEntryId.value = null;
+    }
   }
 }
 

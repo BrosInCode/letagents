@@ -29,6 +29,7 @@ test("supervisor action updates fence stale poll results", () => {
     shell.indexOf("function upsertSupervisorEntry"),
     shell.indexOf("async function resolveComposerPermission"),
   );
+  assert.match(upsert, /isCurrentAgentInspectorSupervisorUpdate\(/);
   assert.match(upsert, /supervisorEntriesMutationVersion \+= 1/);
 });
 
@@ -46,8 +47,32 @@ test("the modal consumes shared supervisor data and owns no supervisor poll", ()
   assert.doesNotMatch(modal, /desktopIpc\.supervisor\.listAgents/);
   assert.doesNotMatch(modal, /desktopIpc\.supervisor\.getStatus/);
   assert.doesNotMatch(modal, /setInterval\(/);
+  assert.doesNotMatch(modal, /managedSessionsContext\.refresh\(/);
   assert.match(modal, /target\.kind === 'external' && showExternalFallback/);
   assert.match(modal, /desktop-agent-detail-supervisor-unavailable/);
+});
+
+test("open, manual refresh, and turn control leave supervisor listing to the shell", () => {
+  assert.equal((modal.match(/emit\("refresh-supervisor"\)/g) ?? []).length, 2);
+  const manualRefresh = modal.slice(
+    modal.indexOf("function refreshAgentStatus"),
+    modal.indexOf("async function setSupervisorDesiredState"),
+  );
+  assert.match(manualRefresh, /emit\("refresh-supervisor"\)/);
+  assert.match(manualRefresh, /loadManagedSessions\(\)/);
+
+  const openWatcher = modal.slice(
+    modal.indexOf("watch(\n  () => props.open"),
+    modal.indexOf("function clearTransientState"),
+  );
+  assert.doesNotMatch(openWatcher, /refresh-supervisor|listAgents|managedSessionsContext\.refresh/);
+
+  const turnControl = modal.slice(
+    modal.indexOf("async function runTurnControl"),
+    modal.indexOf("async function resolveTurnControl"),
+  );
+  assert.equal((turnControl.match(/emit\("refresh-supervisor"\)/g) ?? []).length, 1);
+  assert.doesNotMatch(turnControl, /listAgents|managedSessionsContext\.refresh/);
 });
 
 test("truthful Activity opens the exact durable entry", () => {
