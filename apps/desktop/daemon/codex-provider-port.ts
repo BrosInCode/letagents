@@ -39,12 +39,13 @@ type NativeAdapter = {
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
 };
 
-function publicHandle(handle: NativeHandle): ProviderActionHandle {
+function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: number): ProviderActionHandle {
   return {
     workAttemptId: handle.workAttemptId,
     pid: handle.pid,
     providerContinuationId: handle.providerContinuationId,
     providerConnection: handle.providerConnection ?? null,
+    ...(appliedConfigurationRevision === undefined ? {} : { appliedConfigurationRevision }),
     observedState: handle.observedState(),
   };
 }
@@ -79,7 +80,7 @@ export class CodexProviderActionPort implements ProviderActionPort {
   async spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle> {
     const handle = await (await this.adapter()).spawn(request);
     this.remember(request, handle);
-    return publicHandle(handle);
+    return publicHandle(handle, request.configurationRevision);
   }
 
   async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null> {
@@ -100,7 +101,7 @@ export class CodexProviderActionPort implements ProviderActionPort {
   async resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle> {
     const handle = await (await this.adapter()).resume(ref, request);
     this.remember(request, handle);
-    return publicHandle(handle);
+    return publicHandle(handle, request.configurationRevision);
   }
 
   async poke(handle: ProviderActionHandle, message: string, options?: { actionId?: string }): Promise<void> {

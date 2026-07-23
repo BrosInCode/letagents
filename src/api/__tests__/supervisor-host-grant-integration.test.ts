@@ -177,6 +177,38 @@ test("idempotent supervisor worker creation rotates one session and revokes its 
   assert.equal((second.body as any).session_token, undefined);
 });
 
+test("supervisor worker end is idempotent after a committed response is lost", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const minted = recorder();
+  await mint({ ...reqBase, body: {
+    generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+    agent_instance_id: "lost-end-response-worker",
+  } }, minted);
+  assert.equal(minted.statusCode, 201);
+  const end = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end"); assert.ok(end);
+  const request = {
+    ...reqBase,
+    params: { grantId: grantResult.grant.grant_id, sessionId: (minted.body as any).session_id },
+    body: { generation: 1 },
+  };
+  const first = recorder();
+  await end(request, first);
+  assert.equal(first.statusCode, 200);
+  assert.ok((first.body as any).ended_at);
+  const retry = recorder();
+  await end(request, retry);
+  assert.equal(retry.statusCode, 200);
+  assert.equal((retry.body as any).session_id, (minted.body as any).session_id);
+  assert.equal((retry.body as any).ended_at, (first.body as any).ended_at,
+    "the retry returns the original committed terminal record");
+  assert.equal(
+    (await resolveRequestAuth({ headers: { authorization: `Bearer ${(minted.body as any).worker_bearer}` } } as never)).authKind,
+    null,
+    "the exact worker bearer is rejected after the durable end acknowledgement",
+  );
+});
+
 test("supervisor worker retry collapses all historical active duplicates before rotating the retained session", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const common = {
@@ -457,6 +489,34 @@ test("concurrent renewal has exactly one winner and stale token cannot replay", 
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${created.token}` } } as never)).authKind, null);
   const winner = left ?? right;
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${winner!.token}` } } as never)).authKind, "supervisor_grant");
+});
+
+test("matching-scope grant creation recovers a lost response by preserving identity and rotating the unknown bearer", { skip: requiresDatabase }, async () => {
+  await seedOwner("owner_create_recovery");
+  const input = {
+    owner_account_id: "owner_create_recovery",
+    host_id: "host_create_recovery",
+    installation_id: "install_create_recovery",
+    allowed_room_ids: ["room_create_recovery"],
+    allowed_agent_keys: ["owner_create_recovery/agent"],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const first = await authDb!.createSupervisorHostGrant(input);
+  const recovered = await authDb!.createSupervisorHostGrant({
+    ...input,
+    expires_at: new Date(Date.now() + 120_000).toISOString(),
+  });
+  assert.equal(recovered.grant.grant_id, first.grant.grant_id);
+  assert.equal(recovered.grant.token_version, first.grant.token_version + 1);
+  assert.notEqual(recovered.token, first.token);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${first.token}` } } as never)).authKind, null);
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${recovered.token}` } } as never)).authKind, "supervisor_grant");
+  await assert.rejects(
+    authDb!.createSupervisorHostGrant({ ...input, allowed_room_ids: ["different_room"] }),
+    (error: unknown) => authDb!.isSupervisorGrantProvisionConflictError(error),
+  );
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${recovered.token}` } } as never)).authKind, "supervisor_grant",
+    "a mismatched recovery attempt cannot rotate the exact active grant");
 });
 
 test("handoff is a current-generation CAS, rotates its host token, and rejects stale authority", { skip: requiresDatabase }, async () => {

@@ -91,6 +91,19 @@ export class SupervisedAgentInboxStore {
     }));
   }
 
+  /** Atomically retire source ingress and install the response-first destination tail boundary. */
+  async commitRoomMoveCursor(input: { agent_id: string; source_room_id: string; destination_room_id: string; last_observed_message_id: string | null }): Promise<void> {
+    this.require(input.agent_id, "agent_id"); this.require(input.source_room_id, "source_room_id"); this.require(input.destination_room_id, "destination_room_id");
+    if (input.source_room_id === input.destination_room_id) throw new Error("Room-move cursor requires distinct rooms.");
+    if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
+    await this.exclusive(async (database) => this.transaction(database, () => {
+      const existing = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?").get(input.agent_id, input.destination_room_id) as Row | undefined;
+      if (existing && (existing.last_observed_message_id === null ? null : String(existing.last_observed_message_id)) !== input.last_observed_message_id) throw new Error("Destination ingress cursor already has a different room-move boundary.");
+      run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.source_room_id);
+      if (!existing) run(database.prepare("INSERT OR REPLACE INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)"), input.agent_id, input.destination_room_id, input.last_observed_message_id, this.now());
+    }));
+  }
+
   /** One transaction: idempotently insert activated messages and persist the poll cursor. */
   async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; expected_cursor?: string | null; messages: readonly IngressMessage[]; observed_messages?: readonly ObservedIngressMessage[] }): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
@@ -429,7 +442,7 @@ export class SupervisedAgentInboxStore {
 
   /** Commit the queue side of a room move atomically: later old-room work is
    * cancelled and the old cursor/health authority is removed. */
-  async commitRoomMoveQueue(input: { agent_id: string; old_room_id: string; after_fifo_sequence: number }): Promise<number> {
+  async commitRoomMoveQueue(input: { operation_id: string; agent_id: string; old_room_id: string; after_fifo_sequence: number }): Promise<number> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
         WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
@@ -439,11 +452,53 @@ export class SupervisedAgentInboxStore {
         const item = rowToItem(row);
         run(database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_room_move',last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
           "Cancelled because the agent moved to another room.", timestamp, timestamp, item.inbox_item_id);
-        this.recordEvent(database, item.inbox_item_id, `room_move_cancelled:${item.fifo_sequence}`, "room_move_cancelled", timestamp, "Agent moved rooms after completing an earlier message.");
+        this.recordEvent(database, item.inbox_item_id, `room_move_cancelled:${input.operation_id}:${item.fifo_sequence}`, "room_move_cancelled", timestamp, "Agent moved rooms after completing an earlier message.");
       }
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.old_room_id);
       run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=? AND room_id=?"), input.agent_id, input.old_room_id);
       return rows.length;
+    }));
+  }
+
+  /**
+   * Idempotently restore the exact source ingress truth after a room-move
+   * compensation. Only queue rows cancelled by this operation are revived.
+   */
+  async rollbackRoomMoveIngress(input: {
+    operation_id: string; agent_id: string; source_room_id: string; destination_room_id: string;
+    source_cursor_present: boolean; source_cursor: string | null; after_fifo_sequence: number;
+  }): Promise<number> {
+    this.require(input.operation_id, "operation_id"); this.require(input.agent_id, "agent_id");
+    this.require(input.source_room_id, "source_room_id"); this.require(input.destination_room_id, "destination_room_id");
+    if (input.source_room_id === input.destination_room_id) throw new Error("Room-move rollback requires distinct rooms.");
+    if (input.source_cursor !== null) this.requireNumericCursor(input.source_cursor);
+    if (!input.source_cursor_present && input.source_cursor !== null) throw new Error("Absent source cursor authority cannot carry a cursor value.");
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      // Prove exact operation ownership from the append-only cancellation
+      // event before reviving each bounded source-room candidate.
+      const candidates = database.prepare(`SELECT i.* FROM supervised_agent_inbox i
+        WHERE i.agent_id=? AND i.room_id=? AND i.fifo_sequence>? AND i.state='cancelled_by_room_move'
+        ORDER BY i.fifo_sequence`).all(input.agent_id, input.source_room_id, input.after_fifo_sequence) as Row[];
+      const timestamp = this.now();
+      let restored = 0;
+      for (const row of candidates) {
+        const item = rowToItem(row);
+        const owned = database.prepare("SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key=?").get(
+          item.inbox_item_id, `room_move_cancelled:${input.operation_id}:${item.fifo_sequence}`,
+        );
+        if (!owned) continue;
+        run(database.prepare(`UPDATE supervised_agent_inbox SET state='pending',last_error=?,updated_at=?,acknowledged_at=NULL WHERE inbox_item_id=? AND state='cancelled_by_room_move'`),
+          "Room move rolled back; source-room delivery was restored without starting a duplicate provider turn.", timestamp, item.inbox_item_id);
+        this.recordEvent(database, item.inbox_item_id, `room_move_rollback:${input.operation_id}:${item.fifo_sequence}`, "retry_scheduled", timestamp, "Source-room delivery restored after room-move rollback.");
+        restored += 1;
+      }
+      run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=?"), input.agent_id);
+      if (input.source_cursor_present) {
+        run(database.prepare("INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES(?,?,?,?)"),
+          input.agent_id, input.source_room_id, input.source_cursor, timestamp);
+      }
+      run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=?"), input.agent_id);
+      return restored;
     }));
   }
 

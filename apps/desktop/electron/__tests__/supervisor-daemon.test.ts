@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
@@ -20,6 +21,11 @@ import {
   supervisorDaemonSpawnEnvironment,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
+import {
+  readDesktopSupervisorGrantForAgent,
+  replaceDesktopSupervisorGrantForAgent,
+  revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
+} from "../main/supervisor-grant.js";
 import { apiUrl as configuredApiUrl } from "../main/paths.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
@@ -77,6 +83,7 @@ async function startWireDaemon(
   implementationVersion = SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   controlTurnDelayMs = 0,
   unresponsiveAfterPrepare = false,
+  agentLifecycleCapability = true,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
@@ -94,7 +101,7 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
@@ -131,6 +138,20 @@ async function startWireDaemon(
         };
       } else if (request.method === "supervisor.get_agent_inspector_detail") {
         result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
+      } else if (request.method === "supervisor.get_agent_configuration") {
+        result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
+      } else if (request.method === "supervisor.update_agent_configuration") {
+        result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
+      } else if (request.method === "supervisor.purge_agent") {
+        result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
+          ? { outcome: "purged" }
+          : request.params!.entry_id === "agent_grant_only"
+            ? { outcome: "revocation_required", operation_id: "purge:agent_grant_only", revocation_kind: "grant_only" }
+            : { outcome: "revocation_required", operation_id: `purge:${request.params!.entry_id}`, revocation_kind: "worker_session", agent_session_id: "session_exact" };
+      } else if (request.method === "supervisor.get_current_room_move" && request.params!.entry_id === "agent_none") {
+        result = null;
+      } else if (["supervisor.prepare_room_move", "supervisor.commit_room_move", "supervisor.get_room_move", "supervisor.get_current_room_move", "supervisor.acknowledge_room_move_source_revocation", "supervisor.rollback_room_move"].includes(request.method)) {
+        result = { operation_id: request.params!.operation_id ?? `inspector-room-move:${request.params!.entry_id}:${request.params!.request_id}`, request_id: request.params!.request_id ? `inspector:${request.params!.request_id}` : "inspector:request_1", agent_id: request.params!.entry_id, source_room_id: "room_1", destination_room_id: "room_2", daemon_generation: request.params!.daemon_generation, work_attempt_id: "attempt_1", execution_generation_id: "execution_1", agent_session_id: "session_1", phase: request.method === "supervisor.prepare_room_move" ? "prepared" : "bootstrapping_destination_tail", remote_room_id: request.method === "supervisor.prepare_room_move" ? null : "room_2", destination_cursor: null, source_credentials_revoked: request.method !== "supervisor.prepare_room_move", error: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:01.000Z" };
       } else if (request.method === "lane.reserve_legacy") {
         const owner = {
           reservation_id: request.params!.reservation_id,
@@ -358,6 +379,237 @@ test("agent inspector detail is capability-negotiated and preserves its optional
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
+test("Inspector settings and room-move RPCs preserve strict typed coordinates", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const configuration = await client.getAgentConfiguration("agent_1", 39);
+    assert.equal(configuration.configRevision, 1);
+    assert.equal(configuration.supervisedPermissionProfiles[0]?.id, "full_access");
+    assert.equal(configuration.supervisedPermissionProfiles[0]?.status, "available");
+    await client.updateAgentConfiguration({
+      entryId: "agent_1", daemonGeneration: 39, expectedRevision: 1,
+      // Cast deliberately simulates a compromised renderer attempting to
+      // submit native flags through the public bridge.
+      configuration: { model: null, reasoningEffort: null, charter: "help", permissionProfileId: "full_access", providerLaunchPolicy: { sandboxPolicy: "weakened" } } as never,
+    });
+    const prepared = await client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: "request_1", daemonGeneration: 39 });
+    assert.equal(prepared.phase, "prepared");
+    const committed = await client.commitRoomMove({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39 });
+    assert.equal(committed.phase, "bootstrapping_destination_tail");
+    const acknowledged = await client.acknowledgeRoomMoveSourceRevocation({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39, sourceAgentSessionId: "session_1" });
+    assert.equal(acknowledged.sourceCredentialsRevoked, true);
+    const current = await client.getCurrentRoomMove({ entryId: "agent_1", daemonGeneration: 39 });
+    assert.equal(current?.entryId, "agent_1");
+    assert.equal(await client.getCurrentRoomMove({ entryId: "agent_none", daemonGeneration: 39 }), null);
+    await client.rollbackRoomMove({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39, error: "owner API unavailable" });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.prepare_room_move")?.params, { entry_id: "agent_1", destination_room_id: "room_2", request_id: "request_1", daemon_generation: 39 });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.acknowledge_room_move_source_revocation")?.params, { operation_id: prepared.operationId, entry_id: "agent_1", source_agent_session_id: "session_1", daemon_generation: 39 });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.rollback_room_move")?.params, { operation_id: prepared.operationId, entry_id: "agent_1", error: "owner API unavailable", daemon_generation: 39 });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.get_current_room_move")?.params, { entry_id: "agent_1", daemon_generation: 39 });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.update_agent_configuration")?.params, {
+      entry_id: "agent_1", daemon_generation: 39, expected_revision: 1,
+      configuration: { model: null, reasoning_effort: null, charter: "help", permission_profile_id: "full_access" },
+    }, "the renderer bridge must never forward native provider policy");
+    await assert.rejects(() => client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: undefined as unknown as string, daemonGeneration: 39 }), /exact typed/);
+    await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("agent lifecycle RPCs are negotiated before any mutation is sent", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    40,
+    undefined,
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    false,
+  );
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    await assert.rejects(() => client.setDesiredState("agent_1", "stopped"), /too old for durable agent lifecycle/);
+    await assert.rejects(() => client.retireAgent("agent_1", 40), /too old for durable agent lifecycle/);
+    await assert.rejects(() => client.purgeAgent("agent_1", 40), /too old for durable agent lifecycle/);
+    assert.equal(wire.requests.some((request) => ["manifest.set_desired_state", "supervisor.retire_agent", "supervisor.purge_agent"].includes(request.method)), false);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("purge RPC preserves exact worker-session and grant-only acknowledgement modes", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 40);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    assert.deepEqual(await client.purgeAgent("agent_exact", 40), {
+      outcome: "revocation_required",
+      operationId: "purge:agent_exact",
+      revocationKind: "worker_session",
+      agentSessionId: "session_exact",
+    });
+    assert.deepEqual(await client.purgeAgent("agent_grant_only", 40), {
+      outcome: "revocation_required",
+      operationId: "purge:agent_grant_only",
+      revocationKind: "grant_only",
+    });
+    assert.deepEqual(await client.purgeAgent("agent_exact", 40, "session_exact", false), { outcome: "purged" });
+    assert.deepEqual(await client.purgeAgent("agent_grant_only", 40, null, true), { outcome: "purged" });
+    const purgeRequests = wire.requests.filter((request) => request.method === "supervisor.purge_agent");
+    assert.deepEqual(purgeRequests.map((request) => request.params), [
+      { entry_id: "agent_exact", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: false },
+      { entry_id: "agent_grant_only", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: false },
+      { entry_id: "agent_exact", daemon_generation: 40, revoked_agent_session_id: "session_exact", grant_revoked_without_worker_session: false },
+      { entry_id: "agent_grant_only", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: true },
+    ]);
+    await assert.rejects(() => client.purgeAgent("agent_exact", 40, "session_exact", true), /exact typed coordinates/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("production create durably proves no mint, grant-only purge survives restart, and its identity tombstone is permanent", async () => {
+  const env = await fixture();
+  const previousPlatformOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  const previousGrantStore = process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = join(env.root, "supervisor-grants.json");
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: env.socketPath,
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemonModulePath = ["..", "..", "daemon", "main.js"].join("/");
+  const { SupervisorDaemon: InProcessSupervisorDaemon } = await import(daemonModulePath) as {
+    SupervisorDaemon: new (
+      daemonPaths: typeof paths,
+      platform: NodeJS.Platform,
+    ) => { start(): Promise<void>; stop(): Promise<void> };
+  };
+  const storage = {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(`keychain:${value}`),
+    decryptString: (value: Buffer) => value.toString("utf8").replace("keychain:", ""),
+  };
+  let daemon = new InProcessSupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      spawnDaemon: () => { throw new Error("the real in-process daemon must be reused"); },
+    });
+    const createInput = {
+      creationRequestId: "production_never_minted",
+      roomIdentifier: "room_production_never_minted",
+      displayName: "Production never minted",
+      providerId: "codex" as const,
+      charter: "Remain paused until explicitly activated.",
+      repoRootPath: env.root,
+    };
+    const created = await client.create(createInput);
+    assert.equal(created.id, "supervised_production_never_minted");
+    const createdDatabase = new DatabaseSync(paths.manifestPath);
+    try {
+      const mintState = createdDatabase.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+        .get(created.id) as { phase: string; agent_session_id: string | null };
+      assert.equal(mintState.phase, "never_minted");
+      assert.equal(mintState.agent_session_id, null);
+    } finally { createdDatabase.close(); }
+    assert.equal((await client.setDesiredState(created.id, "stopped")).desiredState, "stopped");
+
+    const agentKey = "owner/production-never-minted";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        grantId: "grant_production_never_minted",
+        hostId: "desktop_host",
+        installationId: "installation_production_never_minted",
+        allowedRoomIds: [created.roomId],
+        allowedAgentKeys: [agentKey],
+        generation: 1,
+        expiresAt: "2026-08-01T00:00:00.000Z",
+      },
+      token: "lashg_production_never_minted",
+      entryId: created.id,
+    }, { storage });
+
+    const generation = (await client.ensureRunning()).generation;
+    assert.deepEqual(await client.purgeAgent(created.id, generation), {
+      outcome: "revocation_required",
+      operationId: `purge:${created.id}`,
+      revocationKind: "grant_only",
+    });
+    const database = new DatabaseSync(paths.manifestPath);
+    try {
+      const purge = database.prepare("SELECT phase,worker_session_attestation,agent_session_id FROM agent_purge_operations WHERE operation_id=?")
+        .get(`purge:${created.id}`) as { phase: string; worker_session_attestation: string; agent_session_id: string | null };
+      assert.equal(purge.phase, "revoking_credentials");
+      assert.equal(purge.worker_session_attestation, "none");
+      assert.equal(purge.agent_session_id, null);
+    } finally { database.close(); }
+
+    const requests: string[] = [];
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(created.id, {
+      storage,
+      apiFetch: (async <T>(requestPath: string) => {
+        requests.push(requestPath);
+        return {} as T;
+      }) as never,
+    });
+    assert.deepEqual(requests, ["/supervisor-host-grants/grant_production_never_minted"]);
+    assert.equal(requests.some((requestPath) => requestPath.includes("/worker-sessions/") || requestPath.endsWith("/end")), false);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage }), null);
+
+    await daemon.stop();
+    daemon = new InProcessSupervisorDaemon(paths, "darwin");
+    await daemon.start();
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(created.id, {
+      storage,
+      apiFetch: (async () => { throw new Error("durable grant-only receipt must suppress a repeated remote revoke"); }) as never,
+    });
+    assert.deepEqual(requests, ["/supervisor-host-grants/grant_production_never_minted"]);
+    const restartedGeneration = (await client.ensureRunning()).generation;
+    assert.deepEqual(await client.purgeAgent(created.id, restartedGeneration, null, true), { outcome: "purged" });
+    await assert.rejects(
+      () => client.create(createInput),
+      /permanently purged.*new creation request id/,
+    );
+    const tombstoneDatabase = new DatabaseSync(paths.manifestPath);
+    try {
+      assert.equal(
+        (tombstoneDatabase.prepare("SELECT phase FROM agent_purge_operations WHERE operation_id=?")
+          .get(`purge:${created.id}`) as { phase: string }).phase,
+        "complete",
+      );
+      assert.equal(
+        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM agent_identities WHERE agent_id=?")
+          .get(created.id) as { count: number }).count),
+        0,
+      );
+      assert.equal(
+        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM supervised_worker_mint_states WHERE agent_id=?")
+          .get(created.id) as { count: number }).count),
+        0,
+        "the permanent purge tombstone survives while all per-agent mint state is removed",
+      );
+    } finally { tombstoneDatabase.close(); }
+    const distinct = await client.create({
+      ...createInput,
+      creationRequestId: "production_new_identity",
+      displayName: "Production new identity",
+    });
+    assert.equal(distinct.id, "supervised_production_new_identity");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    if (previousPlatformOverride === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousPlatformOverride;
+    if (previousGrantStore === undefined) delete process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
+    else process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = previousGrantStore;
+    await env.cleanup();
+  }
+});
+
 test("room delivery retry is capability-negotiated and carries the exact current daemon generation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -475,6 +727,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const createInput = { creationRequestId: "request_alpha", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Durable Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
     const created = await client.create(createInput);
     assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
+    assert.equal(wire.entries[0]?.last_worker_binding, null, "production creation durably attests that no worker session exists yet");
     const retried = await client.create(createInput);
     assert.equal(retried.id, created.id, "one Start request is idempotent across retries");
     const second = await client.create({ ...createInput, creationRequestId: "request_bravo", displayName: "Second durable Codex" });
@@ -659,7 +912,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces the prior 2.0.44 implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the prior 2.0.49 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -678,11 +931,11 @@ test("desktop replaces the prior 2.0.44 implementation and accepts only the new 
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.44",
+    "2.0.49",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.44", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.notEqual("2.0.49", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -700,7 +953,7 @@ test("desktop replaces the prior 2.0.44 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.45");
+    assert.equal(status.implementationVersion, "2.0.50");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

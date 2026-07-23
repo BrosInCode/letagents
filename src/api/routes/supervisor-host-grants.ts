@@ -8,6 +8,7 @@ import {
   getAgentIdentityByCanonicalKey,
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
+  isSupervisorGrantProvisionConflictError,
   isRebindAttestationCause,
   isSupervisorGrantFenceStaleError,
   isUuidShapedExecutionId,
@@ -132,6 +133,10 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       });
       res.status(201).json({ ...created.grant, supervisor_grant: created.token });
     } catch (error) {
+      if (isSupervisorGrantProvisionConflictError(error)) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithInternalError(res, "POST /supervisor-host-grants", error, "Supervisor grant could not be provisioned.");
     }
   });
@@ -266,7 +271,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     const sessionId = String(req.params.sessionId ?? "").trim();
     // A supervisor never receives a session token; this fetch is only a
     // grant-bound ownership check before ending the exact worker session.
-    const session = await getSupervisorRoomAgentSession({ session_id: sessionId, supervisor_grant_id: grant.grant_id });
+    const session = await getSupervisorRoomAgentSession({ session_id: sessionId, supervisor_grant_id: grant.grant_id, include_ended: true });
     if (!session || !grant.allowed_room_ids.includes(session.room_id) || !grant.allowed_agent_keys.includes(session.agent_key)) {
       res.status(403).json({ error: "Grant does not authorize that worker session." });
       return;

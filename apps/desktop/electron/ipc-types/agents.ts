@@ -363,8 +363,65 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
-  capabilities: { roomDeliveryRetry: boolean; agentInspectorDetail: boolean };
+  capabilities: {
+    roomDeliveryRetry: boolean;
+    agentInspectorDetail: boolean;
+    agentInspectorSettings: boolean;
+    agentRoomMove: boolean;
+    agentLifecycle: boolean;
+  };
 }
+
+/** Revisioned, daemon-owned Inspector configuration. Provider never changes after creation. */
+export interface DesktopSupervisorAgentConfiguration {
+  entryId: string;
+  daemonGeneration: number;
+  provider: string;
+  model: string | null;
+  reasoningEffort: DesktopManagedAgentEffort | null;
+  charter: string;
+  permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
+  /** Exact permission availability for this background supervised runtime. */
+  supervisedPermissionProfiles: DesktopManagedAgentPermissionProfile[];
+  providerLaunchPolicy: unknown;
+  configRevision: number;
+  runtimeConfigurationRevision: number;
+}
+
+export interface DesktopSupervisorAgentConfigurationUpdateInput {
+  entryId: string;
+  daemonGeneration: number;
+  expectedRevision: number;
+  /** User-editable values only. Native provider policy is daemon-owned. */
+  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId">;
+}
+export type DesktopSupervisorAgentConfigurationUpdateResult =
+  | { outcome: "updated"; configuration: DesktopSupervisorAgentConfiguration }
+  | { outcome: "conflict"; configuration: DesktopSupervisorAgentConfiguration }
+  | { outcome: "invalid"; error: string };
+
+export type DesktopSupervisorRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
+export interface DesktopSupervisorRoomMove {
+  operationId: string;
+  requestId: string;
+  entryId: string;
+  sourceRoomId: string;
+  destinationRoomId: string;
+  daemonGeneration: number;
+  workAttemptId: string | null;
+  executionGenerationId: string | null;
+  agentSessionId: string | null;
+  phase: DesktopSupervisorRoomMovePhase;
+  remoteRoomId: string | null;
+  destinationCursor: string | null;
+  sourceCredentialsRevoked: boolean;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface DesktopSupervisorRoomMovePrepareInput { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }
+export interface DesktopSupervisorRoomMoveOperationInput { operationId: string; entryId: string; daemonGeneration: number }
+export interface DesktopSupervisorCurrentRoomMoveInput { entryId: string; daemonGeneration: number }
 
 export interface DesktopSupervisorLivenessAxis {
   state: string;

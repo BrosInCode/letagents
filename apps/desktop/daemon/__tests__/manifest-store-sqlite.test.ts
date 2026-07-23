@@ -6,9 +6,607 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
+
+test("Inspector configuration revisions are optimistic, durable, and do not alter the flat manifest", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    const original = await store.getAgentConfiguration(entry.id);
+    assert.equal(original?.config_revision, 1);
+    assert.equal(original?.runtime_configuration_revision, 1);
+    const updated = await store.updateAgentConfiguration(1, {
+      agentId: entry.id, expectedRevision: 1, model: "gpt-next", reasoningEffort: "high",
+      charter: "Use the new charter on future turns.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" },
+    });
+    assert.equal(updated.outcome, "updated");
+    assert.equal(updated.configuration?.config_revision, 2);
+    assert.equal(updated.configuration?.runtime_configuration_revision, 1);
+    const conflict = await store.updateAgentConfiguration(2, {
+      agentId: entry.id, expectedRevision: 1, model: "ignored", reasoningEffort: null,
+      charter: "ignored", permissionProfileId: null, providerLaunchPolicy: {},
+    });
+    assert.equal(conflict.outcome, "conflict");
+    assert.equal((await store.load()).generation, 2, "a revision conflict must not advance manifest generation");
+    await store.replaceEntry(2, { ...entry, observed_state: "idle" });
+    const afterLifecycleReplacement = await store.getAgentConfiguration(entry.id);
+    assert.equal(afterLifecycleReplacement?.model, "gpt-next");
+    assert.equal(afterLifecycleReplacement?.charter, "Use the new charter on future turns.");
+    assert.equal(afterLifecycleReplacement?.config_revision, 2);
+    assert.equal(afterLifecycleReplacement?.runtime_configuration_revision, 1);
+    const manifest = await store.load();
+    assert.equal(manifest.entries[0]?.model, "gpt-next");
+    assert.equal(Object.hasOwn(manifest.entries[0]!, "config_revision"), false, "legacy manifest projection never leaks Inspector bookkeeping");
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("room-move journal is request-idempotent and exact-generation phase fenced", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    const cursorDatabase = new DatabaseSync(env.databasePath);
+    try {
+      cursorDatabase.prepare("INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES(?,?,?,?)")
+        .run(entry.id, entry.room_id, "msg_17", "2026-07-19T00:00:00.000Z");
+    } finally { cursorDatabase.close(); }
+    const coordinates = {
+      operation_id: "move_1", request_id: "request_1", agent_id: entry.id, source_room_id: entry.room_id,
+      destination_room_id: "room_2", daemon_generation: 7, work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      agent_session_id: "session_1", activating_inbox_item_id: null, provider_turn_id: null, effect_id: null, phase: "prepared" as const,
+    };
+    const prepared = await store.prepareRoomMove(coordinates);
+    assert.equal(prepared.created, true);
+    assert.equal(prepared.move.source_cursor_present, true);
+    assert.equal(prepared.move.source_cursor, "msg_17");
+    assert.equal(prepared.move.source_credentials_revoked, false);
+    assert.equal((await store.prepareRoomMove(coordinates)).created, false);
+    await assert.rejects(() => store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 8, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" }), ManifestConflictError);
+    const waiting = await store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 7, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" });
+    assert.equal(waiting.phase, "waiting_for_current_turn");
+    const acknowledged = await store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 7, expectedExecutionGenerationId: "run_1", from: ["waiting_for_current_turn"], to: "waiting_for_current_turn", sourceCredentialsRevoked: true });
+    assert.equal(acknowledged.source_credentials_revoked, true);
+    await store.close();
+    const reopened = new ManifestStore(env.databasePath);
+    assert.equal((await reopened.pendingRoomMoves(entry.id))[0]?.operation_id, "move_1");
+    assert.equal((await reopened.pendingRoomMoves(entry.id))[0]?.source_credentials_revoked, true);
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("purge proves preconditions and deletes local agent rows atomically without touching its worktree", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const worktreeMarker = join(env.root, "preserved-worktree.txt");
+  await writeFile(worktreeMarker, "keep");
+  const attemptId = "attempt_purge";
+  const executionId = "run_purge";
+  const stopped: DaemonManifestEntry = {
+    ...entry, id: "agent_purge", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: worktreeMarker, work_attempt_id: attemptId,
+    provider_ref: {
+      ...entry.provider_ref!, work_attempt_id: attemptId, execution_generation_id: executionId,
+    },
+    activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [stopped]);
+    seedTerminalAttempt(env.databasePath, attemptId, executionId, worktreeMarker);
+    const prepared = await store.preparePurge(1, {
+      operationId: "purge_1", requestId: "purge_1", agentId: stopped.id, daemonGeneration: 3,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    });
+    assert.equal(prepared.purge.phase, "local_commit");
+    assert.equal(prepared.purge.attached_work_attempt_id, attemptId);
+    assert.equal(prepared.purge.preserved_workspace_path, worktreeMarker);
+    await store.close(); // crash boundary after durable preparation
+    const reopened = new ManifestStore(env.databasePath);
+    const committed = await reopened.commitPurge(1, { operationId: "purge_1", agentId: stopped.id, daemonGeneration: 3 });
+    assert.equal(committed.generation, 2);
+    assert.equal(committed.purge.phase, "complete");
+    assert.equal(await reopened.getEntry(stopped.id), undefined);
+    assert.equal(await readFile(worktreeMarker, "utf8"), "keep");
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      for (const [table, column, value] of [
+        ["agent_identities", "agent_id", stopped.id], ["worker_session_bindings", "entry_id", stopped.id], ["supervised_agent_inbox", "agent_id", stopped.id],
+        ["supervised_worker_mint_states", "agent_id", stopped.id],
+        ["work_attempts", "work_attempt_id", attemptId], ["work_attempt_lease_epochs", "work_attempt_id", attemptId],
+        ["work_attempt_checkpoints", "work_attempt_id", attemptId], ["work_attempt_executions", "work_attempt_id", attemptId],
+      ] as const) {
+        assert.equal(Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column}=?`).get(value) as { count: number }).count), 0);
+      }
+      assert.equal((database.prepare("SELECT phase FROM agent_purge_operations WHERE operation_id='purge_1'").get() as { phase: string }).phase, "complete");
+    } finally { database.close(); }
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("mint-state evidence is none only before an attempt, unknown across crashes, exact after recovery, and conflict-safe", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "legacy-worker-bindings.json"), undefined, env.databasePath);
+  const stopped: DaemonManifestEntry = {
+    ...entry,
+    id: "agent_mint_state",
+    delivery_mode: "daemon_inbox",
+    desired_state: "stopped",
+    observed_state: "stopped",
+    condition: "none",
+    workspace_path: null,
+    work_attempt_id: null,
+    provider_ref: null,
+    activity: [],
+    turn_control: null,
+    last_worker_binding: null,
+  };
+  try {
+    await store.write(0, [stopped]);
+    assert.equal((await bindings.supervisedWorkerMintState(stopped.id))?.phase, "never_minted");
+    assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+      workerSessionAttestation: "none",
+      agentSessionId: null,
+    });
+
+    await bindings.beginSupervisedWorkerSessionMint({
+      agent_id: stopped.id,
+      room_id: stopped.room_id,
+      agent_instance_id: `daemon:${stopped.id}`,
+    });
+    assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+      workerSessionAttestation: "unknown",
+      agentSessionId: null,
+    }, "the committed pre-POST fence survives as unknown");
+
+    await bindings.close();
+    const recoveredBindings = new WorkerBindingStore(join(env.root, "legacy-worker-bindings.json"), undefined, env.databasePath);
+    try {
+      assert.equal((await recoveredBindings.supervisedWorkerMintState(stopped.id))?.phase, "minting_unknown");
+      await recoveredBindings.recordExactSupervisedWorkerSessionMint({
+        agent_id: stopped.id,
+        room_id: stopped.room_id,
+        agent_instance_id: `daemon:${stopped.id}`,
+        agent_session_id: "session_exact_recovered",
+      });
+      assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+        workerSessionAttestation: "exact",
+        agentSessionId: "session_exact_recovered",
+      }, "the exact recovered response outranks retained explicit none");
+
+      const conflict = new DatabaseSync(env.databasePath);
+      try {
+        conflict.prepare(`INSERT INTO supervised_worker_sessions
+          (agent_id,room_id,agent_session_id,execution_generation_id,credential_ref,expires_at,updated_at)
+          VALUES (?,?,?,?,?,?,?)`)
+          .run(stopped.id, stopped.room_id, "session_conflicting", "execution_conflicting", "opaque-public-id", null, new Date().toISOString());
+      } finally { conflict.close(); }
+      assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+        workerSessionAttestation: "unknown",
+        agentSessionId: null,
+      }, "conflicting exact durable ids fail closed");
+
+      const cleanup = new DatabaseSync(env.databasePath);
+      try { cleanup.prepare("DELETE FROM supervised_worker_sessions WHERE agent_id=?").run(stopped.id); }
+      finally { cleanup.close(); }
+      await recoveredBindings.beginSupervisedWorkerSessionMint({
+        agent_id: stopped.id,
+        room_id: stopped.room_id,
+        agent_instance_id: `daemon:${stopped.id}`,
+      });
+      assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+        workerSessionAttestation: "unknown",
+        agentSessionId: null,
+      }, "a later mint attempt vetoes older exact evidence until its response is durable");
+    } finally { await recoveredBindings.close(); }
+  } finally {
+    await bindings.close().catch(() => undefined);
+    await store.close();
+    await env.cleanup();
+  }
+});
+
+test("purge generation adoption never substitutes for durable credential-revocation acknowledgement", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const stopped: DaemonManifestEntry = {
+    ...entry, id: "agent_revoke", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: null, work_attempt_id: null, provider_ref: null, activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [stopped]);
+    const prepared = await store.preparePurge(1, {
+      operationId: "purge_revoke", requestId: "purge_revoke", agentId: stopped.id, daemonGeneration: 8,
+      externalRevokeRequired: true, workerSessionAttestation: "exact", agentSessionId: "session_revoke",
+    });
+    assert.equal(prepared.purge.phase, "revoking_credentials");
+    assert.equal(prepared.purge.agent_session_id, "session_revoke");
+    await store.close(); // daemon crashes after prepare but before Electron revoke
+    const reopened = new ManifestStore(env.databasePath);
+    const adopted = await reopened.adoptPurgeDaemonGeneration({
+      operationId: "purge_revoke", agentId: stopped.id, expectedDaemonGeneration: 8, daemonGeneration: 9,
+    });
+    assert.equal(adopted.daemon_generation, 9);
+    assert.equal(adopted.phase, "revoking_credentials", "generation N+1 must still require an explicit durable revoke acknowledgement");
+    const acknowledged = await reopened.markPurgeCredentialsRevoked({
+      operationId: "purge_revoke", agentId: stopped.id, expectedDaemonGeneration: 9, agentSessionId: "session_revoke",
+    });
+    assert.equal(acknowledged.phase, "local_commit");
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("purge commit rolls every agent and work-attempt deletion back on a late injected failure", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const worktreeMarker = join(env.root, "rollback-worktree");
+  const attemptId = "attempt_rollback";
+  const executionId = "run_rollback";
+  const stopped: DaemonManifestEntry = {
+    ...entry, id: "agent_rollback", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: worktreeMarker, work_attempt_id: attemptId,
+    provider_ref: { ...entry.provider_ref!, work_attempt_id: attemptId, execution_generation_id: executionId },
+    activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [stopped]);
+    seedTerminalAttempt(env.databasePath, attemptId, executionId, worktreeMarker);
+    await store.preparePurge(1, {
+      operationId: "purge_rollback", requestId: "purge_rollback", agentId: stopped.id, daemonGeneration: 2, externalRevokeRequired: false,
+      workerSessionAttestation: "not_required", agentSessionId: null,
+    });
+    const injector = new DatabaseSync(env.databasePath);
+    try {
+      injector.exec(`CREATE TRIGGER inject_purge_rollback BEFORE DELETE ON agent_identities
+        WHEN old.agent_id='agent_rollback' BEGIN SELECT RAISE(ABORT,'injected purge rollback'); END`);
+    } finally { injector.close(); }
+    await assert.rejects(
+      () => store.commitPurge(1, { operationId: "purge_rollback", agentId: stopped.id, daemonGeneration: 2 }),
+      /injected purge rollback/,
+    );
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as { generation: number }).generation), 1);
+      assert.equal((database.prepare("SELECT phase FROM agent_purge_operations WHERE operation_id='purge_rollback'").get() as { phase: string }).phase, "local_commit");
+      for (const [table, column, value] of [
+        ["agent_identities", "agent_id", stopped.id], ["work_attempts", "work_attempt_id", attemptId],
+        ["work_attempt_lease_epochs", "work_attempt_id", attemptId], ["work_attempt_checkpoints", "work_attempt_id", attemptId],
+        ["work_attempt_executions", "work_attempt_id", attemptId],
+      ] as const) {
+        assert.equal(Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column}=?`).get(value) as { count: number }).count), 1);
+      }
+    } finally { database.close(); }
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("purge rejection leaves generation, identity, and journal unchanged", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    await assert.rejects(() => store.preparePurge(1, {
+      operationId: "purge_blocked", requestId: "purge_blocked", agentId: entry.id, daemonGeneration: 1,
+      externalRevokeRequired: true, workerSessionAttestation: "exact", agentSessionId: "session_1",
+    }), /fully stopped/);
+    assert.equal((await store.load()).generation, 1);
+    assert.ok(await store.getEntry(entry.id));
+    assert.equal(await store.getPurge("purge_blocked"), null);
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("v12 canonical validation rejects a malformed durable-operation index", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try { await store.write(0, [entry]); } finally { await store.close(); }
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    database.exec("DROP INDEX one_active_agent_room_move; CREATE UNIQUE INDEX one_active_agent_room_move ON agent_room_moves(agent_id,updated_at) WHERE phase NOT IN ('active','failed')");
+  } finally { database.close(); }
+  const reopened = new ManifestStore(env.databasePath);
+  try { await assert.rejects(() => reopened.load(), /index one_active_agent_room_move is invalid/); }
+  finally { await reopened.close(); await env.cleanup(); }
+});
+
+test("v12 canonical validation rejects a mint-state table that could persist unchecked evidence", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try { await store.write(0, [entry]); } finally { await store.close(); }
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    database.exec(`
+      DROP TABLE supervised_worker_mint_states;
+      CREATE TABLE supervised_worker_mint_states (
+        agent_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        agent_instance_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        agent_session_id TEXT,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+    `);
+  } finally { database.close(); }
+  const reopened = new ManifestStore(env.databasePath);
+  try {
+    await assert.rejects(
+      () => reopened.load(),
+      /mint-state table does not match its canonical strict definition/,
+    );
+  } finally { await reopened.close(); await env.cleanup(); }
+});
+
+test("v11 mint evidence migrates transactionally to unknown and exact without credential columns", async () => {
+  const env = await fixture();
+  const neverMinted: DaemonManifestEntry = {
+    ...entry,
+    id: "agent_v11_never_minted",
+    delivery_mode: "daemon_inbox",
+    desired_state: "stopped",
+    observed_state: "stopped",
+    condition: "none",
+    workspace_path: null,
+    work_attempt_id: null,
+    provider_ref: null,
+    activity: [],
+    turn_control: null,
+    last_worker_binding: null,
+  };
+  const exact: DaemonManifestEntry = {
+    ...neverMinted,
+    id: "agent_v11_exact",
+    last_worker_binding: {
+      agent_session_id: "session_v11_exact",
+      work_attempt_id: "attempt_v11_exact",
+      execution_generation_id: "execution_v11_exact",
+      updated_at: "2026-07-20T00:00:00.000Z",
+    },
+  };
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    await initialized.write(0, [neverMinted, exact]);
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec(`
+      DROP TABLE supervised_worker_mint_states;
+      UPDATE manifest_metadata SET schema_version=11 WHERE singleton=1;
+      PRAGMA user_version=11;
+    `);
+    historical.close();
+
+    const interrupted = new ManifestStore(env.databasePath, undefined, undefined, () => {
+      throw new Error("interrupt v12 mint-state migration");
+    });
+    await assert.rejects(() => interrupted.load(), /interrupt v12/);
+    await interrupted.close();
+    const afterInterruption = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal((afterInterruption.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+      assert.equal(
+        (afterInterruption.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1")
+          .get() as { schema_version: number }).schema_version,
+        11,
+      );
+      assert.equal(
+        afterInterruption.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='supervised_worker_mint_states'").get(),
+        undefined,
+        "interrupted schema creation rolls back with the version markers",
+      );
+    } finally { afterInterruption.close(); }
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    await migrated.close();
+    const inspection = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+      const neverMintedState = inspection.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+        .get(neverMinted.id) as { phase: string; agent_session_id: string | null };
+      assert.equal(neverMintedState.phase, "minting_unknown", "v11 explicit null may have crossed the old lost-response window");
+      assert.equal(neverMintedState.agent_session_id, null);
+      const exactState = inspection.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+        .get(exact.id) as { phase: string; agent_session_id: string | null };
+      assert.equal(exactState.phase, "exact");
+      assert.equal(exactState.agent_session_id, "session_v11_exact");
+      const columns = (inspection.prepare("PRAGMA table_info(supervised_worker_mint_states)").all() as Array<{ name: string }>)
+        .map((column) => column.name);
+      assert.equal(columns.some((column) => /(token|bearer|credential|secret)/i.test(column)), false);
+    } finally { inspection.close(); }
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("v10 state migrates through the exact-session purge fence to the current schema before version markers advance", async () => {
+  const env = await fixture();
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    const stopped: DaemonManifestEntry = {
+      ...entry,
+      id: "agent_v10_purge",
+      desired_state: "stopped",
+      observed_state: "stopped",
+      condition: "none",
+      last_error: null,
+      workspace_path: null,
+      work_attempt_id: null,
+      provider_ref: null,
+      activity: [],
+      turn_control: null,
+      last_worker_binding: {
+        agent_session_id: "session_v10_exact",
+        work_attempt_id: "attempt_v10",
+        execution_generation_id: "execution_v10",
+        updated_at: "2026-07-19T00:02:02.000Z",
+      },
+      workplace_liveness: { state: "unknown", observed_at: null, detail: null },
+      native_liveness: { state: "unknown", observed_at: null, detail: null },
+    };
+    await initialized.write(0, [stopped]);
+    await initialized.preparePurge(1, {
+      operationId: "purge_v10", requestId: "purge_v10", agentId: stopped.id, daemonGeneration: 8,
+      externalRevokeRequired: true, workerSessionAttestation: "exact", agentSessionId: "session_v10_exact",
+    });
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec(`
+      CREATE TABLE agent_purge_operations_v10 (
+        operation_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        agent_id TEXT NOT NULL,
+        daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),
+        phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),
+        external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        attached_work_attempt_id TEXT,
+        preserved_workspace_path TEXT
+      ) STRICT;
+      INSERT INTO agent_purge_operations_v10
+        SELECT operation_id,request_id,agent_id,daemon_generation,phase,external_revoke_required,error,created_at,updated_at,
+          attached_work_attempt_id,preserved_workspace_path
+        FROM agent_purge_operations;
+      DROP TABLE agent_purge_operations;
+      ALTER TABLE agent_purge_operations_v10 RENAME TO agent_purge_operations;
+      UPDATE manifest_metadata SET schema_version=10 WHERE singleton=1;
+      PRAGMA user_version=10;
+    `);
+    historical.close();
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    const recovered = await migrated.getPurge("purge_v10");
+    assert.equal(recovered?.phase, "revoking_credentials");
+    assert.equal(recovered?.worker_session_attestation, "exact");
+    assert.equal(recovered?.agent_session_id, "session_v10_exact");
+    const acknowledged = await migrated.markPurgeCredentialsRevoked({
+      operationId: "purge_v10",
+      agentId: stopped.id,
+      expectedDaemonGeneration: 8,
+      agentSessionId: "session_v10_exact",
+    });
+    assert.equal(acknowledged.phase, "local_commit");
+    await migrated.close();
+    const completion = new ManifestStore(env.databasePath);
+    const committed = await completion.commitPurge(1, {
+      operationId: "purge_v10", agentId: stopped.id, daemonGeneration: 8,
+    });
+    assert.equal(committed.purge.phase, "complete");
+    await completion.close();
+    const inspection = new DatabaseSync(env.databasePath);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(
+      (inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get() as { schema_version: number }).schema_version,
+      DAEMON_STATE_SCHEMA_VERSION,
+    );
+    const columns = inspection.prepare("PRAGMA table_info(agent_purge_operations)").all() as Array<{ name: string }>;
+    assert.equal(columns.some((column) => column.name === "agent_session_id"), true);
+    assert.equal(columns.some((column) => column.name === "worker_session_attestation"), true);
+    inspection.close();
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("v10 revoking purge without exact retained evidence migrates to recoverable state and rejects false acknowledgement", async () => {
+  const env = await fixture();
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    const { last_worker_binding: _legacyBinding, ...entryWithoutBindingEvidence } = entry;
+    const stopped: DaemonManifestEntry = {
+      ...entryWithoutBindingEvidence,
+      id: "agent_v10_unknown_purge",
+      desired_state: "stopped",
+      observed_state: "stopped",
+      condition: "none",
+      last_error: null,
+      workspace_path: null,
+      work_attempt_id: null,
+      provider_ref: null,
+      activity: [],
+      turn_control: null,
+      workplace_liveness: { state: "unknown", observed_at: null, detail: null },
+      native_liveness: { state: "unknown", observed_at: null, detail: null },
+    };
+    await initialized.write(0, [stopped]);
+    await initialized.preparePurge(1, {
+      operationId: "purge_v10_unknown", requestId: "purge_v10_unknown", agentId: stopped.id, daemonGeneration: 9,
+      externalRevokeRequired: true, workerSessionAttestation: "unknown", agentSessionId: null,
+    });
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec(`
+      CREATE TABLE agent_purge_operations_v10 (
+        operation_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        agent_id TEXT NOT NULL,
+        daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),
+        phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),
+        external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        attached_work_attempt_id TEXT,
+        preserved_workspace_path TEXT
+      ) STRICT;
+      INSERT INTO agent_purge_operations_v10
+        SELECT operation_id,request_id,agent_id,daemon_generation,'revoking_credentials',external_revoke_required,error,created_at,updated_at,
+          attached_work_attempt_id,preserved_workspace_path
+        FROM agent_purge_operations;
+      DROP TABLE agent_purge_operations;
+      ALTER TABLE agent_purge_operations_v10 RENAME TO agent_purge_operations;
+      UPDATE manifest_metadata SET schema_version=10 WHERE singleton=1;
+      PRAGMA user_version=10;
+    `);
+    historical.close();
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    const recovered = await migrated.getPurge("purge_v10_unknown");
+    assert.equal(recovered?.phase, "reprepare_credentials");
+    assert.equal(recovered?.worker_session_attestation, "unknown");
+    assert.equal(recovered?.agent_session_id, null);
+    await assert.rejects(
+      () => migrated.markPurgeCredentialsRevoked({
+        operationId: "purge_v10_unknown", agentId: stopped.id, expectedDaemonGeneration: 9, agentSessionId: "guessed_session",
+      }),
+      ManifestConflictError,
+    );
+    await assert.rejects(
+      () => migrated.markPurgeGrantRevokedWithoutWorkerSession({
+        operationId: "purge_v10_unknown", agentId: stopped.id, expectedDaemonGeneration: 9,
+      }),
+      ManifestConflictError,
+    );
+    await migrated.close();
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
 
 const terminal = {
   ended_at: "2026-07-19T00:03:00.000Z",
@@ -149,8 +747,8 @@ function removePostV5DeliveryTables(database: DatabaseSync): void {
 }
 
 function assertRoomScopedV9DeliveryShape(database: DatabaseSync): void {
-  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
-  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
+  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, DAEMON_STATE_SCHEMA_VERSION);
   const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as { sql: string };
   const observed = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_observed_messages'").get() as { sql: string };
   const publications = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as { sql: string };
@@ -158,6 +756,26 @@ function assertRoomScopedV9DeliveryShape(database: DatabaseSync): void {
   assert.match(observed.sql, /PRIMARY KEY\s*\(\s*agent_id\s*,\s*room_id\s*,\s*source_message_id\s*\)/i);
   assert.match(publications.sql, /FOREIGN KEY\s*\(\s*inbox_item_id\s*,\s*agent_id\s*,\s*room_id\s*\)/i);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+}
+
+function seedTerminalAttempt(databasePath: string, attemptId: string, executionId: string, workspacePath: string): void {
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.prepare(`INSERT INTO work_attempts(
+      work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,
+      workspace_resolved_revision,workspace_bare_path,state,created_at,concluded_at,conclusion_cause,postmortem_diff
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      attemptId, `task_${attemptId}`, `lease_${attemptId}`, 1, workspacePath, "repo", "https://github.com/example/repo.git",
+      "a".repeat(40), join(workspacePath, ".bare"), "cleanly_concluded", "2026-07-19T00:00:00.000Z",
+      "2026-07-19T00:03:00.000Z", "provider stopped", "",
+    );
+    database.prepare("INSERT INTO work_attempt_lease_epochs VALUES(?,?,?,?,?)").run(attemptId, 0, `lease_${attemptId}`, 1, "2026-07-19T00:00:00.000Z");
+    database.prepare("INSERT INTO work_attempt_checkpoints VALUES(?,?,?,?,?)").run(attemptId, 0, "2026-07-19T00:01:00.000Z", "message_1", "thread_1");
+    database.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,?,?,?)").run(
+      executionId, attemptId, "2026-07-19T00:01:00.000Z", "provider", 1,
+      JSON.stringify({ ...terminal, actor: "provider", generation: 1 }),
+    );
+  } finally { database.close(); }
 }
 
 test("SQLite manifest round-trips the flat wire projection from relational domain tables", async () => {
@@ -272,14 +890,15 @@ test("a post-commit backup failure retries idempotently without reimporting", as
 
 test("future SQLite schema versions are rejected without being downgraded", async () => {
   const env = await fixture();
+  const futureVersion = DAEMON_STATE_SCHEMA_VERSION + 1;
   const database = new DatabaseSync(env.databasePath);
-  database.exec("PRAGMA user_version = 10");
+  database.exec(`PRAGMA user_version = ${futureVersion}`);
   database.close();
   const store = new ManifestStore(env.databasePath);
   try {
-    await assert.rejects(() => store.load(), /schema version 10/);
+    await assert.rejects(() => store.load(), new RegExp(`schema version ${futureVersion}`));
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, futureVersion);
     inspection.close();
   } finally {
     await store.close();
@@ -289,15 +908,16 @@ test("future SQLite schema versions are rejected without being downgraded", asyn
 
 test("manifest metadata schema disagreement is rejected on reopen", async () => {
   const env = await fixture();
+  const futureVersion = DAEMON_STATE_SCHEMA_VERSION + 1;
   const initialized = new ManifestStore(env.databasePath);
   try {
     await initialized.load();
     await initialized.close();
     const database = new DatabaseSync(env.databasePath);
-    database.prepare("UPDATE manifest_metadata SET schema_version = 10 WHERE singleton = 1").run();
+    database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1").run(futureVersion);
     database.close();
     const reopened = new ManifestStore(env.databasePath);
-    await assert.rejects(() => reopened.load(), /metadata schema version 10/);
+    await assert.rejects(() => reopened.load(), new RegExp(`metadata schema version ${futureVersion}`));
     await reopened.close();
   } finally {
     await initialized.close();
@@ -306,10 +926,11 @@ test("manifest metadata schema disagreement is rejected on reopen", async () => 
 });
 
 test("contradictory SQLite and metadata version pairs reject before migration", async () => {
+  const futureVersion = DAEMON_STATE_SCHEMA_VERSION + 1;
   for (const pair of [
     { userVersion: 1, metadataVersion: 2, pattern: /version pair is inconsistent/ },
     { userVersion: 2, metadataVersion: 1, pattern: /version pair is inconsistent/ },
-    { userVersion: 1, metadataVersion: 10, pattern: /metadata schema version 10/ },
+    { userVersion: 1, metadataVersion: futureVersion, pattern: new RegExp(`metadata schema version ${futureVersion}`) },
   ]) {
     const env = await fixture();
     const initialized = new ManifestStore(env.databasePath);
@@ -336,7 +957,7 @@ test("contradictory SQLite and metadata version pairs reject before migration", 
   }
 });
 
-test("physical v1-v4 databases with no delivery tables advance to the complete v9 shape before stamping markers", async () => {
+test("physical v1-v4 databases with no delivery tables advance to the complete current shape before stamping markers", async () => {
   for (const version of [1, 2, 3, 4]) {
     const env = await fixture();
     const initial = new ManifestStore(env.databasePath);
@@ -431,8 +1052,8 @@ test("v1 daemon state migrates transactionally to v2 and normalizes exit timesta
     await migrated.close();
 
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
-    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.equal((inspection.prepare("SELECT provider_launch_policy_undefined FROM agent_configurations WHERE agent_id = ?").get(entry.id) as { provider_launch_policy_undefined: number }).provider_launch_policy_undefined, 0);
     assert.equal((inspection.prepare("SELECT provider_process_identity_present FROM runtime_deployments WHERE agent_id = ?").get(entry.id) as { provider_process_identity_present: number }).provider_process_identity_present, 0);
     const preservedRuntime = inspection.prepare("SELECT deployment_id, run_id FROM runtime_deployments WHERE agent_id = ?").get(invalid.id) as { deployment_id: string; run_id: string };
@@ -512,8 +1133,8 @@ test("partially migrated v2 state is repaired transactionally before reads", asy
     partial.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
     partial.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[404,505]", entry.id);
     partial.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
-    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
-    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
+    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, DAEMON_STATE_SCHEMA_VERSION);
     partial.close();
 
     const repaired = new ManifestStore(env.databasePath);

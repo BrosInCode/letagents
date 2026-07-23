@@ -25,6 +25,7 @@ import {
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
 } from "./provider-adapter.js";
+import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   DEFAULT_STOP_GRACE_MS,
   defaultGetProcessIdentity,
@@ -534,7 +535,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (!req.agentDisplayName?.trim()) {
       throw new Error("Cursor spawn requires the durable agent display name from the manifest.");
     }
-    const policyArgs = cursorLaunchPolicyArgs(req.launchPolicy);
+    const policyArgs = [
+      ...cursorLaunchPolicyArgs(attestProviderSpawnPolicy("cursor", req)),
+      ...(req.model ? ["--model", req.model] : []),
+    ];
     const handle = new CursorProviderHandle(req.workAttemptId, req.cwd, policyArgs);
     if (resumeRef) handle.providerContinuationId = resumeRef.providerContinuationId;
 

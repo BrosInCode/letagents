@@ -175,6 +175,38 @@ test("a publish response without a nonempty matching canonical room identity nev
   }
 });
 
+test("each new bounded turn resolves the latest durable charter without restarting the provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-charter-refresh-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let charter = "first durable charter";
+  const seen: Array<string | undefined> = [];
+  const delivery = new SupervisedAgentDelivery(
+    store,
+    provider(async (_handle, request) => {
+      seen.push(request.charter);
+      return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+    }),
+    { poll: async () => ({}), publish: async () => { throw new Error("no-reply turn must not publish"); } },
+    currentAuthority,
+    0,
+    undefined,
+    undefined,
+    undefined,
+    async () => ({ charter }),
+  );
+  try {
+    await ingest(store, "1");
+    await delivery.pump(agent);
+    charter = "second durable charter";
+    await ingest(store, "2");
+    await delivery.pump(agent);
+    assert.deepEqual(seen, ["first durable charter", "second durable charter"]);
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("result recovery uses bounded backoff and blocks instead of hot-looping forever", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-result-recovery-"));
   try {

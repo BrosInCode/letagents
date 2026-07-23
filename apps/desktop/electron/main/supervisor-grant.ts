@@ -23,6 +23,12 @@ type StoredGrant = DesktopSupervisorGrantMetadata & {
   entryId?: string;
   /** Last daemon generation that safely installed this grant, if any. */
   lastInstalledDaemonGeneration?: number | null;
+  /**
+   * Legacy registries cannot prove which grant owned the retained worker
+   * session. They remain revocation-unknown until a current daemon install
+   * rewrites the grant through the ownership-aware lifecycle.
+   */
+  credentialLifecycle: "tracked" | "unknown";
   encryptedToken: string;
 };
 type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: string };
@@ -32,9 +38,39 @@ type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: stri
  * worker after Electron restarts.  Never derive this from a mutable label.
  */
 type StoredGrantRegistry = {
-  version: 4;
+  version: 7;
   grants: Record<string, StoredGrant>;
   entryAgentKeys: Record<string, string>;
+  /**
+   * Grant-owned remote revocation journal, keyed by the grant being revoked.
+   * sessionOwnerGrantId names the grant that actually owned and ended the
+   * exact worker session. During rollback this can differ from grantId: the
+   * old source session is already terminal, so the uninstalled destination
+   * grant is revoked directly without presenting that session to the wrong
+   * grant endpoint.
+   */
+  credentialRevocations: Record<string, {
+    entryId: string;
+    agentKey: string;
+    grantId: string;
+    agentSessionId: string;
+    sessionOwnerGrantId: string;
+    sessionEndedAt: string | null;
+    grantRevokedAt: string | null;
+  }>;
+  /**
+   * A DELETE acknowledgement must survive an Electron restart until the
+   * daemon consumes it. Without this receipt, a missing registry or mapping
+   * is an ambiguity, not proof that the remote grant was revoked.
+   */
+  purgeRevocationReceipts: Record<string, {
+    agentKey: string;
+    grantId: string;
+    workerSessionAttestation: "exact" | "none";
+    agentSessionId: string | null;
+    sessionEndedAt: string | null;
+    acknowledgedAt: string;
+  }>;
 };
 const MANUAL_GRANT_KEY = "__manual__";
 const registryMutationTails = new Map<string, Promise<void>>();
@@ -102,28 +138,107 @@ export function canonicalSupervisorGrantAgentKey(agentKey: string): string {
 }
 
 function metadataOf(stored: StoredGrant): DesktopSupervisorGrantMetadata {
-  const { agentKey: _agentKey, entryId: _entryId, lastInstalledDaemonGeneration: _daemonGeneration, encryptedToken: _secret, ...metadata } = stored;
+  const {
+    agentKey: _agentKey,
+    entryId: _entryId,
+    lastInstalledDaemonGeneration: _daemonGeneration,
+    credentialLifecycle: _credentialLifecycle,
+    encryptedToken: _secret,
+    ...metadata
+  } = stored;
   return metadata;
 }
 
 function isRegistry(value: unknown): value is StoredGrantRegistry {
-  return Boolean(value && typeof value === "object" && ((value as { version?: unknown }).version === 2 || (value as { version?: unknown }).version === 3 || (value as { version?: unknown }).version === 4)
+  return Boolean(value && typeof value === "object" && ([2, 3, 4, 5, 6, 7].includes(Number((value as { version?: unknown }).version)))
     && typeof (value as { grants?: unknown }).grants === "object");
 }
 
 function registryFrom(value: unknown): StoredGrantRegistry | null {
   if (isRegistry(value)) {
-    const legacy = value as { grants: Record<string, StoredGrant>; entryAgentKeys?: Record<string, unknown> };
+    const registryVersion = Number((value as { version?: unknown }).version);
+    const legacy = value as {
+      grants: Record<string, StoredGrant>;
+      entryAgentKeys?: Record<string, unknown>;
+      credentialRevocations?: Record<string, unknown>;
+      purgeRevocationReceipts?: Record<string, unknown>;
+    };
     const entryAgentKeys: Record<string, string> = {};
+    const credentialRevocations: StoredGrantRegistry["credentialRevocations"] = {};
+    const purgeRevocationReceipts: StoredGrantRegistry["purgeRevocationReceipts"] = {};
     for (const [entryId, agentKey] of Object.entries(legacy.entryAgentKeys ?? {})) {
       if (typeof agentKey === "string" && entryId.trim() && agentKey.trim()) entryAgentKeys[entryId] = canonicalSupervisorGrantAgentKey(agentKey);
     }
+    for (const [entryId, receipt] of Object.entries(legacy.purgeRevocationReceipts ?? {})) {
+      if (!entryId.trim() || !receipt || typeof receipt !== "object") continue;
+      const candidate = receipt as {
+        agentKey?: unknown; grantId?: unknown; workerSessionAttestation?: unknown;
+        agentSessionId?: unknown; sessionEndedAt?: unknown; acknowledgedAt?: unknown;
+      };
+      const attestation = registryVersion >= 7 ? candidate.workerSessionAttestation : "exact";
+      if (typeof candidate.agentKey !== "string" || !candidate.agentKey.trim()
+        || typeof candidate.grantId !== "string" || !candidate.grantId.trim()
+        || !((attestation === "exact"
+          && typeof candidate.agentSessionId === "string" && candidate.agentSessionId.trim()
+          && typeof candidate.sessionEndedAt === "string" && candidate.sessionEndedAt.trim())
+          || (attestation === "none" && candidate.agentSessionId === null && candidate.sessionEndedAt === null))
+        || typeof candidate.acknowledgedAt !== "string" || !candidate.acknowledgedAt.trim()) continue;
+      purgeRevocationReceipts[entryId] = {
+        agentKey: canonicalSupervisorGrantAgentKey(candidate.agentKey),
+        grantId: candidate.grantId.trim(),
+        workerSessionAttestation: attestation,
+        agentSessionId: attestation === "exact" ? (candidate.agentSessionId as string).trim() : null,
+        sessionEndedAt: attestation === "exact" ? candidate.sessionEndedAt as string : null,
+        acknowledgedAt: candidate.acknowledgedAt,
+      };
+    }
+    for (const [journalKey, progress] of Object.entries(legacy.credentialRevocations ?? {})) {
+      if (!journalKey.trim() || !progress || typeof progress !== "object") continue;
+      const candidate = progress as {
+        entryId?: unknown; agentKey?: unknown; grantId?: unknown; agentSessionId?: unknown;
+        sessionOwnerGrantId?: unknown;
+        sessionEndedAt?: unknown; grantRevokedAt?: unknown;
+      };
+      const entryId = registryVersion >= 6 ? candidate.entryId : journalKey;
+      const sessionOwnerGrantId = registryVersion >= 6 ? candidate.sessionOwnerGrantId : candidate.grantId;
+      if (typeof entryId !== "string" || !entryId.trim()
+        || typeof candidate.agentKey !== "string" || !candidate.agentKey.trim()
+        || typeof candidate.grantId !== "string" || !candidate.grantId.trim()
+        || typeof candidate.agentSessionId !== "string" || !candidate.agentSessionId.trim()
+        || typeof sessionOwnerGrantId !== "string" || !sessionOwnerGrantId.trim()
+        || !(candidate.sessionEndedAt === null || (typeof candidate.sessionEndedAt === "string" && candidate.sessionEndedAt.trim()))
+        || !(candidate.grantRevokedAt === null || (typeof candidate.grantRevokedAt === "string" && candidate.grantRevokedAt.trim()))) continue;
+      credentialRevocations[candidate.grantId.trim()] = {
+        entryId: entryId.trim(),
+        agentKey: canonicalSupervisorGrantAgentKey(candidate.agentKey),
+        grantId: candidate.grantId.trim(),
+        agentSessionId: candidate.agentSessionId.trim(),
+        sessionOwnerGrantId: sessionOwnerGrantId.trim(),
+        sessionEndedAt: candidate.sessionEndedAt,
+        grantRevokedAt: candidate.grantRevokedAt,
+      };
+    }
+    const grants: Record<string, StoredGrant> = {};
+    for (const [storedKey, grant] of Object.entries(legacy.grants)) {
+      if (!grant?.grantId?.trim() || !grant.encryptedToken?.trim()) continue;
+      const exactJournal = credentialRevocations[grant.grantId];
+      grants[storedKey] = {
+        ...grant,
+        credentialLifecycle: (registryVersion >= 6 && grant.credentialLifecycle === "tracked")
+          || (exactJournal?.grantId === grant.grantId
+            && exactJournal.sessionOwnerGrantId === grant.grantId
+            && exactJournal.agentKey === grant.agentKey
+            && (!grant.entryId?.trim() || exactJournal.entryId === grant.entryId.trim()))
+          ? "tracked"
+          : "unknown",
+      };
+    }
     // v3 recorded the durable entry beside each grant.  Preserve that mapping
     // when upgrading, rather than guessing from a display name.
-    for (const grant of Object.values(legacy.grants)) {
+    for (const grant of Object.values(grants)) {
       if (grant.entryId?.trim() && grant.agentKey?.trim()) entryAgentKeys[grant.entryId] = canonicalSupervisorGrantAgentKey(grant.agentKey);
     }
-    return { version: 4, grants: legacy.grants, entryAgentKeys };
+    return { version: 7, grants, entryAgentKeys, credentialRevocations, purgeRevocationReceipts };
   }
   if (!value || typeof value !== "object" || !("encryptedToken" in value)) return null;
   // Version 1 had one desktop-wide grant. Treat it as manual unless it was
@@ -132,7 +247,13 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
   if (!legacy.grantId || !legacy.encryptedToken) return null;
   const candidate = legacy.allowedAgentKeys.length === 1 ? legacy.allowedAgentKeys[0] : MANUAL_GRANT_KEY;
   const agentKey = candidate === MANUAL_GRANT_KEY ? candidate : canonicalSupervisorGrantAgentKey(candidate);
-  return { version: 4, grants: { [agentKey]: { ...legacy, agentKey } }, entryAgentKeys: {} };
+  return {
+    version: 7,
+    grants: { [agentKey]: { ...legacy, agentKey, credentialLifecycle: "unknown" } },
+    entryAgentKeys: {},
+    credentialRevocations: {},
+    purgeRevocationReceipts: {},
+  };
 }
 
 async function readRegistry(): Promise<StoredGrantRegistry | null> {
@@ -255,7 +376,13 @@ export async function provisionDesktopSupervisorGrant(
       }
       const agentKey = canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!);
       const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant, storage);
-      await writeRegistry({ version: 4, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } }, entryAgentKeys: registry?.entryAgentKeys ?? {} });
+      await writeRegistry({
+        version: 7,
+        grants: { [agentKey]: { ...metadata, agentKey, credentialLifecycle: "tracked", encryptedToken } },
+        entryAgentKeys: registry?.entryAgentKeys ?? {},
+        credentialRevocations: registry?.credentialRevocations ?? {},
+        purgeRevocationReceipts: registry?.purgeRevocationReceipts ?? {},
+      });
       return metadata;
     } catch (error) {
       await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
@@ -286,6 +413,7 @@ export async function readDesktopSupervisorGrantForAgent(agentKey: string, optio
   token: string;
   entryId: string | null;
   lastInstalledDaemonGeneration: number | null;
+  credentialLifecycle?: "tracked" | "unknown";
 } | null> {
   const registry = await readRegistry();
   const stored = registry?.grants[canonicalSupervisorGrantAgentKey(agentKey)];
@@ -294,6 +422,7 @@ export async function readDesktopSupervisorGrantForAgent(agentKey: string, optio
     metadata: metadataOf(stored), token,
     entryId: stored.entryId?.trim() || null,
     lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,
+    credentialLifecycle: stored.credentialLifecycle,
   } : null;
 }
 
@@ -315,24 +444,61 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
     throw new Error("A per-agent desktop grant must be scoped to that exact one agent identity.");
   }
   await withRegistryMutation(async () => {
-    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {} };
-    if (input.entryId?.trim()) registry.entryAgentKeys[input.entryId.trim()] = agentKey;
+    const registry = (await readRegistry()) ?? { version: 7, grants: {}, entryAgentKeys: {}, credentialRevocations: {}, purgeRevocationReceipts: {} };
+    const entryId = input.entryId?.trim() || undefined;
+    const previous = registry.grants[agentKey];
+    const installedGeneration = input.lastInstalledDaemonGeneration ?? null;
+    if (entryId) {
+      registry.entryAgentKeys[entryId] = agentKey;
+      // Purge receipts are entry-lifecycle-specific, but grant-owned
+      // revocation receipts must survive replacement. Rollback needs the old
+      // source grant's exact session acknowledgement to avoid presenting that
+      // session to the newly saved destination grant.
+      delete registry.purgeRevocationReceipts[entryId];
+    }
+    if (installedGeneration !== null) {
+      // Once this exact grant crosses the daemon socket, its worker session may
+      // be active again even when the durable session id was reused. Any
+      // pre-install predecessor link is no longer revocation evidence.
+      delete registry.credentialRevocations[input.metadata.grantId];
+    } else if (entryId && previous?.grantId !== input.metadata.grantId) {
+      const predecessor = previous && registry.credentialRevocations[previous.grantId];
+      const owner = predecessor && registry.credentialRevocations[predecessor.sessionOwnerGrantId];
+      if (predecessor
+        && predecessor.entryId === entryId
+        && predecessor.agentKey === agentKey
+        && predecessor.grantId === previous.grantId
+        && predecessor.sessionEndedAt
+        && predecessor.grantRevokedAt
+        && owner?.entryId === entryId
+        && owner.agentKey === agentKey
+        && owner.grantId === predecessor.sessionOwnerGrantId
+        && owner.sessionOwnerGrantId === owner.grantId
+        && owner.agentSessionId === predecessor.agentSessionId
+        && owner.sessionEndedAt === predecessor.sessionEndedAt
+        && owner.grantRevokedAt) {
+        // Persist the exact predecessor while both grants are still available.
+        // Looking it up later by session id is ambiguous after that durable id
+        // has been reactivated through more than one grant lifecycle.
+        registry.credentialRevocations[input.metadata.grantId] = {
+          entryId,
+          agentKey,
+          grantId: input.metadata.grantId,
+          agentSessionId: predecessor.agentSessionId,
+          sessionOwnerGrantId: owner.grantId,
+          sessionEndedAt: owner.sessionEndedAt,
+          grantRevokedAt: null,
+        };
+      }
+    }
     registry.grants[agentKey] = {
       ...input.metadata,
       agentKey,
-      entryId: input.entryId?.trim() || undefined,
-      lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+      entryId,
+      lastInstalledDaemonGeneration: installedGeneration,
+      credentialLifecycle: "tracked",
       encryptedToken: encryptSupervisorGrantForStorage(input.token, options.storage),
     };
-    await writeRegistry(registry);
-  });
-}
-
-async function removeDesktopSupervisorGrantForAgentIfCurrent(agentKey: string, grantId: string): Promise<void> {
-  await withRegistryMutation(async () => {
-    const registry = await readRegistry();
-    if (!registry || registry.grants[agentKey]?.grantId !== grantId) return;
-    delete registry.grants[agentKey];
     await writeRegistry(registry);
   });
 }
@@ -373,6 +539,164 @@ export async function storeDesktopSupervisorGrantForAgent(input: {
   await replaceDesktopSupervisorGrantForAgent(input, options);
 }
 
+async function ensureExactWorkerSessionAndGrantRevoked(input: {
+  entryId: string;
+  agentKey: string;
+  grant: NonNullable<Awaited<ReturnType<typeof readDesktopSupervisorGrantForAgent>>>;
+  agentSessionId: string;
+}, options: GrantStorageOptions): Promise<{
+  agentKey: string;
+  grantId: string;
+  agentSessionId: string;
+  sessionOwnerGrantId: string;
+  sessionEndedAt: string;
+  grantRevokedAt: string;
+}> {
+  const entryId = input.entryId.trim();
+  const agentSessionId = input.agentSessionId.trim();
+  if (!entryId || !agentSessionId || input.grant.entryId !== entryId) {
+    throw new Error("Exact worker-session revocation requires one durable entry, grant, and agent session.");
+  }
+  const request = options.apiFetch ?? apiFetch;
+  const grantId = input.grant.metadata.grantId;
+  await withRegistryMutation(async () => {
+    const registry = await readRegistry();
+    const stored = registry?.grants[input.agentKey];
+    if (!registry || registry.entryAgentKeys[entryId] !== input.agentKey
+      || !stored || stored.grantId !== grantId
+      || (stored.entryId?.trim() && stored.entryId.trim() !== entryId)) {
+      throw new Error(`Cannot revoke ${entryId}: its exact local grant recovery mapping is missing or inconsistent.`);
+    }
+    const progress = registry.credentialRevocations[grantId];
+    if (progress && (progress.entryId !== entryId
+      || progress.agentKey !== input.agentKey
+      || progress.grantId !== grantId
+      || progress.agentSessionId !== agentSessionId)) {
+      throw new Error(`Cannot revoke ${entryId}: this grant already has a different credential revocation journal.`);
+    }
+    if (!progress) {
+      registry.credentialRevocations[grantId] = {
+        entryId,
+        agentKey: input.agentKey,
+        grantId,
+        agentSessionId,
+        sessionOwnerGrantId: grantId,
+        sessionEndedAt: null,
+        grantRevokedAt: null,
+      };
+      await writeRegistry(registry);
+    }
+  });
+
+  let progress = (await readRegistry())?.credentialRevocations[grantId];
+  if (!progress) throw new Error(`Cannot revoke ${entryId}: its durable credential-revocation journal disappeared.`);
+  if (progress.sessionOwnerGrantId !== grantId) {
+    const registry = await readRegistry();
+    const owner = registry?.credentialRevocations[progress.sessionOwnerGrantId];
+    if (!owner
+      || owner.entryId !== entryId
+      || owner.agentKey !== input.agentKey
+      || owner.grantId !== progress.sessionOwnerGrantId
+      || owner.sessionOwnerGrantId !== owner.grantId
+      || owner.agentSessionId !== agentSessionId
+      || !owner.sessionEndedAt
+      || !owner.grantRevokedAt
+      || progress.sessionEndedAt !== owner.sessionEndedAt) {
+      throw new Error(`Cannot revoke ${entryId}: the worker session belongs to another grant without a complete durable acknowledgement.`);
+    }
+  } else if (!progress.sessionEndedAt) {
+    const ended = await request<Record<string, unknown>>(
+      `/supervisor-host-grants/${encodeURIComponent(progress.grantId)}/worker-sessions/${encodeURIComponent(agentSessionId)}/end`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${input.grant.token}` },
+        body: JSON.stringify({ generation: input.grant.metadata.generation }),
+      },
+    );
+    if (ended.session_id !== agentSessionId || typeof ended.ended_at !== "string" || !ended.ended_at.trim()) {
+      throw new Error(`Worker-session termination for ${entryId} returned an invalid exact-session acknowledgement.`);
+    }
+    await withRegistryMutation(async () => {
+      const registry = await readRegistry();
+      const current = registry?.credentialRevocations[grantId];
+      if (!registry || !current || current.entryId !== entryId
+        || current.agentKey !== progress!.agentKey
+        || current.grantId !== grantId
+        || current.sessionOwnerGrantId !== grantId
+        || current.agentSessionId !== agentSessionId) {
+        throw new Error(`Worker-session termination for ${entryId} succeeded, but its durable acknowledgement journal changed.`);
+      }
+      current.sessionEndedAt = ended.ended_at as string;
+      await writeRegistry(registry);
+    });
+    progress = (await readRegistry())?.credentialRevocations[grantId];
+  }
+  if (!progress?.sessionEndedAt) {
+    throw new Error(`Worker-session termination for ${entryId} was not durably acknowledged.`);
+  }
+  if (!progress.grantRevokedAt) {
+    try {
+      await request(`/supervisor-host-grants/${encodeURIComponent(progress.grantId)}`, { method: "DELETE" });
+    } catch (error) {
+      // 404 is authoritative only after the exact session-end acknowledgement
+      // under its owning grant is durable. It then proves this current host
+      // credential cannot mint a successor.
+      if (!(error instanceof DesktopApiError && error.status === 404)) throw error;
+    }
+    const acknowledgedAt = new Date().toISOString();
+    await withRegistryMutation(async () => {
+      const registry = await readRegistry();
+      const current = registry?.credentialRevocations[grantId];
+      if (!registry || !current || current.entryId !== entryId
+        || current.agentKey !== progress!.agentKey
+        || current.grantId !== grantId
+        || current.sessionOwnerGrantId !== progress!.sessionOwnerGrantId
+        || current.agentSessionId !== agentSessionId
+        || !current.sessionEndedAt) {
+        throw new Error(`Host-grant revocation for ${entryId} succeeded, but its exact session acknowledgement journal changed.`);
+      }
+      current.grantRevokedAt = acknowledgedAt;
+      await writeRegistry(registry);
+    });
+    progress = (await readRegistry())?.credentialRevocations[grantId];
+  }
+  if (!progress?.sessionEndedAt || !progress.grantRevokedAt) {
+    throw new Error(`Credential revocation for ${entryId} was not durably acknowledged.`);
+  }
+  return {
+    agentKey: progress.agentKey,
+    grantId: progress.grantId,
+    agentSessionId: progress.agentSessionId,
+    sessionOwnerGrantId: progress.sessionOwnerGrantId,
+    sessionEndedAt: progress.sessionEndedAt,
+    grantRevokedAt: progress.grantRevokedAt,
+  };
+}
+
+function authoritativeProvisionFailure(error: unknown): boolean {
+  return error instanceof DesktopApiError && [400, 401, 403, 404, 409, 422].includes(error.status);
+}
+
+async function provisionWithLostResponseRecovery(
+  request: typeof apiFetch,
+  body: Record<string, unknown>,
+): Promise<SupervisorGrantApiResponse> {
+  try {
+    return await request<SupervisorGrantApiResponse>("/supervisor-host-grants", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (authoritativeProvisionFailure(error)) throw error;
+    // A matching-scope retry recovers the exact active grant id and rotates
+    // away any bearer returned by the lost response.
+    return request<SupervisorGrantApiResponse>("/supervisor-host-grants", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+}
+
 /**
  * Main-process-only lifecycle helper for desktop-managed agents.  It performs
  * the Keychain availability check before any API call, scopes every grant to
@@ -380,7 +704,11 @@ export async function storeDesktopSupervisorGrantForAgent(input: {
  * to install directly into that agent's daemon process.
  */
 export async function getOrProvisionDesktopSupervisorGrantForAgent(
-  input: DesktopSupervisorGrantLifecycleInput & { forceReprovision?: boolean },
+  input: DesktopSupervisorGrantLifecycleInput & {
+    forceReprovision?: boolean;
+    /** Exact live worker session that must end before replacing its host grant. */
+    sourceAgentSessionId?: string;
+  },
   options: GrantStorageOptions = {},
 ): Promise<{
   metadata: DesktopSupervisorGrantMetadata;
@@ -398,7 +726,10 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   const installationId = desktopSupervisorGrantInstallationId(hostId, entryId);
   const allowedRoomIds = canonicalDesktopSupervisorGrantRoomIds(input.roomScopes);
   const request = options.apiFetch ?? apiFetch;
-  return withAgentGrantLifecycle(agentKey, async () => {
+  // Serialize by the immutable manifest entry, because purge uses the same
+  // durable identity and may race a replacement whose canonical agent key is
+  // being repaired.
+  return withAgentGrantLifecycle(entryId, async () => {
     const existing = await readDesktopSupervisorGrantForAgent(agentKey, { storage });
     if (!input.forceReprovision && existing && reusableDesktopSupervisorGrant({
       existing, agentKey, entryId, hostId, installationId, allowedRoomIds,
@@ -411,27 +742,33 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       };
     }
     if (existing) {
-      // Only an acknowledged revoke (including an explicit already-revoked
-      // 404) permits deleting the sole recoverable local credential. A
-      // transport error is ambiguous: preserve it and make the next attempt
-      // repeat DELETE rather than proceeding into an unrecoverable 409.
-      try {
-        await request(`/supervisor-host-grants/${encodeURIComponent(existing.metadata.grantId)}`, { method: "DELETE" });
-      } catch (error) {
-        if (!(error instanceof DesktopApiError && error.status === 404)) throw error;
+      if (input.sourceAgentSessionId?.trim()) {
+        if (existing.credentialLifecycle === "unknown") {
+          throw new Error(
+            `Cannot rotate credentials for ${entryId}: its saved grant predates exact session ownership tracking. Reconnect the exact worker credential before retrying this move or purge.`,
+          );
+        }
+        await ensureExactWorkerSessionAndGrantRevoked({
+          entryId, agentKey, grant: existing, agentSessionId: input.sourceAgentSessionId,
+        }, { ...options, storage, apiFetch: request });
+      } else {
+        // Preserve the old encrypted mapping until a validated replacement is
+        // durably written. A crash after DELETE therefore retries the exact
+        // scope and recovers an upserted grant instead of wedging on 409.
+        try {
+          await request(`/supervisor-host-grants/${encodeURIComponent(existing.metadata.grantId)}`, { method: "DELETE" });
+        } catch (error) {
+          if (!(error instanceof DesktopApiError && error.status === 404)) throw error;
+        }
       }
-      await removeDesktopSupervisorGrantForAgentIfCurrent(agentKey, existing.metadata.grantId);
     }
 
-    const response = await request<SupervisorGrantApiResponse>("/supervisor-host-grants", {
-      method: "POST",
-      body: JSON.stringify({
-        host_id: hostId,
-        installation_id: installationId,
-        allowed_room_ids: allowedRoomIds,
-        allowed_agent_keys: [agentKey],
-        ttl_ms: input.ttlMs,
-      }),
+    const response = await provisionWithLostResponseRecovery(request, {
+      host_id: hostId,
+      installation_id: installationId,
+      allowed_room_ids: allowedRoomIds,
+      allowed_agent_keys: [agentKey],
+      ttl_ms: input.ttlMs,
     });
     const metadata = toMetadata(response);
     try {
@@ -477,6 +814,141 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
   return result;
 }
 
+/** Owner-authenticated purge fence: exact worker end, then grant revoke, then one durable receipt. */
+export async function revokeDesktopSupervisorGrantForEntry(
+  entryId: string,
+  agentSessionId: string,
+  options: GrantStorageOptions = {},
+): Promise<void> {
+  const normalizedEntryId = entryId.trim();
+  const normalizedSessionId = agentSessionId.trim();
+  if (!normalizedEntryId || !normalizedSessionId) {
+    throw new Error("A durable supervised entry and exact worker session are required for grant revocation.");
+  }
+  await withAgentGrantLifecycle(normalizedEntryId, async () => {
+    const registry = await readRegistry();
+    if (!registry) {
+      throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: the local supervisor-grant registry is missing. Restore its recovery data before retrying purge; local agent state was preserved.`);
+    }
+    const receipt = registry.purgeRevocationReceipts[normalizedEntryId];
+    if (receipt) {
+      if (receipt.workerSessionAttestation !== "exact" || receipt.agentSessionId !== normalizedSessionId) {
+        throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: its durable receipt belongs to another worker session.`);
+      }
+      return;
+    }
+    const agentKey = registry.entryAgentKeys[normalizedEntryId];
+    if (!agentKey) {
+      throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: its local entry-to-agent mapping is missing. Restore that recovery mapping before retrying purge; local agent state was preserved.`);
+    }
+    const stored = registry.grants[agentKey];
+    if (!stored?.grantId?.trim() || (stored.entryId?.trim() && stored.entryId.trim() !== normalizedEntryId)) {
+      throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: its exact local grant mapping is missing or inconsistent. Restore that recovery mapping before retrying purge; local agent state was preserved.`);
+    }
+    const token = decryptSupervisorGrantFromStorage(stored.encryptedToken, options.storage);
+    if (!token) throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: its encrypted host credential is unavailable.`);
+    if (stored.credentialLifecycle === "unknown") {
+      throw new Error(
+        `Cannot attest credential revocation for ${normalizedEntryId}: its saved grant predates exact session ownership tracking. Reconnect the exact worker credential before retrying purge.`,
+      );
+    }
+    const revoked = await ensureExactWorkerSessionAndGrantRevoked({
+      entryId: normalizedEntryId,
+      agentKey,
+      grant: {
+        metadata: metadataOf(stored),
+        token,
+        entryId: normalizedEntryId,
+        lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,
+      },
+      agentSessionId: normalizedSessionId,
+    }, options);
+    await withRegistryMutation(async () => {
+      const current = await readRegistry();
+      const progress = current?.credentialRevocations[stored.grantId];
+      if (!current || current.entryAgentKeys[normalizedEntryId] !== agentKey
+        || current.grants[agentKey]?.grantId !== stored.grantId
+        || progress?.entryId !== normalizedEntryId
+        || !progress?.sessionEndedAt || !progress.grantRevokedAt
+        || progress.agentSessionId !== normalizedSessionId
+        || progress.sessionOwnerGrantId !== stored.grantId) {
+        throw new Error(`Credential revocation for ${normalizedEntryId} was acknowledged, but its exact durable recovery state changed before purge receipt commit.`);
+      }
+      delete current.grants[agentKey];
+      delete current.entryAgentKeys[normalizedEntryId];
+      current.purgeRevocationReceipts[normalizedEntryId] = {
+        agentKey: revoked.agentKey,
+        grantId: revoked.grantId,
+        workerSessionAttestation: "exact",
+        agentSessionId: revoked.agentSessionId,
+        sessionEndedAt: revoked.sessionEndedAt,
+        acknowledgedAt: revoked.grantRevokedAt,
+      };
+      // Never remove the last file here: this exact two-ack receipt is what
+      // makes a restart retry safe without treating missing state as proof.
+      await writeRegistry(current);
+    });
+  });
+}
+
+/**
+ * Owner-authenticated purge fence for a daemon-attested never-started entry.
+ * The daemon proves no worker session was minted; Electron revokes only the
+ * parent grant and durably records that no session END was applicable.
+ */
+export async function revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(
+  entryId: string,
+  options: GrantStorageOptions = {},
+): Promise<void> {
+  const normalizedEntryId = entryId.trim();
+  if (!normalizedEntryId) throw new Error("A durable supervised entry is required for grant-only revocation.");
+  await withAgentGrantLifecycle(normalizedEntryId, async () => {
+    const registry = await readRegistry();
+    if (!registry) {
+      throw new Error(`Cannot attest grant revocation for ${normalizedEntryId}: the local supervisor-grant registry is missing. Restore its recovery data before retrying purge; local agent state was preserved.`);
+    }
+    const receipt = registry.purgeRevocationReceipts[normalizedEntryId];
+    if (receipt) {
+      if (receipt.workerSessionAttestation !== "none" || receipt.agentSessionId !== null || receipt.sessionEndedAt !== null) {
+        throw new Error(`Cannot attest grant-only revocation for ${normalizedEntryId}: its durable receipt belongs to a worker-session purge.`);
+      }
+      return;
+    }
+    const agentKey = registry.entryAgentKeys[normalizedEntryId];
+    if (!agentKey) {
+      throw new Error(`Cannot attest grant revocation for ${normalizedEntryId}: its local entry-to-agent mapping is missing. Restore that recovery mapping before retrying purge; local agent state was preserved.`);
+    }
+    const stored = registry.grants[agentKey];
+    if (!stored?.grantId?.trim() || (stored.entryId?.trim() && stored.entryId.trim() !== normalizedEntryId)) {
+      throw new Error(`Cannot attest grant revocation for ${normalizedEntryId}: its exact local grant mapping is missing or inconsistent. Restore that recovery mapping before retrying purge; local agent state was preserved.`);
+    }
+    const request = options.apiFetch ?? apiFetch;
+    try {
+      await request(`/supervisor-host-grants/${encodeURIComponent(stored.grantId)}`, { method: "DELETE" });
+    } catch (error) {
+      if (!(error instanceof DesktopApiError && error.status === 404)) throw error;
+    }
+    await withRegistryMutation(async () => {
+      const current = await readRegistry();
+      if (!current || current.entryAgentKeys[normalizedEntryId] !== agentKey
+        || current.grants[agentKey]?.grantId !== stored.grantId) {
+        throw new Error(`Grant revocation for ${normalizedEntryId} was acknowledged, but its exact durable recovery state changed before purge receipt commit.`);
+      }
+      delete current.grants[agentKey];
+      delete current.entryAgentKeys[normalizedEntryId];
+      current.purgeRevocationReceipts[normalizedEntryId] = {
+        agentKey,
+        grantId: stored.grantId,
+        workerSessionAttestation: "none",
+        agentSessionId: null,
+        sessionEndedAt: null,
+        acknowledgedAt: new Date().toISOString(),
+      };
+      await writeRegistry(current);
+    });
+  });
+}
+
 /**
  * Resolve (or create once) the server-owned identity used by a daemon-inbox
  * Codex entry.  The stable name is derived from the immutable entry id, while
@@ -504,7 +976,7 @@ export async function getOrCreateDesktopCodexAgentIdentity(input: {
   }
   const agentKey = canonicalSupervisorGrantAgentKey(created.canonical_key);
   await withRegistryMutation(async () => {
-    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {} };
+    const registry = (await readRegistry()) ?? { version: 7, grants: {}, entryAgentKeys: {}, credentialRevocations: {}, purgeRevocationReceipts: {} };
     // The server response is the authority for canonical casing. Parallel
     // calls converge on the same deterministic identity.
     registry.entryAgentKeys[entryId] = agentKey;
@@ -532,10 +1004,29 @@ export async function revokeDesktopSupervisorGrant(options: GrantStorageOptions 
     }));
     const current = await readRegistry();
     if (!current) return;
+    const acknowledgedAt = new Date().toISOString();
     for (const [agentKey, stored] of Object.entries(snapshot.grants)) {
-      if (current.grants[agentKey]?.grantId === stored.grantId) delete current.grants[agentKey];
+      if (current.grants[agentKey]?.grantId !== stored.grantId) continue;
+      delete current.grants[agentKey];
+      for (const [entryId, mappedAgentKey] of Object.entries(current.entryAgentKeys)) {
+        if (mappedAgentKey !== agentKey) continue;
+        delete current.entryAgentKeys[entryId];
+        const revocation = current.credentialRevocations[stored.grantId];
+        if (!revocation?.sessionEndedAt || !revocation.grantRevokedAt
+          || revocation.entryId !== entryId || revocation.agentKey !== agentKey
+          || revocation.grantId !== stored.grantId
+          || revocation.sessionOwnerGrantId !== stored.grantId) continue;
+        current.purgeRevocationReceipts[entryId] = {
+          agentKey, grantId: stored.grantId, workerSessionAttestation: "exact",
+          agentSessionId: revocation.agentSessionId,
+          sessionEndedAt: revocation.sessionEndedAt, acknowledgedAt,
+        };
+      }
     }
-    if (Object.keys(current.grants).length === 0) await rm(storePath(), { force: true });
+    if (Object.keys(current.grants).length === 0
+      && Object.keys(current.entryAgentKeys).length === 0
+      && Object.keys(current.credentialRevocations).length === 0
+      && Object.keys(current.purgeRevocationReceipts).length === 0) await rm(storePath(), { force: true });
     else await writeRegistry(current);
   });
 }
