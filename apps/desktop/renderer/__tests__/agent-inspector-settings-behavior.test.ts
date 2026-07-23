@@ -289,7 +289,6 @@ const readyResource: AgentInspectorConfigurationResource = {
     reasoningEffort: configuration.reasoningEffort,
     charter: configuration.charter,
     permissionProfileId: configuration.permissionProfileId,
-    providerLaunchPolicy: configuration.providerLaunchPolicy,
   },
   error: null,
 };
@@ -301,8 +300,15 @@ const provider = {
   capabilities: ["desktop_managed_runtime"],
   runtimeCommand: null,
   mcpTargetId: "codex",
-  permissionProfiles: [],
-  defaultPermissionProfileId: null,
+  permissionProfiles: [{
+    id: "full_access",
+    label: "Full access",
+    description: "Lets Codex work in this trusted workspace.",
+    status: "available",
+    risk: "high",
+    detail: null,
+  }],
+  defaultPermissionProfileId: "full_access",
 };
 
 function settingsProps(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -331,6 +337,19 @@ test("mounted initial settings error has a working Retry control", () => {
   assert.equal(retry.props.disabled, false);
   (retry.props.onClick as () => void)();
   assert.equal(reloads, 1);
+  mounted.app.unmount();
+});
+
+test("mounted Settings exposes provider-declared permission profiles as a single-choice control", () => {
+  const patches: Array<Record<string, unknown>> = [];
+  const mounted = mount(AgentInspectorSettings, settingsProps({ onPatch: (patch: Record<string, unknown>) => patches.push(patch) }));
+  const radios = descendants(mounted.root).filter((node) => node.type === "input" && node.props.type === "radio");
+  assert.equal(radios.length, 1, "Codex has one truthful permission profile rather than a misleading disabled selector");
+  assert.equal(radios[0]?.props.checked, true);
+  assert.equal(radios[0]?.props.disabled, false);
+  assert.match(textContent(mounted.root), /Lets Codex work in this trusted workspace/);
+  (radios[0]?.props.onChange as () => void)();
+  assert.deepEqual(patches, [{ permissionProfileId: "full_access" }]);
   mounted.app.unmount();
 });
 

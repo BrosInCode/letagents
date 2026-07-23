@@ -37,13 +37,12 @@ function resource(): AgentInspectorConfigurationResource {
   };
 }
 
-test("settings draft preserves daemon-owned policy and makes saved/runtime revision truth explicit", () => {
+test("settings draft exposes only user-editable settings and makes saved/runtime revision truth explicit", () => {
   assert.deepEqual(configurationDraft(configuration), {
     model: "gpt-next",
     reasoningEffort: "high",
     charter: "Coordinate work.",
     permissionProfileId: "read_only",
-    providerLaunchPolicy: { sandbox: true },
   });
   assert.equal(configurationHasRuntimeLag(configuration), true);
   assert.equal(configurationHasRuntimeLag({ ...configuration, runtimeConfigurationRevision: 4 }), false);

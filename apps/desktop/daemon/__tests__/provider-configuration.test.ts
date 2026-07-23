@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveProviderConfigurationSnapshot } from "../provider-configuration.js";
+import { deriveProviderConfigurationSnapshot, resolveProviderConfigurationSnapshot } from "../provider-configuration.js";
 
 test("provider configuration maps permission profiles to native launch authority", () => {
   assert.deepEqual(resolveProviderConfigurationSnapshot({
@@ -47,6 +47,32 @@ test("provider configuration maps permission profiles to native launch authority
   }).launchPolicy, {
     force: true,
     sandbox: "enabled",
+  });
+});
+
+test("trusted profile selection replaces only native authority and preserves provider options", () => {
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "codex", model: "gpt-next", reasoningEffort: "high", permissionProfileId: "full_access", configurationRevision: 8,
+  }, {
+    approvalPolicy: "ask", sandboxPolicy: { type: "workspaceWrite" }, experimental: true,
+  }).launchPolicy, {
+    experimental: true, approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" },
+  });
+
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "claude-code", model: "claude-next", reasoningEffort: null, permissionProfileId: "full_access", configurationRevision: 4,
+  }, {
+    permissionMode: "plan", dangerouslySkipPermissions: false, allowedTools: ["Read", "Glob"], maxTurns: 6,
+  }).launchPolicy, {
+    allowedTools: ["Read", "Glob"], maxTurns: 6, permissionMode: "bypassPermissions", dangerouslySkipPermissions: true,
+  });
+
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "sandboxed_write", configurationRevision: 6,
+  }, {
+    mode: "ask", force: false, sandbox: null, workspace: "preserve-me",
+  }).launchPolicy, {
+    workspace: "preserve-me", force: true, sandbox: "enabled",
   });
 });
 

@@ -18,7 +18,25 @@
         <label class="agent-inspector-field"><span>Model</span><input :value="resource.draft.model || ''" :disabled="busy || !settingsEditable || !canEditModel" placeholder="Provider default" @input="patch({ model: ($event.target as HTMLInputElement).value.trim() || null })" /><small v-if="!canEditModel">{{ provider ? 'This provider does not expose a managed model control.' : 'Provider capabilities are unavailable.' }}</small></label>
         <label v-if="canEditEffort" class="agent-inspector-field"><span>Reasoning effort</span><select :value="resource.draft.reasoningEffort || ''" :disabled="busy || !settingsEditable" @change="patch({ reasoningEffort: (($event.target as HTMLSelectElement).value || null) as any })"><option v-for="option in inspectorEffortOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <label class="agent-inspector-field"><span>Charter</span><textarea :value="resource.draft.charter" rows="4" :disabled="busy || !settingsEditable" @input="patch({ charter: ($event.target as HTMLTextAreaElement).value })"></textarea></label>
-        <fieldset v-if="provider?.permissionProfiles.length" class="agent-inspector-permissions" disabled><legend>Permissions</legend><button v-for="profile in provider.permissionProfiles" :key="profile.id" type="button" :aria-pressed="resource.draft.permissionProfileId === profile.id" disabled :data-selected="resource.draft.permissionProfileId === profile.id"><strong>{{ profile.label }}</strong><small>{{ resource.draft.permissionProfileId === profile.id ? 'Current profile' : profile.description }}</small></button><p>Permission changes are unavailable until the supervisor returns a provider-normalized launch policy for the selected profile.</p></fieldset>
+        <fieldset v-if="provider?.permissionProfiles.length" class="agent-inspector-permissions" :disabled="busy || !settingsEditable" :aria-describedby="'agent-inspector-permission-detail'">
+          <legend>Permissions</legend>
+          <p id="agent-inspector-permission-detail" class="agent-inspector-settings-note">Choose the access level for future provider starts. LetAgents applies the matching native policy when you save.</p>
+          <label v-for="profile in provider.permissionProfiles" :key="profile.id" class="agent-inspector-permission-choice" :data-selected="resource.draft.permissionProfileId === profile.id" :data-state="profile.status">
+            <input
+              type="radio"
+              name="agent-inspector-permission-profile"
+              :value="profile.id"
+              :checked="resource.draft.permissionProfileId === profile.id"
+              :disabled="profile.status !== 'available'"
+              @change="patch({ permissionProfileId: profile.id })"
+            />
+            <span>
+              <strong>{{ profile.label }}</strong>
+              <small>{{ resource.draft.permissionProfileId === profile.id ? `Selected · ${profile.description}` : profile.description }}</small>
+              <small v-if="profile.status !== 'available'">{{ profile.status === 'gated' ? 'Unavailable until its provider requirement is met.' : 'Unavailable for this provider.' }}</small>
+            </span>
+          </label>
+        </fieldset>
         <p v-if="resource.status === 'error'" class="agent-inspector-settings-error" role="alert">{{ resource.error }}</p>
         <div v-if="conflict" class="agent-inspector-conflict" role="alert"><strong>Saved configuration changed elsewhere.</strong><p>Your draft is preserved. Reload replaces it with revision {{ resource.configuration.configRevision }}; Overwrite saves your draft against that revision.</p><button type="button" :disabled="busy" @click="emit('reload')">Reload</button><button type="button" class="primary" :disabled="busy || !settingsEditable || !validDraft" @click="emit('save', true)">Overwrite</button></div>
         <div v-else class="agent-inspector-settings-actions"><button type="button" :disabled="busy || !settingsEditable || !validDraft" @click="emit('save', false)">{{ busy ? 'Saving…' : 'Save changes' }}</button><button type="button" :disabled="busy" @click="emit('reload')">Reload</button></div>

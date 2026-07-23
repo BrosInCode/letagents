@@ -140,6 +140,8 @@ async function startWireDaemon(
         result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
       } else if (request.method === "supervisor.get_agent_configuration") {
         result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
+      } else if (request.method === "supervisor.update_agent_configuration") {
+        result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
       } else if (request.method === "supervisor.purge_agent") {
         result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
           ? { outcome: "purged" }
@@ -384,6 +386,12 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
     const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
     const configuration = await client.getAgentConfiguration("agent_1", 39);
     assert.equal(configuration.configRevision, 1);
+    await client.updateAgentConfiguration({
+      entryId: "agent_1", daemonGeneration: 39, expectedRevision: 1,
+      // Cast deliberately simulates a compromised renderer attempting to
+      // submit native flags through the public bridge.
+      configuration: { model: null, reasoningEffort: null, charter: "help", permissionProfileId: "full_access", providerLaunchPolicy: { sandboxPolicy: "weakened" } } as never,
+    });
     const prepared = await client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: "request_1", daemonGeneration: 39 });
     assert.equal(prepared.phase, "prepared");
     const committed = await client.commitRoomMove({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39 });
@@ -398,6 +406,10 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.acknowledge_room_move_source_revocation")?.params, { operation_id: prepared.operationId, entry_id: "agent_1", source_agent_session_id: "session_1", daemon_generation: 39 });
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.rollback_room_move")?.params, { operation_id: prepared.operationId, entry_id: "agent_1", error: "owner API unavailable", daemon_generation: 39 });
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.get_current_room_move")?.params, { entry_id: "agent_1", daemon_generation: 39 });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.update_agent_configuration")?.params, {
+      entry_id: "agent_1", daemon_generation: 39, expected_revision: 1,
+      configuration: { model: null, reasoning_effort: null, charter: "help", permission_profile_id: "full_access" },
+    }, "the renderer bridge must never forward native provider policy");
     await assert.rejects(() => client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: undefined as unknown as string, daemonGeneration: 39 }), /exact typed/);
     await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
