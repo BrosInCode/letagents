@@ -596,12 +596,8 @@ const supervisorEntriesUpdatedAt = ref<string | null>(null);
 const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 let supervisorStatusRequestToken = 0;
 let supervisorStatusRefreshInFlight: Promise<DesktopSupervisorDaemonStatus | null> | null = null;
-const inspectorSupervisor = desktopIpc.supervisor as typeof desktopIpc.supervisor & {
-  /** Added by supervisor implementation 2.0.48; optional until that backend lands in this branch. */
-  getCurrentRoomMove?: (input: { entryId: string; daemonGeneration: number }) => Promise<DesktopSupervisorRoomMove | null>;
-};
 const agentInspectorRoomMoveAvailable = computed(() =>
-  Boolean(supervisorStatus.value?.capabilities.agentRoomMove && inspectorSupervisor.getCurrentRoomMove));
+  Boolean(supervisorStatus.value?.capabilities.agentRoomMove));
 const supervisorEntriesResource = computed<SupervisorEntriesResource>(() => {
   if (supervisorEntriesState.value === "error") {
     return {
@@ -2258,7 +2254,7 @@ async function loadAgentInspectorRoomMove(retryOnStaleGeneration = true): Promis
   if (!projection) return;
   const status = await refreshSupervisorStatus();
   if (!agentInspectorSettingsSelectionCurrent(projection.entryId, projection.roomId)) return;
-  if (!status?.capabilities.agentRoomMove || !inspectorSupervisor.getCurrentRoomMove) {
+  if (!status?.capabilities.agentRoomMove) {
     agentInspectorRoomMoveResource.value = {
       status: "unavailable",
       move: null,
@@ -2279,7 +2275,7 @@ async function loadAgentInspectorRoomMove(retryOnStaleGeneration = true): Promis
     error: null,
   };
   try {
-    const move = await inspectorSupervisor.getCurrentRoomMove({
+    const move = await desktopIpc.supervisor.getCurrentRoomMove({
       entryId: projection.entryId,
       daemonGeneration: status.generation,
     });
@@ -2456,7 +2452,7 @@ async function saveAgentInspectorSettings(overwrite: boolean): Promise<void> {
 }
 
 async function prepareAgentInspectorRoomMove(destinationRoomId: string): Promise<void> {
-  if (!destinationRoomId.trim() || !desktopIpc.supervisor?.prepareRoomMove || !inspectorSupervisor.getCurrentRoomMove) return;
+  if (!destinationRoomId.trim()) return;
   const projection = selectedAgentDetailProjection.value;
   if (!projection) return;
   const status = await refreshSupervisorStatus();
@@ -2500,7 +2496,7 @@ async function prepareAgentInspectorRoomMove(destinationRoomId: string): Promise
 
 async function commitAgentInspectorRoomMove(): Promise<void> {
   const currentMove = agentInspectorRoomMoveResource.value.move;
-  if (!currentMove || !desktopIpc.supervisor?.commitRoomMove || !inspectorSupervisor.getCurrentRoomMove) return;
+  if (!currentMove) return;
   const projection = selectedAgentDetailProjection.value;
   if (!projection) return;
   const status = await refreshSupervisorStatus();
