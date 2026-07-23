@@ -105,7 +105,8 @@ export type DaemonRoomMoveRecord = {
   updated_at: string;
 };
 
-export type DaemonPurgePhase = "prepared" | "revoking_credentials" | "local_commit" | "complete" | "failed";
+export type DaemonPurgePhase = "prepared" | "reprepare_credentials" | "revoking_credentials" | "local_commit" | "complete" | "failed";
+export type DaemonPurgeWorkerSessionAttestation = "exact" | "none" | "unknown" | "not_required";
 export type DaemonPurgeRecord = {
   operation_id: string;
   request_id: string;
@@ -117,6 +118,8 @@ export type DaemonPurgeRecord = {
   attached_work_attempt_id: string | null;
   /** Filesystem location retained after its durable attempt row is removed. */
   preserved_workspace_path: string | null;
+  /** Durable proof of an exact session, no minted session, or missing legacy evidence. */
+  worker_session_attestation: DaemonPurgeWorkerSessionAttestation;
   /** Exact worker session whose bearer must be ended before purge commit. */
   agent_session_id: string | null;
   error: string | null;

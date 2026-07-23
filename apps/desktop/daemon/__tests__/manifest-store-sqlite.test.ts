@@ -102,7 +102,10 @@ test("purge proves preconditions and deletes local agent rows atomically without
   try {
     await store.write(0, [stopped]);
     seedTerminalAttempt(env.databasePath, attemptId, executionId, worktreeMarker);
-    const prepared = await store.preparePurge(1, { operationId: "purge_1", requestId: "purge_1", agentId: stopped.id, daemonGeneration: 3, externalRevokeRequired: false });
+    const prepared = await store.preparePurge(1, {
+      operationId: "purge_1", requestId: "purge_1", agentId: stopped.id, daemonGeneration: 3,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    });
     assert.equal(prepared.purge.phase, "local_commit");
     assert.equal(prepared.purge.attached_work_attempt_id, attemptId);
     assert.equal(prepared.purge.preserved_workspace_path, worktreeMarker);
@@ -143,7 +146,7 @@ test("purge generation adoption never substitutes for durable credential-revocat
     await store.write(0, [stopped]);
     const prepared = await store.preparePurge(1, {
       operationId: "purge_revoke", requestId: "purge_revoke", agentId: stopped.id, daemonGeneration: 8,
-      externalRevokeRequired: true, agentSessionId: "session_revoke",
+      externalRevokeRequired: true, workerSessionAttestation: "exact", agentSessionId: "session_revoke",
     });
     assert.equal(prepared.purge.phase, "revoking_credentials");
     assert.equal(prepared.purge.agent_session_id, "session_revoke");
@@ -183,6 +186,7 @@ test("purge commit rolls every agent and work-attempt deletion back on a late in
     seedTerminalAttempt(env.databasePath, attemptId, executionId, worktreeMarker);
     await store.preparePurge(1, {
       operationId: "purge_rollback", requestId: "purge_rollback", agentId: stopped.id, daemonGeneration: 2, externalRevokeRequired: false,
+      workerSessionAttestation: "not_required", agentSessionId: null,
     });
     const injector = new DatabaseSync(env.databasePath);
     try {
@@ -216,7 +220,10 @@ test("purge rejection leaves generation, identity, and journal unchanged", async
   const store = new ManifestStore(env.databasePath);
   try {
     await store.write(0, [entry]);
-    await assert.rejects(() => store.preparePurge(1, { operationId: "purge_blocked", requestId: "purge_blocked", agentId: entry.id, daemonGeneration: 1, externalRevokeRequired: true }), /fully stopped/);
+    await assert.rejects(() => store.preparePurge(1, {
+      operationId: "purge_blocked", requestId: "purge_blocked", agentId: entry.id, daemonGeneration: 1,
+      externalRevokeRequired: true, workerSessionAttestation: "exact", agentSessionId: "session_1",
+    }), /fully stopped/);
     assert.equal((await store.load()).generation, 1);
     assert.ok(await store.getEntry(entry.id));
     assert.equal(await store.getPurge("purge_blocked"), null);
@@ -240,11 +247,54 @@ test("v10 state migrates to v11 with an exact-session purge fence before version
   const env = await fixture();
   const initialized = new ManifestStore(env.databasePath);
   try {
-    await initialized.load();
+    const stopped: DaemonManifestEntry = {
+      ...entry,
+      id: "agent_v10_purge",
+      desired_state: "stopped",
+      observed_state: "stopped",
+      condition: "none",
+      last_error: null,
+      workspace_path: null,
+      work_attempt_id: null,
+      provider_ref: null,
+      activity: [],
+      turn_control: null,
+      last_worker_binding: {
+        agent_session_id: "session_v10_exact",
+        work_attempt_id: "attempt_v10",
+        execution_generation_id: "execution_v10",
+        updated_at: "2026-07-19T00:02:02.000Z",
+      },
+      workplace_liveness: { state: "unknown", observed_at: null, detail: null },
+      native_liveness: { state: "unknown", observed_at: null, detail: null },
+    };
+    await initialized.write(0, [stopped]);
+    await initialized.preparePurge(1, {
+      operationId: "purge_v10", requestId: "purge_v10", agentId: stopped.id, daemonGeneration: 8,
+      externalRevokeRequired: true, workerSessionAttestation: "exact", agentSessionId: "session_v10_exact",
+    });
     await initialized.close();
     const historical = new DatabaseSync(env.databasePath);
     historical.exec(`
-      ALTER TABLE agent_purge_operations DROP COLUMN agent_session_id;
+      CREATE TABLE agent_purge_operations_v10 (
+        operation_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        agent_id TEXT NOT NULL,
+        daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),
+        phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),
+        external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        attached_work_attempt_id TEXT,
+        preserved_workspace_path TEXT
+      ) STRICT;
+      INSERT INTO agent_purge_operations_v10
+        SELECT operation_id,request_id,agent_id,daemon_generation,phase,external_revoke_required,error,created_at,updated_at,
+          attached_work_attempt_id,preserved_workspace_path
+        FROM agent_purge_operations;
+      DROP TABLE agent_purge_operations;
+      ALTER TABLE agent_purge_operations_v10 RENAME TO agent_purge_operations;
       UPDATE manifest_metadata SET schema_version=10 WHERE singleton=1;
       PRAGMA user_version=10;
     `);
@@ -252,7 +302,24 @@ test("v10 state migrates to v11 with an exact-session purge fence before version
 
     const migrated = new ManifestStore(env.databasePath);
     await migrated.load();
+    const recovered = await migrated.getPurge("purge_v10");
+    assert.equal(recovered?.phase, "revoking_credentials");
+    assert.equal(recovered?.worker_session_attestation, "exact");
+    assert.equal(recovered?.agent_session_id, "session_v10_exact");
+    const acknowledged = await migrated.markPurgeCredentialsRevoked({
+      operationId: "purge_v10",
+      agentId: stopped.id,
+      expectedDaemonGeneration: 8,
+      agentSessionId: "session_v10_exact",
+    });
+    assert.equal(acknowledged.phase, "local_commit");
     await migrated.close();
+    const completion = new ManifestStore(env.databasePath);
+    const committed = await completion.commitPurge(1, {
+      operationId: "purge_v10", agentId: stopped.id, daemonGeneration: 8,
+    });
+    assert.equal(committed.purge.phase, "complete");
+    await completion.close();
     const inspection = new DatabaseSync(env.databasePath);
     assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
     assert.equal(
@@ -261,7 +328,85 @@ test("v10 state migrates to v11 with an exact-session purge fence before version
     );
     const columns = inspection.prepare("PRAGMA table_info(agent_purge_operations)").all() as Array<{ name: string }>;
     assert.equal(columns.some((column) => column.name === "agent_session_id"), true);
+    assert.equal(columns.some((column) => column.name === "worker_session_attestation"), true);
     inspection.close();
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("v10 revoking purge without exact retained evidence migrates to recoverable state and rejects false acknowledgement", async () => {
+  const env = await fixture();
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    const { last_worker_binding: _legacyBinding, ...entryWithoutBindingEvidence } = entry;
+    const stopped: DaemonManifestEntry = {
+      ...entryWithoutBindingEvidence,
+      id: "agent_v10_unknown_purge",
+      desired_state: "stopped",
+      observed_state: "stopped",
+      condition: "none",
+      last_error: null,
+      workspace_path: null,
+      work_attempt_id: null,
+      provider_ref: null,
+      activity: [],
+      turn_control: null,
+      workplace_liveness: { state: "unknown", observed_at: null, detail: null },
+      native_liveness: { state: "unknown", observed_at: null, detail: null },
+    };
+    await initialized.write(0, [stopped]);
+    await initialized.preparePurge(1, {
+      operationId: "purge_v10_unknown", requestId: "purge_v10_unknown", agentId: stopped.id, daemonGeneration: 9,
+      externalRevokeRequired: true, workerSessionAttestation: "unknown", agentSessionId: null,
+    });
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec(`
+      CREATE TABLE agent_purge_operations_v10 (
+        operation_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        agent_id TEXT NOT NULL,
+        daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),
+        phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),
+        external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        attached_work_attempt_id TEXT,
+        preserved_workspace_path TEXT
+      ) STRICT;
+      INSERT INTO agent_purge_operations_v10
+        SELECT operation_id,request_id,agent_id,daemon_generation,'revoking_credentials',external_revoke_required,error,created_at,updated_at,
+          attached_work_attempt_id,preserved_workspace_path
+        FROM agent_purge_operations;
+      DROP TABLE agent_purge_operations;
+      ALTER TABLE agent_purge_operations_v10 RENAME TO agent_purge_operations;
+      UPDATE manifest_metadata SET schema_version=10 WHERE singleton=1;
+      PRAGMA user_version=10;
+    `);
+    historical.close();
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    const recovered = await migrated.getPurge("purge_v10_unknown");
+    assert.equal(recovered?.phase, "reprepare_credentials");
+    assert.equal(recovered?.worker_session_attestation, "unknown");
+    assert.equal(recovered?.agent_session_id, null);
+    await assert.rejects(
+      () => migrated.markPurgeCredentialsRevoked({
+        operationId: "purge_v10_unknown", agentId: stopped.id, expectedDaemonGeneration: 9, agentSessionId: "guessed_session",
+      }),
+      ManifestConflictError,
+    );
+    await assert.rejects(
+      () => migrated.markPurgeGrantRevokedWithoutWorkerSession({
+        operationId: "purge_v10_unknown", agentId: stopped.id, expectedDaemonGeneration: 9,
+      }),
+      ManifestConflictError,
+    );
+    await migrated.close();
   } finally {
     await initialized.close().catch(() => undefined);
     await env.cleanup();

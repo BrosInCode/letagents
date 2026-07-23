@@ -18,6 +18,7 @@ import type {
   DaemonProviderRuntimeReference,
   DaemonPurgePhase,
   DaemonPurgeRecord,
+  DaemonPurgeWorkerSessionAttestation,
   DaemonRoomMovePhase,
   DaemonRoomMoveRecord,
   DaemonTurnControlEffect,
@@ -49,7 +50,9 @@ function purgeFromRow(row: Row): DaemonPurgeRecord {
     operation_id: String(row.operation_id), request_id: String(row.request_id), agent_id: String(row.agent_id),
     daemon_generation: Number(row.daemon_generation), phase: String(row.phase) as DaemonPurgePhase,
     external_revoke_required: bool(row.external_revoke_required), attached_work_attempt_id: nullableString(row.attached_work_attempt_id),
-    preserved_workspace_path: nullableString(row.preserved_workspace_path), agent_session_id: nullableString(row.agent_session_id),
+    preserved_workspace_path: nullableString(row.preserved_workspace_path),
+    worker_session_attestation: String(row.worker_session_attestation) as DaemonPurgeWorkerSessionAttestation,
+    agent_session_id: nullableString(row.agent_session_id),
     error: nullableString(row.error),
     created_at: String(row.created_at), updated_at: String(row.updated_at),
   };
@@ -274,6 +277,7 @@ export class ManifestStore {
     agentId: string;
     daemonGeneration: number;
     externalRevokeRequired: boolean;
+    workerSessionAttestation: DaemonPurgeWorkerSessionAttestation;
     agentSessionId: string | null;
   }): Promise<{ generation: number; created: boolean; purge: DaemonPurgeRecord }> {
     return this.serialize(async () => {
@@ -286,6 +290,7 @@ export class ManifestStore {
         if (existing) {
           const purge = purgeFromRow(existing);
           if (purge.operation_id !== input.operationId || purge.agent_id !== input.agentId
+            || purge.worker_session_attestation !== input.workerSessionAttestation
             || purge.agent_session_id !== input.agentSessionId) {
             throw new Error("Purge request id is already bound to another operation or worker session.");
           }
@@ -294,13 +299,21 @@ export class ManifestStore {
         }
         const attachment = this.assertPurgePreconditions(database, input.agentId);
         const now = new Date().toISOString();
-        const phase: DaemonPurgePhase = input.externalRevokeRequired ? "revoking_credentials" : "local_commit";
-        if (input.externalRevokeRequired && !input.agentSessionId?.trim()) {
-          throw new Error("External purge revocation requires the exact retained worker session.");
+        const phase: DaemonPurgePhase = input.externalRevokeRequired
+          ? input.workerSessionAttestation === "unknown" ? "reprepare_credentials" : "revoking_credentials"
+          : "local_commit";
+        if (!input.externalRevokeRequired && (input.workerSessionAttestation !== "not_required" || input.agentSessionId !== null)) {
+          throw new Error("A local-only purge cannot carry worker-session revocation evidence.");
         }
-        run(database.prepare("INSERT INTO agent_purge_operations(operation_id,request_id,agent_id,daemon_generation,phase,external_revoke_required,error,created_at,updated_at,attached_work_attempt_id,preserved_workspace_path,agent_session_id) VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?)"),
+        if (input.externalRevokeRequired
+          && !((input.workerSessionAttestation === "exact" && Boolean(input.agentSessionId?.trim()))
+            || (input.workerSessionAttestation === "none" && input.agentSessionId === null)
+            || (input.workerSessionAttestation === "unknown" && input.agentSessionId === null))) {
+          throw new Error("External purge revocation requires exact, none-minted, or recoverable worker-session evidence.");
+        }
+        run(database.prepare("INSERT INTO agent_purge_operations(operation_id,request_id,agent_id,daemon_generation,phase,external_revoke_required,error,created_at,updated_at,attached_work_attempt_id,preserved_workspace_path,worker_session_attestation,agent_session_id) VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,?)"),
           input.operationId, input.requestId, input.agentId, input.daemonGeneration, phase, input.externalRevokeRequired ? 1 : 0, now, now,
-          attachment.attachedWorkAttemptId, attachment.preservedWorkspacePath, input.agentSessionId ?? null);
+          attachment.attachedWorkAttemptId, attachment.preservedWorkspacePath, input.workerSessionAttestation, input.agentSessionId ?? null);
         const purge = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);
         database.exec("COMMIT");
         return { generation, created: true, purge };
@@ -314,7 +327,44 @@ export class ManifestStore {
   }
 
   async pendingPurges(): Promise<DaemonPurgeRecord[]> {
-    return ((await this.getDatabase()).prepare("SELECT * FROM agent_purge_operations WHERE phase IN ('revoking_credentials','local_commit') ORDER BY created_at").all() as Row[]).map(purgeFromRow);
+    return ((await this.getDatabase()).prepare("SELECT * FROM agent_purge_operations WHERE phase IN ('reprepare_credentials','revoking_credentials','local_commit') ORDER BY created_at").all() as Row[]).map(purgeFromRow);
+  }
+
+  /**
+   * Resolve only durable worker-session evidence. An explicit retained null
+   * proves no session was minted; an absent legacy field remains unknown even
+   * when the history tables are empty.
+   */
+  async durablePurgeWorkerSessionAttestation(agentId: string): Promise<{
+    workerSessionAttestation: "exact" | "none" | "unknown";
+    agentSessionId: string | null;
+  }> {
+    const database = await this.getDatabase();
+    const retained = database.prepare("SELECT last_worker_binding_present,binding_agent_session_id FROM retained_worker_bindings WHERE agent_id=?").get(agentId) as Row | undefined;
+    if (retained && bool(retained.last_worker_binding_present)) {
+      const sessionId = nullableString(retained.binding_agent_session_id)?.trim() ?? "";
+      return sessionId
+        ? { workerSessionAttestation: "exact", agentSessionId: sessionId }
+        : { workerSessionAttestation: "none", agentSessionId: null };
+    }
+    const current = database.prepare("SELECT agent_session_id FROM supervised_worker_sessions WHERE agent_id=?").get(agentId) as Row | undefined;
+    const currentSessionId = nullableString(current?.agent_session_id)?.trim() ?? "";
+    if (currentSessionId) return { workerSessionAttestation: "exact", agentSessionId: currentSessionId };
+    const ids = new Set<string>();
+    for (const [table, column] of [
+      ["worker_session_bindings", "entry_id"],
+      ["worker_binding_publications", "entry_id"],
+      ["worker_generation_verifications", "entry_id"],
+    ] as const) {
+      const rows = database.prepare(`SELECT DISTINCT agent_session_id FROM ${table} WHERE ${column}=?`).all(agentId) as Row[];
+      for (const row of rows) {
+        const sessionId = nullableString(row.agent_session_id)?.trim();
+        if (sessionId) ids.add(sessionId);
+      }
+    }
+    if (ids.size === 0) return { workerSessionAttestation: "unknown", agentSessionId: null };
+    if (ids.size === 1) return { workerSessionAttestation: "exact", agentSessionId: [...ids][0]! };
+    return { workerSessionAttestation: "unknown", agentSessionId: null };
   }
 
   async adoptPurgeDaemonGeneration(input: { operationId: string; agentId: string; expectedDaemonGeneration: number; daemonGeneration: number }): Promise<DaemonPurgeRecord> {
@@ -325,8 +375,37 @@ export class ManifestStore {
         const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
         if (!row) throw new Error("Unknown purge operation.");
         const purge = purgeFromRow(row);
-        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.expectedDaemonGeneration || !["revoking_credentials", "local_commit"].includes(purge.phase)) throw new ManifestConflictError("Purge credential-revocation fence changed.");
+        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.expectedDaemonGeneration || !["reprepare_credentials", "revoking_credentials", "local_commit"].includes(purge.phase)) throw new ManifestConflictError("Purge credential-revocation fence changed.");
         run(database.prepare("UPDATE agent_purge_operations SET daemon_generation=?,updated_at=? WHERE operation_id=?"), input.daemonGeneration, new Date().toISOString(), input.operationId);
+        const updated = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);
+        database.exec("COMMIT");
+        return updated;
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+    });
+  }
+
+  async repreparePurgeCredentials(input: {
+    operationId: string;
+    agentId: string;
+    expectedDaemonGeneration: number;
+    workerSessionAttestation: "exact" | "none";
+    agentSessionId: string | null;
+  }): Promise<DaemonPurgeRecord> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
+        if (!row) throw new Error("Unknown purge operation.");
+        const purge = purgeFromRow(row);
+        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.expectedDaemonGeneration
+          || purge.phase !== "reprepare_credentials" || !purge.external_revoke_required
+          || !((input.workerSessionAttestation === "exact" && Boolean(input.agentSessionId?.trim()))
+            || (input.workerSessionAttestation === "none" && input.agentSessionId === null))) {
+          throw new ManifestConflictError("Purge credential repreparation fence changed.");
+        }
+        run(database.prepare("UPDATE agent_purge_operations SET phase='revoking_credentials',worker_session_attestation=?,agent_session_id=?,error=NULL,updated_at=? WHERE operation_id=?"),
+          input.workerSessionAttestation, input.agentSessionId, new Date().toISOString(), input.operationId);
         const updated = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);
         database.exec("COMMIT");
         return updated;
@@ -348,8 +427,34 @@ export class ManifestStore {
         if (!row) throw new Error("Unknown purge operation.");
         const purge = purgeFromRow(row);
         if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.expectedDaemonGeneration
-          || purge.phase !== "revoking_credentials" || purge.agent_session_id !== input.agentSessionId) {
+          || purge.phase !== "revoking_credentials" || purge.worker_session_attestation !== "exact"
+          || purge.agent_session_id !== input.agentSessionId) {
           throw new ManifestConflictError("Purge credential-revocation acknowledgement is stale or belongs to another worker session.");
+        }
+        run(database.prepare("UPDATE agent_purge_operations SET phase='local_commit',error=NULL,updated_at=? WHERE operation_id=?"), new Date().toISOString(), input.operationId);
+        const updated = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);
+        database.exec("COMMIT");
+        return updated;
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+    });
+  }
+
+  async markPurgeGrantRevokedWithoutWorkerSession(input: {
+    operationId: string;
+    agentId: string;
+    expectedDaemonGeneration: number;
+  }): Promise<DaemonPurgeRecord> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
+        if (!row) throw new Error("Unknown purge operation.");
+        const purge = purgeFromRow(row);
+        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.expectedDaemonGeneration
+          || purge.phase !== "revoking_credentials" || purge.worker_session_attestation !== "none"
+          || purge.agent_session_id !== null) {
+          throw new ManifestConflictError("Purge grant-only acknowledgement is stale or lacks durable no-session proof.");
         }
         run(database.prepare("UPDATE agent_purge_operations SET phase='local_commit',error=NULL,updated_at=? WHERE operation_id=?"), new Date().toISOString(), input.operationId);
         const updated = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);

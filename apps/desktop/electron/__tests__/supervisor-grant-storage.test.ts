@@ -16,6 +16,7 @@ import {
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntry,
+  revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
   revokeDesktopSupervisorGrant,
 } from "../main/supervisor-grant.js";
 import { DesktopApiError } from "../main/auth.js";
@@ -120,6 +121,45 @@ test("per-entry purge revokes only its grant and removes local recovery only aft
     ]);
     assert.equal(await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }), null);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_b");
+  });
+});
+
+test("never-minted purge revokes only the parent grant and persists an idempotent no-session receipt", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-never-minted";
+    const entryId = "entry-never-minted";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "never-minted"),
+      token: "lashg_never_minted",
+      entryId,
+    }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string) => {
+        calls.push(requestPath);
+        return {} as T;
+      }) as never,
+    });
+    assert.deepEqual(calls, ["/supervisor-host-grants/grant_never-minted"]);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null);
+    const registry = JSON.parse(await readFile(path, "utf8")) as {
+      purgeRevocationReceipts: Record<string, {
+        workerSessionAttestation: string;
+        agentSessionId: string | null;
+        sessionEndedAt: string | null;
+      }>;
+    };
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.workerSessionAttestation, "none");
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.agentSessionId, null);
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.sessionEndedAt, null);
+
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
+      storage: keychain,
+      apiFetch: (async () => { throw new Error("DELETE must not repeat after the durable receipt"); }) as never,
+    });
+    assert.deepEqual(calls, ["/supervisor-host-grants/grant_never-minted"]);
   });
 });
 
