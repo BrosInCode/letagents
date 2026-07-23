@@ -29,7 +29,7 @@ export type SupervisedEffectRecord = {
 };
 export type AgentInspectorDetail = {
   availability: "available" | "pruned" | "not_loaded";
-  entry_id: string; room_id: string; inbox_item_id: string | null;
+  entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: InboxActivation | null } | null;
   receipt: { state: SupervisedInboxState; attempt_count: number; provider_turn_id: string | null; outcome: unknown; last_error: string | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
   terminal: { outcome: string; normalized_text: string | null; evidence_source: string; observed_at: string } | null;
@@ -107,19 +107,19 @@ export class SupervisedAgentInboxStore {
         this.require(message.source_message_id, "source_message_id");
         run(database.prepare(`INSERT INTO supervised_agent_observed_messages
           (agent_id,room_id,source_message_id,source_message_json,activation_json,activation_decision,observed_at)
-          VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id,source_message_id) DO NOTHING`),
+          VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id,room_id,source_message_id) DO NOTHING`),
           input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), message.activation_decision, observedAt);
       }
       let sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value);
       const created: SupervisedInboxItem[] = [];
       for (const message of input.messages) {
         this.require(message.source_message_id, "source_message_id");
-        const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND source_message_id=?").get(input.agent_id, message.source_message_id) as Row | undefined;
+        const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, message.source_message_id) as Row | undefined;
         if (existing) { created.push(rowToItem(existing)); continue; }
         sequence += 1;
         const timestamp = this.now(); const inboxItemId = randomUUID();
-        const actionId = `supervised-room:${input.agent_id}:${message.source_message_id}:action:v1`;
-        const replyId = `supervised-room:${input.agent_id}:${message.source_message_id}:reply:v1`;
+        const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${message.source_message_id}:action:v1`;
+        const replyId = `supervised-room:${input.agent_id}:${input.room_id}:${message.source_message_id}:reply:v1`;
         run(database.prepare(`INSERT INTO supervised_agent_inbox
           (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
           VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
@@ -190,17 +190,17 @@ export class SupervisedAgentInboxStore {
         const pruned = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_pruned_sources WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const observed = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const availability: AgentInspectorDetail["availability"] = pruned ? "pruned" : observed ? "not_loaded" : "not_loaded";
-        return { availability, entry_id: agentId, room_id: roomId, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items, history_boundary: history };
+        return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items, history_boundary: history };
       }
       const item = rowToItem(row);
       const events = (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
       const terminal = database.prepare("SELECT outcome,normalized_text,evidence_source,observed_at FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const publication = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
-      return { availability: "available", entry_id: agentId, room_id: roomId, inbox_item_id: item.inbox_item_id,
+      return { availability: "available", entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
         source_message: safeSource(item.source_message, item.source_message_id, roomId, item.activation),
         receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms },
         terminal: terminal ? { outcome: String(terminal.outcome), normalized_text: terminal.normalized_text === null ? null : String(terminal.normalized_text), evidence_source: String(terminal.evidence_source), observed_at: String(terminal.observed_at) } : null,
-        publication: { client_message_id: item.reply_client_message_id, canonical_message_id: publication ? String(publication.canonical_message_id) : null, room_id: publication ? String(publication.room_id) : null }, timeline: events, items, history_boundary: history };
+        publication: publication ? { client_message_id: String(publication.client_message_id), canonical_message_id: String(publication.canonical_message_id), room_id: String(publication.room_id) } : null, timeline: events, items, history_boundary: history };
     });
   }
   async transition(inboxItemId: string, next: SupervisedInboxState, patch: Partial<Pick<SupervisedInboxItem, "provider_turn_id" | "outcome" | "last_error" | "next_attempt_at_ms" | "blocked_by_inbox_item_id">> = {}): Promise<SupervisedInboxItem> {

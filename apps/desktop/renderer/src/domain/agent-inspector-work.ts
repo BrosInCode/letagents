@@ -27,7 +27,10 @@ export function isCurrentAgentInspectorWorkResponse(
 ): boolean {
   return detail.entry_id === entryId
     && detail.room_id === roomId
-    && (sourceMessageId === null || detail.source_message?.id === sourceMessageId);
+    && detail.requested_source_message_id === sourceMessageId
+    && (sourceMessageId === null
+      ? detail.availability === "not_loaded" && detail.source_message === null
+      : (detail.availability !== "available" || detail.source_message?.id === sourceMessageId));
 }
 
 /** The active turn wins; otherwise the daemon's bounded newest-first list wins. */

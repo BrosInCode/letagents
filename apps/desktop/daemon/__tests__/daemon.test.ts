@@ -14,7 +14,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, resolveReadyReachedAt, SupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
+import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
@@ -140,6 +140,56 @@ test("desired-state compare-and-set cannot resurrect a concurrently stopped laun
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
+  }
+});
+
+test("agent inspector detail socket requests require an exact string-or-null source fence", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    for (const params of [
+      { entry_id: "agent_1", room_id: "room_1" },
+      { entry_id: "agent_1", room_id: "room_1", source_message_id: 7 },
+      { entry_id: 7, room_id: "room_1", source_message_id: null },
+      { entry_id: "agent_1", room_id: 7, source_message_id: null },
+    ]) {
+      const response = await daemonRequest(paths.socketPath, "supervisor.get_agent_inspector_detail", params);
+      assert.equal(response.ok, false);
+      assert.match(response.error ?? "", /requires string entry_id, string room_id, and source_message_id as string or null/);
+    }
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("production publication requires a nonempty canonical id in the requested room", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    for (const body of [{ id: "", room_id: "room_1" }, { id: "msg_1", room_id: "room_2" }]) {
+      globalThis.fetch = (async () => ({ ok: true, json: async () => body })) as typeof fetch;
+      await assert.rejects(
+        () => productionSupervisedDeliveryHttp.publish({ roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "reply", clientMessageId: "client_1" }),
+        /omitted its canonical message identity/,
+      );
+    }
+    globalThis.fetch = (async () => ({ ok: true, json: async () => ({ id: "msg_1", room_id: "room_1" }) })) as typeof fetch;
+    assert.deepEqual(
+      await productionSupervisedDeliveryHttp.publish({ roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "reply", clientMessageId: "client_1" }),
+      { messageId: "msg_1", roomId: "room_1" },
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
   }
 });
 

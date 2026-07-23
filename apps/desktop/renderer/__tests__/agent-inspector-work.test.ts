@@ -16,10 +16,13 @@ test("work detail source selection uses exact active source before bounded recen
 });
 
 test("work response and artifact joins are exact durable identifiers", () => {
-  const detail = { entry_id: "agent_a", room_id: "room_a", source_message: { id: "source_a" } } as any;
+  const detail = { availability: "available", entry_id: "agent_a", room_id: "room_a", requested_source_message_id: "source_a", source_message: { id: "source_a" } } as any;
   assert.equal(isCurrentAgentInspectorWorkResponse(detail, "agent_a", "room_a", "source_a"), true);
   assert.equal(isCurrentAgentInspectorWorkResponse(detail, "agent_a", "room_b", "source_a"), false);
   assert.equal(isCurrentAgentInspectorWorkResponse(detail, "agent_a", "room_a", "source_b"), false);
+  assert.equal(isCurrentAgentInspectorWorkResponse({ ...detail, requested_source_message_id: "source_b" }, "agent_a", "room_a", "source_a"), false);
+  assert.equal(isCurrentAgentInspectorWorkResponse({ availability: "pruned", entry_id: "agent_a", room_id: "room_a", requested_source_message_id: "source_pruned", source_message: null } as any, "agent_a", "room_a", "source_pruned"), true);
+  assert.equal(isCurrentAgentInspectorWorkResponse({ availability: "not_loaded", entry_id: "agent_a", room_id: "room_a", requested_source_message_id: null, source_message: null } as any, "agent_a", "room_a", null), true);
   const artifacts = agentInspectorWorkArtifacts([{ id: "task_a" }], [
     { identityKey: "a", linkedTaskIds: ["task_a"], updatedAt: "2026-01-01T00:00:00.000Z", firstSeenAt: "2026-01-01T00:00:00.000Z", kind: "branch", provider: "git", source: "manual", roomId: "room_a", artifactId: null, artifactNumber: null, title: "Exact", url: null, ref: null, state: null, detail: null },
     { identityKey: "b", linkedTaskIds: ["task_b"], updatedAt: "2026-01-02T00:00:00.000Z", firstSeenAt: "2026-01-02T00:00:00.000Z", kind: "branch", provider: "git", source: "manual", roomId: "room_a", artifactId: null, artifactNumber: null, title: "Different", url: null, ref: null, state: null, detail: null },
@@ -39,6 +42,8 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /if \(!agentInspectorFoundationEnabled\) return;/);
   assert.match(shell, /capabilities\.agentInspectorDetail/);
   assert.match(shell, /agentInspectorWorkRequestStillCurrent/);
+  assert.match(shell, /agentInspectorWorkResource\.value = \{ status: "loading", detail: null, error: null, sourceMessageId \}/);
+  assert.match(shell, /void loadAgentInspectorWorkDetail\(sourceMessageId, true\)/);
   assert.match(shell, /status: previous \? "refreshing" : "loading", detail: previous/);
   assert.match(shell, /activeTab\.value = "chat"[\s\S]{0,120}revealRoomMessage\(canonicalMessageId\)/);
   assert.match(surface, /role="tablist"/);

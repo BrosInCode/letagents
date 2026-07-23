@@ -159,7 +159,7 @@ function lastRoomMessageId(messages: readonly Record<string, unknown>[]): string
 }
 
 /** The daemon talks to the room API only through the live worker bearer. */
-const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
+export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
   async poll(input) {
     const query = new URLSearchParams({ timeout: String(DEFAULT_ROOM_POLL_MAX_MS) });
@@ -186,9 +186,9 @@ const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     });
     if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
     const message = await response.json() as Record<string, unknown>;
-    const messageId = typeof message.id === "string" ? message.id : null;
-    const roomId = typeof message.room_id === "string" ? message.room_id : input.roomId;
-    if (!messageId || roomId !== input.roomId) throw new Error("Supervised room publication response omitted its canonical message identity.");
+    const messageId = typeof message.id === "string" && message.id.trim() ? message.id : null;
+    const roomId = typeof message.room_id === "string" && message.room_id.trim() ? message.room_id : null;
+    if (!messageId || !roomId || roomId !== input.roomId) throw new Error("Supervised room publication response omitted its canonical message identity.");
     return { messageId, roomId };
   },
 };
@@ -729,7 +729,15 @@ export class SupervisorDaemon {
       }
       if (request.method === "supervisor.get_agent_inspector_detail") {
         const params = this.paramsRecord(request.params);
-        return this.getAgentInspectorDetail(String(params.entry_id ?? ""), String(params.room_id ?? ""), typeof params.source_message_id === "string" ? params.source_message_id : null);
+        const entryId = params.entry_id;
+        const roomId = params.room_id;
+        const sourceMessageId = params.source_message_id;
+        if (typeof entryId !== "string" || typeof roomId !== "string"
+          || !Object.hasOwn(params, "source_message_id")
+          || !(sourceMessageId === null || typeof sourceMessageId === "string")) {
+          throw new Error("Agent inspector detail requires string entry_id, string room_id, and source_message_id as string or null.");
+        }
+        return this.getAgentInspectorDetail(entryId, roomId, sourceMessageId);
       }
       if (request.method === "supervisor.prepare_bounded_effect") {
         const params = this.paramsRecord(request.params);

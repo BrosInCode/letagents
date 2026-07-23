@@ -568,7 +568,7 @@ export class SupervisedAgentDelivery {
     parent.signal.addEventListener("abort", relayAbort, { once: true });
     try {
       const publication = await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
-      if (!publication.messageId || publication.roomId !== agent.roomId) throw new Error("Room publication did not return its canonical identity.");
+      if (!publication.messageId?.trim() || !publication.roomId?.trim() || publication.roomId !== agent.roomId) throw new Error("Room publication did not return a nonempty canonical message id in the matching room.");
       this.publishedIds.set(item.inbox_item_id, publication.messageId);
       const current = await this.hasExecutionAuthority(agent, parent);
       if (!current) this.publishedIds.delete(item.inbox_item_id);

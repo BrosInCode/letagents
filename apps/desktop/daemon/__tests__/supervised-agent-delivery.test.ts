@@ -144,9 +144,35 @@ test("worker-authenticated activation ingress deduplicates replay and publishes 
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(polls.length, 2);
     assert.equal((await store.receipts("stone")).length, 1);
-    assert.deepEqual(published, ["supervised-room:stone:1:reply:v1"]);
+    assert.deepEqual(published, ["supervised-room:stone:room:1:reply:v1"]);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a publish response without a nonempty matching canonical room identity never checkpoints publication", async () => {
+  for (const response of [
+    { messageId: "", roomId: agent.roomId },
+    { messageId: "msg_wrong_room", roomId: "other_room" },
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-delivery-bad-publication-"));
+    try {
+      const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+      await ingest(store);
+      const delivery = new SupervisedAgentDelivery(
+        store,
+        provider(async () => ({ turnId: "turn_bad_publication", outcome: "reply", text: "reply" })),
+        { poll: async () => ({}), publish: async () => response },
+        currentAuthority,
+        0,
+      );
+      await delivery.pump(agent);
+      const detail = await store.detail(agent.agentId, agent.roomId, "1");
+      assert.equal(detail.publication, null);
+      assert.equal(detail.receipt?.state, "blocked");
+      assert.match(detail.receipt?.last_error ?? "", /canonical message id.*matching room/);
+      await store.close();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test("result recovery uses bounded backoff and blocks instead of hot-looping forever", async () => {
