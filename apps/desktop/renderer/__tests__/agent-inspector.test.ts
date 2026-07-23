@@ -13,6 +13,10 @@ import {
   mergeSupervisorEntriesPoll,
   SUPERVISOR_ACTIVITY_CAP,
 } from "../src/domain/supervisor-entries-resource";
+import {
+  isProjectedSupervisedActivityParticipant,
+  supervisedActivityIdentity,
+} from "../src/domain/room-agent-delivery";
 import { roomMentionCandidates } from "../src/domain/participants";
 import type {
   DesktopParticipantSummary,
@@ -200,6 +204,53 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
     ],
   });
   assert.equal(projectAgentInspector(rawOnly, { roomId: "focus_1" })?.now?.summary, "Working on the room message");
+
+  const detailedFallback = entry({
+    ...responding,
+    activity: [activity(1, { kind: "provider_event", summary: "opaque provider notification" })],
+    roomAgentState: {
+      ...responding.roomAgentState!,
+      turn: { state: "responding", inboxItemId: delivery.inboxItemId, sourceMessageId: "message_1", providerTurnId: "turn_1", detail: "Reviewing the latest room context" },
+    },
+  });
+  assert.equal(projectAgentInspector(detailedFallback, { roomId: "focus_1" })?.now?.summary, "Reviewing the latest room context");
+
+  const finished = entry({ ...responding, roomAgentState: { ...responding.roomAgentState!, turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } } });
+  assert.equal(projectAgentInspector(finished, { roomId: "focus_1" })?.now, null, "completion clears active Now instead of retaining a stale progress echo");
+});
+
+test("Activity suppresses only exact supervised identity, including a sessionless entry", () => {
+  const identity = supervisedActivityIdentity([
+    entry({ id: "supervised_one", agentKey: "emmymay/gardensignal", agentSessionId: "session_historical", agentSessionBindingState: "historical" }),
+    entry({ id: "supervised_two", agentKey: "emmymay/mapleridge", agentSessionId: null, agentSessionBindingState: "none" }),
+    entry({ id: "other_room", roomId: "other_room", agentKey: "emmymay/other", agentSessionId: "session_other" }),
+  ], "focus_1");
+
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "desktop-supervisor-agent:supervised_two",
+    agentKey: null,
+    agentSessionId: null,
+  }), true, "the canonical supervisor participant key suppresses a sessionless supervised agent");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:session_historical",
+    agentKey: null,
+    agentSessionId: "session_historical",
+  }), true, "the retained historical binding suppresses a stale presence echo");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:another-session",
+    agentKey: "emmymay/gardensignal",
+    agentSessionId: "another-session",
+  }), true, "the exact canonical agent key is sufficient when presence rotates its session");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:unrelated",
+    agentKey: "another/gardensignal",
+    agentSessionId: "unrelated",
+  }), false, "same display labels never suppress an unrelated agent");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:session_other",
+    agentKey: "emmymay/other",
+    agentSessionId: "session_other",
+  }), false, "a supervisor entry from another room cannot suppress this room's roster");
 });
 
 test("Assigned work excludes terminal historical assignments while retaining exact active work", () => {

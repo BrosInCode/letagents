@@ -279,12 +279,13 @@ function nowProjection(
       .sort((left, right) => right.sequence - left.sequence)
       .find((event) => isAgentInspectorNowActivity(event)
         && Date.parse(event.observedAt) >= startedAt);
+    const fallback = entry.roomAgentState?.turn.detail?.trim() || "Working on the room message";
     return {
       kind: "progress",
       label: "Now",
       summary: latest
         ? humanFacingSupervisorActivitySummary(latest)
-        : entry.roomAgentState?.turn.detail || "Working on the room message",
+        : fallback,
       observedAt: latest?.observedAt ?? null,
     };
   }
