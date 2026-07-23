@@ -30,10 +30,7 @@
       </button>
     </header>
 
-    <div class="agent-inspector-status-copy">
-      <strong>{{ projection.overallLabel }}</strong>
-      <p>{{ projection.overallDetail }}</p>
-    </div>
+    <p class="agent-inspector-status-copy">{{ projection.overallDetail }}</p>
 
     <p v-if="projection.resourceFreshness === 'stale'" class="agent-inspector-stale-banner" role="status">
       Showing the last known agent state. Controls that depend on live state are unavailable until the supervisor reconnects.

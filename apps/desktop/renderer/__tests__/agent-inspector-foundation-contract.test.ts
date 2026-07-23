@@ -17,6 +17,7 @@ const participantSurface = source("../src/components/desktop/content/agent-inspe
 const composer = source("../src/components/desktop/content/room-chat/RoomComposer.vue");
 const chat = source("../src/components/desktop/content/RoomChatView.vue");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
+const shellLayout = source("../src/styles/room-shell/shell-layout.css");
 test("the Inspector is the single selected-agent detail owner after cutover", () => {
   assert.match(shell, /<AgentInspectorHost\s*[\s\S]*v-if="selectedAgentDetailTarget"/);
   assert.doesNotMatch(shell, /agentInspectorFoundationEnabled|DesktopAgentDetailModal|projectAgentInspectorsWhenEnabled/);
@@ -74,7 +75,9 @@ test("wide and compact modes have distinct, accessible spatial behavior", () => 
   assert.match(host, /surfaceComponent\.value\?\.focusInitial\(\)/);
   assert.match(host, /previous\[1\] !== isCompact/);
   assert.match(host, /\}, \{ immediate: true \}\);/);
-  assert.match(styles, /\.agent-inspector-host-wide[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*3[\s\S]*justify-self:\s*end/);
+  assert.match(styles, /\.agent-inspector-host-wide[\s\S]*position:\s*absolute[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*3/);
+  assert.doesNotMatch(styles, /\.agent-inspector-host-wide[\s\S]*justify-self:\s*end/);
+  assert.match(shellLayout, /\.desktop-room-shell > \.room-tab-page \{[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*3/);
   assert.doesNotMatch(styles, /\.desktop-room-shell\[data-agent-inspector-open="true"\][\s\S]*grid-template-columns/);
   assert.match(styles, /\.agent-inspector-surface\[data-compact="true"\] \{\s*position: fixed/);
   assert.doesNotMatch(styles, /transition:\s*all|ease-in/);
