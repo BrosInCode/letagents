@@ -55,8 +55,36 @@ test("poll ingestion advances its cursor atomically, deduplicates replay, and re
     assert.equal((await store.cursor("stone"))?.last_observed_message_id, "3", "a delayed older poll cannot regress the cursor");
     await assert.rejects(() => store.ingestPoll({ agent_id: "stone", room_id: "room", expected_cursor: "2", last_observed_message_id: "4", messages: [] }), /cursor changed/);
     assert.equal((await store.head("stone"))?.source_message_id, "1");
-    assert.match(first[0]!.action_id, /stone:1:action:v1$/);
-    assert.match(first[0]!.reply_client_message_id, /stone:1:reply:v1$/);
+    assert.match(first[0]!.action_id, /stone:room:1:action:v1$/);
+    assert.match(first[0]!.reply_client_message_id, /stone:room:1:reply:v1$/);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("the same source id in separate rooms remains separate durable inbox and observed context", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [first] = await store.ingestPoll({
+      agent_id: "stone", room_id: "room_a", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { text: "first room" }, activation: {} }],
+      observed_messages: [{ source_message_id: "msg_1", source_message: { text: "first room" }, activation: {}, activation_decision: "activate" }],
+    });
+    await store.commitRoomMoveQueue({ agent_id: "stone", old_room_id: "room_a", after_fifo_sequence: first!.fifo_sequence });
+    const [second] = await store.ingestPoll({
+      agent_id: "stone", room_id: "room_b", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { text: "second room" }, activation: {} }],
+      observed_messages: [{ source_message_id: "msg_1", source_message: { text: "second room" }, activation: {}, activation_decision: "activate" }],
+    });
+    assert.ok(first && second);
+    assert.notEqual(first.inbox_item_id, second.inbox_item_id);
+    assert.notEqual(first.action_id, second.action_id);
+    assert.notEqual(first.reply_client_message_id, second.reply_client_message_id);
+    assert.match(first.action_id, /stone:room_a:msg_1:action:v1$/);
+    assert.match(second.reply_client_message_id, /stone:room_b:msg_1:reply:v1$/);
+    assert.equal((await store.detail("stone", "room_a", "msg_1")).source_message?.text, "first room");
+    assert.equal((await store.detail("stone", "room_b", "msg_1")).source_message?.text, "second room");
+    assert.equal((await store.observedContext("stone", "room_a"))[0]?.source_message_id, "msg_1");
+    assert.equal((await store.observedContext("stone", "room_b"))[0]?.source_message_id, "msg_1");
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -168,6 +196,7 @@ test("terminal receipts and observed context are bounded while prepared effects 
     assert.equal(firstBoundary.history_boundary?.pruned_before_message_id, "1004");
     assert.ok(firstBoundary.history_boundary?.pruned_at, "first retention wave records an explicit pruning time");
     assert.equal((await store.detail("bounded", "room", "1004")).availability, "pruned", "newest pruned receipt wins over its retained observed-message context");
+    assert.equal((await store.detail("bounded", "room", "1004")).requested_source_message_id, "1004");
     const next = await store.ingestPoll({ agent_id: "bounded", room_id: "room", last_observed_message_id: "1206", messages: [
       { source_message_id: "1205", source_message: { index: 205 }, activation: {} },
       { source_message_id: "1206", source_message: { index: 206 }, activation: {} },
@@ -221,11 +250,15 @@ test("inspector detail checkpoints canonical publication and records a monotonic
     await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "detail", execution_generation_id: "run", provider_turn_id: "turn-detail", outcome: "reply", text: "done", evidence: "transcript", terminal_evidence: { provider: "normalized-only" } });
     await store.transition(item.inbox_item_id, "awaiting_result");
     await store.transition(item.inbox_item_id, "publishing");
+    const beforePublication = await store.detail("detail", "room", "1");
+    assert.equal(beforePublication.requested_source_message_id, "1");
+    assert.equal(beforePublication.publication, null, "publication stays null until a canonical checkpoint exists");
     await store.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: "room", canonical_message_id: "msg_99" });
     await store.close();
     const reopened = new SupervisedAgentInboxStore(env.database);
     const detail = await reopened.detail("detail", "room", "1");
     assert.equal(detail.availability, "available");
+    assert.equal(detail.requested_source_message_id, "1");
     assert.equal(detail.receipt?.provider_turn_id, "turn-detail");
     assert.equal(detail.publication?.canonical_message_id, "msg_99");
     assert.equal(detail.source_message?.text, "ship it");
@@ -242,7 +275,7 @@ test("inspector detail checkpoints canonical publication and records a monotonic
   } finally { await env.cleanup(); }
 });
 
-test("v8 validation rejects malformed table and required-index shapes", async () => {
+test("v9 validation rejects malformed delivery-history table and relational shapes", async () => {
   for (const mutation of [
     `DROP INDEX supervised_agent_publications_agent_room; CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(room_id,agent_id)`,
     `DROP TABLE supervised_agent_publications; CREATE TABLE supervised_agent_publications (inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id),agent_id TEXT NOT NULL,room_id TEXT NOT NULL,client_message_id TEXT NOT NULL,canonical_message_id TEXT NOT NULL,published_at INTEGER NOT NULL,UNIQUE(room_id,client_message_id),UNIQUE(room_id,canonical_message_id)) STRICT`,
@@ -251,13 +284,45 @@ test("v8 validation rejects malformed table and required-index shapes", async ()
       const store = new SupervisedAgentInboxStore(env.database); await store.receipts("shape"); await store.close();
       const database = new DatabaseSync(env.database); database.exec(mutation); database.close();
       const rejected = new SupervisedAgentInboxStore(env.database);
-      await assert.rejects(() => rejected.receipts("shape"), /Daemon state v8 (?:table|index)/);
+      await assert.rejects(() => rejected.receipts("shape"), /Daemon state v(?:8|9) (?:table|index|delivery-history constraints|publication index)/);
       await rejected.close();
     } finally { await env.cleanup(); }
   }
 });
 
-test("older marker with physical v7 delivery tables installs v8 before advancing", async () => {
+test("v9 rejects corrupt publication parent identity and unpaired pruning fields", async () => {
+  for (const corruption of ["publication", "boundary"] as const) {
+    const env = await fixture(); try {
+      const store = new SupervisedAgentInboxStore(env.database);
+      const [item] = await store.ingestPoll({
+        agent_id: "integrity", room_id: "room_a", last_observed_message_id: "msg_1",
+        messages: [{ source_message_id: "msg_1", source_message: {}, activation: {} }],
+      });
+      await store.close();
+      const database = new DatabaseSync(env.database);
+      if (corruption === "publication") {
+        database.exec("PRAGMA foreign_keys = OFF");
+        database.prepare(`INSERT INTO supervised_agent_publications
+          (inbox_item_id,agent_id,room_id,client_message_id,canonical_message_id,published_at)
+          VALUES (?,?,?,?,?,?)`).run(item!.inbox_item_id, "integrity", "room_b", "bad-client", "bad-canonical", "2026-07-23T00:00:00.000Z");
+      } else {
+        database.exec("PRAGMA ignore_check_constraints = ON");
+        database.prepare(`UPDATE supervised_agent_history_boundaries
+          SET pruned_before_message_id=?, pruned_at=NULL
+          WHERE agent_id=? AND room_id=?`).run("msg_1", "integrity", "room_a");
+      }
+      database.close();
+      const rejected = new SupervisedAgentInboxStore(env.database);
+      await assert.rejects(
+        () => rejected.receipts("integrity"),
+        corruption === "publication" ? /publication parent identity|foreign key integrity/ : /history boundary pruning fields/,
+      );
+      await rejected.close();
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("older marker with physical v7 delivery tables installs v9 before advancing", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database); await store.receipts("repair-v8"); await store.close();
     const database = new DatabaseSync(env.database);
@@ -265,7 +330,7 @@ test("older marker with physical v7 delivery tables installs v8 before advancing
     database.close();
     const reopened = new SupervisedAgentInboxStore(env.database); await reopened.receipts("repair-v8"); await reopened.close();
     const inspection = new DatabaseSync(env.database);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.ok(inspection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='supervised_agent_pruned_sources'").get());
     inspection.close();
   } finally { await env.cleanup(); }
@@ -327,7 +392,7 @@ test("v7 repair adds a missing causal-event table without rewriting canonical in
     await first.close();
     const partialV7 = new DatabaseSync(env.database);
     partialV7.exec("DROP TABLE supervised_agent_inbox_events");
-    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     partialV7.close();
     const repaired = new SupervisedAgentInboxStore(env.database);
     const preserved = (await repaired.receipts("repair"))[0]!;
@@ -422,7 +487,7 @@ test("a post-COMMIT v6 scrub interruption leaves a durable marker that a reopen 
     await prepareSecretBearingV5(env);
     const interrupted = new DatabaseSync(env.database);
     assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
-    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     assert.equal((interrupted.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
     interrupted.close();
     const reopened = new DatabaseSync(env.database);

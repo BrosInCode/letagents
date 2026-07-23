@@ -857,7 +857,8 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   const fail = (): never => { throw new Error("Supervisor returned an invalid or unfenced agent inspector detail response."); };
   const availability = enumValue(value.availability, ["available", "pruned", "not_loaded"] as const) ?? fail();
   const inboxItemId = nullableNonEmptyString(value.inbox_item_id);
-  if (value.entry_id !== input.entryId || value.room_id !== input.roomId || inboxItemId === undefined) fail();
+  const requestedSourceMessageId = nullableNonEmptyString(value.requested_source_message_id);
+  if (value.entry_id !== input.entryId || value.room_id !== input.roomId || inboxItemId === undefined || requestedSourceMessageId === undefined || requestedSourceMessageId !== (input.sourceMessageId ?? null)) fail();
   const mapOutcome = (candidate: unknown): Detail["receipt"] extends { outcome: infer T } ? T : never => {
     if (candidate === null) return null as never;
     const outcome = record(candidate) ?? fail();
@@ -879,7 +880,7 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   if (availability === "available" && (!requestedSourceId || !inboxItemId || !source || source.id !== requestedSourceId || !receipt)) fail();
   if (availability !== "available" && (inboxItemId || source || receipt || terminal || publication || timeline.length)) fail();
   if (requestedSourceId === null && availability !== "not_loaded") fail();
-  return { availability, entry_id: input.entryId, room_id: input.roomId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, timeline, items, history_boundary: boundary } as Detail;
+  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, timeline, items, history_boundary: boundary } as Detail;
 }
 
 /**

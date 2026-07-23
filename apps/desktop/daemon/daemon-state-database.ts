@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 8;
+export const DAEMON_STATE_SCHEMA_VERSION = 9;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -59,11 +59,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV7ToV8(database);
     return;
   }
+  if (existingVersion === 8) {
+    this.migrateV8ToV9(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV8Shape(database);
+    this.repairAndValidateV9Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -340,6 +344,8 @@ createSchema(database: DatabaseSync): void {
     this.validateV7Shape(database);
     this.applyV8Shape(database);
     this.validateV8Shape(database);
+    this.applyV9Shape(database);
+    this.validateV9Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -518,6 +524,8 @@ migrateV5ToV6(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.applyBoundedDeliveryV6Shape(database);
     this.validateBoundedDeliveryV6Shape(database);
+    if (!this.hasV9DeliveryHistoryShape(database)) this.applyV9Shape(database);
+    this.validateV9Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -544,6 +552,8 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV7Shape(database);
     this.applyV8Shape(database);
     this.validateV8Shape(database);
+    this.applyV9Shape(database);
+    this.validateV9Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -564,6 +574,26 @@ migrateV7ToV8(database: DatabaseSync): void {
     this.validateV7Shape(database);
     this.applyV8Shape(database);
     this.validateV8Shape(database);
+    this.applyV9Shape(database);
+    this.validateV9Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** V9 makes message identity room-scoped and verifies cross-table delivery evidence. */
+migrateV8ToV9(database: DatabaseSync): void {
+  this.repairAndValidateV8Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV8Shape(database);
+    this.applyV9Shape(database);
+    this.validateV9Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -648,6 +678,158 @@ repairAndValidateV8Shape(database: DatabaseSync): void {
 }
 
 /**
+ * V9 deliberately rebuilds the small, bounded delivery-history tables. The
+ * old uniqueness key omitted room_id, which made a reused room message id
+ * collide across room moves for the same durable agent.
+ */
+private applyV9Shape(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA defer_foreign_keys = ON;
+    ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v8;
+    ALTER TABLE supervised_agent_observed_messages RENAME TO supervised_agent_observed_messages_v8;
+
+    CREATE TABLE supervised_agent_inbox (
+      inbox_item_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
+      source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
+      fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
+      state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move')),
+      attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+      action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
+      provider_turn_id TEXT, outcome TEXT, last_error TEXT,
+      blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
+      next_attempt_at_ms INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, acknowledged_at TEXT,
+      UNIQUE(agent_id,room_id,source_message_id), UNIQUE(agent_id,fifo_sequence),
+      UNIQUE(inbox_item_id,agent_id,room_id)
+    ) STRICT;
+    INSERT INTO supervised_agent_inbox
+      (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+      SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
+      FROM supervised_agent_inbox_v8;
+
+    CREATE TABLE supervised_agent_inbox_events_v9 (
+      inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+      event_sequence INTEGER NOT NULL CHECK(event_sequence > 0),
+      idempotency_key TEXT NOT NULL,
+      phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled')),
+      observed_at TEXT NOT NULL, detail TEXT,
+      PRIMARY KEY(inbox_item_id,event_sequence), UNIQUE(inbox_item_id,idempotency_key)
+    ) STRICT;
+    INSERT INTO supervised_agent_inbox_events_v9 SELECT * FROM supervised_agent_inbox_events;
+
+    CREATE TABLE supervised_agent_terminal_results_v9 (
+      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
+      normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
+      terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO supervised_agent_terminal_results_v9 SELECT * FROM supervised_agent_terminal_results;
+
+    CREATE TABLE supervised_agent_publications_v9 (
+      inbox_item_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+      client_message_id TEXT NOT NULL, canonical_message_id TEXT NOT NULL, published_at TEXT NOT NULL,
+      FOREIGN KEY(inbox_item_id,agent_id,room_id)
+        REFERENCES supervised_agent_inbox(inbox_item_id,agent_id,room_id) ON DELETE CASCADE,
+      UNIQUE(room_id,client_message_id), UNIQUE(room_id,canonical_message_id)
+    ) STRICT;
+    INSERT INTO supervised_agent_publications_v9 SELECT * FROM supervised_agent_publications;
+
+    DROP TABLE supervised_agent_inbox_events;
+    DROP TABLE supervised_agent_terminal_results;
+    DROP TABLE supervised_agent_publications;
+
+    DROP TABLE supervised_agent_inbox_v8;
+
+    CREATE TABLE supervised_agent_observed_messages (
+      agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
+      source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
+      activation_decision TEXT NOT NULL, observed_at TEXT NOT NULL,
+      PRIMARY KEY(agent_id,room_id,source_message_id)
+    ) STRICT;
+    INSERT INTO supervised_agent_observed_messages SELECT * FROM supervised_agent_observed_messages_v8;
+    DROP TABLE supervised_agent_observed_messages_v8;
+
+    ALTER TABLE supervised_agent_inbox_events_v9 RENAME TO supervised_agent_inbox_events;
+    ALTER TABLE supervised_agent_terminal_results_v9 RENAME TO supervised_agent_terminal_results;
+    ALTER TABLE supervised_agent_publications_v9 RENAME TO supervised_agent_publications;
+    CREATE INDEX supervised_agent_inbox_head ON supervised_agent_inbox(agent_id,fifo_sequence);
+    CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
+    CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
+    CREATE INDEX supervised_agent_observed_context ON supervised_agent_observed_messages(agent_id,room_id,source_message_id);
+    CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(agent_id,room_id);
+
+    ALTER TABLE supervised_agent_history_boundaries RENAME TO supervised_agent_history_boundaries_v8;
+    CREATE TABLE supervised_agent_history_boundaries (
+      agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+      earliest_retained_observed_message_id TEXT, earliest_retained_inbox_message_id TEXT,
+      earliest_retained_receipt_sequence INTEGER,
+      pruned_before_message_id TEXT, pruned_at TEXT,
+      updated_at TEXT NOT NULL,
+      CHECK ((pruned_before_message_id IS NULL) = (pruned_at IS NULL)),
+      PRIMARY KEY(agent_id,room_id)
+    ) STRICT;
+    INSERT INTO supervised_agent_history_boundaries
+      SELECT agent_id,room_id,earliest_retained_observed_message_id,earliest_retained_inbox_message_id,earliest_retained_receipt_sequence,
+        CASE WHEN pruned_before_message_id IS NULL OR pruned_at IS NULL THEN NULL ELSE pruned_before_message_id END,
+        CASE WHEN pruned_before_message_id IS NULL OR pruned_at IS NULL THEN NULL ELSE pruned_at END,
+        updated_at
+      FROM supervised_agent_history_boundaries_v8;
+    DROP TABLE supervised_agent_history_boundaries_v8;
+    CREATE INDEX supervised_agent_history_boundaries_updated ON supervised_agent_history_boundaries(agent_id,updated_at);
+  `);
+}
+
+private validateV9Shape(database: DatabaseSync): void {
+  const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
+  const observed = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_observed_messages'").get() as Row | undefined;
+  const publications = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as Row | undefined;
+  const boundaries = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_history_boundaries'").get() as Row | undefined;
+  for (const [name, row] of Object.entries({ inbox, observed, publications, boundaries })) {
+    if (!row || !/STRICT\s*$/i.test(String(row.sql))) throw new Error(`Daemon state v9 table ${name} is invalid.`);
+  }
+  const inboxSql = String(inbox?.sql);
+  const observedSql = String(observed?.sql);
+  const publicationsSql = String(publications?.sql);
+  const boundariesSql = String(boundaries?.sql);
+  if (!/UNIQUE\s*\(\s*agent_id\s*,\s*room_id\s*,\s*source_message_id\s*\)/i.test(inboxSql)
+    || !/PRIMARY KEY\s*\(\s*agent_id\s*,\s*room_id\s*,\s*source_message_id\s*\)/i.test(observedSql)
+    || !/FOREIGN KEY\s*\(\s*inbox_item_id\s*,\s*agent_id\s*,\s*room_id\s*\)/i.test(publicationsSql)
+    || !/CHECK\s*\(\s*\(\s*pruned_before_message_id\s+IS\s+NULL\s*\)\s*=\s*\(\s*pruned_at\s+IS\s+NULL\s*\)\s*\)/i.test(boundariesSql)) {
+    throw new Error("Daemon state v9 delivery-history constraints are invalid.");
+  }
+  if (database.prepare("SELECT 1 FROM supervised_agent_inbox GROUP BY agent_id,room_id,source_message_id HAVING COUNT(*) > 1 LIMIT 1").get()) {
+    throw new Error("Daemon state v9 inbox room-scoped uniqueness is invalid.");
+  }
+  const publicationIndex = database.prepare("PRAGMA index_info('supervised_agent_publications_agent_room')").all() as Row[];
+  if (publicationIndex.map((row) => String(row.name)).join(",") !== "agent_id,room_id") {
+    throw new Error("Daemon state v9 publication index is invalid.");
+  }
+  if (database.prepare("SELECT 1 FROM supervised_agent_history_boundaries WHERE (pruned_before_message_id IS NULL) <> (pruned_at IS NULL) LIMIT 1").get()) {
+    throw new Error("Daemon state v9 history boundary pruning fields are invalid.");
+  }
+  if (database.prepare(`SELECT 1 FROM supervised_agent_publications p LEFT JOIN supervised_agent_inbox i
+    ON i.inbox_item_id=p.inbox_item_id AND i.agent_id=p.agent_id AND i.room_id=p.room_id
+    WHERE i.inbox_item_id IS NULL LIMIT 1`).get()) {
+    throw new Error("Daemon state v9 publication parent identity is invalid.");
+  }
+  if ((database.prepare("PRAGMA foreign_key_check").all() as Row[]).length) {
+    throw new Error("Daemon state v9 foreign key integrity check failed.");
+  }
+}
+
+private hasV9DeliveryHistoryShape(database: DatabaseSync): boolean {
+  const publication = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as Row | undefined;
+  return Boolean(publication && /FOREIGN KEY\s*\(\s*inbox_item_id\s*,\s*agent_id\s*,\s*room_id\s*\)/i.test(String(publication.sql)));
+}
+
+repairAndValidateV9Shape(database: DatabaseSync): void {
+  this.repairAndValidateV7Shape(database);
+  this.validateV9Shape(database);
+}
+
+/**
  * Older-version test fixtures can carry a newer physical worker table after a
  * version-marker rollback.  Prefer its already-secret-free v6 shape; real
  * v1–v5 databases still build and validate each predecessor in order.
@@ -667,6 +849,10 @@ private migrateWorkerShapeToV6(database: DatabaseSync): boolean {
   if (this.tableColumns(database, "supervised_agent_terminal_results").size) {
     if (requiresScrub) this.applyV6Shape(database);
     this.validateV7Shape(database);
+    if (this.hasV9DeliveryHistoryShape(database)) {
+      this.validateV9Shape(database);
+      return requiresScrub;
+    }
     this.applyV8Shape(database);
     this.validateV8Shape(database);
     return requiresScrub;

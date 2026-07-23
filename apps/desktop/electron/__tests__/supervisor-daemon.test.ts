@@ -130,7 +130,7 @@ async function startWireDaemon(
           stages: ["delivered", "interrupting", "applied", "resumed"],
         };
       } else if (request.method === "supervisor.get_agent_inspector_detail") {
-        result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
+        result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
       } else if (request.method === "lane.reserve_legacy") {
         const owner = {
           reservation_id: request.params!.reservation_id,
@@ -323,7 +323,7 @@ test("causal manifest projection drops malformed nested state and malformed rece
 test("agent inspector detail mapper validates every bounded wire section", () => {
   const input = { entryId: "agent_1", roomId: "room_1", sourceMessageId: "msg_1" };
   const wire = {
-    availability: "available", entry_id: "agent_1", room_id: "room_1", inbox_item_id: "inbox_1",
+    availability: "available", entry_id: "agent_1", room_id: "room_1", requested_source_message_id: "msg_1", inbox_item_id: "inbox_1",
     source_message: { id: "msg_1", room_id: "room_1", sender: "Ada", text: "ship it", created_at: "2026-01-01T00:00:00.000Z", reply_to: null, thread_root_id: "msg_1", activation: { decision: "activate" } },
     receipt: { state: "acknowledged", attempt_count: 1, provider_turn_id: "turn_1", outcome: { kind: "reply", text: "done", evidence: "transcript" }, last_error: null, blocked_by_inbox_item_id: null, next_attempt_at_ms: null },
     terminal: { outcome: "reply", normalized_text: "done", evidence_source: "transcript", observed_at: "2026-01-01T00:00:01.000Z" },
@@ -333,12 +333,14 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
     history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
   };
   const mapped = mapAgentInspectorDetail(wire, input);
+  assert.equal(mapped.requested_source_message_id, "msg_1");
   assert.equal(mapped.items[0]?.sender, "Ada");
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
   assert.throws(() => mapAgentInspectorDetail({ ...wire, room_id: "room_2" }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, requested_source_message_id: "msg_other" }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, source_message: { ...wire.source_message, id: "msg_other" } }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail(wire, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }), /invalid or unfenced/);
-  assert.doesNotThrow(() => mapAgentInspectorDetail({ ...wire, availability: "not_loaded", inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [] }, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }));
+  assert.doesNotThrow(() => mapAgentInspectorDetail({ ...wire, availability: "not_loaded", requested_source_message_id: null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [] }, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }));
   assert.throws(() => mapAgentInspectorDetail({ ...wire, items: [{ ...wire.items[0], state: "invented" }] }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: Array.from({ length: 101 }, () => wire.timeline[0]) }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, history_boundary: { ...wire.history_boundary, earliest_retained_receipt_sequence: -1 } }, input), /invalid or unfenced/);

@@ -2014,15 +2014,21 @@ function agentInspectorWorkRequestStillCurrent(entryId: string, roomId: string, 
 function selectAgentInspectorWorkSource(sourceMessageId: string): void {
   if (!sourceMessageId.trim()) return;
   agentInspectorWorkSourceMessageId.value = sourceMessageId;
+  // A work item is a fenced causal record, not a generic detail cache. Never
+  // leave the previous message visible while the exact new source is loading.
+  agentInspectorWorkResource.value = { status: "loading", detail: null, error: null, sourceMessageId };
   void loadAgentInspectorWorkDetail(sourceMessageId);
 }
 
 function openAgentInspectorWork(): void {
   const projection = selectedAgentDetailProjection.value;
-  const sourceMessageId = agentInspectorWorkSourceMessageId.value
-    || (projection ? defaultAgentInspectorWorkSource(projection.entry, null) : null);
+  const sourceMessageId = projection
+    ? defaultAgentInspectorWorkSource(projection.entry, agentInspectorWorkResource.value.detail)
+    : null;
   agentInspectorWorkSourceMessageId.value = sourceMessageId;
-  void loadAgentInspectorWorkDetail(sourceMessageId);
+  // Re-entering Work reconciles the exact active source and receipt; manifest
+  // activity may have advanced while another tab was selected.
+  void loadAgentInspectorWorkDetail(sourceMessageId, true);
 }
 
 async function loadAgentInspectorWorkDetail(sourceMessageId: string | null = agentInspectorWorkSourceMessageId.value, force = false): Promise<void> {
@@ -2031,13 +2037,18 @@ async function loadAgentInspectorWorkDetail(sourceMessageId: string | null = age
   const projection = selectedAgentDetailProjection.value;
   if (target?.kind !== "supervised" || !projection || projection.roomId !== props.room.identifier) return;
   if (!desktopIpc.supervisor?.getAgentInspectorDetail || !supervisorStatus.value?.capabilities.agentInspectorDetail) {
-    agentInspectorWorkResource.value = { ...agentInspectorWorkResource.value, status: "unavailable", error: null, sourceMessageId };
+    agentInspectorWorkResource.value = { status: "unavailable", detail: null, error: null, sourceMessageId };
     return;
   }
   if (!force && agentInspectorWorkResource.value.status === "ready" && agentInspectorWorkSourceMessageId.value === sourceMessageId) return;
   agentInspectorWorkSourceMessageId.value = sourceMessageId;
   const token = ++agentInspectorWorkRequestToken;
-  const previous = agentInspectorWorkResource.value.detail;
+  const cached = agentInspectorWorkResource.value.detail;
+  const previous = agentInspectorWorkResource.value.sourceMessageId === sourceMessageId
+    && cached
+    && isCurrentAgentInspectorWorkResponse(cached, target.supervisorEntryId, projection.roomId, sourceMessageId)
+    ? cached
+    : null;
   agentInspectorWorkResource.value = { status: previous ? "refreshing" : "loading", detail: previous, error: null, sourceMessageId };
   try {
     const detail = await desktopIpc.supervisor.getAgentInspectorDetail({ entryId: target.supervisorEntryId, roomId: projection.roomId, sourceMessageId });
