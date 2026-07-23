@@ -18,8 +18,8 @@ const chat = source("../src/components/desktop/content/RoomChatView.vue");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
 const flag = source("../src/domain/agent-inspector-feature.ts");
 
-test("the completed foundation owns the exclusive Inspector runtime", () => {
-  assert.match(flag, /AGENT_INSPECTOR_FOUNDATION_ENABLED = true/);
+test("the foundation stays dark and owns no runtime work while disabled", () => {
+  assert.match(flag, /AGENT_INSPECTOR_FOUNDATION_ENABLED = false/);
   assert.match(shell, /if \(agentInspectorFoundationEnabled\) \{\s*unsubscribeSupervisorActivity/);
   assert.match(shell, /v-if="agentInspectorFoundationEnabled && selectedAgentDetailTarget"/);
   assert.match(shell, /v-if="!agentInspectorFoundationEnabled"/);
@@ -120,4 +120,10 @@ test("small inspector labels use the accessible secondary text token", () => {
   };
   const ratio = (luminance("a1a1aa") + 0.05) / (luminance("111112") + 0.05);
   assert.ok(ratio >= 4.5, `expected 4.5:1, received ${ratio.toFixed(2)}:1`);
+});
+
+test("Inspector controls keep a 44px minimum interaction target", () => {
+  assert.match(styles, /\.agent-inspector-surface button \{ min-height: 44px; \}/);
+  assert.match(styles, /\.agent-inspector-tabs button \{[^}]*min-height: 44px/);
+  assert.match(styles, /\.agent-inspector-field input, \.agent-inspector-field select, \.agent-inspector-field textarea \{[^}]*min-height: 44px/);
 });

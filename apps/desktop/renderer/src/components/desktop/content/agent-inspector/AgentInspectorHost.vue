@@ -4,7 +4,7 @@
       <component
         ref="surfaceComponent"
         :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
-        v-bind="projection ? { projection, actionState, compact: false, workResource, selectedWorkSourceMessageId, workArtifacts, settingsResource, roomMoveResource, providers, destinations, settingsConflict } : { ...statusPresentation, compact: false }"
+        v-bind="projection ? { projection, actionState, compact: false, workResource, selectedWorkSourceMessageId, workArtifacts, settingsResource, roomMoveResource, roomMoveAvailable, providers, destinations, settingsConflict } : { ...statusPresentation, compact: false }"
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
         @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
@@ -28,7 +28,7 @@
         ref="surfaceComponent"
         :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
         v-if="open"
-        v-bind="projection ? { projection, actionState, compact, workResource, selectedWorkSourceMessageId, workArtifacts, settingsResource, roomMoveResource, providers, destinations, settingsConflict } : { ...statusPresentation, compact }"
+        v-bind="projection ? { projection, actionState, compact, workResource, selectedWorkSourceMessageId, workArtifacts, settingsResource, roomMoveResource, roomMoveAvailable, providers, destinations, settingsConflict } : { ...statusPresentation, compact }"
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
         @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
@@ -47,7 +47,7 @@ import type {
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
-import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource, AgentInspectorConfigurationDraft } from "../../../../domain/agent-inspector-settings";
+import type { AgentInspectorConfigurationResource, AgentInspectorConfigurationDraft, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
 import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
@@ -65,6 +65,7 @@ const props = defineProps<{
   workArtifacts: readonly RoomArtifactTimelineItem[];
   settingsResource: AgentInspectorConfigurationResource;
   roomMoveResource: AgentInspectorRoomMoveResource;
+  roomMoveAvailable: boolean;
   providers: readonly DesktopAgentProvider[];
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;

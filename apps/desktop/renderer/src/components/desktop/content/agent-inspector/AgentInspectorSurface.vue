@@ -73,10 +73,11 @@
       <AgentInspectorSettings
         v-else id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
         :entry-id="projection.entryId" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
-        :resource="settingsResource" :move="roomMoveResource" :providers="providers" :destinations="destinations"
+        :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
         :busy="actionState?.status === 'running'" :conflict="settingsConflict"
         @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @reload="emit('settings-reload')"
-        @prepare-move="emit('room-move-prepare', $event)" @commit-move="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
+        @prepare-move="emit('room-move-prepare', $event)" @commit-move="emit('room-move-commit')"
+        @retire="emit('retire')" @purge="emit('purge')"
       />
     </div>
   </aside>
@@ -108,6 +109,7 @@ const props = defineProps<{
   workArtifacts: readonly RoomArtifactTimelineItem[];
   settingsResource: AgentInspectorConfigurationResource;
   roomMoveResource: AgentInspectorRoomMoveResource;
+  roomMoveAvailable: boolean;
   providers: readonly DesktopAgentProvider[];
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
