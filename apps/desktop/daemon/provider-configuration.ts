@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { assertSupervisedPermissionProfileAvailable } from "./supervised-permission-profiles.js";
 
 export type ProviderReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | null;
 export type ProviderConfigurationSnapshot = {
@@ -127,11 +128,13 @@ export function deriveProviderConfigurationSnapshot(
   currentTrustedLaunchPolicy: unknown,
 ): ProviderConfigurationSnapshot {
   const provider = selection.provider.trim().toLowerCase();
+  const permissionProfileId = assertSupervisedPermissionProfileAvailable(provider, selection.permissionProfileId);
   const existing = plainPolicy(currentTrustedLaunchPolicy, provider);
   const stripped = stripProfileAuthority(provider, existing);
   return resolveProviderConfigurationSnapshot({
     ...selection,
     provider,
+    permissionProfileId,
     launchPolicy: stripped,
   });
 }

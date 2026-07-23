@@ -18,10 +18,10 @@
         <label class="agent-inspector-field"><span>Model</span><input :value="resource.draft.model || ''" :disabled="busy || !settingsEditable || !canEditModel" placeholder="Provider default" @input="patch({ model: ($event.target as HTMLInputElement).value.trim() || null })" /><small v-if="!canEditModel">{{ provider ? 'This provider does not expose a managed model control.' : 'Provider capabilities are unavailable.' }}</small></label>
         <label v-if="canEditEffort" class="agent-inspector-field"><span>Reasoning effort</span><select :value="resource.draft.reasoningEffort || ''" :disabled="busy || !settingsEditable" @change="patch({ reasoningEffort: (($event.target as HTMLSelectElement).value || null) as any })"><option v-for="option in inspectorEffortOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <label class="agent-inspector-field"><span>Charter</span><textarea :value="resource.draft.charter" rows="4" :disabled="busy || !settingsEditable" @input="patch({ charter: ($event.target as HTMLTextAreaElement).value })"></textarea></label>
-        <fieldset v-if="provider?.permissionProfiles.length" class="agent-inspector-permissions" :disabled="busy || !settingsEditable" :aria-describedby="'agent-inspector-permission-detail'">
+        <fieldset v-if="resource.configuration.supervisedPermissionProfiles.length" class="agent-inspector-permissions" :disabled="busy || !settingsEditable" :aria-describedby="'agent-inspector-permission-detail'">
           <legend>Permissions</legend>
           <p id="agent-inspector-permission-detail" class="agent-inspector-settings-note">Choose the access level for future provider starts. LetAgents applies the matching native policy when you save.</p>
-          <label v-for="profile in provider.permissionProfiles" :key="profile.id" class="agent-inspector-permission-choice" :data-selected="resource.draft.permissionProfileId === profile.id" :data-state="profile.status">
+          <label v-for="profile in resource.configuration.supervisedPermissionProfiles" :key="profile.id" class="agent-inspector-permission-choice" :data-selected="resource.draft.permissionProfileId === profile.id" :data-state="profile.status">
             <input
               type="radio"
               name="agent-inspector-permission-profile"
@@ -33,7 +33,7 @@
             <span>
               <strong>{{ profile.label }}</strong>
               <small>{{ resource.draft.permissionProfileId === profile.id ? `Selected · ${profile.description}` : profile.description }}</small>
-              <small v-if="profile.status !== 'available'">{{ profile.status === 'gated' ? 'Unavailable until its provider requirement is met.' : 'Unavailable for this provider.' }}</small>
+              <small v-if="profile.status !== 'available'">{{ profile.detail || (profile.status === 'gated' ? 'Unavailable until its provider requirement is met.' : 'Unavailable for this provider.') }}</small>
             </span>
           </label>
         </fieldset>

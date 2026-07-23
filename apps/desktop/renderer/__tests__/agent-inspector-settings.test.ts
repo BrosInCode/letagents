@@ -23,6 +23,7 @@ const configuration = {
   reasoningEffort: "high" as const,
   charter: "Coordinate work.",
   permissionProfileId: "read_only" as const,
+  supervisedPermissionProfiles: [],
   providerLaunchPolicy: { sandbox: true },
   configRevision: 4,
   runtimeConfigurationRevision: 3,

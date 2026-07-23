@@ -18,6 +18,7 @@ import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./sin
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import { deriveProviderConfigurationSnapshot, resolveProviderConfigurationSnapshot, type ProviderReasoningEffort } from "./provider-configuration.js";
+import { supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { SupervisedAgentInboxStore, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
@@ -2237,6 +2238,7 @@ export class SupervisorDaemon {
     if (!configuration) throw new Error("The exact agent no longer exists.");
     return {
       entry_id: entryId, daemon_generation: daemonGeneration, ...configuration,
+      supervised_permission_profiles: supervisedPermissionProfilesForProvider(configuration.provider),
     };
   }
 
