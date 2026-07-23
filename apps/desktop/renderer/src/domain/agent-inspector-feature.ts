@@ -3,7 +3,7 @@
  * this constant and removes the legacy modal; there is never a hidden second
  * surface or listener.
  */
-export const AGENT_INSPECTOR_FOUNDATION_ENABLED = false;
+export const AGENT_INSPECTOR_FOUNDATION_ENABLED = true;
 
 /**
  * Keeps the dark launch genuinely inert: while disabled, neither the new

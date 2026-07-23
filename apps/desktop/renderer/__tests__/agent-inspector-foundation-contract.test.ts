@@ -18,8 +18,8 @@ const chat = source("../src/components/desktop/content/RoomChatView.vue");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
 const flag = source("../src/domain/agent-inspector-feature.ts");
 
-test("the foundation stays dark and owns no runtime work while disabled", () => {
-  assert.match(flag, /AGENT_INSPECTOR_FOUNDATION_ENABLED = false/);
+test("the completed foundation owns the exclusive Inspector runtime", () => {
+  assert.match(flag, /AGENT_INSPECTOR_FOUNDATION_ENABLED = true/);
   assert.match(shell, /if \(agentInspectorFoundationEnabled\) \{\s*unsubscribeSupervisorActivity/);
   assert.match(shell, /v-if="agentInspectorFoundationEnabled && selectedAgentDetailTarget"/);
   assert.match(shell, /v-if="!agentInspectorFoundationEnabled"/);
