@@ -325,7 +325,7 @@ test("daemon spawn includes devMcpServerEntryPath for codex when both env gates 
       await daemon1.stop();
     }
 
-    // Case 2: both env gates set + claude-code provider → field absent (provider gate)
+    // Case 2: a stale generic Claude profile must be rejected before native dispatch.
     capturedSpawns.length = 0;
     const paths2 = {
       lockPath: join(root, "d2.lock"), socketPath: join(root, "d2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
@@ -339,27 +339,51 @@ test("daemon spawn includes devMcpServerEntryPath for codex when both env gates 
     try {
       await daemon2.start();
       assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: claudeEntry })).ok, true);
-      await eventually(async () => ((await daemonRequest(paths2.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "claude dev-gate spawn");
-      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "claude-code + both gates: devMcpServerEntryPath must be absent (provider gate)");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(capturedSpawns.length, 0, "a gated supervised profile must fail before provider launch");
     } finally {
       await daemon2.stop();
     }
 
-    // Case 3: dev-url gate absent + codex provider → field absent (env gate)
-    delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+    // Case 3: a missing legacy Claude profile uses the supervised default,
+    // not the interactive-worker generic ask-before-write default.
     capturedSpawns.length = 0;
     const paths3 = {
       lockPath: join(root, "d3.lock"), socketPath: join(root, "d3.sock"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
       attemptsPath: join(root, "attempts3.json"), attemptsRoot: join(root, "attempts3"), workspaceRoot: root,
     };
-    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter() }), true);
     try {
       await daemon3.start();
-      assert.equal((await daemonRequest(paths3.socketPath, "manifest.put", { entry: { ...codexEntry, id: "dev_gate_codex_nourl" } })).ok, true);
-      await eventually(async () => ((await daemonRequest(paths3.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "codex no-dev-url spawn");
-      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "codex + missing dev-url: devMcpServerEntryPath must be absent");
+      assert.equal((await daemonRequest(paths3.socketPath, "manifest.put", { entry: {
+        ...claudeEntry,
+        id: "dev_gate_claude_legacy_default",
+        permission_profile_id: null,
+        provider_launch_policy: { permissionMode: "acceptEdits" },
+      } })).ok, true);
+      await eventually(async () => ((await daemonRequest(paths3.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "Claude supervised default spawn");
+      assert.equal(capturedSpawns[0]?.permissionProfileId, "read_only");
+      assert.deepEqual(capturedSpawns[0]?.launchPolicy, { permissionMode: "plan", dangerouslySkipPermissions: false });
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "claude-code + both gates: devMcpServerEntryPath must be absent (provider gate)");
     } finally {
       await daemon3.stop();
+    }
+
+    // Case 4: dev-url gate absent + codex provider → field absent (env gate)
+    delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+    capturedSpawns.length = 0;
+    const paths4 = {
+      lockPath: join(root, "d4.lock"), socketPath: join(root, "d4.sock"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
+      attemptsPath: join(root, "attempts4.json"), attemptsRoot: join(root, "attempts4"), workspaceRoot: root,
+    };
+    const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    try {
+      await daemon4.start();
+      assert.equal((await daemonRequest(paths4.socketPath, "manifest.put", { entry: { ...codexEntry, id: "dev_gate_codex_nourl" } })).ok, true);
+      await eventually(async () => ((await daemonRequest(paths4.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "codex no-dev-url spawn");
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "codex + missing dev-url: devMcpServerEntryPath must be absent");
+    } finally {
+      await daemon4.stop();
     }
   } finally {
     if (savedUrl === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
@@ -465,7 +489,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   const daemon = new SupervisorDaemon(paths, "darwin", router, true);
   const entry: DaemonManifestEntry = {
     id: "claude_supervised", room_id: "room", display_name: "Claude", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
-    permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+    permission_profile_id: "full_access", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
   };
   try {
     await daemon.start();
