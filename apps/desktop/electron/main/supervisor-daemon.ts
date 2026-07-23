@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.49";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.50";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -996,6 +996,7 @@ function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, 
   if (value.entry_id !== entryId || value.daemon_generation !== daemonGeneration || typeof value.provider !== "string" || !value.provider.trim() || typeof value.charter !== "string" || !value.charter.trim()
     || !Object.hasOwn(value, "model") || (value.model !== null && typeof value.model !== "string")
     || !Object.hasOwn(value, "permission_profile_id") || (value.permission_profile_id !== null && typeof value.permission_profile_id !== "string")
+    || !Array.isArray(value.supervised_permission_profiles)
     || !Object.hasOwn(value, "provider_launch_policy") || value.provider_launch_policy === null || typeof value.provider_launch_policy !== "object" || Array.isArray(value.provider_launch_policy)
     || !Number.isSafeInteger(value.config_revision) || (value.config_revision as number) < 1
     || !Number.isSafeInteger(value.runtime_configuration_revision) || (value.runtime_configuration_revision as number) < 1
@@ -1005,7 +1006,21 @@ function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, 
   return { entryId, daemonGeneration, provider: value.provider, model: value.model as string | null,
     reasoningEffort: effort as import("../ipc-types/agents.js").DesktopManagedAgentEffort | null, charter: value.charter,
     permissionProfileId: value.permission_profile_id as string | null,
+    supervisedPermissionProfiles: value.supervised_permission_profiles.map((profile) => mapSupervisedPermissionProfile(profile)),
     providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number };
+}
+
+function mapSupervisedPermissionProfile(value: unknown): import("../ipc-types/agents.js").DesktopManagedAgentPermissionProfile {
+  const profile = record(value);
+  const id = typeof profile?.id === "string" && profile.id.trim() ? profile.id : null;
+  const label = typeof profile?.label === "string" && profile.label.trim() ? profile.label : null;
+  const description = typeof profile?.description === "string" && profile.description.trim() ? profile.description : null;
+  const status = enumValue(profile?.status, ["available", "gated", "unsupported"] as const);
+  const risk = enumValue(profile?.risk, ["low", "medium", "high"] as const);
+  if (!id || !label || !description || !status || !risk || typeof profile?.isDefault !== "boolean" || (profile.detail !== null && typeof profile.detail !== "string")) {
+    throw new Error("Supervisor returned an invalid supervised permission profile.");
+  }
+  return { id, label, description, status, risk, detail: profile.detail as string | null, isDefault: profile.isDefault };
 }
 
 function mapRoomMove(value: Record<string, unknown>, entryId: string, operationId?: string): import("../ipc-types/agents.js").DesktopSupervisorRoomMove {

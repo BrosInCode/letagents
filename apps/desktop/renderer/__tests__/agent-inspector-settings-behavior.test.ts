@@ -277,6 +277,7 @@ const configuration = {
   reasoningEffort: "high" as const,
   charter: "Coordinate work.",
   permissionProfileId: "full_access" as const,
+  supervisedPermissionProfiles: [{ id: "full_access", label: "Full access", description: "Lets Codex work in this trusted workspace.", status: "available" as const, risk: "high" as const, detail: null, isDefault: true }],
   providerLaunchPolicy: { approvalPolicy: "never" },
   configRevision: 4,
   runtimeConfigurationRevision: 4,
@@ -350,6 +351,30 @@ test("mounted Settings exposes provider-declared permission profiles as a single
   assert.match(textContent(mounted.root), /Lets Codex work in this trusted workspace/);
   (radios[0]?.props.onChange as () => void)();
   assert.deepEqual(patches, [{ permissionProfileId: "full_access" }]);
+  mounted.app.unmount();
+});
+
+test("mounted Settings honors exact supervised profile gates instead of generic provider availability", () => {
+  const claudeConfiguration = {
+    ...configuration,
+    provider: "claude-code",
+    permissionProfileId: "read_only" as const,
+    reasoningEffort: null,
+    supervisedPermissionProfiles: [
+      { id: "read_only", label: "Read-only", description: "Read safely.", status: "available" as const, risk: "low" as const, detail: null, isDefault: true },
+      { id: "ask_before_write", label: "Ask before writes", description: "Ask before a write.", status: "gated" as const, risk: "medium" as const, detail: "Claude supervised prompt bridging is not available yet.", isDefault: false },
+      { id: "full_access", label: "Full access", description: "Trusted writes.", status: "available" as const, risk: "high" as const, detail: null, isDefault: false },
+    ],
+  };
+  const mounted = mount(AgentInspectorSettings, settingsProps({
+    resource: { status: "ready", configuration: claudeConfiguration, draft: { model: claudeConfiguration.model, reasoningEffort: null, charter: claudeConfiguration.charter, permissionProfileId: "read_only" }, error: null },
+    // The generic catalog deliberately still calls this available for interactive workers.
+    providers: [{ ...provider, id: "claude-code", permissionProfiles: [{ id: "ask_before_write", label: "Ask before writes", description: "Generic local worker option.", status: "available", risk: "medium", detail: null, isDefault: true }] }],
+  }));
+  const radios = descendants(mounted.root).filter((node) => node.type === "input" && node.props.type === "radio");
+  const ask = radios.find((radio) => radio.props.value === "ask_before_write");
+  assert.equal(ask?.props.disabled, true);
+  assert.match(textContent(mounted.root), /Claude supervised prompt bridging is not available yet/);
   mounted.app.unmount();
 });
 

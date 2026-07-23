@@ -381,6 +381,8 @@ export interface DesktopSupervisorAgentConfiguration {
   reasoningEffort: DesktopManagedAgentEffort | null;
   charter: string;
   permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
+  /** Exact permission availability for this background supervised runtime. */
+  supervisedPermissionProfiles: DesktopManagedAgentPermissionProfile[];
   providerLaunchPolicy: unknown;
   configRevision: number;
   runtimeConfigurationRevision: number;
