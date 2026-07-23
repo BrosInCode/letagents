@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   agentInspectorTurnControlActionId,
+  agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
   agentInspectorOverallState,
@@ -335,6 +336,49 @@ test("lost Inspector control responses retry the same exact durable action id", 
   assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, providerTurnId: "turn_2" }));
   assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, executionGenerationId: "generation_2" }));
   assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, sourceMessageId: "message_2", inboxItemId: "inbox_2" }));
+});
+
+test("a supervisor push advancing the turn while the action digest yields prevents the native IPC effect", async () => {
+  let resolveDigest: (value: string) => void = () => undefined;
+  const deferredDigest = new Promise<string>((resolve) => { resolveDigest = resolve; });
+  const fence = {
+    entryId: "supervised_1",
+    roomId: "focus_1",
+    workAttemptId: "attempt_1",
+    executionGenerationId: "generation_1",
+    providerTurnId: "turn_1",
+    inboxItemId: "inbox_1",
+    sourceMessageId: "message_1",
+    daemonGeneration: 7,
+  };
+  let supervisorPushedEntry = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const submitted: string[] = [];
+  const pendingActionId = agentInspectorTurnControlActionIdIfCurrent(
+    deferredDigest,
+    () => agentInspectorTurnControlFenceMatches(fence, supervisorPushedEntry, 7),
+  )
+    .then((actionId) => {
+      if (actionId) submitted.push(actionId);
+      return actionId;
+    });
+
+  // This mirrors a supervisor push: the selected entry advances while the
+  // asynchronous WebCrypto digest is unresolved.
+  supervisorPushedEntry = entry({
+    roomAgentState: {
+      ...supervisorPushedEntry.roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_2", sourceMessageId: "message_2", providerTurnId: "turn_2", detail: null },
+    },
+  });
+  resolveDigest("inspector-turn:deferred");
+
+  assert.equal(await pendingActionId, null);
+  assert.deepEqual(submitted, [], "the stale action must not reach controlTurn IPC");
 });
 
 test("Activity suppresses only exact supervised identity, including a sessionless entry", () => {

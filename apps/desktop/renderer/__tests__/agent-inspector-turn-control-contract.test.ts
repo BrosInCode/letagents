@@ -19,6 +19,7 @@ test("the Inspector routes a correction and uncertain resolution through durable
   assert.match(shell, /desktopIpc\.supervisor\.controlTurn\(/);
   assert.match(shell, /desktopIpc\.supervisor\.resolveTurnControl\(/);
   assert.match(shell, /agentInspectorTurnControlActionId\(/);
+  assert.match(shell, /agentInspectorTurnControlActionIdIfCurrent\(/);
   assert.doesNotMatch(shell, /controlTurn\(\{[\s\S]{0,500}actionId: globalThis\.crypto\.randomUUID\(\)/);
   assert.match(shell, /const correction = intent\.kind === "steer_turn" \? intent\.correction\?\.trim\(\) \|\| null : null/);
   assert.match(shell, /if \(intent\.kind === "steer_turn" && !correction\) throw new Error\("Write a correction before applying it\."\)/);
@@ -28,6 +29,9 @@ test("the Inspector routes a correction and uncertain resolution through durable
 test("the Inspector fences stale control completions and makes uncertainty recoverable instead of retrying blindly", () => {
   assert.match(shell, /let turnControlFence: AgentInspectorTurnControlFence \| null = null/);
   assert.match(shell, /agentInspectorTurnControlFenceMatches\(turnControlFence, currentEntry, supervisorStatus\.value\?\.generation \?\? null\)/);
+  assert.match(shell, /const currentEntryAfterDigest = agentInspectorProjections\.value\.find/);
+  assert.match(shell, /currentAgentInspectorAction\(operationId, intent, requestVersion, operationDaemonGeneration\)/);
+  assert.match(shell, /agentInspectorTurnControlFenceMatches\(exactTurnControlFence, currentEntryAfterDigest, supervisorStatus\.value\?\.generation \?\? null\)/);
   assert.match(shell, /inboxItemId: entry\.roomAgentState\?\.turn\.inboxItemId \?\? null/);
   assert.match(shell, /sourceMessageId: entry\.roomAgentState\?\.turn\.sourceMessageId \?\? null/);
   assert.match(control, /Mark as applied/);

@@ -385,6 +385,7 @@ import {
 import {
   agentInspectorActionStateForEntry,
   agentInspectorTurnControlActionId,
+  agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorTurnControlFenceMatches,
   projectAgentInspectors,
   type AgentInspectorTurnControlFence,
@@ -2720,7 +2721,7 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         throw new Error("The active turn changed. Refresh and try again.");
       }
       operationDaemonGeneration = status.generation;
-      turnControlFence = {
+      const exactTurnControlFence: AgentInspectorTurnControlFence = {
         entryId: entry.id,
         roomId: entry.roomId,
         workAttemptId: entry.workAttemptId,
@@ -2730,8 +2731,9 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
         daemonGeneration: status.generation,
       };
+      turnControlFence = exactTurnControlFence;
       const currentEntry = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
-      if (!agentInspectorTurnControlFenceMatches(turnControlFence, currentEntry, supervisorStatus.value?.generation ?? null)) {
+      if (!agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntry, supervisorStatus.value?.generation ?? null)) {
         throw new Error("The active turn changed. Refresh and try again.");
       }
       if (intent.kind === "resolve_turn_control") {
@@ -2746,11 +2748,8 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       } else {
         const correction = intent.kind === "steer_turn" ? intent.correction?.trim() || null : null;
         if (intent.kind === "steer_turn" && !correction) throw new Error("Write a correction before applying it.");
-        await desktopIpc.supervisor.controlTurn({
-          entryId: entry.id,
-          workAttemptId: entry.workAttemptId,
-          executionGenerationId: entry.executionGenerationId,
-          actionId: await agentInspectorTurnControlActionId({
+        const actionId = await agentInspectorTurnControlActionIdIfCurrent(
+          agentInspectorTurnControlActionId({
             entryId: entry.id,
             roomId: entry.roomId,
             workAttemptId: entry.workAttemptId,
@@ -2760,6 +2759,20 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
             sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
             correction,
           }),
+          () => {
+            // A supervisor push can arrive while the digest yields. Re-read
+            // the projected entry rather than trusting the pre-digest object.
+            const currentEntryAfterDigest = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
+            return currentAgentInspectorAction(operationId, intent, requestVersion, operationDaemonGeneration)
+              && agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntryAfterDigest, supervisorStatus.value?.generation ?? null);
+          },
+        );
+        if (!actionId) return;
+        await desktopIpc.supervisor.controlTurn({
+          entryId: entry.id,
+          workAttemptId: entry.workAttemptId,
+          executionGenerationId: entry.executionGenerationId,
+          actionId,
           correction,
         });
       }
