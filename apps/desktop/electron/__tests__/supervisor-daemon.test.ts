@@ -134,6 +134,12 @@ async function startWireDaemon(
         result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
       } else if (request.method === "supervisor.get_agent_configuration") {
         result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
+      } else if (request.method === "supervisor.purge_agent") {
+        result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
+          ? { outcome: "purged" }
+          : request.params!.entry_id === "agent_grant_only"
+            ? { outcome: "revocation_required", operation_id: "purge:agent_grant_only", revocation_kind: "grant_only" }
+            : { outcome: "revocation_required", operation_id: `purge:${request.params!.entry_id}`, revocation_kind: "worker_session", agent_session_id: "session_exact" };
       } else if (request.method === "supervisor.get_current_room_move" && request.params!.entry_id === "agent_none") {
         result = null;
       } else if (["supervisor.prepare_room_move", "supervisor.commit_room_move", "supervisor.get_room_move", "supervisor.get_current_room_move", "supervisor.acknowledge_room_move_source_revocation", "supervisor.rollback_room_move"].includes(request.method)) {
@@ -409,6 +415,35 @@ test("agent lifecycle RPCs are negotiated before any mutation is sent", async ()
     await assert.rejects(() => client.retireAgent("agent_1", 40), /too old for durable agent lifecycle/);
     await assert.rejects(() => client.purgeAgent("agent_1", 40), /too old for durable agent lifecycle/);
     assert.equal(wire.requests.some((request) => ["manifest.set_desired_state", "supervisor.retire_agent", "supervisor.purge_agent"].includes(request.method)), false);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("purge RPC preserves exact worker-session and grant-only acknowledgement modes", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 40);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    assert.deepEqual(await client.purgeAgent("agent_exact", 40), {
+      outcome: "revocation_required",
+      operationId: "purge:agent_exact",
+      revocationKind: "worker_session",
+      agentSessionId: "session_exact",
+    });
+    assert.deepEqual(await client.purgeAgent("agent_grant_only", 40), {
+      outcome: "revocation_required",
+      operationId: "purge:agent_grant_only",
+      revocationKind: "grant_only",
+    });
+    assert.deepEqual(await client.purgeAgent("agent_exact", 40, "session_exact", false), { outcome: "purged" });
+    assert.deepEqual(await client.purgeAgent("agent_grant_only", 40, null, true), { outcome: "purged" });
+    const purgeRequests = wire.requests.filter((request) => request.method === "supervisor.purge_agent");
+    assert.deepEqual(purgeRequests.map((request) => request.params), [
+      { entry_id: "agent_exact", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: false },
+      { entry_id: "agent_grant_only", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: false },
+      { entry_id: "agent_exact", daemon_generation: 40, revoked_agent_session_id: "session_exact", grant_revoked_without_worker_session: false },
+      { entry_id: "agent_grant_only", daemon_generation: 40, revoked_agent_session_id: null, grant_revoked_without_worker_session: true },
+    ]);
+    await assert.rejects(() => client.purgeAgent("agent_exact", 40, "session_exact", true), /exact typed coordinates/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 

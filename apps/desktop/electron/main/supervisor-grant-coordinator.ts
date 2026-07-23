@@ -7,6 +7,7 @@ import {
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntry,
+  revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
   type DesktopSupervisorGrantMetadata,
 } from "./supervisor-grant.js";
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
@@ -183,7 +184,12 @@ export class SupervisorGrantCoordinator {
       // and stopped entries remain stopped.
       .filter((entry) => entry.provider === "codex" && entry.deliveryMode === "daemon_inbox"
         && (entry.desiredState === "running" || entry.desiredState === "stopped"))
-      .map((entry) => this.reconcileEntry(entry, status.generation)));
+      .map((entry) => this.reconcileEntry(
+        entry,
+        status.generation,
+        false,
+        status.capabilities?.agentRoomMove === true,
+      )));
     this.lastReconciledDaemonGeneration = status.generation;
   }
 
@@ -191,7 +197,7 @@ export class SupervisorGrantCoordinator {
   async prepareEntryForActivation(entry: DesktopSupervisorManifestEntry): Promise<void> {
     if (entry.provider !== "codex" || entry.deliveryMode !== "daemon_inbox") return;
     const status = await this.daemon.ensureRunning();
-    await this.reconcileEntry(entry, status.generation);
+    await this.reconcileEntry(entry, status.generation, false, status.capabilities?.agentRoomMove === true);
   }
 
   /**
@@ -214,12 +220,17 @@ export class SupervisorGrantCoordinator {
       throw new Error("This agent no longer has a live runtime to reconnect. Recover the saved agent to start it again.");
     }
     const status = await this.daemon.ensureRunning();
-    await this.reconcileEntry(entry, status.generation, true);
+    await this.reconcileEntry(entry, status.generation, true, status.capabilities?.agentRoomMove === true);
   }
 
   /** Complete the external half of the daemon's durable purge journal. */
   async revokeEntryForPurge(entryId: string, agentSessionId: string): Promise<void> {
     await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntry(entryId, agentSessionId, { apiFetch: this.request }));
+  }
+
+  /** Revoke only the parent grant after the daemon durably proves no worker session was minted. */
+  async revokeEntryForPurgeWithoutWorkerSession(entryId: string): Promise<void> {
+    await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, { apiFetch: this.request }));
   }
 
   /**
@@ -228,67 +239,28 @@ export class SupervisorGrantCoordinator {
    * into the same daemon generation. Every step is restart-idempotent.
    */
   async prepareRoomMoveDestination(move: DesktopSupervisorRoomMove): Promise<void> {
-    await this.serialize(move.entryId, async () => {
-      if (move.phase !== "rotating_credentials" || !move.agentSessionId) {
-        throw new Error("Room move is not waiting on an exact source-session credential rotation.");
-      }
-      const status = await this.daemon.ensureRunning();
-      if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move credential rotation.");
-      const destination = move.remoteRoomId ?? move.destinationRoomId;
-      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
-      if (!entry || entry.roomId !== destination || entry.workAttemptId !== move.workAttemptId
-        || entry.executionGenerationId !== move.executionGenerationId) {
-        throw new Error("Room-move destination no longer matches the exact live provider generation.");
-      }
-      const { agentKey, grant } = await this.exactGrantForRoom(
-        entry,
-        destination,
-        status.generation,
-        false,
-        move.agentSessionId,
-      );
-      try {
-        await this.daemon.acknowledgeRoomMoveSourceRevocation({
-          operationId: move.operationId, entryId: move.entryId, daemonGeneration: status.generation,
-          sourceAgentSessionId: move.agentSessionId,
-        });
-      } catch (error) {
-        // The socket response can be lost after the daemon commits the exact
-        // acknowledgement. Read the durable journal before deciding that
-        // destination preparation failed and needs source compensation.
-        const recovered = await this.daemon.getRoomMove({
-          operationId: move.operationId, entryId: move.entryId, daemonGeneration: status.generation,
-        }).catch(() => null);
-        if (!recovered?.sourceCredentialsRevoked) throw error;
-      }
-      await this.install(entry, agentKey, grant, status.generation, true);
-    });
+    await this.serialize(move.entryId, () => this.prepareRoomMoveDestinationWithinEntryTail(move));
   }
 
   /** Restore exact source-room owner authority before daemon compensation. */
   async prepareRoomMoveSourceRollback(move: DesktopSupervisorRoomMove): Promise<void> {
-    await this.serialize(move.entryId, async () => {
-      if (move.phase !== "rollback_required") throw new Error("Room move is not awaiting source-room rollback.");
-      const status = await this.daemon.ensureRunning();
-      if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move rollback.");
-      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
-      if (!entry || entry.roomId !== move.sourceRoomId || entry.workAttemptId !== move.workAttemptId
-        || entry.executionGenerationId !== move.executionGenerationId) {
-        throw new Error("Room-move rollback no longer matches the exact source provider generation.");
-      }
-      const { agentKey, grant } = await this.exactGrantForRoom(
-        entry,
-        move.sourceRoomId,
-        status.generation,
-        true,
-        move.agentSessionId ?? entry.agentSessionId ?? undefined,
-      );
-      await this.install(entry, agentKey, grant, status.generation, true);
-    });
+    await this.serialize(move.entryId, () => this.prepareRoomMoveSourceRollbackWithinEntryTail(move));
   }
 
-  private async reconcileEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number, credentialOnly = false): Promise<void> {
+  private async reconcileEntry(
+    entry: DesktopSupervisorManifestEntry,
+    daemonGeneration: number,
+    credentialOnly = false,
+    discoverPendingRoomMove = false,
+  ): Promise<void> {
     await this.serialize(entry.id, async () => {
+      // A room-move journal owns both membership and credential convergence.
+      // In particular, a restart can expose destination membership while the
+      // encrypted grant is still source-scoped. Generic scope repair would
+      // DELETE that source grant without first ending its exact source worker
+      // session, permanently bypassing the move's revocation handshake.
+      if (discoverPendingRoomMove
+        && await this.reconcilePendingRoomMoveWithinEntryTail(entry.id, daemonGeneration)) return;
       const agentKey = await this.operations.readEntryAgentKey(entry.id);
       if (!agentKey) {
         // Legacy entries can be recovered only from a durable mapping or by
@@ -327,6 +299,102 @@ export class SupervisorGrantCoordinator {
       // lets Electron recover from a lost in-memory daemon grant.
       await this.install(entry, agentKey, stored, daemonGeneration, credentialOnly);
     });
+  }
+
+  /**
+   * Recover a daemon-owned move before ordinary generation reconciliation is
+   * allowed to inspect or mutate a saved grant. Caller must hold entryTails.
+   */
+  private async reconcilePendingRoomMoveWithinEntryTail(
+    entryId: string,
+    daemonGeneration: number,
+  ): Promise<boolean> {
+    let move = await this.daemon.getCurrentRoomMove({ entryId, daemonGeneration });
+    if (!move) return false;
+    const coordinates = {
+      operationId: move.operationId,
+      entryId: move.entryId,
+      daemonGeneration,
+    };
+    for (let step = 0; step < 6 && move; step += 1) {
+      if (move.phase === "rotating_credentials") {
+        await this.prepareRoomMoveDestinationWithinEntryTail(move);
+        move = await this.daemon.commitRoomMove(coordinates);
+        continue;
+      }
+      if (move.phase === "rollback_required") {
+        move = await this.daemon.rollbackRoomMove({
+          ...coordinates,
+          error: move.error ?? "Resuming durable room-move rollback during credential reconciliation.",
+        });
+        await this.prepareRoomMoveSourceRollbackWithinEntryTail(move);
+        move = await this.daemon.commitRoomMove(coordinates);
+        continue;
+      }
+      if (move.phase === "active" || move.phase === "failed") return true;
+      const previousPhase = move.phase;
+      move = await this.daemon.commitRoomMove(coordinates);
+      // Waiting for a current turn, an external join retry, or destination
+      // ingress remains authoritative. Block generic grant repair until a
+      // later move recovery trigger advances that durable phase.
+      if (move.phase === previousPhase) return true;
+    }
+    return true;
+  }
+
+  private async prepareRoomMoveDestinationWithinEntryTail(move: DesktopSupervisorRoomMove): Promise<void> {
+    if (move.phase !== "rotating_credentials" || !move.agentSessionId) {
+      throw new Error("Room move is not waiting on an exact source-session credential rotation.");
+    }
+    const status = await this.daemon.ensureRunning();
+    if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move credential rotation.");
+    const destination = move.remoteRoomId ?? move.destinationRoomId;
+    const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
+    if (!entry || entry.roomId !== destination || entry.workAttemptId !== move.workAttemptId
+      || entry.executionGenerationId !== move.executionGenerationId) {
+      throw new Error("Room-move destination no longer matches the exact live provider generation.");
+    }
+    const { agentKey, grant } = await this.exactGrantForRoom(
+      entry,
+      destination,
+      status.generation,
+      false,
+      move.agentSessionId,
+    );
+    try {
+      await this.daemon.acknowledgeRoomMoveSourceRevocation({
+        operationId: move.operationId, entryId: move.entryId, daemonGeneration: status.generation,
+        sourceAgentSessionId: move.agentSessionId,
+      });
+    } catch (error) {
+      // The socket response can be lost after the daemon commits the exact
+      // acknowledgement. Read the durable journal before deciding that
+      // destination preparation failed and needs source compensation.
+      const recovered = await this.daemon.getRoomMove({
+        operationId: move.operationId, entryId: move.entryId, daemonGeneration: status.generation,
+      }).catch(() => null);
+      if (!recovered?.sourceCredentialsRevoked) throw error;
+    }
+    await this.install(entry, agentKey, grant, status.generation, true);
+  }
+
+  private async prepareRoomMoveSourceRollbackWithinEntryTail(move: DesktopSupervisorRoomMove): Promise<void> {
+    if (move.phase !== "rollback_required") throw new Error("Room move is not awaiting source-room rollback.");
+    const status = await this.daemon.ensureRunning();
+    if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move rollback.");
+    const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
+    if (!entry || entry.roomId !== move.sourceRoomId || entry.workAttemptId !== move.workAttemptId
+      || entry.executionGenerationId !== move.executionGenerationId) {
+      throw new Error("Room-move rollback no longer matches the exact source provider generation.");
+    }
+    const { agentKey, grant } = await this.exactGrantForRoom(
+      entry,
+      move.sourceRoomId,
+      status.generation,
+      true,
+      move.agentSessionId ?? entry.agentSessionId ?? undefined,
+    );
+    await this.install(entry, agentKey, grant, status.generation, true);
   }
 
   private async provisionAndInstall(entry: DesktopSupervisorManifestEntry, agentKey: string, daemonGeneration: number, forceReprovision: boolean, credentialOnly = false) {

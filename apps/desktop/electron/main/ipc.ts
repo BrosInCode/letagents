@@ -1135,11 +1135,20 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
     supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration));
   targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
-    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null);
+    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, false);
     if (prepared.outcome !== "revocation_required") return prepared;
-    if (!prepared.agentSessionId) return { outcome: "invalid" as const, error: "Purge did not identify the exact worker session to revoke." };
+    if (prepared.revocationKind === "grant_only") {
+      await supervisorGrantCoordinator.revokeEntryForPurgeWithoutWorkerSession(input.entryId);
+      const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, true);
+      return committed.outcome === "revocation_required"
+        ? { outcome: "invalid" as const, error: "Purge grant revocation was not durably acknowledged." }
+        : committed;
+    }
+    if (prepared.revocationKind !== "worker_session" || !prepared.agentSessionId) {
+      return { outcome: "invalid" as const, error: "Purge did not identify an exact revocation mode." };
+    }
     await supervisorGrantCoordinator.revokeEntryForPurge(input.entryId, prepared.agentSessionId);
-    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, prepared.agentSessionId);
+    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, prepared.agentSessionId, false);
     return committed.outcome === "revocation_required" ? { outcome: "invalid" as const, error: "Purge credential revocation was not durably acknowledged." } : committed;
   });
   if (!supervisorActivityBridgeRegistered) {

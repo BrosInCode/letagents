@@ -49,13 +49,13 @@ test("registerDesktopIpcHandlers routes exact room-delivery retries and propagat
 test("purge IPC never attests an exact worker session when local revocation identity is unavailable", async () => {
   const originalPurge = supervisorDaemonClient.purgeAgent;
   const originalRevoke = supervisorGrantCoordinator.revokeEntryForPurge;
-  const calls: Array<string | null> = [];
+  const calls: Array<{ sessionId: string | null; grantOnly: boolean }> = [];
   try {
     (supervisorDaemonClient as unknown as {
-      purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId?: string | null): Promise<{ outcome: "revocation_required"; operationId: string; agentSessionId: string }>;
-    }).purgeAgent = async (_entryId, _daemonGeneration, revokedAgentSessionId = null) => {
-      calls.push(revokedAgentSessionId);
-      return { outcome: "revocation_required", operationId: "purge:agent_1", agentSessionId: "session_1" };
+      purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId?: string | null, grantOnly?: boolean): Promise<{ outcome: "revocation_required"; operationId: string; revocationKind: "worker_session"; agentSessionId: string }>;
+    }).purgeAgent = async (_entryId, _daemonGeneration, revokedAgentSessionId = null, grantOnly = false) => {
+      calls.push({ sessionId: revokedAgentSessionId, grantOnly });
+      return { outcome: "revocation_required", operationId: "purge:agent_1", revocationKind: "worker_session", agentSessionId: "session_1" };
     };
     (supervisorGrantCoordinator as unknown as {
       revokeEntryForPurge(entryId: string, agentSessionId: string): Promise<void>;
@@ -69,7 +69,7 @@ test("purge IPC never attests an exact worker session when local revocation iden
       async () => { await handler!({}, { entryId: "agent_1", daemonGeneration: 40 }); },
       /registry is missing.*local agent state was preserved/,
     );
-    assert.deepEqual(calls, [null], "the daemon purge journal remains at revocation_required");
+    assert.deepEqual(calls, [{ sessionId: null, grantOnly: false }], "the daemon purge journal remains at revocation_required");
   } finally {
     (supervisorDaemonClient as unknown as { purgeAgent: typeof originalPurge }).purgeAgent = originalPurge;
     (supervisorGrantCoordinator as unknown as { revokeEntryForPurge: typeof originalRevoke }).revokeEntryForPurge = originalRevoke;
@@ -79,14 +79,14 @@ test("purge IPC never attests an exact worker session when local revocation iden
 test("purge IPC advances only with the exact session whose end and grant revoke were acknowledged", async () => {
   const originalPurge = supervisorDaemonClient.purgeAgent;
   const originalRevoke = supervisorGrantCoordinator.revokeEntryForPurge;
-  const calls: Array<string | null> = [];
+  const calls: Array<{ sessionId: string | null; grantOnly: boolean }> = [];
   try {
     (supervisorDaemonClient as unknown as {
-      purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId?: string | null): Promise<any>;
-    }).purgeAgent = async (_entryId, _daemonGeneration, revokedAgentSessionId = null) => {
-      calls.push(revokedAgentSessionId);
+      purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId?: string | null, grantOnly?: boolean): Promise<any>;
+    }).purgeAgent = async (_entryId, _daemonGeneration, revokedAgentSessionId = null, grantOnly = false) => {
+      calls.push({ sessionId: revokedAgentSessionId, grantOnly });
       return revokedAgentSessionId === null
-        ? { outcome: "revocation_required", operationId: "purge:agent_1", agentSessionId: "session_exact" }
+        ? { outcome: "revocation_required", operationId: "purge:agent_1", revocationKind: "worker_session", agentSessionId: "session_exact" }
         : { outcome: "purged" };
     };
     (supervisorGrantCoordinator as unknown as {
@@ -99,10 +99,47 @@ test("purge IPC advances only with the exact session whose end and grant revoke 
     const handler = handlers.get("desktop:supervisor:purge-agent");
     const result = await handler!({}, { entryId: "agent_1", daemonGeneration: 40 });
     assert.deepEqual(result, { outcome: "purged" });
-    assert.deepEqual(calls, [null, "session_exact"]);
+    assert.deepEqual(calls, [
+      { sessionId: null, grantOnly: false },
+      { sessionId: "session_exact", grantOnly: false },
+    ]);
   } finally {
     (supervisorDaemonClient as unknown as { purgeAgent: typeof originalPurge }).purgeAgent = originalPurge;
     (supervisorGrantCoordinator as unknown as { revokeEntryForPurge: typeof originalRevoke }).revokeEntryForPurge = originalRevoke;
+  }
+});
+
+test("purge IPC revokes a never-minted entry grant without inventing a worker-session END", async () => {
+  const originalPurge = supervisorDaemonClient.purgeAgent;
+  const originalGrantOnlyRevoke = supervisorGrantCoordinator.revokeEntryForPurgeWithoutWorkerSession;
+  const calls: Array<{ sessionId: string | null; grantOnly: boolean }> = [];
+  const revokes: string[] = [];
+  try {
+    (supervisorDaemonClient as unknown as {
+      purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId?: string | null, grantOnly?: boolean): Promise<any>;
+    }).purgeAgent = async (_entryId, _daemonGeneration, sessionId = null, grantOnly = false) => {
+      calls.push({ sessionId, grantOnly });
+      return grantOnly
+        ? { outcome: "purged" }
+        : { outcome: "revocation_required", operationId: "purge:agent_never", revocationKind: "grant_only" };
+    };
+    (supervisorGrantCoordinator as unknown as {
+      revokeEntryForPurgeWithoutWorkerSession(entryId: string): Promise<void>;
+    }).revokeEntryForPurgeWithoutWorkerSession = async (entryId) => { revokes.push(entryId); };
+    registerDesktopIpcHandlers(fakeIpcMain as never);
+    const handler = handlers.get("desktop:supervisor:purge-agent");
+    const result = await handler!({}, { entryId: "agent_never", daemonGeneration: 41 });
+    assert.deepEqual(result, { outcome: "purged" });
+    assert.deepEqual(revokes, ["agent_never"]);
+    assert.deepEqual(calls, [
+      { sessionId: null, grantOnly: false },
+      { sessionId: null, grantOnly: true },
+    ]);
+  } finally {
+    (supervisorDaemonClient as unknown as { purgeAgent: typeof originalPurge }).purgeAgent = originalPurge;
+    (supervisorGrantCoordinator as unknown as {
+      revokeEntryForPurgeWithoutWorkerSession: typeof originalGrantOnlyRevoke;
+    }).revokeEntryForPurgeWithoutWorkerSession = originalGrantOnlyRevoke;
   }
 });
 

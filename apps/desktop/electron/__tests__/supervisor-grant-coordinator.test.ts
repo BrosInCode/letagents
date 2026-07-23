@@ -487,6 +487,128 @@ test("room-move rollback force-restores a source-scoped grant before compensatio
   assert.equal(events.some((event) => event.includes("secret_destination")), false);
 });
 
+test("generation reconciliation recovers a pending move before ordinary grant scope repair", async () => {
+  await withRegistry(async () => {
+    const source = entry();
+    const moved = { ...source, roomId: "room_2" };
+    const agentKey = `owner/${source.id}`;
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        ...metadata(agentKey, "grant_source_restart", "room_1"),
+        installationId: desktopSupervisorGrantInstallationId("host_1", source.id),
+      },
+      token: "secret_source_restart",
+      entryId: source.id,
+      lastInstalledDaemonGeneration: 7,
+    }, { storage: keychain });
+
+    const lifecycle: string[] = [];
+    let provisionSourceSession: string | undefined;
+    let sourceCredentialsRevoked = false;
+    let installedDestination = false;
+    let movePhase: "rotating_credentials" | "active" = "rotating_credentials";
+    const rotatingMove = () => ({
+      operationId: "move_restart", requestId: "request_restart", entryId: source.id,
+      sourceRoomId: "room_1", destinationRoomId: "room_2", daemonGeneration: 8,
+      workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+      agentSessionId: "session_1", phase: movePhase,
+      remoteRoomId: "room_2", destinationCursor: null, sourceCredentialsRevoked,
+      error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+    });
+    const daemon = {
+      async ensureRunning() {
+        return { generation: 8, capabilities: { agentRoomMove: true } };
+      },
+      async list() { return [moved]; },
+      async getCurrentRoomMove() { return movePhase === "active" ? null : rotatingMove(); },
+      async acknowledgeRoomMoveSourceRevocation(input: { sourceAgentSessionId: string }) {
+        assert.equal(input.sourceAgentSessionId, "session_1");
+        lifecycle.push("ACK source");
+        sourceCredentialsRevoked = true;
+        return rotatingMove();
+      },
+      async installHostGrant(input: { roomId: string; grantId: string; supervisorGrant: string }) {
+        lifecycle.push(`INSTALL ${input.roomId}`);
+        assert.equal(input.roomId, "room_2");
+        assert.equal(input.grantId, "grant_destination_restart");
+        assert.equal(input.supervisorGrant, "secret_destination_restart");
+        installedDestination = true;
+        return "installed" as const;
+      },
+      async bootstrapRoomIngress() { return "bootstrapped" as const; },
+      async commitRoomMove() {
+        lifecycle.push("COMMIT move");
+        assert.equal(sourceCredentialsRevoked, true, "daemon commit follows the exact source-session acknowledgement");
+        assert.equal(installedDestination, true, "daemon commit follows destination grant install");
+        movePhase = "active";
+        return rotatingMove();
+      },
+    };
+    const request = (async <T>(path: string, init?: { method?: string; body?: string }) => {
+      if (path.includes("/worker-sessions/")) {
+        lifecycle.push("END source");
+        assert.equal(
+          path,
+          "/supervisor-host-grants/grant_source_restart/worker-sessions/session_1/end",
+        );
+        return { session_id: "session_1", ended_at: "2026-01-01T00:00:02.000Z" } as T;
+      }
+      if (init?.method === "DELETE") {
+        lifecycle.push("DELETE source");
+        assert.equal(path, "/supervisor-host-grants/grant_source_restart");
+        return {} as T;
+      }
+      assert.equal(path, "/supervisor-host-grants");
+      const body = JSON.parse(init?.body ?? "{}") as { allowed_room_ids: string[]; allowed_agent_keys: string[] };
+      lifecycle.push(`POST ${body.allowed_room_ids[0]}`);
+      assert.deepEqual(body.allowed_room_ids, ["room_2"]);
+      assert.deepEqual(body.allowed_agent_keys, [agentKey]);
+      return {
+        grant_id: "grant_destination_restart",
+        host_id: "host_1",
+        installation_id: desktopSupervisorGrantInstallationId("host_1", source.id),
+        allowed_room_ids: body.allowed_room_ids,
+        allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1,
+        expires_at: "2099-01-01T00:00:00.000Z",
+        supervisor_grant: "secret_destination_restart",
+      } as T;
+    }) as never;
+    const actualOperations = storageOperations();
+    const operations: SupervisorGrantCoordinatorOperations = {
+      ...actualOperations,
+      async provision(input, options) {
+        provisionSourceSession = input.sourceAgentSessionId;
+        return actualOperations.provision(input, options);
+      },
+    };
+    const coordinator = new SupervisorGrantCoordinator(
+      daemon as never,
+      request,
+      () => "host_1",
+      operations,
+      async (room) => room,
+    );
+
+    await coordinator.reconcileDesiredRunning();
+
+    assert.equal(provisionSourceSession, "session_1", "ordinary scope repair never bypasses the move journal");
+    assert.deepEqual(lifecycle, [
+      "END source",
+      "DELETE source",
+      "POST room_2",
+      "ACK source",
+      "INSTALL room_2",
+      "COMMIT move",
+    ]);
+    assert.equal(movePhase, "active");
+    const stored = await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain });
+    assert.equal(stored?.metadata.grantId, "grant_destination_restart");
+    assert.equal(stored?.lastInstalledDaemonGeneration, 8);
+  });
+});
+
 test("destination-save followed by acknowledgement failure rolls back through grant-owned session receipts", async () => {
   await withRegistry(async (registryPath) => {
     const source = entry();
@@ -658,7 +780,7 @@ test("destination-save followed by acknowledgement failure rolls back through gr
         grantRevokedAt: string | null;
       }>;
     };
-    assert.equal(registry.version, 6);
+    assert.equal(registry.version, 7);
     assert.equal(registry.credentialRevocations.grant_source?.sessionOwnerGrantId, "grant_source");
     assert.equal(registry.credentialRevocations.grant_source?.agentSessionId, "session_1");
     assert.ok(registry.credentialRevocations.grant_source?.sessionEndedAt);
