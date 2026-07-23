@@ -214,8 +214,7 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
 .agent-inspector-context-list dd span { display: block; }
 
 .agent-inspector-diagnostics { display: grid; gap: 12px; }
-.agent-inspector-diagnostics-copy { min-height: 44px; padding: 0 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.055); color: var(--text,#fafafa); font: inherit; font-size: .7rem; font-weight: 670; cursor: pointer; transition: transform 120ms var(--inspector-ease-out), background-color 140ms ease, border-color 140ms ease; }
-.agent-inspector-diagnostics-copy:active { transform: scale(.97); }
+.agent-inspector-diagnostics-copy { min-height: 44px; padding: 0 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.055); color: var(--text,#fafafa); font: inherit; font-size: .7rem; font-weight: 670; cursor: pointer; transition: background-color 140ms ease, border-color 140ms ease; }
 .agent-inspector-diagnostics-copy:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
 .agent-inspector-diagnostics-events { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
 .agent-inspector-diagnostics-events li { display: grid; gap: 5px; padding: 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }

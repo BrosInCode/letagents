@@ -11,7 +11,16 @@ const DEPTH_LIMIT = 4;
 const NODE_LIMIT = 48;
 const COLLECTION_LIMIT = 16;
 const SECRET_KEY = /(?:access[_-]?token|api[_-]?key|authorization|bearer|cookie|credential|password|passwd|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|token)/i;
-const SECRET_TEXT = /\b(?:authorization|bearer|token|api[_ -]?key|password|passwd|private[_ -]?key|secret|credential|cookie)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi;
+const SECRET_NAME_SOURCE = String.raw`(?:access[_ -]?token|api[_ -]?key|authorization|proxy[_ -]?authorization|bearer|client[_ -]?secret|cookie|credential|password|passwd|passphrase|private[_ -]?key|refresh[_ -]?token|secret|session[_ -]?token|token|(?:anthropic|azure|gemini|github|gitlab|google|groq|huggingface|letagents|openai|openrouter)[_ -]?(?:api[_ -]?key|access[_ -]?token|secret|token))`;
+const DOUBLE_QUOTED_SECRET_TEXT = new RegExp(String.raw`(["']?(?:${SECRET_NAME_SOURCE})["']?\s*[:=]\s*)"(?:\\.|[^"\\])*"`, "gi");
+const SINGLE_QUOTED_SECRET_TEXT = new RegExp(String.raw`(["']?(?:${SECRET_NAME_SOURCE})["']?\s*[:=]\s*)'(?:\\.|[^'\\])*'`, "gi");
+const MALFORMED_QUOTED_SECRET_TEXT = new RegExp(String.raw`\b(?:${SECRET_NAME_SOURCE})\b\s*[:=]\s*["'][^\r\n]*`, "gi");
+const UNQUOTED_SECRET_TEXT = new RegExp(String.raw`\b(?:${SECRET_NAME_SOURCE})\b\s*[:=]\s*(?:bearer\s+)?[^\s,;}\]]+`, "gi");
+const PRIVATE_KEY_BLOCK = /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----/gi;
+const COOKIE_HEADER = /\b(?:cookie|set-cookie)\s*:\s*[^\r\n]*/gi;
+const BEARER_VALUE = /\bbearer\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi;
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/gi;
+const PROVIDER_TOKEN = /\b(?:sk-(?:proj-|svcacct-)?[a-zA-Z0-9_-]{8,}|gh[pousr]_[a-zA-Z0-9_]{8,}|AKIA[A-Z0-9]{12,})\b/g;
 const JWT = /\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b/g;
 
 export type AgentInspectorDiagnosticsValue = null | boolean | number | string | AgentInspectorDiagnosticsValue[] | { [key: string]: AgentInspectorDiagnosticsValue };
@@ -41,14 +50,42 @@ interface SanitizeContext { redacted: boolean; truncated: boolean; nodes: number
 
 function newContext(): SanitizeContext { return { redacted: false, truncated: false, nodes: 0, seen: new WeakSet() }; }
 
+function redactMatches(text: string, pattern: RegExp, context: SanitizeContext, replacement: string | ((match: string, ...captures: string[]) => string) = "[REDACTED]"): string {
+  return text.replace(pattern, (match, ...args: unknown[]) => {
+    context.redacted = true;
+    if (typeof replacement === "string") return replacement;
+    return replacement(match, ...(args.slice(0, -2) as string[]));
+  });
+}
+
+function sanitizeEncodedJson(text: string, context: SanitizeContext): string {
+  const trimmed = text.trim();
+  const isCandidate = (trimmed.startsWith("{") && trimmed.endsWith("}"))
+    || (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    || (trimmed.startsWith('"') && trimmed.endsWith('"'));
+  if (!isCandidate) return text;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const sanitized = sanitizeAgentInspectorDiagnosticsValue(parsed, context, 1).value;
+    return JSON.stringify(sanitized);
+  } catch {
+    return text;
+  }
+}
+
 function safeText(value: unknown, context: SanitizeContext): string {
   let text = typeof value === "string" ? value : String(value ?? "");
-  const redacted = text.replace(SECRET_TEXT, (_match, offset: number, source: string) => {
-    context.redacted = true;
-    const prefix = source.slice(Math.max(0, offset), offset).match(/(?:authorization|bearer|token|api[_ -]?key|password|passwd|private[_ -]?key|secret|credential|cookie)\s*[:=]\s*$/i)?.[0] ?? "";
-    return `${prefix}[REDACTED]`;
-  }).replace(JWT, () => { context.redacted = true; return "[REDACTED]"; });
-  text = redacted;
+  text = sanitizeEncodedJson(text, context);
+  text = redactMatches(text, PRIVATE_KEY_BLOCK, context);
+  text = redactMatches(text, COOKIE_HEADER, context);
+  text = redactMatches(text, DOUBLE_QUOTED_SECRET_TEXT, context, (_match, prefix) => `${prefix}"[REDACTED]"`);
+  text = redactMatches(text, SINGLE_QUOTED_SECRET_TEXT, context, (_match, prefix) => `${prefix}'[REDACTED]'`);
+  text = redactMatches(text, MALFORMED_QUOTED_SECRET_TEXT, context);
+  text = redactMatches(text, UNQUOTED_SECRET_TEXT, context);
+  text = redactMatches(text, BEARER_VALUE, context);
+  text = redactMatches(text, URL_USERINFO, context, (_match, protocol) => `${protocol}[REDACTED]@`);
+  text = redactMatches(text, PROVIDER_TOKEN, context);
+  text = redactMatches(text, JWT, context);
   if (text.length > STRING_LIMIT) { context.truncated = true; return `${text.slice(0, STRING_LIMIT)}…`; }
   return text;
 }
