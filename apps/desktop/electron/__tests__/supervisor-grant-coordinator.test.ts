@@ -1,8 +1,51 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { Buffer } from "node:buffer";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SupervisorGrantCoordinator, type SupervisorGrantCoordinatorOperations } from "../main/supervisor-grant-coordinator.js";
+import {
+  desktopSupervisorGrantInstallationId,
+  encryptSupervisorGrantForStorage,
+  getOrProvisionDesktopSupervisorGrantForAgent,
+  readDesktopSupervisorGrantAgentKeyForEntry,
+  readDesktopSupervisorGrantForAgent,
+  replaceDesktopSupervisorGrantForAgent,
+} from "../main/supervisor-grant.js";
 import type { DesktopSupervisorManifestEntry } from "../ipc-types.js";
+
+const keychain = {
+  isEncryptionAvailable: () => true,
+  encryptString: (value: string) => Buffer.from(`keychain:${value}`),
+  decryptString: (value: Buffer) => value.toString("utf8").replace("keychain:", ""),
+};
+
+async function withRegistry(testBody: (path: string) => Promise<void>): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-coordinator-grant-"));
+  const previous = process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
+  const path = join(directory, "registry.json");
+  process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = path;
+  try {
+    await testBody(path);
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
+    else process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function storageOperations(): SupervisorGrantCoordinatorOperations {
+  return {
+    resolveIdentity: async ({ entryId }) => `owner/${entryId}`,
+    provision: async (input, options) =>
+      getOrProvisionDesktopSupervisorGrantForAgent(input, { ...options, storage: keychain }),
+    readEntryAgentKey: readDesktopSupervisorGrantAgentKeyForEntry,
+    readGrant: async (agentKey) => readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }),
+    replaceGrant: async (input) => replaceDesktopSupervisorGrantForAgent(input, { storage: keychain }),
+  };
+}
 
 const metadata = (key: string, id = "grant_1", roomId = "room_1") => ({
   grantId: id, hostId: "host_1", installationId: "install_1", allowedRoomIds: [roomId],
@@ -347,7 +390,7 @@ test("room move rotates exact destination authority, acknowledges the source ses
   assert.equal(events.some((event) => event.includes("secret_source")), false, "the source-scoped grant is never reinstalled against destination membership");
 });
 
-test("room-move destination handshake recovers a lost acknowledgement response without reprovisioning", async () => {
+test("room-move destination handshake recovers a lost acknowledgement response after ownership-aware provisioning", async () => {
   const h = harness();
   const key = "owner/supervised_launch_1234567";
   const moved = { ...entry(), roomId: "room_2" };
@@ -357,6 +400,7 @@ test("room-move destination handshake recovers a lost acknowledgement response w
   });
   let acknowledgements = 0;
   let installs = 0;
+  let provisions = 0;
   let durablyAcknowledged = false;
   const daemon = {
     ...h.daemon,
@@ -374,7 +418,11 @@ test("room-move destination handshake recovers a lost acknowledgement response w
   };
   const operations: SupervisorGrantCoordinatorOperations = {
     ...h.operations,
-    async provision() { throw new Error("destination grant must be reused"); },
+    async provision(input) {
+      provisions += 1;
+      assert.equal(input.sourceAgentSessionId, "session_1");
+      return h.grants.get(key)!;
+    },
   };
   const coordinator = new SupervisorGrantCoordinator(
     daemon as never, (async () => { throw new Error("unexpected"); }) as never,
@@ -389,6 +437,7 @@ test("room-move destination handshake recovers a lost acknowledgement response w
     error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
   };
   await coordinator.prepareRoomMoveDestination(move);
+  assert.equal(provisions, 1, "scope equality alone never bypasses the ownership-aware lifecycle");
   assert.equal(acknowledgements, 1);
   assert.equal(installs, 1);
 });
@@ -436,4 +485,253 @@ test("room-move rollback force-restores a source-scoped grant before compensatio
   assert.equal(events[0], "provision:room_1:true:session_1");
   assert.equal(events.some((event) => event === "install:room_1:secret_source_recovered"), true);
   assert.equal(events.some((event) => event.includes("secret_destination")), false);
+});
+
+test("destination-save followed by acknowledgement failure rolls back through grant-owned session receipts", async () => {
+  await withRegistry(async (registryPath) => {
+    const source = entry();
+    const moved = { ...source, roomId: "room_2" };
+    const agentKey = `owner/${source.id}`;
+    const installationId = desktopSupervisorGrantInstallationId("host_1", source.id);
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        ...metadata(agentKey, "grant_source", "room_1"),
+        installationId,
+      },
+      token: "secret_source",
+      entryId: source.id,
+      lastInstalledDaemonGeneration: 7,
+    }, { storage: keychain });
+
+    const requests: string[] = [];
+    let destinationCreates = 0;
+    let sourceCreates = 0;
+    const request = (async <T>(path: string, init?: { body?: string }) => {
+      if (path.includes("/worker-sessions/")) {
+        requests.push(`END ${path}`);
+        assert.match(
+          path,
+          /^\/supervisor-host-grants\/grant_(?:source|source_recovered)\/worker-sessions\/session_1\/end$/,
+          "only an installed source grant may own the reactivated exact session",
+        );
+        return { session_id: "session_1", ended_at: "2026-01-01T00:00:02.000Z" } as T;
+      }
+      if (path !== "/supervisor-host-grants") {
+        requests.push(`DELETE ${path}`);
+        return {} as T;
+      }
+      const body = JSON.parse(init?.body ?? "{}") as {
+        host_id: string;
+        installation_id: string;
+        allowed_room_ids: string[];
+        allowed_agent_keys: string[];
+      };
+      const roomId = body.allowed_room_ids[0]!;
+      requests.push(`POST ${roomId}`);
+      const suffix = roomId === "room_2"
+        ? (destinationCreates++ === 0 ? "destination" : "destination_second")
+        : (sourceCreates++ === 0 ? "source_recovered" : "source_recovered_second");
+      return {
+        grant_id: `grant_${suffix}`,
+        host_id: body.host_id,
+        installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids,
+        allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1,
+        expires_at: "2099-01-01T00:00:00.000Z",
+        supervisor_grant: `secret_${suffix}`,
+      } as T;
+    }) as never;
+
+    let manifestEntry = moved;
+    let acknowledgements = 0;
+    const installs: string[] = [];
+    const daemon = {
+      async ensureRunning() { return { generation: 7 }; },
+      async list() { return [manifestEntry]; },
+      async acknowledgeRoomMoveSourceRevocation() {
+        acknowledgements += 1;
+        throw new Error("daemon acknowledgement unavailable before commit");
+      },
+      async getRoomMove() { return { sourceCredentialsRevoked: false }; },
+      async installHostGrant(input: { roomId: string; grantId: string; supervisorGrant: string }) {
+        installs.push(`${input.roomId}:${input.grantId}:${input.supervisorGrant}`);
+        return "installed" as const;
+      },
+      async bootstrapRoomIngress() { return "bootstrapped" as const; },
+    };
+    const coordinator = new SupervisorGrantCoordinator(
+      daemon as never,
+      request,
+      () => "host_1",
+      storageOperations(),
+      async (room) => room,
+    );
+    const rotating = {
+      operationId: "move_fault", requestId: "request_fault", entryId: source.id,
+      sourceRoomId: "room_1", destinationRoomId: "room_2", daemonGeneration: 7,
+      workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+      agentSessionId: "session_1", phase: "rotating_credentials" as const,
+      remoteRoomId: "room_2", destinationCursor: null, sourceCredentialsRevoked: false,
+      error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+    };
+    await assert.rejects(
+      coordinator.prepareRoomMoveDestination(rotating),
+      /acknowledgement unavailable/,
+    );
+    assert.equal(acknowledgements, 1);
+    assert.deepEqual(installs, [], "destination authority is durable but was never installed");
+    assert.equal(
+      (await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.metadata.grantId,
+      "grant_destination",
+    );
+
+    // Daemon compensation restores source membership but intentionally still
+    // projects the old source session. The storage journal—not that stale
+    // projection—decides which grant owned the session.
+    manifestEntry = source;
+    await coordinator.prepareRoomMoveSourceRollback({
+      ...rotating,
+      phase: "rollback_required",
+      error: "destination acknowledgement failed",
+    });
+    assert.deepEqual(requests, [
+      "END /supervisor-host-grants/grant_source/worker-sessions/session_1/end",
+      "DELETE /supervisor-host-grants/grant_source",
+      "POST room_2",
+      "DELETE /supervisor-host-grants/grant_destination",
+      "POST room_1",
+    ]);
+    assert.equal(
+      requests.some((value) => value.includes("grant_destination/worker-sessions")),
+      false,
+      "the old source session is never presented to the destination grant",
+    );
+    assert.deepEqual(installs, ["room_1:grant_source_recovered:secret_source_recovered"]);
+    assert.equal(
+      (await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.metadata.grantId,
+      "grant_source_recovered",
+    );
+
+    // The API can reactivate the same durable session id when the recovered
+    // source grant is installed. Its installed marker makes that current
+    // grant the owner; a later move must END under source_recovered rather
+    // than reusing the older grant_source receipt.
+    await getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "host_1",
+      entryId: source.id,
+      agentKey,
+      roomScopes: [{ requestedRoomId: "room_2", canonicalRoomId: "room_2" }],
+      forceReprovision: true,
+      sourceAgentSessionId: "session_1",
+    }, { storage: keychain, apiFetch: request });
+    assert.deepEqual(requests.slice(-3), [
+      "END /supervisor-host-grants/grant_source_recovered/worker-sessions/session_1/end",
+      "DELETE /supervisor-host-grants/grant_source_recovered",
+      "POST room_2",
+    ]);
+
+    // A second uninstalled destination must point to its immediate lifecycle
+    // predecessor rather than scanning the now-ambiguous historical receipts
+    // for the reused durable session id.
+    await getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "host_1",
+      entryId: source.id,
+      agentKey,
+      roomScopes: [{ requestedRoomId: "room_1", canonicalRoomId: "room_1" }],
+      forceReprovision: true,
+      sourceAgentSessionId: "session_1",
+    }, { storage: keychain, apiFetch: request });
+    assert.deepEqual(requests.slice(-2), [
+      "DELETE /supervisor-host-grants/grant_destination_second",
+      "POST room_1",
+    ]);
+
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as {
+      version: number;
+      credentialRevocations: Record<string, {
+        grantId: string;
+        agentSessionId: string;
+        sessionOwnerGrantId: string;
+        sessionEndedAt: string | null;
+        grantRevokedAt: string | null;
+      }>;
+    };
+    assert.equal(registry.version, 6);
+    assert.equal(registry.credentialRevocations.grant_source?.sessionOwnerGrantId, "grant_source");
+    assert.equal(registry.credentialRevocations.grant_source?.agentSessionId, "session_1");
+    assert.ok(registry.credentialRevocations.grant_source?.sessionEndedAt);
+    assert.ok(registry.credentialRevocations.grant_source?.grantRevokedAt);
+    assert.equal(registry.credentialRevocations.grant_destination?.sessionOwnerGrantId, "grant_source");
+    assert.equal(registry.credentialRevocations.grant_destination?.agentSessionId, "session_1");
+    assert.ok(registry.credentialRevocations.grant_destination?.grantRevokedAt);
+    assert.equal(registry.credentialRevocations.grant_source_recovered?.sessionOwnerGrantId, "grant_source_recovered");
+    assert.equal(registry.credentialRevocations.grant_destination_second?.sessionOwnerGrantId, "grant_source_recovered");
+    assert.ok(registry.credentialRevocations.grant_destination_second?.grantRevokedAt);
+  });
+});
+
+test("v4 destination grants remain revocation-unknown and cannot ACK a move across restart", async () => {
+  await withRegistry(async (registryPath) => {
+    const moved = { ...entry(), roomId: "room_2" };
+    const agentKey = `owner/${moved.id}`;
+    const legacyMetadata = {
+      ...metadata(agentKey, "grant_legacy_destination", "room_2"),
+      installationId: desktopSupervisorGrantInstallationId("host_1", moved.id),
+    };
+    await writeFile(registryPath, `${JSON.stringify({
+      version: 4,
+      grants: {
+        [agentKey]: {
+          ...legacyMetadata,
+          agentKey,
+          entryId: moved.id,
+          lastInstalledDaemonGeneration: 7,
+          encryptedToken: encryptSupervisorGrantForStorage("secret_legacy_destination", keychain),
+        },
+      },
+      entryAgentKeys: { [moved.id]: agentKey },
+      purgeRevocationReceipts: {},
+    })}\n`, "utf8");
+
+    let requests = 0;
+    let acknowledgements = 0;
+    const daemon = {
+      async ensureRunning() { return { generation: 7 }; },
+      async list() { return [moved]; },
+      async acknowledgeRoomMoveSourceRevocation() { acknowledgements += 1; return {}; },
+    };
+    const move = {
+      operationId: "move_legacy", requestId: "request_legacy", entryId: moved.id,
+      sourceRoomId: "room_1", destinationRoomId: "room_2", daemonGeneration: 7,
+      workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+      agentSessionId: "session_1", phase: "rotating_credentials" as const,
+      remoteRoomId: "room_2", destinationCursor: null, sourceCredentialsRevoked: false,
+      error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+    };
+    const request = (async () => {
+      requests += 1;
+      throw new Error("legacy move must fail before remote mutation");
+    }) as never;
+    for (let restart = 0; restart < 2; restart += 1) {
+      const coordinator = new SupervisorGrantCoordinator(
+        daemon as never,
+        request,
+        () => "host_1",
+        storageOperations(),
+        async (room) => room,
+      );
+      await assert.rejects(
+        coordinator.prepareRoomMoveDestination(move),
+        /predates exact session ownership tracking/,
+      );
+      assert.equal(
+        (await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.credentialLifecycle,
+        "unknown",
+      );
+    }
+    assert.equal(requests, 0);
+    assert.equal(acknowledgements, 0, "scope equality alone never attests source revocation");
+  });
 });

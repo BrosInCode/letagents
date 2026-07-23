@@ -281,7 +281,7 @@ export class SupervisorGrantCoordinator {
         move.sourceRoomId,
         status.generation,
         true,
-        entry.agentSessionId ?? undefined,
+        move.agentSessionId ?? entry.agentSessionId ?? undefined,
       );
       await this.install(entry, agentKey, grant, status.generation, true);
     });
@@ -366,7 +366,11 @@ export class SupervisorGrantCoordinator {
       agentKey = await this.operations.resolveIdentity({ entryId: entry.id, displayName: entry.displayName }, { apiFetch: this.request });
     }
     const stored = await this.operations.readGrant(agentKey);
-    if (!alwaysReprovision && stored?.entryId === entry.id && this.grantExactlyScopes(stored, roomId, agentKey)) {
+    // A matching destination scope is not revocation evidence. Move/rollback
+    // calls carry the exact source session and must enter the ownership-aware
+    // storage lifecycle even when a saved grant already covers the room.
+    if (!alwaysReprovision && !sourceAgentSessionId
+      && stored?.entryId === entry.id && this.grantExactlyScopes(stored, roomId, agentKey)) {
       return { agentKey, grant: stored };
     }
     const grant = await this.operations.provision({

@@ -137,6 +137,42 @@ test("per-entry purge fails closed when the local grant registry is missing", as
   });
 });
 
+test("v4 grants remain revocation-unknown and cannot attest purge after restart", async () => {
+  await withRegistry(async (path) => {
+    const entryId = "entry-legacy-purge";
+    const agentKey = "owner/agent-legacy-purge";
+    await writeFile(path, `${JSON.stringify({
+      version: 4,
+      grants: {
+        [agentKey]: {
+          ...metadata(agentKey, "legacy-purge"),
+          agentKey,
+          entryId,
+          lastInstalledDaemonGeneration: 7,
+          encryptedToken: encryptSupervisorGrantForStorage("lashg_legacy_purge", keychain),
+        },
+      },
+      entryAgentKeys: { [entryId]: agentKey },
+      purgeRevocationReceipts: {},
+    })}\n`, "utf8");
+    let requests = 0;
+    for (let restart = 0; restart < 2; restart += 1) {
+      await assert.rejects(
+        revokeDesktopSupervisorGrantForEntry(entryId, "session-legacy-purge", {
+          storage: keychain,
+          apiFetch: (async () => { requests += 1; return {}; }) as never,
+        }),
+        /predates exact session ownership tracking/,
+      );
+      assert.equal(
+        (await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.credentialLifecycle,
+        "unknown",
+      );
+    }
+    assert.equal(requests, 0);
+  });
+});
+
 test("per-entry purge fails closed when either half of the exact local mapping is missing", async () => {
   for (const missing of ["entry-agent", "agent-grant"] as const) {
     await withRegistry(async (path) => {
