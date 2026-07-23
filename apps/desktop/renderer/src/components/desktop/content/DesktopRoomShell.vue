@@ -273,6 +273,11 @@
       :work-resource="agentInspectorWorkResource"
       :selected-work-source-message-id="agentInspectorWorkSourceMessageId"
       :work-artifacts="selectedAgentInspectorWorkArtifacts"
+      :settings-resource="agentInspectorConfigurationResource"
+      :room-move-resource="agentInspectorRoomMoveResource"
+      :providers="agentInspectorProviders"
+      :destinations="focusRooms.filter((candidate) => candidate.identifier !== room.identifier)"
+      :settings-conflict="agentInspectorSettingsConflict"
       @close="closeAgentDetail"
       @action="runAgentInspectorAction"
       @presentation-change="agentInspectorCompact = $event"
@@ -280,6 +285,14 @@
       @work-retry="loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true)"
       @work-source-select="selectAgentInspectorWorkSource"
       @reveal-message="revealAgentInspectorWorkMessage"
+      @settings-selected="loadAgentInspectorSettings"
+      @settings-patch="patchAgentInspectorSettings"
+      @settings-save="saveAgentInspectorSettings"
+      @settings-reload="() => loadAgentInspectorSettings(true)"
+      @room-move-prepare="prepareAgentInspectorRoomMove"
+      @room-move-commit="commitAgentInspectorRoomMove"
+      @retire="retireAgentInspectorAgent"
+      @purge="purgeAgentInspectorAgent"
     />
 
     <DesktopAgentDetailModal
@@ -319,6 +332,7 @@ import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReadonly, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
+  DesktopAgentProvider,
   DesktopAgentPresence,
   DesktopBoardSettingsSummary,
   DesktopFocusRoomInfo,
@@ -384,6 +398,12 @@ import {
   type AgentInspectorActionIntent,
   type AgentInspectorActionState,
 } from "../../../domain/agent-inspector";
+import {
+  configurationDraft,
+  type AgentInspectorConfigurationDraft,
+  type AgentInspectorConfigurationResource,
+  type AgentInspectorRoomMoveResource,
+} from "../../../domain/agent-inspector-settings";
 import {
   agentInspectorWorkArtifacts,
   defaultAgentInspectorWorkSource,
@@ -514,6 +534,12 @@ const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
 const agentInspectorWorkResource = ref<AgentInspectorWorkResource>(emptyAgentInspectorWorkResource());
 const agentInspectorWorkSourceMessageId = ref<string | null>(null);
+const agentInspectorConfigurationResource = ref<AgentInspectorConfigurationResource>({ status: "idle", configuration: null, draft: null, error: null });
+const agentInspectorProviders = ref<DesktopAgentProvider[]>([]);
+const agentInspectorSettingsConflict = ref(false);
+const agentInspectorRoomMoveResource = ref<AgentInspectorRoomMoveResource>({ status: "idle", move: null, error: null });
+let agentInspectorSettingsRequestToken = 0;
+let agentInspectorMoveRecoveryTimer: number | null = null;
 let agentInspectorWorkRequestToken = 0;
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
@@ -1990,6 +2016,7 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
   agentInspectorWorkRequestToken += 1;
   agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
   agentInspectorWorkSourceMessageId.value = null;
+  resetAgentInspectorSettings();
 }
 
 function closeAgentDetail(): void {
@@ -1999,7 +2026,132 @@ function closeAgentDetail(): void {
   agentInspectorWorkRequestToken += 1;
   agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
   agentInspectorWorkSourceMessageId.value = null;
+  resetAgentInspectorSettings();
 }
+
+function resetAgentInspectorSettings(): void {
+  agentInspectorSettingsRequestToken += 1;
+  if (agentInspectorMoveRecoveryTimer !== null) window.clearTimeout(agentInspectorMoveRecoveryTimer);
+  agentInspectorMoveRecoveryTimer = null;
+  agentInspectorConfigurationResource.value = { status: "idle", configuration: null, draft: null, error: null };
+  agentInspectorProviders.value = [];
+  agentInspectorSettingsConflict.value = false;
+  agentInspectorRoomMoveResource.value = { status: "idle", move: null, error: null };
+}
+
+function agentInspectorSettingsCurrent(entryId: string, roomId: string, token: number): boolean {
+  return agentInspectorFoundationEnabled && token === agentInspectorSettingsRequestToken
+    && props.room.identifier === roomId
+    && selectedAgentDetailTarget.value?.kind === "supervised"
+    && selectedAgentDetailTarget.value.supervisorEntryId === entryId;
+}
+
+async function loadAgentInspectorSettings(force = false): Promise<void> {
+  const projection = selectedAgentDetailProjection.value;
+  if (!projection || !desktopIpc.supervisor?.getAgentConfiguration || !supervisorStatus.value?.capabilities.agentInspectorSettings) {
+    agentInspectorConfigurationResource.value = { status: "unavailable", configuration: null, draft: null, error: "Inspector settings require a current desktop supervisor." };
+    return;
+  }
+  if (!force && agentInspectorConfigurationResource.value.status === "ready") return;
+  const token = ++agentInspectorSettingsRequestToken;
+  const previous = agentInspectorConfigurationResource.value;
+  agentInspectorConfigurationResource.value = { ...previous, status: previous.configuration ? "refreshing" : "loading", error: null };
+  try {
+    const [configuration, providers] = await Promise.all([
+      desktopIpc.supervisor.getAgentConfiguration({ entryId: projection.entryId, daemonGeneration: supervisorStatus.value.generation }),
+      desktopIpc.workers.listAgentProviders(),
+    ]);
+    if (!agentInspectorSettingsCurrent(projection.entryId, projection.roomId, token)) return;
+    agentInspectorProviders.value = providers;
+    agentInspectorConfigurationResource.value = { status: "ready", configuration, draft: configurationDraft(configuration), error: null };
+    agentInspectorSettingsConflict.value = false;
+  } catch (error) {
+    if (!agentInspectorSettingsCurrent(projection.entryId, projection.roomId, token)) return;
+    agentInspectorConfigurationResource.value = { ...previous, status: "error", error: error instanceof Error ? error.message : "Could not load saved configuration." };
+  }
+}
+
+function patchAgentInspectorSettings(patch: Partial<AgentInspectorConfigurationDraft>): void {
+  const current = agentInspectorConfigurationResource.value;
+  if (!current.draft) return;
+  agentInspectorConfigurationResource.value = { ...current, draft: { ...current.draft, ...patch } };
+}
+
+function beginAgentInspectorOperation(kind: AgentInspectorActionState["kind"], message: string): { operationId: string; entryId: string; roomId: string; requestVersion: number } | null {
+  const projection = selectedAgentDetailProjection.value;
+  if (!projection || agentInspectorActionState.value?.status === "running") return null;
+  const operationId = globalThis.crypto.randomUUID();
+  const requestVersion = selectedAgentDetailRequestVersion.value;
+  agentInspectorActionState.value = { operationId, entryId: projection.entryId, kind, status: "running", message };
+  return { operationId, entryId: projection.entryId, roomId: projection.roomId, requestVersion };
+}
+
+function agentInspectorOperationCurrent(operation: { operationId: string; entryId: string; roomId: string; requestVersion: number }): boolean {
+  return props.room.identifier === operation.roomId && selectedAgentDetailRequestVersion.value === operation.requestVersion
+    && selectedAgentDetailTarget.value?.kind === "supervised" && selectedAgentDetailTarget.value.supervisorEntryId === operation.entryId
+    && agentInspectorActionState.value?.operationId === operation.operationId;
+}
+
+async function saveAgentInspectorSettings(overwrite: boolean): Promise<void> {
+  const current = agentInspectorConfigurationResource.value;
+  const status = supervisorStatus.value;
+  const operation = beginAgentInspectorOperation("save_settings", overwrite ? "Overwriting saved configuration…" : "Saving configuration…");
+  if (!operation || !current.configuration || !current.draft || !status || !desktopIpc.supervisor?.updateAgentConfiguration) return;
+  try {
+    const result = await desktopIpc.supervisor.updateAgentConfiguration({ entryId: operation.entryId, daemonGeneration: status.generation, expectedRevision: current.configuration.configRevision, configuration: current.draft });
+    if (!agentInspectorOperationCurrent(operation)) return;
+    if (result.outcome === "conflict") {
+      agentInspectorConfigurationResource.value = { status: "ready", configuration: result.configuration, draft: current.draft, error: null };
+      agentInspectorSettingsConflict.value = true;
+      agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "save_settings", status: "error", message: "Saved configuration changed elsewhere. Your draft is preserved." };
+      return;
+    }
+    if (result.outcome === "invalid") throw new Error(result.error);
+    agentInspectorConfigurationResource.value = { status: "ready", configuration: result.configuration, draft: configurationDraft(result.configuration), error: null };
+    agentInspectorSettingsConflict.value = false;
+    agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "save_settings", status: "success", message: "Configuration saved." };
+  } catch (error) {
+    if (agentInspectorOperationCurrent(operation)) agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "save_settings", status: "error", message: error instanceof Error ? error.message : "Configuration could not be saved." };
+  }
+}
+
+async function prepareAgentInspectorRoomMove(destinationRoomId: string): Promise<void> {
+  const status = supervisorStatus.value; const operation = beginAgentInspectorOperation("move_room", "Preparing durable room move…");
+  if (!operation || !status || !desktopIpc.supervisor?.prepareRoomMove || !destinationRoomId.trim()) return;
+  agentInspectorRoomMoveResource.value = { status: "preparing", move: null, error: null };
+  try {
+    const move = await desktopIpc.supervisor.prepareRoomMove({ entryId: operation.entryId, destinationRoomId, requestId: globalThis.crypto.randomUUID(), daemonGeneration: status.generation });
+    if (!agentInspectorOperationCurrent(operation)) return;
+    agentInspectorRoomMoveResource.value = { status: "idle", move, error: null };
+    agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "move_room", status: "success", message: "Move prepared. Continue when ready." };
+  } catch (error) { if (agentInspectorOperationCurrent(operation)) { agentInspectorRoomMoveResource.value = { status: "error", move: null, error: error instanceof Error ? error.message : "Room move could not be prepared." }; agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "move_room", status: "error", message: agentInspectorRoomMoveResource.value.error }; } }
+}
+
+async function commitAgentInspectorRoomMove(): Promise<void> {
+  const status = supervisorStatus.value; const current = agentInspectorRoomMoveResource.value.move; const operation = beginAgentInspectorOperation("move_room", "Continuing durable room move…");
+  if (!operation || !status || !current || !desktopIpc.supervisor?.commitRoomMove) return;
+  agentInspectorRoomMoveResource.value = { status: "committing", move: current, error: null };
+  try {
+    const move = await desktopIpc.supervisor.commitRoomMove({ operationId: current.operationId, entryId: operation.entryId, daemonGeneration: status.generation });
+    if (!agentInspectorOperationCurrent(operation)) return;
+    agentInspectorRoomMoveResource.value = { status: ["active", "failed"].includes(move.phase) ? "idle" : "recovering", move, error: null };
+    agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "move_room", status: "success", message: move.phase === "active" ? "Room move completed." : "Room move is continuing in the daemon." };
+    if (!["active", "failed"].includes(move.phase)) scheduleAgentInspectorMoveRecovery(move.operationId, operation.entryId, operation.roomId);
+    if (move.phase === "active") await refreshManagedAgentSessions();
+  } catch (error) { if (agentInspectorOperationCurrent(operation)) { agentInspectorRoomMoveResource.value = { status: "error", move: current, error: error instanceof Error ? error.message : "Room move could not continue." }; agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "move_room", status: "error", message: agentInspectorRoomMoveResource.value.error }; } }
+}
+
+function scheduleAgentInspectorMoveRecovery(operationId: string, entryId: string, roomId: string): void {
+  if (agentInspectorMoveRecoveryTimer !== null) window.clearTimeout(agentInspectorMoveRecoveryTimer);
+  agentInspectorMoveRecoveryTimer = window.setTimeout(async () => {
+    const status = supervisorStatus.value;
+    if (!status || !agentInspectorSettingsCurrent(entryId, roomId, agentInspectorSettingsRequestToken) || !desktopIpc.supervisor?.getRoomMove) return;
+    try { const move = await desktopIpc.supervisor.getRoomMove({ operationId, entryId, daemonGeneration: status.generation }); if (!agentInspectorSettingsCurrent(entryId, roomId, agentInspectorSettingsRequestToken)) return; agentInspectorRoomMoveResource.value = { status: ["active", "failed"].includes(move.phase) ? "idle" : "recovering", move, error: null }; if (!["active", "failed"].includes(move.phase)) scheduleAgentInspectorMoveRecovery(operationId, entryId, roomId); else if (move.phase === "active") await refreshManagedAgentSessions(); } catch (error) { if (agentInspectorSettingsCurrent(entryId, roomId, agentInspectorSettingsRequestToken)) agentInspectorRoomMoveResource.value = { ...agentInspectorRoomMoveResource.value, status: "error", error: error instanceof Error ? error.message : "Could not check move recovery." }; }
+  }, 1_200);
+}
+
+async function retireAgentInspectorAgent(): Promise<void> { const status = supervisorStatus.value; const operation = beginAgentInspectorOperation("retire_agent", "Retiring saved agent…"); if (!operation || !status || !desktopIpc.supervisor?.retireAgent) return; try { await desktopIpc.supervisor.retireAgent({ entryId: operation.entryId, daemonGeneration: status.generation }); if (!agentInspectorOperationCurrent(operation)) return; await refreshManagedAgentSessions(); if (agentInspectorOperationCurrent(operation)) agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "retire_agent", status: "success", message: "Agent retired. Its history and worktree are retained." }; } catch (error) { if (agentInspectorOperationCurrent(operation)) agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "retire_agent", status: "error", message: error instanceof Error ? error.message : "Agent could not be retired." }; } }
+async function purgeAgentInspectorAgent(): Promise<void> { const status = supervisorStatus.value; const operation = beginAgentInspectorOperation("purge_agent", "Revoking credentials and purging durable records…"); if (!operation || !status || !desktopIpc.supervisor?.purgeAgent) return; try { const result = await desktopIpc.supervisor.purgeAgent({ entryId: operation.entryId, daemonGeneration: status.generation }); if (!agentInspectorOperationCurrent(operation)) return; if (result.outcome !== "purged") throw new Error(result.error || "Purge could not be completed."); await refreshManagedAgentSessions(); if (agentInspectorOperationCurrent(operation)) { agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "purge_agent", status: "success", message: "Durable agent records purged. The worktree was preserved." }; closeAgentDetail(); } } catch (error) { if (agentInspectorOperationCurrent(operation)) agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "purge_agent", status: "error", message: error instanceof Error ? error.message : "Purge could not be completed." }; } }
 
 function agentInspectorWorkRequestStillCurrent(entryId: string, roomId: string, sourceMessageId: string | null, token: number): boolean {
   const target = selectedAgentDetailTarget.value;
@@ -2138,8 +2290,9 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "paused");
     } else if (intent.kind === "resume" || intent.kind === "recover") {
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "running");
-    } else if (intent.kind === "stop_agent") {
-      updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "stopped");
+    } else if (intent.kind === "retire_agent") {
+      if (!supervisorStatus.value?.capabilities.agentLifecycle || !desktopIpc.supervisor.retireAgent) throw new Error("This supervisor does not support durable retirement.");
+      await desktopIpc.supervisor.retireAgent({ entryId: intent.entryId, daemonGeneration: supervisorStatus.value.generation });
     } else if (intent.kind === "reconnect") {
       updated = await desktopIpc.supervisor.reconnectAgent({ entryId: intent.entryId });
     } else if (intent.kind === "stop_turn") {
@@ -2205,7 +2358,10 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
     recover: "Recovering this saved agent…",
     stop_turn: "Stopping the current turn…",
     retry_delivery: "Retrying this delivery…",
-    stop_agent: "Stopping this agent…",
+    retire_agent: "Retiring this saved agent…",
+    save_settings: "Saving configuration…",
+    move_room: "Moving room…",
+    purge_agent: "Purging durable records…",
   } as const)[kind];
 }
 
@@ -2218,7 +2374,10 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     recover: "Recovery started.",
     stop_turn: "Current turn stopped.",
     retry_delivery: "Delivery retry started.",
-    stop_agent: "Agent stopped.",
+    retire_agent: "Agent retired. Its worktree is retained.",
+    save_settings: "Configuration saved.",
+    move_room: "Room move started.",
+    purge_agent: "Durable records purged.",
   } as const)[kind];
 }
 

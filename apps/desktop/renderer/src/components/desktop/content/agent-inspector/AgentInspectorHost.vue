@@ -4,10 +4,11 @@
       <component
         ref="surfaceComponent"
         :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
-        v-bind="projection ? { projection, actionState, compact: false, workResource, selectedWorkSourceMessageId, workArtifacts } : { ...statusPresentation, compact: false }"
+        v-bind="projection ? { projection, actionState, compact: false, workResource, selectedWorkSourceMessageId, workArtifacts, settingsResource, roomMoveResource, providers, destinations, settingsConflict } : { ...statusPresentation, compact: false }"
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
         @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </div>
@@ -27,10 +28,11 @@
         ref="surfaceComponent"
         :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
         v-if="open"
-        v-bind="projection ? { projection, actionState, compact, workResource, selectedWorkSourceMessageId, workArtifacts } : { ...statusPresentation, compact }"
+        v-bind="projection ? { projection, actionState, compact, workResource, selectedWorkSourceMessageId, workArtifacts, settingsResource, roomMoveResource, providers, destinations, settingsConflict } : { ...statusPresentation, compact }"
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
         @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </Teleport>
@@ -45,6 +47,8 @@ import type {
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
+import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource, AgentInspectorConfigurationDraft } from "../../../../domain/agent-inspector-settings";
+import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
 import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
 import type { AgentInspectorSelection } from "../desktop-chat-message/types";
@@ -59,6 +63,11 @@ const props = defineProps<{
   workResource: AgentInspectorWorkResource;
   selectedWorkSourceMessageId: string | null;
   workArtifacts: readonly RoomArtifactTimelineItem[];
+  settingsResource: AgentInspectorConfigurationResource;
+  roomMoveResource: AgentInspectorRoomMoveResource;
+  providers: readonly DesktopAgentProvider[];
+  destinations: readonly DesktopFocusRoomInfo[];
+  settingsConflict: boolean;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -68,6 +77,14 @@ const emit = defineEmits<{
   "work-retry": [];
   "work-source-select": [sourceMessageId: string];
   "reveal-message": [canonicalMessageId: string];
+  "settings-selected": [];
+  "settings-patch": [patch: Partial<AgentInspectorConfigurationDraft>];
+  "settings-save": [overwrite: boolean];
+  "settings-reload": [];
+  "room-move-prepare": [destination: string];
+  "room-move-commit": [];
+  retire: [];
+  purge: [];
 }>();
 
 const compact = ref(false);
