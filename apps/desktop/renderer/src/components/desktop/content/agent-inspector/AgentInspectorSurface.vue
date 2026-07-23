@@ -57,35 +57,57 @@
       {{ actionState.message }}
     </p>
 
+    <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleTabKeydown">
+      <button ref="overviewTab" id="agent-inspector-overview-tab" type="button" role="tab" :aria-selected="selectedTab === 'overview'" aria-controls="agent-inspector-overview-panel" :tabindex="selectedTab === 'overview' ? 0 : -1" @click="selectTab('overview')">Overview</button>
+      <button id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
+    </div>
+
     <div class="agent-inspector-scroll-region">
-      <AgentInspectorOverview :projection="projection" />
+      <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab"><AgentInspectorOverview :projection="projection" /></div>
+      <AgentInspectorWork
+        v-else id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"
+        :resource="workResource" :selected-source-message-id="selectedWorkSourceMessageId" :tasks="projection.assignedWork" :artifacts="workArtifacts"
+        @retry="emit('work-retry')" @select-source="emit('work-source-select', $event)" @reveal="emit('reveal-message', $event)"
+      />
     </div>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,
   AgentInspectorActionState,
   AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
+import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
+import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
+import AgentInspectorWork from "./AgentInspectorWork.vue";
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
   actionState: AgentInspectorActionState | null;
   compact: boolean;
+  workResource: AgentInspectorWorkResource;
+  selectedWorkSourceMessageId: string | null;
+  workArtifacts: readonly RoomArtifactTimelineItem[];
 }>();
 const emit = defineEmits<{
   close: [];
   action: [intent: AgentInspectorActionIntent];
+  "work-selected": [];
+  "work-retry": [];
+  "work-source-select": [sourceMessageId: string];
+  "reveal-message": [canonicalMessageId: string];
 }>();
 
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
+const overviewTab = ref<HTMLButtonElement | null>(null);
+const selectedTab = ref<"overview" | "work">("overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
 
 function focusInitial(): void {
@@ -97,6 +119,22 @@ function containsFocus(): boolean {
 }
 
 defineExpose({ focusInitial, containsFocus });
+
+watch(() => props.projection.entryId, () => { selectedTab.value = "overview"; });
+
+function selectTab(tab: "overview" | "work"): void {
+  if (selectedTab.value === tab) return;
+  selectedTab.value = tab;
+  if (tab === "work") emit("work-selected");
+}
+
+function handleTabKeydown(event: KeyboardEvent): void {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === 'Home' || event.key === 'ArrowLeft' ? 'overview' : 'work';
+  selectTab(next);
+  void Promise.resolve().then(() => (next === 'overview' ? overviewTab.value : surfaceElement.value?.querySelector<HTMLButtonElement>('#agent-inspector-work-tab'))?.focus());
+}
 
 function handleKeydown(event: KeyboardEvent): void {
   if (!props.compact && event.key === "Escape") {
