@@ -313,7 +313,7 @@ test("daemon spawn includes devMcpServerEntryPath for codex when both env gates 
     };
     const codexEntry: DaemonManifestEntry = {
       id: "dev_gate_codex", room_id: "room", display_name: "CodexAgent", provider: "codex", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
-      permission_profile_id: "ask_before_write", provider_launch_policy: { promptForInstallation: false }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+      permission_profile_id: "full_access", provider_launch_policy: { promptForInstallation: false }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
     const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
     try {
@@ -333,7 +333,7 @@ test("daemon spawn includes devMcpServerEntryPath for codex when both env gates 
     };
     const claudeEntry: DaemonManifestEntry = {
       id: "dev_gate_claude", room_id: "room", display_name: "ClaudeAgent", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
-      permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "default" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+      permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
     const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter() }), true);
     try {
@@ -465,7 +465,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   const daemon = new SupervisorDaemon(paths, "darwin", router, true);
   const entry: DaemonManifestEntry = {
     id: "claude_supervised", room_id: "room", display_name: "Claude", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
-    permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "default" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+    permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
   };
   try {
     await daemon.start();

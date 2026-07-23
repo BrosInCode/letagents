@@ -95,6 +95,9 @@ export type DaemonRoomMoveRecord = {
   phase: DaemonRoomMovePhase;
   remote_room_id: string | null;
   destination_cursor: string | null;
+  /** Exact pre-move ingress authority captured by the prepare transaction. */
+  source_cursor_present: boolean;
+  source_cursor: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -108,6 +111,10 @@ export type DaemonPurgeRecord = {
   daemon_generation: number;
   phase: DaemonPurgePhase;
   external_revoke_required: boolean;
+  /** Exact runtime attachment captured by the preparation transaction. */
+  attached_work_attempt_id: string | null;
+  /** Filesystem location retained after its durable attempt row is removed. */
+  preserved_workspace_path: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;

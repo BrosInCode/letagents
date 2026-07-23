@@ -197,6 +197,85 @@ test("v4 upgrade reconstructs a deleted binding watermark from both reservation 
   } finally { await env.cleanup(); }
 });
 
+test("a canonical v4 database with no later additive tables upgrades through the complete current shape", async () => {
+  const env = await fixture(); try {
+    const seed = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await seed.list();
+    await seed.close();
+
+    const legacyV4 = new DatabaseSync(env.database);
+    try {
+      legacyV4.exec(`
+        PRAGMA foreign_keys=OFF;
+        BEGIN IMMEDIATE;
+        DROP TABLE agent_room_moves;
+        DROP TABLE agent_purge_operations;
+        DROP TABLE supervised_agent_publications;
+        DROP TABLE supervised_agent_history_boundaries;
+        DROP TABLE supervised_agent_pruned_sources;
+        DROP TABLE supervised_agent_terminal_results;
+        DROP TABLE supervised_agent_observed_messages;
+        DROP TABLE supervised_agent_effects;
+        DROP TABLE supervised_agent_ingress_health;
+        DROP TABLE supervised_agent_inbox_events;
+        DROP TABLE supervised_agent_inbox;
+        DROP TABLE supervised_agent_ingress_cursors;
+        DROP TABLE supervised_worker_sessions;
+        DROP TABLE worker_binding_watermarks;
+        ALTER TABLE agent_configurations DROP COLUMN runtime_configuration_revision;
+        ALTER TABLE agent_configurations DROP COLUMN config_revision;
+        ALTER TABLE agent_configurations DROP COLUMN reasoning_effort;
+        ALTER TABLE agent_configurations DROP COLUMN delivery_cutover_json;
+        ALTER TABLE agent_configurations DROP COLUMN delivery_mode;
+        ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id;
+        DROP TABLE worker_session_bindings;
+        CREATE TABLE worker_session_bindings (
+          entry_id TEXT PRIMARY KEY,
+          room_id TEXT NOT NULL,
+          work_attempt_id TEXT NOT NULL,
+          execution_generation_id TEXT NOT NULL,
+          agent_session_id TEXT NOT NULL,
+          agent_session_token TEXT NOT NULL,
+          api_url TEXT NOT NULL,
+          room_cursor TEXT,
+          last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+          last_observed_at_ms INTEGER NOT NULL CHECK (last_observed_at_ms >= 0),
+          binding_epoch INTEGER NOT NULL CHECK (binding_epoch >= 1),
+          updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE UNIQUE INDEX worker_session_binding_authority
+          ON worker_session_bindings(entry_id,binding_epoch,execution_generation_id,agent_session_id);
+        UPDATE manifest_metadata SET schema_version=4 WHERE singleton=1;
+        PRAGMA user_version=4;
+        COMMIT;
+        PRAGMA foreign_keys=ON;
+      `);
+      for (const table of ["agent_room_moves", "agent_purge_operations", "supervised_agent_terminal_results", "supervised_agent_publications"]) {
+        assert.equal(legacyV4.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), undefined);
+      }
+    } finally { legacyV4.close(); }
+
+    const upgraded = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await upgraded.list();
+    await upgraded.close();
+    const current = new DatabaseSync(env.database);
+    try {
+      assert.equal(Number((current.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 9);
+      assert.equal(Number((current.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get() as { schema_version: number }).schema_version), 9);
+      for (const table of ["supervised_agent_terminal_results", "supervised_agent_publications", "agent_room_moves", "agent_purge_operations"]) {
+        assert.ok(current.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), `${table} was created before version markers advanced`);
+      }
+      const configurationColumns = new Set((current.prepare("PRAGMA table_info(agent_configurations)").all() as Array<{ name: string }>).map((column) => column.name));
+      for (const column of ["delivery_mode", "delivery_cutover_json", "reasoning_effort", "config_revision", "runtime_configuration_revision"]) {
+        assert.ok(configurationColumns.has(column), `${column} was applied during the canonical v4 upgrade`);
+      }
+      const bindingColumns = new Set((current.prepare("PRAGMA table_info(worker_session_bindings)").all() as Array<{ name: string }>).map((column) => column.name));
+      assert.equal(bindingColumns.has("agent_session_token"), false);
+      assert.equal(bindingColumns.has("credential_ref"), true);
+    } finally { current.close(); }
+  } finally { await env.cleanup(); }
+});
+
 test("escaped duplicate legacy keys are quarantined before JSON collapse", async () => {
   const env = await fixture(); try {
     const value = JSON.stringify(input());

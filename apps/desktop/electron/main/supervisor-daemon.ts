@@ -402,7 +402,9 @@ export class SupervisorDaemonClient {
   }
 
   async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {
-    await this.ensureRunning();
+    if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle requires an exact identity and desired state.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
   }
 
@@ -428,7 +430,9 @@ export class SupervisorDaemonClient {
     expectedDesiredState: DesktopSupervisorDesiredState,
     desiredState: DesktopSupervisorDesiredState,
   ): Promise<DesktopSupervisorManifestEntry | null> {
-    await this.ensureRunning();
+    if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(expectedDesiredState) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle compare-and-set requires exact typed fields.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
     const result = await this.request<{ applied: boolean; entry: WireEntry }>("manifest.compare_and_set_desired_state", {
       id,
       expected_desired_state: expectedDesiredState,
@@ -528,13 +532,15 @@ export class SupervisorDaemonClient {
 
   async retireAgent(entryId: string, daemonGeneration: number): Promise<void> {
     if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Retire requires exact typed coordinates.");
-    await this.ensureRunning();
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
     await this.request("supervisor.retire_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
   }
 
   async purgeAgent(entryId: string, daemonGeneration: number, credentialsRevoked = false): Promise<{ outcome: "purged" | "invalid" | "revocation_required"; operationId?: string; error?: string }> {
     if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1 || typeof credentialsRevoked !== "boolean") throw new Error("Purge requires exact typed coordinates.");
-    await this.ensureRunning();
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
     const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", { entry_id: entryId, daemon_generation: daemonGeneration, credentials_revoked: credentialsRevoked });
     if (result.outcome === "purged") return { outcome: "purged" };
     if (result.outcome === "revocation_required" && typeof result.operation_id === "string" && result.operation_id.trim()) return { outcome: "revocation_required", operationId: result.operation_id };
@@ -908,7 +914,13 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
     implementationVersion: String(value.implementation_version ?? "unknown"),
-    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"), agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1"), agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1"), agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1") },
+    capabilities: {
+      roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"),
+      agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1"),
+      agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1"),
+      agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1"),
+      agentLifecycle: booleanField(value.capabilities, "agent_lifecycle_v1"),
+    },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),

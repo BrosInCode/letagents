@@ -17,6 +17,7 @@ import { advanceReconciliationState, beginReconciliationAction, completeReconcil
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
+import { resolveProviderConfigurationSnapshot, type ProviderReasoningEffort } from "./provider-configuration.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { SupervisedAgentInboxStore, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
@@ -700,6 +701,17 @@ export class SupervisorDaemon {
         undefined,
         undefined,
         (input) => this.commitPreparedRoomMove(input),
+        async (authority) => {
+          if (!await this.isExactSupervisedDeliveryAuthority(authority)) {
+            throw new Error("The supervised delivery authority changed before resolving its turn configuration.");
+          }
+          const configuration = await this.store.getAgentConfiguration(authority.agentId);
+          if (!configuration) throw new Error("The exact agent no longer exists.");
+          if (!await this.isExactSupervisedDeliveryAuthority(authority)) {
+            throw new Error("The supervised delivery authority changed while resolving its turn configuration.");
+          }
+          return { charter: configuration.charter };
+        },
       )
       : null;
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
@@ -769,54 +781,84 @@ export class SupervisorDaemon {
       }
       if (request.method === "supervisor.get_agent_configuration") {
         const params = this.paramsRecord(request.params);
-        if (typeof params.entry_id !== "string" || typeof params.daemon_generation !== "number") throw new Error("Agent configuration requires exact typed coordinates.");
-        return this.getAgentConfiguration(params.entry_id, params.daemon_generation);
+        return this.getAgentConfiguration(
+          this.requiredStringParam(params, "entry_id", "Agent configuration requires exact typed coordinates."),
+          this.positiveIntegerParam(params, "daemon_generation", "Agent configuration requires exact typed coordinates."),
+        );
       }
       if (request.method === "supervisor.update_agent_configuration") {
         const params = this.paramsRecord(request.params);
-        if (typeof params.entry_id !== "string" || typeof params.daemon_generation !== "number" || typeof params.expected_revision !== "number" || params.configuration === null || typeof params.configuration !== "object" || Array.isArray(params.configuration)) throw new Error("Agent configuration update requires exact typed coordinates.");
+        if (params.configuration === null || typeof params.configuration !== "object" || Array.isArray(params.configuration)) throw new Error("Agent configuration update requires exact typed coordinates.");
         return this.updateAgentConfiguration({
-          entryId: params.entry_id, daemonGeneration: params.daemon_generation,
-          expectedRevision: params.expected_revision, configuration: this.paramsRecord(params.configuration),
+          entryId: this.requiredStringParam(params, "entry_id", "Agent configuration update requires exact typed coordinates."),
+          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", "Agent configuration update requires exact typed coordinates."),
+          expectedRevision: this.positiveIntegerParam(params, "expected_revision", "Agent configuration update requires exact typed coordinates."),
+          configuration: this.paramsRecord(params.configuration),
         });
       }
       if (request.method === "supervisor.prepare_room_move") {
         const params = this.paramsRecord(request.params);
-        if (typeof params.entry_id !== "string" || typeof params.destination_room_id !== "string" || typeof params.request_id !== "string" || typeof params.daemon_generation !== "number") throw new Error("Room-move preparation requires exact typed coordinates.");
-        return this.prepareInspectorRoomMove({ entryId: params.entry_id, destinationRoomId: params.destination_room_id, requestId: params.request_id, daemonGeneration: params.daemon_generation });
+        const error = "Room-move preparation requires exact typed coordinates.";
+        return this.prepareInspectorRoomMove({
+          entryId: this.requiredStringParam(params, "entry_id", error),
+          destinationRoomId: this.requiredStringParam(params, "destination_room_id", error),
+          requestId: this.requiredStringParam(params, "request_id", error),
+          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
+        });
       }
       if (request.method === "supervisor.commit_room_move") {
         const params = this.paramsRecord(request.params);
-        if (typeof params.operation_id !== "string" || typeof params.entry_id !== "string" || typeof params.daemon_generation !== "number") throw new Error("Room-move commit requires exact typed coordinates.");
-        return this.commitInspectorRoomMove({ operationId: params.operation_id, entryId: params.entry_id, daemonGeneration: params.daemon_generation });
+        const error = "Room-move commit requires exact typed coordinates.";
+        return this.commitInspectorRoomMove({
+          operationId: this.requiredStringParam(params, "operation_id", error),
+          entryId: this.requiredStringParam(params, "entry_id", error),
+          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
+        });
       }
       if (request.method === "supervisor.get_room_move") {
         const params = this.paramsRecord(request.params);
-        if (typeof params.operation_id !== "string" || typeof params.entry_id !== "string" || typeof params.daemon_generation !== "number") throw new Error("Room-move status requires exact typed coordinates.");
-        return this.getInspectorRoomMove({ operationId: params.operation_id, entryId: params.entry_id, daemonGeneration: params.daemon_generation });
+        const error = "Room-move status requires exact typed coordinates.";
+        return this.getInspectorRoomMove({
+          operationId: this.requiredStringParam(params, "operation_id", error),
+          entryId: this.requiredStringParam(params, "entry_id", error),
+          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
+        });
       }
       if (request.method === "supervisor.retire_agent") {
         const params = this.paramsRecord(request.params);
-        if (typeof params.entry_id !== "string" || typeof params.daemon_generation !== "number") throw new Error("Retire requires exact typed coordinates.");
-        return this.retireAgent(params.entry_id, params.daemon_generation);
+        const error = "Retire requires exact typed coordinates.";
+        return this.retireAgent(
+          this.requiredStringParam(params, "entry_id", error),
+          this.positiveIntegerParam(params, "daemon_generation", error),
+        );
       }
       if (request.method === "supervisor.purge_agent") {
         const params = this.paramsRecord(request.params);
-        if (typeof params.entry_id !== "string" || typeof params.daemon_generation !== "number" || (params.credentials_revoked !== undefined && typeof params.credentials_revoked !== "boolean")) throw new Error("Purge requires exact typed coordinates.");
-        return this.purgeAgent(params.entry_id, params.daemon_generation, params.credentials_revoked === true);
+        const error = "Purge requires exact typed coordinates.";
+        if (params.credentials_revoked !== undefined && typeof params.credentials_revoked !== "boolean") throw new Error(error);
+        return this.purgeAgent(
+          this.requiredStringParam(params, "entry_id", error),
+          this.positiveIntegerParam(params, "daemon_generation", error),
+          params.credentials_revoked === true,
+        );
       }
       if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
       if (request.method === "manifest.set_desired_state") {
         const params = this.paramsRecord(request.params);
-        const updated = await this.setDesiredState(String(params.id ?? ""), String(params.desired_state ?? "") as DesiredState);
+        const error = "Agent lifecycle requires an exact identity and desired state.";
+        const updated = await this.setDesiredState(
+          this.requiredStringParam(params, "id", error),
+          this.desiredStateParam(params, "desired_state", error),
+        );
         return this.entryWithDerivedLiveness(updated);
       }
       if (request.method === "manifest.compare_and_set_desired_state") {
         const params = this.paramsRecord(request.params);
+        const error = "Agent lifecycle compare-and-set requires exact typed fields.";
         const result = await this.compareAndSetDesiredState(
-          String(params.id ?? ""),
-          String(params.expected_desired_state ?? "") as DesiredState,
-          String(params.desired_state ?? "") as DesiredState,
+          this.requiredStringParam(params, "id", error),
+          this.desiredStateParam(params, "expected_desired_state", error),
+          this.desiredStateParam(params, "desired_state", error),
         );
         return { applied: result.applied, entry: await this.entryWithDerivedLiveness(result.entry) };
       }
@@ -1296,7 +1338,12 @@ export class SupervisorDaemon {
   private async reconcileRoomMove(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
     return this.serializeEntryTick(initial.agent_id, async () => {
       let move = await this.store.getRoomMove(initial.operation_id);
-      if (!move || ["active", "failed", "rollback_required"].includes(move.phase)) return move ?? initial;
+      if (!move || ["active", "failed"].includes(move.phase)) return move ?? initial;
+      if (move.daemon_generation !== this.singleton.currentGeneration) {
+        await this.singleton.assertCurrent();
+        move = await this.store.advanceRoomMove({ operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation, expectedExecutionGenerationId: move.execution_generation_id, from: [move.phase], to: move.phase, adoptDaemonGeneration: this.singleton.currentGeneration });
+      }
+      if (move.phase === "rollback_required") return this.compensateRoomMoveRollback(move);
       let entry = await this.store.getEntry(move.agent_id);
       const membershipCommitted = ["membership_committed", "rotating_credentials", "bootstrapping_destination_tail"].includes(move.phase);
       const runtimeExact = Boolean(entry && move.work_attempt_id && move.execution_generation_id
@@ -1305,12 +1352,9 @@ export class SupervisorDaemon {
       if (!entry || !runtimeExact || (membershipCommitted ? entry.room_id !== (move.remote_room_id ?? move.destination_room_id) : ![move.source_room_id, move.destination_room_id, move.remote_room_id].includes(entry.room_id))) {
         const phase = membershipCommitted ? "rollback_required" : "failed";
         move = await this.store.advanceRoomMove({ operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation, expectedExecutionGenerationId: move.execution_generation_id, from: [move.phase], to: phase, error: "The exact provider generation or room membership changed during the move." });
-        if (move.effect_id) await this.supervisedInbox.completeEffect({ effect_id: move.effect_id, error: move.error ?? undefined });
+        if (phase === "failed" && move.effect_id) await this.supervisedInbox.completeEffect({ effect_id: move.effect_id, error: move.error ?? undefined });
+        if (phase === "rollback_required") this.scheduleRecoveryConvergence(move.agent_id, 1_000);
         return move;
-      }
-      if (move.daemon_generation !== this.singleton.currentGeneration) {
-        await this.singleton.assertCurrent();
-        move = await this.store.advanceRoomMove({ operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation, expectedExecutionGenerationId: move.execution_generation_id, from: [move.phase], to: move.phase, adoptDaemonGeneration: this.singleton.currentGeneration });
       }
       const advance = async (from: DaemonRoomMoveRecord["phase"], to: DaemonRoomMoveRecord["phase"], extra: Partial<Pick<DaemonRoomMoveRecord, "remote_room_id" | "destination_cursor" | "error">> = {}) => {
         move = await this.store.advanceRoomMove({ operationId: move!.operation_id, agentId: move!.agent_id, expectedDaemonGeneration: move!.daemon_generation, expectedExecutionGenerationId: move!.execution_generation_id, from: [from], to, remoteRoomId: extra.remote_room_id, destinationCursor: extra.destination_cursor, error: extra.error });
@@ -1323,7 +1367,8 @@ export class SupervisorDaemon {
       };
       const failFence = async (terminal: "failed" | "rollback_required", detail: string): Promise<DaemonRoomMoveRecord> => {
         await advance(move!.phase, terminal, { error: detail });
-        if (move!.effect_id) await this.supervisedInbox.completeEffect({ effect_id: move!.effect_id, error: detail });
+        if (terminal === "failed" && move!.effect_id) await this.supervisedInbox.completeEffect({ effect_id: move!.effect_id, error: detail });
+        if (terminal === "rollback_required") this.scheduleRecoveryConvergence(move!.agent_id, 1_000);
         return move!;
       };
 
@@ -1367,6 +1412,7 @@ export class SupervisorDaemon {
             await advance("joining_destination", "failed", { error: "Runtime authority changed after remote join; remote membership was rolled back to the source room." });
           } catch (error) {
             await advance("joining_destination", "rollback_required", { error: `Runtime authority changed after remote join and remote rollback failed: ${schedulerErrorDetail(error)}` });
+            this.scheduleRecoveryConvergence(move.agent_id, 1_000);
           }
           return move;
         }
@@ -1386,6 +1432,7 @@ export class SupervisorDaemon {
             await advance("joining_destination", "failed", { error: "Local membership commit lost its fence; remote membership was rolled back to the source room." });
           } catch (error) {
             await advance("joining_destination", "rollback_required", { error: `Local membership commit and remote rollback both failed: ${schedulerErrorDetail(error)}` });
+            this.scheduleRecoveryConvergence(move.agent_id, 1_000);
           }
           return move;
         }
@@ -1396,7 +1443,7 @@ export class SupervisorDaemon {
         const destination = move.remote_room_id ?? move.destination_room_id;
         if (!binding || ![move.source_room_id, destination].includes(binding.room_id) || binding.work_attempt_id !== move.work_attempt_id || binding.execution_generation_id !== move.execution_generation_id) return failFence("rollback_required", "Credential binding changed after membership commit.");
         const activating = move.activating_inbox_item_id ? await this.supervisedInbox.get(move.activating_inbox_item_id) : null;
-        await this.supervisedInbox.commitRoomMoveQueue({ agent_id: move.agent_id, old_room_id: move.source_room_id, after_fifo_sequence: activating?.fifo_sequence ?? 0 });
+        await this.supervisedInbox.commitRoomMoveQueue({ operation_id: move.operation_id, agent_id: move.agent_id, old_room_id: move.source_room_id, after_fifo_sequence: activating?.fifo_sequence ?? 0 });
         if (!await runtimeIsExact([destination])) return failFence("rollback_required", "Runtime authority changed after membership commit.");
         await advance("membership_committed", "rotating_credentials");
       }
@@ -1442,6 +1489,97 @@ export class SupervisorDaemon {
       }
       return move;
     });
+  }
+
+  /**
+   * Retryable compensation for every post-join failure. Each edge is
+   * idempotent, so a daemon crash may replay from rollback_required without
+   * inventing external success or leaving the operation as a permanent lock.
+   */
+  private async compensateRoomMoveRollback(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
+    let move = initial;
+    const destination = move.remote_room_id ?? move.destination_room_id;
+    const retry = async (detail: string): Promise<DaemonRoomMoveRecord> => {
+      move = await this.store.advanceRoomMove({
+        operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
+        expectedExecutionGenerationId: move.execution_generation_id, from: ["rollback_required"], to: "rollback_required", error: detail,
+      });
+      this.scheduleRecoveryConvergence(move.agent_id, 1_000);
+      return move;
+    };
+    this.supervisedDelivery?.pauseIngress(move.agent_id);
+    const entry = await this.store.getEntry(move.agent_id);
+    if (!entry) return move;
+    if (![move.source_room_id, destination, move.destination_room_id].includes(entry.room_id)) {
+      const detail = `Room-move rollback was superseded by operator membership ${entry.room_id}; no local membership was overwritten.`;
+      move = await this.store.advanceRoomMove({
+        operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
+        expectedExecutionGenerationId: move.execution_generation_id, from: ["rollback_required"], to: "failed", error: detail,
+      });
+      if (move.effect_id) await this.supervisedInbox.completeEffect({ effect_id: move.effect_id, error: detail });
+      return move;
+    }
+
+    const binding = await this.workerBindings.get(move.agent_id);
+    const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
+    if (!binding || !credential || ![move.source_room_id, destination, move.destination_room_id].includes(binding.room_id)) {
+      return retry("Room-move rollback is waiting for a current source-or-destination credential.");
+    }
+    if (!this.supervisedDeliveryHttp.joinRoom) return retry("Room-move rollback transport is unavailable.");
+    try {
+      const joined = await this.supervisedDeliveryHttp.joinRoom({
+        roomId: move.source_room_id, apiUrl: binding.api_url, bearer: credential, signal: AbortSignal.timeout(10_000),
+      });
+      if (joined.roomId.trim() !== move.source_room_id) throw new Error("Source rejoin returned a different canonical room identity.");
+    } catch (error) {
+      return retry(`Source-room rollback join failed and will retry: ${schedulerErrorDetail(error)}`);
+    }
+
+    await this.updateManifestEntry(move.agent_id, (current) => {
+      if (![move.source_room_id, destination, move.destination_room_id].includes(current.room_id)) return current;
+      return {
+        ...current,
+        room_id: move.source_room_id,
+        condition: "coordination_blocked",
+        last_error: "Room move rolled back; waiting for source-room credential and ingress convergence.",
+        workplace_liveness: {
+          state: "unknown", observed_at: new Date().toISOString(),
+          detail: "Source membership restored after room-move compensation.",
+        },
+        last_worker_binding: binding.room_id === move.source_room_id ? current.last_worker_binding : null,
+      };
+    });
+    const restored = await this.store.getEntry(move.agent_id);
+    if (!restored || restored.room_id !== move.source_room_id) {
+      return retry("Source-room external membership was restored, but local membership is awaiting an operator-safe retry.");
+    }
+
+    const activating = move.activating_inbox_item_id ? await this.supervisedInbox.get(move.activating_inbox_item_id) : null;
+    await this.supervisedInbox.rollbackRoomMoveIngress({
+      operation_id: move.operation_id,
+      agent_id: move.agent_id,
+      source_room_id: move.source_room_id,
+      destination_room_id: destination,
+      source_cursor_present: move.source_cursor_present,
+      source_cursor: move.source_cursor,
+      after_fifo_sequence: activating?.fifo_sequence ?? 0,
+    });
+    if (binding.room_id !== move.source_room_id) {
+      await this.workerBindings.unbind(move.agent_id, binding.agent_session_id, binding.execution_generation_id);
+      this.liveBindingIdentities.delete(move.agent_id);
+      this.cachedWorkerAuthorizations.delete(move.agent_id);
+    }
+    const grant = this.hostGrants.get(move.agent_id);
+    if (grant && grant.roomId !== move.source_room_id) this.revokeHostGrantIfCurrent(move.agent_id, grant);
+
+    const detail = "Room move failed after destination join and was durably restored to the source room.";
+    move = await this.store.advanceRoomMove({
+      operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
+      expectedExecutionGenerationId: move.execution_generation_id, from: ["rollback_required"], to: "failed", error: detail,
+    });
+    if (move.effect_id) await this.supervisedInbox.completeEffect({ effect_id: move.effect_id, error: detail });
+    void this.startSupervisedDelivery(move.agent_id).catch(() => undefined);
+    return move;
   }
 
   private async prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
@@ -1826,7 +1964,13 @@ export class SupervisorDaemon {
       healthy: true,
       protocol_version: DAEMON_PROTOCOL_VERSION,
       implementation_version: DAEMON_IMPLEMENTATION_VERSION,
-      capabilities: { room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn), agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true },
+      capabilities: {
+        room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn),
+        agent_inspector_detail_v1: true,
+        agent_inspector_settings_v1: true,
+        agent_room_move_v1: true,
+        agent_lifecycle_v1: true,
+      },
       generation: this.singleton.currentGeneration,
       pid: process.pid,
       started_at: this.startedAt,
@@ -1875,6 +2019,24 @@ export class SupervisorDaemon {
   private paramsRecord(value: unknown): Record<string, unknown> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Daemon request params must be an object.");
     return value as Record<string, unknown>;
+  }
+
+  private requiredStringParam(params: Record<string, unknown>, key: string, error: string): string {
+    const value = params[key];
+    if (typeof value !== "string" || !value.trim() || value !== value.trim()) throw new Error(error);
+    return value;
+  }
+
+  private positiveIntegerParam(params: Record<string, unknown>, key: string, error: string): number {
+    const value = params[key];
+    if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(error);
+    return value as number;
+  }
+
+  private desiredStateParam(params: Record<string, unknown>, key: string, error: string): DesiredState {
+    const value = params[key];
+    if (value !== "running" && value !== "paused" && value !== "stopped") throw new Error(error);
+    return value;
   }
 
   private paramsEntry(value: unknown): DaemonManifestEntry {
@@ -1976,6 +2138,20 @@ export class SupervisorDaemon {
       || policy === null || typeof policy !== "object" || Array.isArray(policy)) {
       return { outcome: "invalid", error: "The selected provider does not accept this model, effort, charter, permission profile, or launch policy." };
     }
+    const currentConfiguration = await this.store.getAgentConfiguration(input.entryId);
+    if (!currentConfiguration) return { outcome: "invalid", error: "The exact agent no longer exists." };
+    try {
+      resolveProviderConfigurationSnapshot({
+        provider: currentConfiguration.provider,
+        model: model === null ? null : (model as string).trim(),
+        reasoningEffort: effort as ProviderReasoningEffort,
+        permissionProfileId: profile === null ? null : (profile as string).trim(),
+        launchPolicy: policy,
+        configurationRevision: input.expectedRevision + 1,
+      });
+    } catch (error) {
+      return { outcome: "invalid", error: schedulerErrorDetail(error) };
+    }
     // Provider is deliberately absent from this mutation. A provider is bound at
     // creation and changing it would create an unfenced runtime identity.
     return this.serializeManifestMutation(async () => {
@@ -2020,8 +2196,11 @@ export class SupervisorDaemon {
           return { outcome: "invalid" as const, error: schedulerErrorDetail(error) };
         }
       }
-      if (purge.daemon_generation !== daemonGeneration || (credentialsRevoked && purge.phase === "revoking_credentials")) {
-        purge = await this.store.markPurgeCredentialsRevoked({ operationId, agentId: entryId, expectedDaemonGeneration: purge.daemon_generation, adoptDaemonGeneration: daemonGeneration });
+      if (purge.daemon_generation !== daemonGeneration) {
+        purge = await this.store.adoptPurgeDaemonGeneration({ operationId, agentId: entryId, expectedDaemonGeneration: purge.daemon_generation, daemonGeneration });
+      }
+      if (credentialsRevoked && purge.phase === "revoking_credentials") {
+        purge = await this.store.markPurgeCredentialsRevoked({ operationId, agentId: entryId, expectedDaemonGeneration: daemonGeneration });
       }
       if (purge.phase === "revoking_credentials") return { outcome: "revocation_required" as const, operation_id: operationId };
       if (purge.phase === "complete") return { outcome: "purged" as const };
@@ -3135,6 +3314,14 @@ export class SupervisorDaemon {
       }
       const launchConfiguration = await this.store.getAgentConfiguration(entry.id);
       if (!launchConfiguration) throw new Error("Agent configuration disappeared before provider launch.");
+      const launchSnapshot = resolveProviderConfigurationSnapshot({
+        provider: launchConfiguration.provider,
+        model: launchConfiguration.model,
+        reasoningEffort: launchConfiguration.reasoning_effort ?? null,
+        permissionProfileId: launchConfiguration.permission_profile_id,
+        launchPolicy: launchConfiguration.provider_launch_policy,
+        configurationRevision: launchConfiguration.config_revision,
+      });
       const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
       const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
       if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
@@ -3147,12 +3334,12 @@ export class SupervisorDaemon {
         workAttemptId: attempt.work_attempt_id,
         roomId: entry.room_id,
         cwd: attempt.workspace_path,
-        launchPolicy: entry.provider_launch_policy ?? {},
-        provider: entry.provider,
-        model: launchConfiguration.model,
-        reasoningEffort: launchConfiguration.reasoning_effort ?? null,
-        permissionProfileId: launchConfiguration.permission_profile_id,
-        configurationRevision: launchConfiguration.config_revision,
+        launchPolicy: launchSnapshot.launchPolicy,
+        provider: launchSnapshot.provider,
+        model: launchSnapshot.model,
+        reasoningEffort: launchSnapshot.reasoningEffort,
+        permissionProfileId: launchSnapshot.permissionProfileId,
+        configurationRevision: launchSnapshot.configurationRevision,
         deliveryMode: entry.delivery_mode ?? "mcp_polling",
         agentDisplayName: entry.display_name,
         actionId: `manifest:${entry.id}:generation:${generationNumber}`,
@@ -3183,6 +3370,13 @@ export class SupervisorDaemon {
               ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
               : await this.providerPort.spawn(spawn);
             providerDispatched = true;
+            // This check is synchronous with the native return: an adapter
+            // that cannot attest the exact snapshot is still an unjournaled
+            // provider and is fenced by the cleanup path below. It never
+            // becomes an attachable continuation under ambiguous authority.
+            if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision) {
+              throw new Error("Provider launch did not attest the complete configuration snapshot.");
+            }
             await this.persistDispatchedProvider(
               dispatchReservation.token, entry.id, handle, execution.execution_generation_id,
             );
@@ -3193,7 +3387,7 @@ export class SupervisorDaemon {
             const applied = await this.store.markRuntimeConfigurationApplied(this.manifestGeneration, {
               agentId: entry.id,
               executionGenerationId: execution.execution_generation_id,
-              appliedRevision: launchConfiguration.config_revision,
+              appliedRevision: launchSnapshot.configurationRevision,
             }, (commit) => this.fenceDaemonCommit(commit));
             this.manifestGeneration = applied.generation;
             await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });

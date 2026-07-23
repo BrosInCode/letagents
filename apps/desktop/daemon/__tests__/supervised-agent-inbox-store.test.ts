@@ -118,7 +118,7 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
   } finally { await env.cleanup(); }
 });
 
-test("room move cancels only later old-room work and clears old ingress authority", async () => {
+test("room move compensation restores only its source queue and exact pre-move cursor idempotently", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
     await store.bootstrapCursor({ agent_id: "mover", room_id: "old-room", last_observed_message_id: "9" });
@@ -134,12 +134,27 @@ test("room move cancels only later old-room work and clears old ingress authorit
     await store.checkpointTurnStarted(current!.inbox_item_id, "turn-move");
     await store.transition(current!.inbox_item_id, "awaiting_result");
     await store.transition(current!.inbox_item_id, "acknowledged_no_reply");
-    const cancelled = await store.commitRoomMoveQueue({ agent_id: "mover", old_room_id: "old-room", after_fifo_sequence: current!.fifo_sequence });
+    const cancelled = await store.commitRoomMoveQueue({ operation_id: "move_1", agent_id: "mover", old_room_id: "old-room", after_fifo_sequence: current!.fifo_sequence });
     assert.equal(cancelled, 1);
     assert.equal((await store.get(later!.inbox_item_id))?.state, "cancelled_by_room_move");
     assert.equal((await store.receipts("mover"))[1]?.timeline.at(-1)?.phase, "room_move_cancelled");
     assert.equal(await store.cursor("mover"), null);
     assert.equal(await store.ingressHealth("mover"), null);
+    await store.commitRoomMoveCursor({ agent_id: "mover", source_room_id: "old-room", destination_room_id: "new-room", last_observed_message_id: "40" });
+    const restored = await store.rollbackRoomMoveIngress({
+      operation_id: "move_1", agent_id: "mover", source_room_id: "old-room", destination_room_id: "new-room",
+      source_cursor_present: true, source_cursor: "11", after_fifo_sequence: current!.fifo_sequence,
+    });
+    assert.equal(restored, 1);
+    assert.equal((await store.get(current!.inbox_item_id))?.state, "acknowledged_no_reply");
+    assert.equal((await store.get(later!.inbox_item_id))?.state, "pending");
+    assert.equal((await store.cursor("mover"))?.room_id, "old-room");
+    assert.equal((await store.cursor("mover"))?.last_observed_message_id, "11");
+    assert.equal((await store.receipts("mover"))[1]?.timeline.at(-1)?.phase, "retry_scheduled");
+    assert.equal(await store.rollbackRoomMoveIngress({
+      operation_id: "move_1", agent_id: "mover", source_room_id: "old-room", destination_room_id: "new-room",
+      source_cursor_present: true, source_cursor: "11", after_fifo_sequence: current!.fifo_sequence,
+    }), 0, "a crash replay cannot enqueue the restored message twice");
     await store.close();
   } finally { await env.cleanup(); }
 });
