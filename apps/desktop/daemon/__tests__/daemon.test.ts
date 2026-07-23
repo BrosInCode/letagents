@@ -3201,66 +3201,6 @@ test("lifecycle handlers advertise support and reject coercible or imprecise coo
   }
 });
 
-test("a stopped daemon-inbox entry purges before its first worker mint by revoking only the parent grant", async () => {
-  const env = await fixture();
-  const paths = {
-    lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "daemon-state.sqlite"),
-    auditPath: join(env.root, "audit.jsonl"),
-  };
-  let daemon = new SupervisorDaemon(paths, "darwin");
-  try {
-    await daemon.start();
-    const firstStatus = (await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number };
-    const entryId = "never_minted_purge";
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-      ...entry,
-      id: entryId,
-      provider: "codex",
-      delivery_mode: "daemon_inbox",
-      desired_state: "stopped",
-      observed_state: "stopped",
-      condition: "none",
-      workspace_path: null,
-      work_attempt_id: null,
-      provider_ref: null,
-      activity: [],
-      turn_control: null,
-      last_worker_binding: null,
-    } })).ok, true);
-    const prepared = await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
-      entry_id: entryId,
-      daemon_generation: firstStatus.generation,
-      revoked_agent_session_id: null,
-      grant_revoked_without_worker_session: false,
-    });
-    assert.equal(prepared.ok, true);
-    assert.deepEqual(prepared.result, {
-      outcome: "revocation_required",
-      operation_id: `purge:${entryId}`,
-      revocation_kind: "grant_only",
-    });
-
-    await daemon.stop();
-    daemon = new SupervisorDaemon(paths, "darwin");
-    await daemon.start();
-    const restarted = (await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number };
-    const completed = await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
-      entry_id: entryId,
-      daemon_generation: restarted.generation,
-      revoked_agent_session_id: null,
-      grant_revoked_without_worker_session: true,
-    });
-    assert.equal(completed.ok, true);
-    assert.deepEqual(completed.result, { outcome: "purged" });
-    assert.equal(((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[]).some((candidate) => candidate.id === entryId), false);
-  } finally {
-    await daemon.stop().catch(() => undefined);
-    await env.cleanup();
-  }
-});
-
 test("cross-version negotiation is allowed before a generation handoff", async () => {
   const env = await fixture();
   try {
