@@ -138,7 +138,7 @@ test("worker-authenticated activation ingress deduplicates replay and publishes 
     const polls: unknown[] = []; const published: string[] = [];
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "hello" })), {
       poll: async (input) => { polls.push(input); return { messages: [{ id: "1", activation: { for_current_agent: { decision: "activate", reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
-      publish: async (input) => { published.push(input.clientMessageId); },
+      publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
     }, currentAuthority, 0);
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
@@ -323,7 +323,7 @@ test("a publish retry reuses the persisted terminal reply without rerunning the 
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let turns = 0; let publishes = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), { poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }), publish: async () => { if (++publishes === 1) throw new Error("crash before ack"); } }, currentAuthority, 0);
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), { poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }), publish: async (input) => { if (++publishes === 1) throw new Error("crash before ack"); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; } }, currentAuthority, 0);
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(turns, 1); assert.equal(publishes, 2);
     assert.equal((await store.receipts("stone"))[0]?.state, "acknowledged");
@@ -632,7 +632,7 @@ test("rebind waits for an old provider turn, recovers its interrupted FIFO head,
       return { turnId: `turn:${turns}`, outcome: "no_reply", text: null };
     }), {
       poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
-      publish: async () => { published += 1; },
+      publish: async (input) => { published += 1; return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
     }, currentAuthority);
     await delivery.pump(agent);
     await ingest(store, "1"); await ingest(store, "2");
@@ -803,7 +803,7 @@ test("startup recovery publishes durable work before a hanging first poll settle
       poll: ({ signal }) => new Promise((resolve) => {
         pollEntered.resolve(); signal.addEventListener("abort", () => resolve({}), { once: true });
       }),
-      publish: async () => { published += 1; },
+      publish: async (input) => { published += 1; return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
     }, currentAuthority);
     void delivery.start(agent);
     await waitFor(() => published === 1);
@@ -1246,7 +1246,7 @@ test("startup recovery republishes a durable publishing outcome without rerunnin
     await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn", outcome: JSON.stringify({ kind: "reply", text: "durable" }) });
     await store.transition(item.inbox_item_id, "publishing");
     let turns = 0; const published: string[] = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; throw new Error("provider must not rerun"); }), { poll: async () => ({}), publish: async ({ clientMessageId }) => { published.push(clientMessageId); } }, currentAuthority);
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; throw new Error("provider must not rerun"); }), { poll: async () => ({}), publish: async ({ clientMessageId, roomId }) => { published.push(clientMessageId); return { messageId: `msg:${clientMessageId}`, roomId }; } }, currentAuthority);
     await delivery.pump(agent);
     assert.equal(turns, 0); assert.deepEqual(published, [item.reply_client_message_id]);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
@@ -1260,7 +1260,7 @@ test("startup recovery treats a dispatching durable terminal outcome as republis
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite")); const item = await enqueue(store);
     await store.checkpointTerminalOutcome(item.inbox_item_id, JSON.stringify({ kind: "reply", text: "durable" }));
     let turns = 0; const published: string[] = [];
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; throw new Error("provider must not rerun"); }), { poll: async () => ({}), publish: async ({ clientMessageId }) => { published.push(clientMessageId); } }, currentAuthority);
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => { turns += 1; throw new Error("provider must not rerun"); }), { poll: async () => ({}), publish: async ({ clientMessageId, roomId }) => { published.push(clientMessageId); return { messageId: `msg:${clientMessageId}`, roomId }; } }, currentAuthority);
     await delivery.pump(agent);
     assert.equal(turns, 0); assert.deepEqual(published, [item.reply_client_message_id]);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
@@ -1297,7 +1297,7 @@ test("startup recovery reattaches only a persisted exact provider turn and block
     const delivery = new SupervisedAgentDelivery(store, provider(
       async () => { newTurns += 1; throw new Error("must not rerun"); },
       async (_handle, request) => { recoveries += 1; assert.equal(request.providerTurnId, "turn-exact"); return { turnId: "turn-exact", outcome: "reply", text: "recovered" }; },
-    ), { poll: async () => ({}), publish: async (input) => { published.push(input.text); } }, currentAuthority, 0);
+    ), { poll: async () => ({}), publish: async (input) => { published.push(input.text); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; } }, currentAuthority, 0);
     await delivery.pump(agent);
     assert.equal(recoveries, 1); assert.equal(newTurns, 0); assert.deepEqual(published, ["recovered"]);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");

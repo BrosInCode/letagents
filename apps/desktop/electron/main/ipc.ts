@@ -1084,6 +1084,13 @@ export function registerDesktopIpcHandlers(
     "desktop:supervisor:read-attempt",
     async (_event, id: string): Promise<DesktopSupervisorAttemptDetail> => supervisorDaemonClient.readAttempt(id),
   );
+  targetIpcMain.handle(
+    "desktop:supervisor:get-agent-inspector-detail",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorAgentInspectorDetailInput): Promise<import("../ipc-types.js").DesktopSupervisorAgentInspectorDetail> => {
+      if (isDesktopSmokeCheck()) throw new Error("Agent inspector detail history is unavailable in the desktop smoke environment.");
+      return supervisorDaemonClient.getAgentInspectorDetail(input);
+    },
+  );
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;
     onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));

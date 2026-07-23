@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 7;
+export const DAEMON_STATE_SCHEMA_VERSION = 8;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -55,11 +55,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV6ToV7(database);
     return;
   }
+  if (existingVersion === 7) {
+    this.migrateV7ToV8(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV7Shape(database);
+    this.repairAndValidateV8Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -334,6 +338,8 @@ createSchema(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.applyV7Shape(database);
     this.validateV7Shape(database);
+    this.applyV8Shape(database);
+    this.validateV8Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -536,6 +542,8 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateBoundedDeliveryV6Shape(database);
     this.applyV7Shape(database);
     this.validateV7Shape(database);
+    this.applyV8Shape(database);
+    this.validateV8Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -544,6 +552,99 @@ migrateV6ToV7(database: DatabaseSync): void {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
   }
+}
+
+/** V8 is an additive, transactionally versioned inspector-history upgrade. */
+migrateV7ToV8(database: DatabaseSync): void {
+  // First repair exactly the v7 additive shape. This preserves the prior
+  // fail-closed scrub guard before the new version marker is advanced.
+  this.repairAndValidateV7Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV7Shape(database);
+    this.applyV8Shape(database);
+    this.validateV8Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+private applyV8Shape(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS supervised_agent_publications (
+      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      client_message_id TEXT NOT NULL,
+      canonical_message_id TEXT NOT NULL,
+      published_at TEXT NOT NULL,
+      UNIQUE(room_id,client_message_id),
+      UNIQUE(room_id,canonical_message_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS supervised_agent_publications_agent_room
+      ON supervised_agent_publications(agent_id,room_id);
+    CREATE TABLE IF NOT EXISTS supervised_agent_history_boundaries (
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      earliest_retained_observed_message_id TEXT,
+      earliest_retained_inbox_message_id TEXT,
+      earliest_retained_receipt_sequence INTEGER,
+      pruned_before_message_id TEXT,
+      pruned_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(agent_id,room_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS supervised_agent_history_boundaries_updated
+      ON supervised_agent_history_boundaries(agent_id,updated_at);
+    CREATE TABLE IF NOT EXISTS supervised_agent_pruned_sources (
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      pruned_at TEXT NOT NULL,
+      PRIMARY KEY(agent_id,room_id,source_message_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS supervised_agent_pruned_sources_retention
+      ON supervised_agent_pruned_sources(agent_id,pruned_at,source_message_id);
+  `);
+}
+
+private validateV8Shape(database: DatabaseSync): void {
+  const canonical: Record<string, string> = {
+    supervised_agent_publications: `CREATE TABLE supervised_agent_publications (inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,agent_id TEXT NOT NULL,room_id TEXT NOT NULL,client_message_id TEXT NOT NULL,canonical_message_id TEXT NOT NULL,published_at TEXT NOT NULL,UNIQUE(room_id,client_message_id),UNIQUE(room_id,canonical_message_id)) STRICT`,
+    supervised_agent_history_boundaries: `CREATE TABLE supervised_agent_history_boundaries (agent_id TEXT NOT NULL,room_id TEXT NOT NULL,earliest_retained_observed_message_id TEXT,earliest_retained_inbox_message_id TEXT,earliest_retained_receipt_sequence INTEGER,pruned_before_message_id TEXT,pruned_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(agent_id,room_id)) STRICT`,
+    supervised_agent_pruned_sources: `CREATE TABLE supervised_agent_pruned_sources (agent_id TEXT NOT NULL,room_id TEXT NOT NULL,source_message_id TEXT NOT NULL,pruned_at TEXT NOT NULL,PRIMARY KEY(agent_id,room_id,source_message_id)) STRICT`,
+  };
+  const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replaceAll('"', "").replaceAll("`", "").replaceAll("[", "").replaceAll("]", "").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").replace(/\)\s*strict$/i, ")strict").trim().toLowerCase();
+  for (const [table, expected] of Object.entries(canonical)) {
+    const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
+    if (!actual || normalizeSql(String(actual.sql)) !== normalizeSql(expected)) throw new Error(`Daemon state v8 table ${table} does not match its canonical definition.`);
+    const info = (database.prepare("PRAGMA table_list").all() as Row[]).find((row) => row.name === table && row.type === "table");
+    if (!info || Number(info.strict) !== 1 || Number(info.wr) !== 0) throw new Error(`Daemon state v8 table ${table} has an invalid strict schema.`);
+  }
+  const indexes: Record<string, { table: string; unique: number; columns: string[] }> = {
+    supervised_agent_publications_agent_room: { table: "supervised_agent_publications", unique: 0, columns: ["agent_id", "room_id"] },
+    supervised_agent_history_boundaries_updated: { table: "supervised_agent_history_boundaries", unique: 0, columns: ["agent_id", "updated_at"] },
+    supervised_agent_pruned_sources_retention: { table: "supervised_agent_pruned_sources", unique: 0, columns: ["agent_id", "pruned_at", "source_message_id"] },
+  };
+  for (const [name, expected] of Object.entries(indexes)) {
+    const listed = (database.prepare(`PRAGMA index_list(${expected.table})`).all() as Row[]).find((row) => row.name === name);
+    const terms = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Row[]).filter((row) => Number(row.key) === 1).sort((a, b) => Number(a.seqno) - Number(b.seqno));
+    if (!listed || Number(listed.unique) !== expected.unique || Number(listed.partial) !== 0 || String(listed.origin) !== "c" || terms.length !== expected.columns.length || terms.some((term, index) => Number(term.cid) < 0 || term.name !== expected.columns[index] || Number(term.desc) !== 0 || String(term.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v8 index ${name} is invalid.`);
+  }
+}
+
+repairAndValidateV8Shape(database: DatabaseSync): void {
+  const needsRepair = !this.tableColumns(database, "supervised_agent_publications").size || !this.tableColumns(database, "supervised_agent_history_boundaries").size || !this.tableColumns(database, "supervised_agent_pruned_sources").size;
+  // Preserve v7's security scrub and shape-repair guards before accepting v8.
+  if (!needsRepair) { this.repairAndValidateV7Shape(database); this.validateV8Shape(database); return; }
+  database.exec("BEGIN IMMEDIATE");
+  try { this.validateV7Shape(database); this.applyV8Shape(database); this.validateV8Shape(database); database.exec("COMMIT"); }
+  catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
 }
 
 /**
@@ -566,6 +667,8 @@ private migrateWorkerShapeToV6(database: DatabaseSync): boolean {
   if (this.tableColumns(database, "supervised_agent_terminal_results").size) {
     if (requiresScrub) this.applyV6Shape(database);
     this.validateV7Shape(database);
+    this.applyV8Shape(database);
+    this.validateV8Shape(database);
     return requiresScrub;
   }
   this.applyV6Shape(database);
@@ -574,6 +677,8 @@ private migrateWorkerShapeToV6(database: DatabaseSync): boolean {
   this.validateBoundedDeliveryV6Shape(database);
   this.applyV7Shape(database);
   this.validateV7Shape(database);
+  this.applyV8Shape(database);
+  this.validateV8Shape(database);
   return requiresScrub;
 }
 
