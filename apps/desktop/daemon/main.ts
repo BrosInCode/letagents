@@ -117,6 +117,11 @@ function retryableWorkerMintFailure(error: unknown): boolean {
   return error.status >= 500 || [408, 425, 429].includes(error.status);
 }
 
+function authoritativeRoomJoinRejection(error: unknown): boolean {
+  return error instanceof SupervisorGrantRequestError
+    && [400, 401, 403, 404, 409, 422].includes(error.status);
+}
+
 class WorkerCredentialMintError extends Error {
   constructor(
     readonly attempts: number,
@@ -815,6 +820,26 @@ export class SupervisorDaemon {
           daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
         });
       }
+      if (request.method === "supervisor.acknowledge_room_move_source_revocation") {
+        const params = this.paramsRecord(request.params);
+        const error = "Room-move credential acknowledgement requires exact typed coordinates.";
+        return this.acknowledgeInspectorRoomMoveSourceRevocation({
+          operationId: this.requiredStringParam(params, "operation_id", error),
+          entryId: this.requiredStringParam(params, "entry_id", error),
+          sourceAgentSessionId: this.requiredStringParam(params, "source_agent_session_id", error),
+          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
+        });
+      }
+      if (request.method === "supervisor.rollback_room_move") {
+        const params = this.paramsRecord(request.params);
+        const error = "Room-move rollback requires exact typed coordinates.";
+        return this.rollbackInspectorRoomMove({
+          operationId: this.requiredStringParam(params, "operation_id", error),
+          entryId: this.requiredStringParam(params, "entry_id", error),
+          detail: this.requiredStringParam(params, "error", error),
+          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
+        });
+      }
       if (request.method === "supervisor.get_room_move") {
         const params = this.paramsRecord(request.params);
         const error = "Room-move status requires exact typed coordinates.";
@@ -1356,8 +1381,8 @@ export class SupervisorDaemon {
         if (phase === "rollback_required") this.scheduleRecoveryConvergence(move.agent_id, 1_000);
         return move;
       }
-      const advance = async (from: DaemonRoomMoveRecord["phase"], to: DaemonRoomMoveRecord["phase"], extra: Partial<Pick<DaemonRoomMoveRecord, "remote_room_id" | "destination_cursor" | "error">> = {}) => {
-        move = await this.store.advanceRoomMove({ operationId: move!.operation_id, agentId: move!.agent_id, expectedDaemonGeneration: move!.daemon_generation, expectedExecutionGenerationId: move!.execution_generation_id, from: [from], to, remoteRoomId: extra.remote_room_id, destinationCursor: extra.destination_cursor, error: extra.error });
+      const advance = async (from: DaemonRoomMoveRecord["phase"], to: DaemonRoomMoveRecord["phase"], extra: Partial<Pick<DaemonRoomMoveRecord, "remote_room_id" | "destination_cursor" | "source_credentials_revoked" | "error">> = {}) => {
+        move = await this.store.advanceRoomMove({ operationId: move!.operation_id, agentId: move!.agent_id, expectedDaemonGeneration: move!.daemon_generation, expectedExecutionGenerationId: move!.execution_generation_id, from: [from], to, remoteRoomId: extra.remote_room_id, destinationCursor: extra.destination_cursor, sourceCredentialsRevoked: extra.source_credentials_revoked, error: extra.error });
       };
       const runtimeIsExact = async (roomIds: readonly string[]): Promise<boolean> => {
         if (!await this.ownsDaemonGeneration(move!.daemon_generation)) return false;
@@ -1400,11 +1425,22 @@ export class SupervisorDaemon {
           remoteRoomId = (await this.supervisedDeliveryHttp.joinRoom({ roomId: move.destination_room_id, apiUrl: binding.api_url, bearer: credential, signal: AbortSignal.timeout(10_000) })).roomId.trim();
           if (!remoteRoomId || remoteRoomId === move.source_room_id || remoteRoomId.length > 1_024 || /[\u0000-\u001f\u007f]/.test(remoteRoomId)) throw new Error("Destination join response omitted a valid distinct canonical room identity.");
         } catch (error) {
-          await advance("joining_destination", "failed", { error: `Destination join failed before local membership changed: ${schedulerErrorDetail(error)}` });
+          if (!authoritativeRoomJoinRejection(error)) {
+            await advance("joining_destination", "joining_destination", { error: `Destination join outcome was ambiguous and will retry: ${schedulerErrorDetail(error)}` });
+            this.scheduleRecoveryConvergence(move.agent_id, 1_000);
+            return move;
+          }
+          await advance("joining_destination", "failed", { error: `Destination join was authoritatively rejected before local membership changed: ${schedulerErrorDetail(error)}` });
           if (move.effect_id) await this.supervisedInbox.completeEffect({ effect_id: move.effect_id, error: move.error ?? undefined });
           void this.startSupervisedDelivery(move.agent_id).catch(() => undefined);
           return move;
         }
+        // The join target can be an alias while the server returns a
+        // different canonical room id. Journal that canonical identity before
+        // changing the manifest. A crash after local membership then replays
+        // from joining_destination with enough durable evidence to recognize
+        // the canonical room instead of falsely terminalizing the move.
+        await advance("joining_destination", "joining_destination", { remote_room_id: remoteRoomId });
         entry = await this.store.getEntry(move.agent_id);
         if (!entry || entry.work_attempt_id !== move.work_attempt_id || entry.provider_ref?.execution_generation_id !== move.execution_generation_id) {
           try {
@@ -1448,24 +1484,21 @@ export class SupervisorDaemon {
         await advance("membership_committed", "rotating_credentials");
       }
       if (move.phase === "rotating_credentials") {
-        const oldBinding = await this.workerBindings.get(move.agent_id);
-        const oldGrant = this.hostGrants.get(move.agent_id) ?? null;
-        const oldSessionId = move.agent_session_id ?? (oldBinding?.room_id === move.source_room_id ? oldBinding.agent_session_id : null);
-        if (oldSessionId && oldGrant?.roomId === move.source_room_id && this.supervisorGrantHttp.endWorkerSession) {
-          try {
-            await this.supervisorGrantHttp.endWorkerSession({ apiUrl: oldGrant.apiUrl, grantId: oldGrant.grantId, supervisorGrant: oldGrant.supervisorGrant, grantGeneration: oldGrant.grantGeneration, sessionId: oldSessionId });
-          } catch (error) {
-            // Credential revocation is a durable phase, so a failed external
-            // call is retried and destination authority is never activated.
-            throw new Error(`Old room credential revocation failed: ${schedulerErrorDetail(error)}`);
-          }
-        }
-        if (!await runtimeIsExact([move.remote_room_id ?? move.destination_room_id])) return failFence("rollback_required", "Runtime authority changed during credential rotation.");
-        if (oldBinding?.room_id === move.source_room_id) await this.workerBindings.unbind(move.agent_id, oldBinding.agent_session_id, oldBinding.execution_generation_id);
-        this.liveBindingIdentities.delete(move.agent_id);
-        if (oldGrant) this.revokeHostGrantIfCurrent(move.agent_id, oldGrant);
+        const destination = move.remote_room_id ?? move.destination_room_id;
+        if (!await runtimeIsExact([destination])) return failFence("rollback_required", "Runtime authority changed during credential rotation.");
+        // Process memory is not durable revocation evidence. Electron owns the
+        // parent grant and must first acknowledge revocation of the exact
+        // journalled source session, then install a destination-scoped grant
+        // into this same daemon generation.
+        if (!move.source_credentials_revoked || !move.agent_session_id) return move;
+        const binding = await this.workerBindings.get(move.agent_id);
+        const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
+        const grant = this.hostGrants.get(move.agent_id) ?? null;
+        if (!binding || !credential || binding.room_id !== destination
+          || binding.work_attempt_id !== move.work_attempt_id || binding.execution_generation_id !== move.execution_generation_id
+          || !grant || grant.entryId !== move.agent_id || grant.roomId !== destination
+          || grant.daemonGeneration !== move.daemon_generation) return move;
         await advance("rotating_credentials", "bootstrapping_destination_tail");
-        this.requestConvergence(move.agent_id);
       }
       if (move.phase === "bootstrapping_destination_tail") {
         const current = await this.store.getEntry(move.agent_id);
@@ -1613,6 +1646,65 @@ export class SupervisorDaemon {
     const move = await this.store.getRoomMove(input.operationId);
     if (!move || move.agent_id !== input.entryId) throw new Error("Unknown room-move operation for this agent.");
     return this.reconcileRoomMove(move);
+  }
+
+  private async acknowledgeInspectorRoomMoveSourceRevocation(input: { operationId: string; entryId: string; sourceAgentSessionId: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
+    if (!input.operationId.trim() || !input.entryId.trim() || !input.sourceAgentSessionId.trim()
+      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) {
+      throw new Error("Room-move credential acknowledgement is stale or invalid.");
+    }
+    return this.serializeEntryTick(input.entryId, async () => {
+      await this.singleton.assertCurrent();
+      const move = await this.store.getRoomMove(input.operationId);
+      if (!move || move.agent_id !== input.entryId) throw new Error("Unknown room-move operation for this agent.");
+      if (move.agent_session_id !== input.sourceAgentSessionId) throw new Error("Room-move credential acknowledgement does not match the exact source session.");
+      if (move.source_credentials_revoked) return move;
+      if (move.phase !== "rotating_credentials") throw new Error("Room-move source credentials can only be acknowledged during credential rotation.");
+      return this.store.advanceRoomMove({
+        operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
+        expectedExecutionGenerationId: move.execution_generation_id, from: ["rotating_credentials"], to: "rotating_credentials",
+        sourceCredentialsRevoked: true,
+      });
+    });
+  }
+
+  private async rollbackInspectorRoomMove(input: { operationId: string; entryId: string; detail: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
+    if (!input.operationId.trim() || !input.entryId.trim() || !input.detail.trim()
+      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) {
+      throw new Error("Room-move rollback is stale or invalid.");
+    }
+    return this.serializeEntryTick(input.entryId, async () => {
+      await this.singleton.assertCurrent();
+      let move = await this.store.getRoomMove(input.operationId);
+      if (!move || move.agent_id !== input.entryId) throw new Error("Unknown room-move operation for this agent.");
+      if (["active", "failed"].includes(move.phase)) return move;
+      if (move.phase !== "rollback_required") {
+        if (!["membership_committed", "rotating_credentials", "bootstrapping_destination_tail"].includes(move.phase)) {
+          throw new Error("Room move cannot be rolled back before destination membership commits.");
+        }
+        move = await this.store.advanceRoomMove({
+          operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
+          expectedExecutionGenerationId: move.execution_generation_id, from: [move.phase], to: "rollback_required",
+          error: `Destination credential preparation failed: ${schedulerErrorDetail(new Error(input.detail))}`,
+        });
+      }
+      // Journal rollback_required before restoring local source membership, so
+      // a crash can never make the source manifest look like a fresh move.
+      const destination = move.remote_room_id ?? move.destination_room_id;
+      await this.updateManifestEntry(move.agent_id, (current) => {
+        if (![move.source_room_id, destination, move.destination_room_id].includes(current.room_id)) return current;
+        return {
+          ...current, room_id: move.source_room_id, condition: "coordination_blocked",
+          last_error: "Room move rollback is waiting for source-room owner authority.",
+          workplace_liveness: {
+            state: "unknown", observed_at: new Date().toISOString(),
+            detail: "Destination credential preparation failed; source authority is being restored.",
+          },
+          last_worker_binding: current.room_id === move.source_room_id ? current.last_worker_binding : null,
+        };
+      });
+      return move;
+    });
   }
 
   private async getInspectorRoomMove(input: { operationId: string; entryId: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {

@@ -11,7 +11,7 @@ import {
 } from "./supervisor-grant.js";
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
 import { getJoinedRoomInfo } from "./rooms/room-info.js";
-import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry } from "../ipc-types.js";
+import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
 type GrantResponse = {
   grant_id: string;
@@ -222,6 +222,59 @@ export class SupervisorGrantCoordinator {
     await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntry(entryId, { apiFetch: this.request }));
   }
 
+  /**
+   * Rotate owner authority to the canonical destination, durably acknowledge
+   * revocation of the exact source session, then bind the destination bearer
+   * into the same daemon generation. Every step is restart-idempotent.
+   */
+  async prepareRoomMoveDestination(move: DesktopSupervisorRoomMove): Promise<void> {
+    await this.serialize(move.entryId, async () => {
+      if (move.phase !== "rotating_credentials" || !move.agentSessionId) {
+        throw new Error("Room move is not waiting on an exact source-session credential rotation.");
+      }
+      const status = await this.daemon.ensureRunning();
+      if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move credential rotation.");
+      const destination = move.remoteRoomId ?? move.destinationRoomId;
+      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
+      if (!entry || entry.roomId !== destination || entry.workAttemptId !== move.workAttemptId
+        || entry.executionGenerationId !== move.executionGenerationId) {
+        throw new Error("Room-move destination no longer matches the exact live provider generation.");
+      }
+      const { agentKey, grant } = await this.exactGrantForRoom(entry, destination, status.generation, false);
+      try {
+        await this.daemon.acknowledgeRoomMoveSourceRevocation({
+          operationId: move.operationId, entryId: move.entryId, daemonGeneration: status.generation,
+          sourceAgentSessionId: move.agentSessionId,
+        });
+      } catch (error) {
+        // The socket response can be lost after the daemon commits the exact
+        // acknowledgement. Read the durable journal before deciding that
+        // destination preparation failed and needs source compensation.
+        const recovered = await this.daemon.getRoomMove({
+          operationId: move.operationId, entryId: move.entryId, daemonGeneration: status.generation,
+        }).catch(() => null);
+        if (!recovered?.sourceCredentialsRevoked) throw error;
+      }
+      await this.install(entry, agentKey, grant, status.generation, true);
+    });
+  }
+
+  /** Restore exact source-room owner authority before daemon compensation. */
+  async prepareRoomMoveSourceRollback(move: DesktopSupervisorRoomMove): Promise<void> {
+    await this.serialize(move.entryId, async () => {
+      if (move.phase !== "rollback_required") throw new Error("Room move is not awaiting source-room rollback.");
+      const status = await this.daemon.ensureRunning();
+      if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move rollback.");
+      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
+      if (!entry || entry.roomId !== move.sourceRoomId || entry.workAttemptId !== move.workAttemptId
+        || entry.executionGenerationId !== move.executionGenerationId) {
+        throw new Error("Room-move rollback no longer matches the exact source provider generation.");
+      }
+      const { agentKey, grant } = await this.exactGrantForRoom(entry, move.sourceRoomId, status.generation, true);
+      await this.install(entry, agentKey, grant, status.generation, true);
+    });
+  }
+
   private async reconcileEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number, credentialOnly = false): Promise<void> {
     await this.serialize(entry.id, async () => {
       const agentKey = await this.operations.readEntryAgentKey(entry.id);
@@ -233,7 +286,7 @@ export class SupervisorGrantCoordinator {
         return;
       }
       const stored = await this.operations.readGrant(agentKey);
-      if (!stored || stored.entryId !== entry.id) {
+      if (!stored || stored.entryId !== entry.id || !this.grantExactlyScopes(stored, entry.roomId, agentKey)) {
         // A pre-case-preservation registry can contain a truthy but invalid
         // lowercase key. Re-resolve the deterministic server identity before
         // provisioning whenever no usable encrypted grant proves this local
@@ -271,6 +324,53 @@ export class SupervisorGrantCoordinator {
       roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision,
     }, { apiFetch: this.request });
     await this.install(entry, agentKey, grant, daemonGeneration, credentialOnly);
+  }
+
+  private grantExactlyScopes(
+    stored: NonNullable<Awaited<ReturnType<SupervisorGrantCoordinatorOperations["readGrant"]>>>,
+    roomId: string,
+    agentKey: string,
+  ): boolean {
+    return stored.metadata.allowedRoomIds.length === 1
+      && stored.metadata.allowedRoomIds[0] === roomId
+      && stored.metadata.allowedAgentKeys.length === 1
+      && stored.metadata.allowedAgentKeys[0] === agentKey
+      && Number.isFinite(Date.parse(stored.metadata.expiresAt))
+      && Date.parse(stored.metadata.expiresAt) > Date.now();
+  }
+
+  private async exactGrantForRoom(
+    entry: DesktopSupervisorManifestEntry,
+    roomId: string,
+    daemonGeneration: number,
+    alwaysReprovision: boolean,
+  ): Promise<{
+    agentKey: string;
+    grant: NonNullable<Awaited<ReturnType<SupervisorGrantCoordinatorOperations["readGrant"]>>>;
+  }> {
+    let agentKey = await this.operations.readEntryAgentKey(entry.id);
+    if (!agentKey) {
+      agentKey = await this.operations.resolveIdentity({ entryId: entry.id, displayName: entry.displayName }, { apiFetch: this.request });
+    }
+    const stored = await this.operations.readGrant(agentKey);
+    if (!alwaysReprovision && stored?.entryId === entry.id && this.grantExactlyScopes(stored, roomId, agentKey)) {
+      return { agentKey, grant: stored };
+    }
+    const grant = await this.operations.provision({
+      hostId: this.hostId(), entryId: entry.id, agentKey,
+      roomScopes: [{ requestedRoomId: roomId, canonicalRoomId: roomId }],
+      forceReprovision: true,
+    }, { apiFetch: this.request });
+    if (grant.entryId !== entry.id || !this.grantExactlyScopes(grant, roomId, agentKey)) {
+      throw new Error("Owner authority provisioning returned a grant outside the exact room-move scope.");
+    }
+    // Provision persists before returning. Retain this explicit write for
+    // injected/fake operations and to make the handoff boundary obvious.
+    await this.operations.replaceGrant({
+      agentKey, metadata: grant.metadata, token: grant.token, entryId: entry.id,
+      lastInstalledDaemonGeneration: null,
+    });
+    return { agentKey, grant };
   }
 
   private async handoffOrReprovision(

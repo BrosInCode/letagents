@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.46";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.47";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -95,6 +95,8 @@ export type DaemonRoomMoveRecord = {
   phase: DaemonRoomMovePhase;
   remote_room_id: string | null;
   destination_cursor: string | null;
+  /** Electron durably acknowledged revocation of the exact source session. */
+  source_credentials_revoked: boolean;
   /** Exact pre-move ingress authority captured by the prepare transaction. */
   source_cursor_present: boolean;
   source_cursor: string | null;

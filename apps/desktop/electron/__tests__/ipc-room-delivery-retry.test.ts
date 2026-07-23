@@ -21,6 +21,7 @@ mock.module("electron", {
 
 const { registerDesktopIpcHandlers } = await import("../main/ipc.js");
 const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
+const { supervisorGrantCoordinator } = await import("../main/supervisor-grant-coordinator.js");
 
 test("registerDesktopIpcHandlers routes exact room-delivery retries and propagates stale failures", async () => {
   const original = supervisorDaemonClient.retryRoomDelivery;
@@ -42,5 +43,90 @@ test("registerDesktopIpcHandlers routes exact room-delivery retries and propagat
     await assert.rejects(async () => { await handler!({}, exact); }, /binding is stale/);
   } finally {
     (supervisorDaemonClient as unknown as { retryRoomDelivery: typeof original }).retryRoomDelivery = original;
+  }
+});
+
+test("purge IPC never attests credentials_revoked when local revocation identity is unavailable", async () => {
+  const originalPurge = supervisorDaemonClient.purgeAgent;
+  const originalRevoke = supervisorGrantCoordinator.revokeEntryForPurge;
+  const calls: boolean[] = [];
+  try {
+    (supervisorDaemonClient as unknown as {
+      purgeAgent(entryId: string, daemonGeneration: number, credentialsRevoked?: boolean): Promise<{ outcome: "revocation_required"; operationId: string }>;
+    }).purgeAgent = async (_entryId, _daemonGeneration, credentialsRevoked = false) => {
+      calls.push(credentialsRevoked);
+      return { outcome: "revocation_required", operationId: "purge:agent_1" };
+    };
+    (supervisorGrantCoordinator as unknown as {
+      revokeEntryForPurge(entryId: string): Promise<void>;
+    }).revokeEntryForPurge = async () => {
+      throw new Error("local supervisor-grant registry is missing; local agent state was preserved");
+    };
+    const handler = handlers.get("desktop:supervisor:purge-agent");
+    assert.ok(handler, "the production IPC registration owns the purge channel");
+    await assert.rejects(
+      async () => { await handler!({}, { entryId: "agent_1", daemonGeneration: 40 }); },
+      /registry is missing.*local agent state was preserved/,
+    );
+    assert.deepEqual(calls, [false], "the daemon purge journal remains at revocation_required");
+  } finally {
+    (supervisorDaemonClient as unknown as { purgeAgent: typeof originalPurge }).purgeAgent = originalPurge;
+    (supervisorGrantCoordinator as unknown as { revokeEntryForPurge: typeof originalRevoke }).revokeEntryForPurge = originalRevoke;
+  }
+});
+
+test("room-move IPC durably requests rollback and restores source authority when destination preparation fails", async () => {
+  const daemon = supervisorDaemonClient as unknown as {
+    commitRoomMove(input: unknown): Promise<any>;
+    rollbackRoomMove(input: unknown): Promise<any>;
+  };
+  const coordinator = supervisorGrantCoordinator as unknown as {
+    prepareRoomMoveDestination(move: unknown): Promise<void>;
+    prepareRoomMoveSourceRollback(move: unknown): Promise<void>;
+  };
+  const originalCommit = daemon.commitRoomMove;
+  const originalRollback = daemon.rollbackRoomMove;
+  const originalDestination = coordinator.prepareRoomMoveDestination;
+  const originalSource = coordinator.prepareRoomMoveSourceRollback;
+  const events: string[] = [];
+  const base = {
+    operationId: "move_1", requestId: "request_1", entryId: "agent_1",
+    sourceRoomId: "room_1", destinationRoomId: "room_2", daemonGeneration: 40,
+    workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+    agentSessionId: "session_1", remoteRoomId: "room_2", destinationCursor: null,
+    sourceCredentialsRevoked: false, error: null,
+    createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+  };
+  let commits = 0;
+  try {
+    daemon.commitRoomMove = async () => {
+      commits += 1;
+      events.push(`commit:${commits}`);
+      return commits === 1 ? { ...base, phase: "rotating_credentials" } : {
+        ...base, phase: "failed", error: "source restored",
+      };
+    };
+    daemon.rollbackRoomMove = async (input) => {
+      events.push(`rollback:${(input as { error: string }).error}`);
+      return { ...base, phase: "rollback_required", error: "destination failed" };
+    };
+    coordinator.prepareRoomMoveDestination = async () => {
+      events.push("destination");
+      throw new Error("owner API unavailable");
+    };
+    coordinator.prepareRoomMoveSourceRollback = async () => { events.push("source"); };
+    registerDesktopIpcHandlers(fakeIpcMain as never);
+    const handler = handlers.get("desktop:supervisor:commit-room-move");
+    assert.ok(handler);
+    const result = await handler!({}, { operationId: "move_1", entryId: "agent_1", daemonGeneration: 40 }) as { phase: string };
+    assert.equal(result.phase, "failed");
+    assert.deepEqual(events, [
+      "commit:1", "destination", "rollback:owner API unavailable", "source", "commit:2",
+    ]);
+  } finally {
+    daemon.commitRoomMove = originalCommit;
+    daemon.rollbackRoomMove = originalRollback;
+    coordinator.prepareRoomMoveDestination = originalDestination;
+    coordinator.prepareRoomMoveSourceRollback = originalSource;
   }
 });

@@ -1097,8 +1097,37 @@ export function registerDesktopIpcHandlers(
     supervisorDaemonClient.updateAgentConfiguration(input));
   targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) =>
     supervisorDaemonClient.prepareRoomMove(input));
-  targetIpcMain.handle("desktop:supervisor:commit-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) =>
-    supervisorDaemonClient.commitRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:commit-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) => {
+    let move = await supervisorDaemonClient.commitRoomMove(input);
+    for (let step = 0; step < 4; step += 1) {
+      if (move.phase === "rotating_credentials") {
+        try {
+          await supervisorGrantCoordinator.prepareRoomMoveDestination(move);
+          move = await supervisorDaemonClient.commitRoomMove(input);
+          continue;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          move = await supervisorDaemonClient.rollbackRoomMove({ ...input, error: detail });
+          try {
+            await supervisorGrantCoordinator.prepareRoomMoveSourceRollback(move);
+            return await supervisorDaemonClient.commitRoomMove(input);
+          } catch (rollbackError) {
+            throw new Error(`Destination credential preparation failed (${detail}); source authority rollback is pending: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+          }
+        }
+      }
+      if (move.phase === "rollback_required") {
+        move = await supervisorDaemonClient.rollbackRoomMove({
+          ...input, error: move.error ?? "Resuming durable room-move rollback.",
+        });
+        await supervisorGrantCoordinator.prepareRoomMoveSourceRollback(move);
+        move = await supervisorDaemonClient.commitRoomMove(input);
+        continue;
+      }
+      return move;
+    }
+    return move;
+  });
   targetIpcMain.handle("desktop:supervisor:get-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) =>
     supervisorDaemonClient.getRoomMove(input));
   targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>

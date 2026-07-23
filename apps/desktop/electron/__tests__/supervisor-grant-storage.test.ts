@@ -112,6 +112,139 @@ test("per-entry purge revokes only its grant and removes local recovery only aft
   });
 });
 
+test("per-entry purge fails closed when the local grant registry is missing", async () => {
+  await withRegistry(async () => {
+    let requests = 0;
+    await assert.rejects(
+      revokeDesktopSupervisorGrantForEntry("entry-missing", {
+        storage: keychain,
+        apiFetch: (async () => { requests += 1; return {}; }) as never,
+      }),
+      /local supervisor-grant registry is missing.*local agent state was preserved/,
+    );
+    assert.equal(requests, 0, "an unknown remote identity must never be treated as an acknowledged revoke");
+  });
+});
+
+test("per-entry purge fails closed when either half of the exact local mapping is missing", async () => {
+  for (const missing of ["entry-agent", "agent-grant"] as const) {
+    await withRegistry(async (path) => {
+      const agentKey = `owner/${missing}`;
+      const entryId = `entry-${missing}`;
+      await replaceDesktopSupervisorGrantForAgent({
+        agentKey,
+        metadata: metadata(agentKey, missing),
+        token: `lashg_${missing}`,
+        entryId,
+      }, { storage: keychain });
+      const registry = JSON.parse(await readFile(path, "utf8")) as {
+        grants: Record<string, unknown>;
+        entryAgentKeys: Record<string, string>;
+      };
+      if (missing === "entry-agent") {
+        delete registry.entryAgentKeys[entryId];
+        delete (registry.grants[agentKey] as { entryId?: string }).entryId;
+      } else delete registry.grants[agentKey];
+      await writeFile(path, `${JSON.stringify(registry)}\n`, "utf8");
+      const before = await readFile(path, "utf8");
+
+      let requests = 0;
+      await assert.rejects(
+        revokeDesktopSupervisorGrantForEntry(entryId, {
+          storage: keychain,
+          apiFetch: (async () => { requests += 1; return {}; }) as never,
+        }),
+        missing === "entry-agent" ? /entry-to-agent mapping is missing/ : /exact local grant mapping is missing/,
+      );
+      assert.equal(requests, 0);
+      assert.equal(await readFile(path, "utf8"), before, "the remaining recovery evidence is not erased on an unprovable revoke");
+    });
+  }
+});
+
+test("per-entry purge preserves exact recovery state when the server does not acknowledge DELETE", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-server-failure";
+    const entryId = "entry-server-failure";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "server-failure"),
+      token: "lashg_server_failure",
+      entryId,
+    }, { storage: keychain });
+    const before = await readFile(path, "utf8");
+    await assert.rejects(
+      revokeDesktopSupervisorGrantForEntry(entryId, {
+        storage: keychain,
+        apiFetch: (async () => { throw new DesktopApiError(503, { error: "grant service unavailable" }); }) as never,
+      }),
+      /was not acknowledged; local recovery state was preserved/,
+    );
+    assert.equal(await readFile(path, "utf8"), before);
+    assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_server_failure");
+  });
+});
+
+test("an acknowledged already-revoked response records a durable idempotency receipt", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-idempotent";
+    const entryId = "entry-idempotent";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "idempotent"),
+      token: "lashg_idempotent",
+      entryId,
+    }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntry(entryId, {
+      storage: keychain,
+      apiFetch: (async (requestPath: string) => {
+        calls.push(requestPath);
+        throw new DesktopApiError(404, { error: "Active supervisor grant not found." });
+      }) as never,
+    });
+    assert.deepEqual(calls, ["/supervisor-host-grants/grant_idempotent"]);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null);
+    const registry = JSON.parse(await readFile(path, "utf8")) as {
+      grants: Record<string, unknown>;
+      entryAgentKeys: Record<string, string>;
+      purgeRevocationReceipts: Record<string, { agentKey: string; grantId: string; acknowledgedAt: string }>;
+    };
+    assert.deepEqual(registry.grants, {});
+    assert.deepEqual(registry.entryAgentKeys, {});
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.agentKey, agentKey);
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.grantId, "grant_idempotent");
+    assert.ok(Number.isFinite(new Date(registry.purgeRevocationReceipts[entryId]!.acknowledgedAt).getTime()));
+  });
+});
+
+test("a restart retry consumes the durable revoke receipt without repeating DELETE", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-restart-retry";
+    const entryId = "entry-restart-retry";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "restart-retry"),
+      token: "lashg_restart_retry",
+      entryId,
+    }, { storage: keychain });
+    let requests = 0;
+    await revokeDesktopSupervisorGrantForEntry(entryId, {
+      storage: keychain,
+      apiFetch: (async () => { requests += 1; return {}; }) as never,
+    });
+    assert.match(await readFile(path, "utf8"), /purgeRevocationReceipts/);
+
+    // Every call re-reads the on-disk registry, matching a fresh Electron
+    // process after DELETE succeeded but before the daemon consumed its ack.
+    await revokeDesktopSupervisorGrantForEntry(entryId, {
+      storage: keychain,
+      apiFetch: (async () => { requests += 1; throw new Error("DELETE must not repeat after a durable acknowledgement"); }) as never,
+    });
+    assert.equal(requests, 1);
+  });
+});
+
 test("identity resolution preserves server casing and repairs a lowercased legacy mapping", async () => {
   await withRegistry(async (path) => {
     const entryId = "supervised_mixed_case_owner";
