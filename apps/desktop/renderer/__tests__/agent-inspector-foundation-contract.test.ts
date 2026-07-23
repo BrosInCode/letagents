@@ -13,6 +13,7 @@ const host = source("../src/components/desktop/content/agent-inspector/AgentInsp
 const actions = source("../src/components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue");
 const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue");
 const statusSurface = source("../src/components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue");
+const participantSurface = source("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue");
 const composer = source("../src/components/desktop/content/room-chat/RoomComposer.vue");
 const chat = source("../src/components/desktop/content/RoomChatView.vue");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
@@ -31,10 +32,16 @@ test("the foundation stays dark and owns no runtime work while disabled", () => 
 });
 
 test("flag ON has one exclusive inspector for durable, external, loading, and error selections", () => {
-  assert.match(host, /projection \? AgentInspectorSurface : AgentInspectorStatusSurface/);
+  assert.match(host, /AgentInspectorParticipantSurface/);
+  assert.match(host, /projectAgentInspectorParticipant\(props\.selection, props\.managedSessions\)/);
+  assert.match(host, /surfaceComponentType/);
   assert.match(host, /selection\.kind === "resolving"/);
   assert.match(host, /unavailableReason === "load_error"/);
   assert.match(host, /selection\.kind === "external"/);
+  assert.match(participantSurface, /Room participant/);
+  assert.match(participantSurface, /useManagedAgentSessionsContext/);
+  assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
+  assert.doesNotMatch(participantSurface, /aria-live/);
   assert.doesNotMatch(activity, /v-if="selectedTruthfulAgent" class="desktop-activity-detail"/);
   assert.match(activity, /v-if="!agentInspectorFoundationEnabled && selectedLegacyTruthfulAgent"/);
   assert.match(activity, /v-else-if="!agentInspectorFoundationEnabled && selectedLiveParticipant"/);
@@ -92,6 +99,8 @@ test("Escape ownership and replacement focus stay scoped to the inspector", () =
   assert.match(host, /nextTick\(\(\) => surfaceComponent\.value\?\.focusInitial\(\)\)/);
   assert.match(surface, /defineExpose\(\{ focusInitial, containsFocus \}\)/);
   assert.match(statusSurface, /defineExpose\(\{ focusInitial, containsFocus \}\)/);
+  assert.match(participantSurface, /!props\.compact && event\.key === "Escape"/);
+  assert.match(participantSurface, /defineExpose\(\{ focusInitial, containsFocus \}\)/);
 });
 
 test("poll completion cannot remain refreshing after activity arrives", () => {

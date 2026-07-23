@@ -279,6 +279,7 @@
       :providers="agentInspectorProviders"
       :destinations="focusRooms.filter((candidate) => candidate.identifier !== room.identifier)"
       :settings-conflict="agentInspectorSettingsConflict"
+      :managed-sessions="managedAgentSessions"
       @close="closeAgentDetail"
       @action="runAgentInspectorAction"
       @presentation-change="agentInspectorCompact = $event"
