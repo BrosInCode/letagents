@@ -2042,6 +2042,7 @@ function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval):
 function agentTargetForManagedSession(session: DesktopManagedAgentSession): AgentModalTarget {
   const displayName = managedAgentSessionDisplayName(session);
   return {
+    messageId: null,
     actorLabel: session.actorLabel,
     displayName,
     ownerAttribution: ownerAttributionLabel(session.ownerLabel),

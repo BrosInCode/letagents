@@ -67,6 +67,7 @@ export function agentInspectorRequestResetKey(
     selection?.kind ?? null,
     selection?.kind === "supervised" ? selection.supervisorEntryId : null,
     selection?.kind === "unavailable" ? selection.unavailableReason : null,
+    selection?.messageId ?? null,
     selection?.agentSessionId ?? null,
     selection?.agentKey ?? null,
     selection?.actorLabel ?? null,
@@ -130,6 +131,26 @@ export function resolveSupervisorEntryId(
   return { state: "unmatched" };
 }
 
+/**
+ * A daemon-owned final-answer publication is the strongest Chat identity
+ * available: it binds one canonical room message directly to one durable
+ * supervisor entry without consulting mutable labels or provider metadata.
+ */
+export function resolveSupervisorEntryIdForPublishedMessage(
+  entries: readonly Pick<DesktopSupervisorManifestEntry, "id" | "deliveryReceipts">[],
+  messageId: string | null | undefined,
+): SupervisorIdentityResolution {
+  const canonicalMessageId = exactIdentity(messageId);
+  if (!canonicalMessageId) return { state: "unmatched" };
+  const matches = entries.filter((entry) =>
+    entry.deliveryReceipts?.some((receipt) =>
+      exactIdentity(receipt.canonicalMessageId) === canonicalMessageId));
+  if (matches.length > 1) return { state: "ambiguous" };
+  return matches.length === 1
+    ? { state: "matched", entryId: matches[0]!.id }
+    : { state: "unmatched" };
+}
+
 export function supervisedAgentInspectorSelection(
   entry: Pick<DesktopSupervisorManifestEntry, "id" | "displayName" | "agentKey" | "agentSessionId" | "provider">,
   presentation: Partial<AgentModalTarget> = {},
@@ -138,6 +159,7 @@ export function supervisedAgentInspectorSelection(
   return {
     kind: "supervised",
     supervisorEntryId: entry.id,
+    messageId: presentation.messageId ?? null,
     actorLabel: presentation.actorLabel ?? null,
     displayName,
     ownerAttribution: presentation.ownerAttribution ?? null,
@@ -245,15 +267,27 @@ export function resolveAgentInspectorSelection(
     return { ...target, kind: "resolving" };
   }
 
-  const resolution = resolveSupervisorEntryId(roomEntries, {
+  const publicationResolution = resolveSupervisorEntryIdForPublishedMessage(
+    roomEntries,
+    target.messageId,
+  );
+  const stableIdentityResolution = resolveSupervisorEntryId(roomEntries, {
     agentSessionId: target.agentSessionId,
     agentKey: target.agentKey,
   });
+  if (publicationResolution.state === "ambiguous" || stableIdentityResolution.state === "ambiguous") {
+    return { ...target, kind: "unavailable", unavailableReason: "ambiguous" };
+  }
+  if (publicationResolution.state === "matched"
+    && stableIdentityResolution.state === "matched"
+    && publicationResolution.entryId !== stableIdentityResolution.entryId) {
+    return { ...target, kind: "unavailable", unavailableReason: "ambiguous" };
+  }
+  const resolution = publicationResolution.state === "matched"
+    ? publicationResolution
+    : stableIdentityResolution;
   if (resolution.state === "matched") {
     return { ...target, kind: "supervised", supervisorEntryId: resolution.entryId };
-  }
-  if (resolution.state === "ambiguous") {
-    return { ...target, kind: "unavailable", unavailableReason: "ambiguous" };
   }
 
   // Only a completed list operation can authoritatively classify the target

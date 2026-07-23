@@ -217,6 +217,7 @@ describe("useRoomActivityViewModel", () => {
     assert.deepEqual(
       activityParticipantToAgentTarget(model.selectedLiveParticipant.value!),
       {
+        messageId: null,
         actorLabel: "MapleRidge",
         displayName: "MapleRidge",
         ownerAttribution: "Local desktop's agent",

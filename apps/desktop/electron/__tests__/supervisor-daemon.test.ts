@@ -47,6 +47,7 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
     },
     delivery_receipts: [{
       inbox_item_id: "inbox_1", source_message_id: "msg_1", state: "blocked", attempt_count: 3,
+      canonical_message_id: "msg_reply_1",
       provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
       timeline: [{ phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
     }],
@@ -303,6 +304,7 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   assert.equal(projected.roomAgentState?.inbox.pendingCount, 2);
   assert.deepEqual(projected.deliveryReceipts, [{
     inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
+    canonicalMessageId: "msg_reply_1",
     providerTurnId: null, blockedByMessageId: null, error: "failed", updatedAt: "2026-01-01T00:00:00.000Z",
     timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
@@ -331,9 +333,10 @@ test("causal manifest projection drops malformed nested state and malformed rece
     task: { state: "none", task_id: null, title: null },
   };
   malformed.delivery_receipts = [
-    { inbox_item_id: "", source_message_id: "msg_1", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
-    { inbox_item_id: "inbox_2", source_message_id: "msg_2", state: "blocked", attempt_count: Number.NaN, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
-    { inbox_item_id: "inbox_3", source_message_id: "msg_3", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [{ phase: "invented", observed_at: "now", detail: null }] },
+    { inbox_item_id: "", source_message_id: "msg_1", canonical_message_id: null, state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_2", source_message_id: "msg_2", canonical_message_id: null, state: "blocked", attempt_count: Number.NaN, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_3", source_message_id: "msg_3", canonical_message_id: null, state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [{ phase: "invented", observed_at: "now", detail: null }] },
+    { inbox_item_id: "inbox_4", source_message_id: "msg_4", canonical_message_id: "", state: "acknowledged", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
     null,
   ];
   const projected = mapEntry(malformed as unknown as Parameters<typeof mapEntry>[0]);
@@ -912,7 +915,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces the prior 2.0.49 implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the prior 2.0.50 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -931,11 +934,11 @@ test("desktop replaces the prior 2.0.49 implementation and accepts only the new 
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.49",
+    "2.0.50",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.49", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.notEqual("2.0.50", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -953,7 +956,7 @@ test("desktop replaces the prior 2.0.49 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.50");
+    assert.equal(status.implementationVersion, "2.0.51");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
