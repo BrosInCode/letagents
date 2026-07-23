@@ -51,6 +51,11 @@ test("room-move journal is request-idempotent and exact-generation phase fenced"
   const store = new ManifestStore(env.databasePath);
   try {
     await store.write(0, [entry]);
+    const cursorDatabase = new DatabaseSync(env.databasePath);
+    try {
+      cursorDatabase.prepare("INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES(?,?,?,?)")
+        .run(entry.id, entry.room_id, "msg_17", "2026-07-19T00:00:00.000Z");
+    } finally { cursorDatabase.close(); }
     const coordinates = {
       operation_id: "move_1", request_id: "request_1", agent_id: entry.id, source_room_id: entry.room_id,
       destination_room_id: "room_2", daemon_generation: 7, work_attempt_id: "attempt_1", execution_generation_id: "run_1",
@@ -58,6 +63,8 @@ test("room-move journal is request-idempotent and exact-generation phase fenced"
     };
     const prepared = await store.prepareRoomMove(coordinates);
     assert.equal(prepared.created, true);
+    assert.equal(prepared.move.source_cursor_present, true);
+    assert.equal(prepared.move.source_cursor, "msg_17");
     assert.equal((await store.prepareRoomMove(coordinates)).created, false);
     await assert.rejects(() => store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 8, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" }), ManifestConflictError);
     const waiting = await store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 7, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" });
@@ -77,15 +84,24 @@ test("purge proves preconditions and deletes local agent rows atomically without
   const store = new ManifestStore(env.databasePath);
   const worktreeMarker = join(env.root, "preserved-worktree.txt");
   await writeFile(worktreeMarker, "keep");
+  const attemptId = "attempt_purge";
+  const executionId = "run_purge";
   const stopped: DaemonManifestEntry = {
     ...entry, id: "agent_purge", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
-    workspace_path: worktreeMarker, work_attempt_id: null, provider_ref: null, activity: [], turn_control: null, last_worker_binding: null,
+    workspace_path: worktreeMarker, work_attempt_id: attemptId,
+    provider_ref: {
+      ...entry.provider_ref!, work_attempt_id: attemptId, execution_generation_id: executionId,
+    },
+    activity: [], turn_control: null, last_worker_binding: null,
     workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
   };
   try {
     await store.write(0, [stopped]);
+    seedTerminalAttempt(env.databasePath, attemptId, executionId, worktreeMarker);
     const prepared = await store.preparePurge(1, { operationId: "purge_1", requestId: "purge_1", agentId: stopped.id, daemonGeneration: 3, externalRevokeRequired: false });
     assert.equal(prepared.purge.phase, "local_commit");
+    assert.equal(prepared.purge.attached_work_attempt_id, attemptId);
+    assert.equal(prepared.purge.preserved_workspace_path, worktreeMarker);
     await store.close(); // crash boundary after durable preparation
     const reopened = new ManifestStore(env.databasePath);
     const committed = await reopened.commitPurge(1, { operationId: "purge_1", agentId: stopped.id, daemonGeneration: 3 });
@@ -95,12 +111,94 @@ test("purge proves preconditions and deletes local agent rows atomically without
     assert.equal(await readFile(worktreeMarker, "utf8"), "keep");
     const database = new DatabaseSync(env.databasePath);
     try {
-      for (const [table, column] of [["agent_identities", "agent_id"], ["worker_session_bindings", "entry_id"], ["supervised_agent_inbox", "agent_id"]] as const) {
-        assert.equal(Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column}=?`).get(stopped.id) as { count: number }).count), 0);
+      for (const [table, column, value] of [
+        ["agent_identities", "agent_id", stopped.id], ["worker_session_bindings", "entry_id", stopped.id], ["supervised_agent_inbox", "agent_id", stopped.id],
+        ["work_attempts", "work_attempt_id", attemptId], ["work_attempt_lease_epochs", "work_attempt_id", attemptId],
+        ["work_attempt_checkpoints", "work_attempt_id", attemptId], ["work_attempt_executions", "work_attempt_id", attemptId],
+      ] as const) {
+        assert.equal(Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column}=?`).get(value) as { count: number }).count), 0);
       }
       assert.equal((database.prepare("SELECT phase FROM agent_purge_operations WHERE operation_id='purge_1'").get() as { phase: string }).phase, "complete");
     } finally { database.close(); }
     await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("purge generation adoption never substitutes for durable credential-revocation acknowledgement", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const stopped: DaemonManifestEntry = {
+    ...entry, id: "agent_revoke", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: null, work_attempt_id: null, provider_ref: null, activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [stopped]);
+    const prepared = await store.preparePurge(1, {
+      operationId: "purge_revoke", requestId: "purge_revoke", agentId: stopped.id, daemonGeneration: 8, externalRevokeRequired: true,
+    });
+    assert.equal(prepared.purge.phase, "revoking_credentials");
+    await store.close(); // daemon crashes after prepare but before Electron revoke
+    const reopened = new ManifestStore(env.databasePath);
+    const adopted = await reopened.adoptPurgeDaemonGeneration({
+      operationId: "purge_revoke", agentId: stopped.id, expectedDaemonGeneration: 8, daemonGeneration: 9,
+    });
+    assert.equal(adopted.daemon_generation, 9);
+    assert.equal(adopted.phase, "revoking_credentials", "generation N+1 must still require an explicit durable revoke acknowledgement");
+    const acknowledged = await reopened.markPurgeCredentialsRevoked({
+      operationId: "purge_revoke", agentId: stopped.id, expectedDaemonGeneration: 9,
+    });
+    assert.equal(acknowledged.phase, "local_commit");
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("purge commit rolls every agent and work-attempt deletion back on a late injected failure", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const worktreeMarker = join(env.root, "rollback-worktree");
+  const attemptId = "attempt_rollback";
+  const executionId = "run_rollback";
+  const stopped: DaemonManifestEntry = {
+    ...entry, id: "agent_rollback", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: worktreeMarker, work_attempt_id: attemptId,
+    provider_ref: { ...entry.provider_ref!, work_attempt_id: attemptId, execution_generation_id: executionId },
+    activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [stopped]);
+    seedTerminalAttempt(env.databasePath, attemptId, executionId, worktreeMarker);
+    await store.preparePurge(1, {
+      operationId: "purge_rollback", requestId: "purge_rollback", agentId: stopped.id, daemonGeneration: 2, externalRevokeRequired: false,
+    });
+    const injector = new DatabaseSync(env.databasePath);
+    try {
+      injector.exec(`CREATE TRIGGER inject_purge_rollback BEFORE DELETE ON agent_identities
+        WHEN old.agent_id='agent_rollback' BEGIN SELECT RAISE(ABORT,'injected purge rollback'); END`);
+    } finally { injector.close(); }
+    await assert.rejects(
+      () => store.commitPurge(1, { operationId: "purge_rollback", agentId: stopped.id, daemonGeneration: 2 }),
+      /injected purge rollback/,
+    );
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as { generation: number }).generation), 1);
+      assert.equal((database.prepare("SELECT phase FROM agent_purge_operations WHERE operation_id='purge_rollback'").get() as { phase: string }).phase, "local_commit");
+      for (const [table, column, value] of [
+        ["agent_identities", "agent_id", stopped.id], ["work_attempts", "work_attempt_id", attemptId],
+        ["work_attempt_lease_epochs", "work_attempt_id", attemptId], ["work_attempt_checkpoints", "work_attempt_id", attemptId],
+        ["work_attempt_executions", "work_attempt_id", attemptId],
+      ] as const) {
+        assert.equal(Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column}=?`).get(value) as { count: number }).count), 1);
+      }
+    } finally { database.close(); }
   } finally {
     await store.close().catch(() => undefined);
     await env.cleanup();
@@ -271,8 +369,8 @@ function removePostV5DeliveryTables(database: DatabaseSync): void {
 }
 
 function assertRoomScopedV9DeliveryShape(database: DatabaseSync): void {
-  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
-  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
+  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 10);
   const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as { sql: string };
   const observed = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_observed_messages'").get() as { sql: string };
   const publications = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as { sql: string };
@@ -280,6 +378,26 @@ function assertRoomScopedV9DeliveryShape(database: DatabaseSync): void {
   assert.match(observed.sql, /PRIMARY KEY\s*\(\s*agent_id\s*,\s*room_id\s*,\s*source_message_id\s*\)/i);
   assert.match(publications.sql, /FOREIGN KEY\s*\(\s*inbox_item_id\s*,\s*agent_id\s*,\s*room_id\s*\)/i);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+}
+
+function seedTerminalAttempt(databasePath: string, attemptId: string, executionId: string, workspacePath: string): void {
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.prepare(`INSERT INTO work_attempts(
+      work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,
+      workspace_resolved_revision,workspace_bare_path,state,created_at,concluded_at,conclusion_cause,postmortem_diff
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      attemptId, `task_${attemptId}`, `lease_${attemptId}`, 1, workspacePath, "repo", "https://github.com/example/repo.git",
+      "a".repeat(40), join(workspacePath, ".bare"), "cleanly_concluded", "2026-07-19T00:00:00.000Z",
+      "2026-07-19T00:03:00.000Z", "provider stopped", "",
+    );
+    database.prepare("INSERT INTO work_attempt_lease_epochs VALUES(?,?,?,?,?)").run(attemptId, 0, `lease_${attemptId}`, 1, "2026-07-19T00:00:00.000Z");
+    database.prepare("INSERT INTO work_attempt_checkpoints VALUES(?,?,?,?,?)").run(attemptId, 0, "2026-07-19T00:01:00.000Z", "message_1", "thread_1");
+    database.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,?,?,?)").run(
+      executionId, attemptId, "2026-07-19T00:01:00.000Z", "provider", 1,
+      JSON.stringify({ ...terminal, actor: "provider", generation: 1 }),
+    );
+  } finally { database.close(); }
 }
 
 test("SQLite manifest round-trips the flat wire projection from relational domain tables", async () => {

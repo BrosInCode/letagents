@@ -483,6 +483,9 @@ migrateV4ToV5(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
+    // A real v4 database has none of the delivery v7-v9 or inspector v10
+    // tables, so complete and validate the current shape before advancing
+    // either version marker.
     this.advanceDeliveryToCurrent(database);
     this.applyV10Shape(database);
     this.validateV10Shape(database);
@@ -636,7 +639,7 @@ private applyV10Shape(database: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS agent_room_moves (
       operation_id TEXT PRIMARY KEY,
       request_id TEXT NOT NULL UNIQUE,
-      agent_id TEXT NOT NULL REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
       source_room_id TEXT NOT NULL,
       destination_room_id TEXT NOT NULL,
       daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),
@@ -652,6 +655,8 @@ private applyV10Shape(database: DatabaseSync): void {
       error TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK(source_cursor_present IN (0,1)),
+      source_cursor TEXT,
       CHECK(source_room_id <> destination_room_id),
       CHECK((work_attempt_id IS NULL) = (execution_generation_id IS NULL))
     ) STRICT;
@@ -667,7 +672,9 @@ private applyV10Shape(database: DatabaseSync): void {
       external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),
       error TEXT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      attached_work_attempt_id TEXT,
+      preserved_workspace_path TEXT
     ) STRICT;
     CREATE INDEX IF NOT EXISTS agent_purge_operations_agent_updated ON agent_purge_operations(agent_id,updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_agent_purge ON agent_purge_operations(agent_id)
@@ -681,26 +688,26 @@ private validateV10Shape(database: DatabaseSync): void {
     if (!columns.has(column)) throw new Error(`Daemon state v10 is missing agent configuration column ${column}.`);
   }
   const moves = this.tableColumns(database, "agent_room_moves");
-  for (const column of ["operation_id", "request_id", "agent_id", "source_room_id", "destination_room_id", "daemon_generation", "work_attempt_id", "execution_generation_id", "agent_session_id", "activating_inbox_item_id", "provider_turn_id", "effect_id", "phase", "remote_room_id", "destination_cursor", "created_at", "updated_at"]) {
+  for (const column of ["operation_id", "request_id", "agent_id", "source_room_id", "destination_room_id", "daemon_generation", "work_attempt_id", "execution_generation_id", "agent_session_id", "activating_inbox_item_id", "provider_turn_id", "effect_id", "phase", "remote_room_id", "destination_cursor", "created_at", "updated_at", "source_cursor_present", "source_cursor"]) {
     if (!moves.has(column)) throw new Error(`Daemon state v10 is missing room-move column ${column}.`);
   }
   const purges = this.tableColumns(database, "agent_purge_operations");
-  for (const column of ["operation_id", "request_id", "agent_id", "daemon_generation", "phase", "external_revoke_required", "created_at", "updated_at"]) {
-    if (!purges.has(column)) throw new Error(`Daemon state v9 is missing purge-operation column ${column}.`);
+  for (const column of ["operation_id", "request_id", "agent_id", "daemon_generation", "phase", "external_revoke_required", "created_at", "updated_at", "attached_work_attempt_id", "preserved_workspace_path"]) {
+    if (!purges.has(column)) throw new Error(`Daemon state v10 is missing purge-operation column ${column}.`);
   }
   const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replaceAll('"', "").replaceAll("`", "").replaceAll("[", "").replaceAll("]", "").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").replace(/\)\s*strict$/i, ")strict").trim().toLowerCase();
   const canonicalTables: Record<string, string> = {
-    agent_room_moves: `CREATE TABLE agent_room_moves (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL REFERENCES agent_identities(agent_id) ON DELETE CASCADE,source_room_id TEXT NOT NULL,destination_room_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),work_attempt_id TEXT,execution_generation_id TEXT,agent_session_id TEXT,activating_inbox_item_id TEXT,provider_turn_id TEXT,effect_id TEXT,phase TEXT NOT NULL CHECK(phase IN ('prepared','waiting_for_current_turn','joining_destination','membership_committed','rotating_credentials','bootstrapping_destination_tail','active','failed','rollback_required')),remote_room_id TEXT,destination_cursor TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,CHECK(source_room_id <> destination_room_id),CHECK((work_attempt_id IS NULL) = (execution_generation_id IS NULL))) STRICT`,
-    agent_purge_operations: `CREATE TABLE agent_purge_operations (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL) STRICT`,
+    agent_room_moves: `CREATE TABLE agent_room_moves (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,source_room_id TEXT NOT NULL,destination_room_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),work_attempt_id TEXT,execution_generation_id TEXT,agent_session_id TEXT,activating_inbox_item_id TEXT,provider_turn_id TEXT,effect_id TEXT,phase TEXT NOT NULL CHECK(phase IN ('prepared','waiting_for_current_turn','joining_destination','membership_committed','rotating_credentials','bootstrapping_destination_tail','active','failed','rollback_required')),remote_room_id TEXT,destination_cursor TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK(source_cursor_present IN (0,1)),source_cursor TEXT,CHECK(source_room_id <> destination_room_id),CHECK((work_attempt_id IS NULL) = (execution_generation_id IS NULL))) STRICT`,
+    agent_purge_operations: `CREATE TABLE agent_purge_operations (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,attached_work_attempt_id TEXT,preserved_workspace_path TEXT) STRICT`,
   };
   const strictTables = database.prepare("PRAGMA table_list").all() as Row[];
   for (const table of ["agent_room_moves", "agent_purge_operations"]) {
     const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
-    if (!definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalTables[table]!)) throw new Error(`Daemon state v9 table ${table} does not match its canonical definition.`);
+    if (!definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalTables[table]!)) throw new Error(`Daemon state v10 table ${table} does not match its canonical definition.`);
     const info = strictTables.find((row) => row.name === table && row.type === "table");
-    if (!info || Number(info.strict) !== 1 || Number(info.wr) !== 0) throw new Error(`Daemon state v9 table ${table} must be a strict rowid table.`);
+    if (!info || Number(info.strict) !== 1 || Number(info.wr) !== 0) throw new Error(`Daemon state v10 table ${table} must be a strict rowid table.`);
     const fk = database.prepare(`PRAGMA foreign_key_check(${table})`).get();
-    if (fk) throw new Error(`Daemon state v9 table ${table} contains a broken foreign key.`);
+    if (fk) throw new Error(`Daemon state v10 table ${table} contains a broken foreign key.`);
   }
   const indexes: Record<string, { table: string; unique: number; partial: number; columns: string[] }> = {
     agent_room_moves_agent_updated: { table: "agent_room_moves", unique: 0, partial: 0, columns: ["agent_id", "updated_at"] },
@@ -718,27 +725,43 @@ private validateV10Shape(database: DatabaseSync): void {
     const listed = (database.prepare(`PRAGMA index_list(${expected.table})`).all() as Row[]).find((row) => row.name === name);
     const terms = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Row[]).filter((row) => Number(row.key) === 1).sort((a, b) => Number(a.seqno) - Number(b.seqno));
     const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(name) as Row | undefined;
-    if (!listed || String(listed.origin) !== "c" || Number(listed.unique) !== expected.unique || Number(listed.partial) !== expected.partial || !definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalIndexes[name]!) || terms.length !== expected.columns.length || terms.some((term, index) => Number(term.cid) < 0 || term.name !== expected.columns[index] || Number(term.desc) !== 0 || String(term.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v9 index ${name} is invalid.`);
+    if (!listed || String(listed.origin) !== "c" || Number(listed.unique) !== expected.unique || Number(listed.partial) !== expected.partial || !definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalIndexes[name]!) || terms.length !== expected.columns.length || terms.some((term, index) => Number(term.cid) < 0 || term.name !== expected.columns[index] || Number(term.desc) !== 0 || String(term.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v10 index ${name} is invalid.`);
   }
   const integrity = database.prepare("PRAGMA integrity_check").get() as Row | undefined;
-  if (!integrity || Object.values(integrity)[0] !== "ok" || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v9 failed SQLite integrity validation.");
+  if (!integrity || Object.values(integrity)[0] !== "ok" || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v10 failed SQLite integrity validation.");
 }
 
 repairAndValidateV10Shape(database: DatabaseSync): void {
   this.repairAndValidateV9Shape(database);
   const columns = this.tableColumns(database, "agent_configurations");
-  if (columns.has("reasoning_effort") && columns.has("config_revision") && columns.has("runtime_configuration_revision") && this.tableColumns(database, "agent_room_moves").has("request_id") && this.tableColumns(database, "agent_purge_operations").size) {
+  const purgeColumns = this.tableColumns(database, "agent_purge_operations");
+  if (columns.has("reasoning_effort") && columns.has("config_revision") && columns.has("runtime_configuration_revision") && this.tableColumns(database, "agent_room_moves").has("source_cursor_present")
+    && purgeColumns.has("attached_work_attempt_id") && purgeColumns.has("preserved_workspace_path")) {
     this.applyV10Shape(database);
     this.validateV10Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
   try {
-    const moveColumns = this.tableColumns(database, "agent_room_moves");
+    let moveColumns = this.tableColumns(database, "agent_room_moves");
     if (moveColumns.size && !moveColumns.has("request_id")) {
       const count = Number((database.prepare("SELECT COUNT(*) AS count FROM agent_room_moves").get() as Row).count);
-      if (count !== 0) throw new Error("Cannot repair the prerelease v9 room-move journal because it contains operations.");
+      if (count !== 0) throw new Error("Cannot repair the prerelease v10 room-move journal because it contains operations.");
       database.exec("DROP TABLE agent_room_moves");
+      moveColumns = new Set();
+    }
+    if (moveColumns.size && !moveColumns.has("source_cursor_present")) {
+      database.exec("ALTER TABLE agent_room_moves ADD COLUMN source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK(source_cursor_present IN (0,1))");
+    }
+    if (moveColumns.size && !moveColumns.has("source_cursor")) {
+      database.exec("ALTER TABLE agent_room_moves ADD COLUMN source_cursor TEXT");
+    }
+    const purgeColumns = this.tableColumns(database, "agent_purge_operations");
+    if (purgeColumns.size && !purgeColumns.has("attached_work_attempt_id")) {
+      database.exec("ALTER TABLE agent_purge_operations ADD COLUMN attached_work_attempt_id TEXT");
+    }
+    if (purgeColumns.size && !purgeColumns.has("preserved_workspace_path")) {
+      database.exec("ALTER TABLE agent_purge_operations ADD COLUMN preserved_workspace_path TEXT");
     }
     this.applyV10Shape(database); this.validateV10Shape(database); database.exec("COMMIT");
   }

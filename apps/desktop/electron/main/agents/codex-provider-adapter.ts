@@ -14,6 +14,7 @@ import {
 } from "./codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
+import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -708,7 +709,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex spawn requires the durable agent display name from the manifest.");
     }
 
-    const policy = normalizeLaunchPolicy(req.launchPolicy);
+    const policy = normalizeLaunchPolicy(attestProviderSpawnPolicy("codex", req));
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,

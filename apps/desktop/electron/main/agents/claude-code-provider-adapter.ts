@@ -30,6 +30,7 @@ import {
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
 } from "./provider-adapter.js";
+import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   DEFAULT_STOP_GRACE_MS,
   defaultGetProcessIdentity,
@@ -626,7 +627,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       throw new Error("Claude spawn requires the durable agent display name from the manifest.");
     }
 
-    const policyArgs = claudeLaunchPolicyArgs(req.launchPolicy);
+    const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
     const managedMcpConfig = await this.deps.createLetAgentsMcpConfig();
     // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
     // the managed room workplace. The short-lived 0600 config lives outside

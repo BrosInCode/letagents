@@ -363,7 +363,13 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
-  capabilities: { roomDeliveryRetry: boolean; agentInspectorDetail: boolean; agentInspectorSettings: boolean; agentRoomMove: boolean };
+  capabilities: {
+    roomDeliveryRetry: boolean;
+    agentInspectorDetail: boolean;
+    agentInspectorSettings: boolean;
+    agentRoomMove: boolean;
+    agentLifecycle: boolean;
+  };
 }
 
 /** Revisioned, daemon-owned Inspector configuration. Provider never changes after creation. */

@@ -29,6 +29,9 @@ export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent,
   "executionGenerationId" | "daemonGeneration" | "workAttemptId" |
   "providerContinuationId" | "pid" | "handle">;
 export type SupervisedAuthorityRevalidator = (authority: SupervisedDeliveryAuthority) => Promise<boolean> | boolean;
+export type SupervisedTurnConfigurationResolver = (
+  authority: SupervisedDeliveryAuthority,
+) => Promise<{ charter?: string }>;
 
 export type SupervisedPollResponse = {
   messages?: Array<Record<string, unknown>>;
@@ -98,6 +101,7 @@ export class SupervisedAgentDelivery {
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     private readonly waitForPollDelay: SupervisedPollWait = abortablePollDelay,
     private readonly commitPreparedRoomMove?: SupervisedRoomMoveCommitter,
+    private readonly resolveTurnConfiguration?: SupervisedTurnConfigurationResolver,
   ) {}
 
   fence(): void {
@@ -435,6 +439,14 @@ export class SupervisedAgentDelivery {
       const recovering = Boolean(item.provider_turn_id);
       if (recovering) setActive("responding");
       else setActive("dispatching");
+      const observedContext = recovering
+        ? []
+        : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
+      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      const turnConfiguration = recovering
+        ? { charter: agent.charter }
+        : await this.resolveTurnConfiguration?.(agent) ?? { charter: agent.charter };
+      if (!await this.hasExecutionAuthority(agent, controller)) return;
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<void> => {
         if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
         // New turns already checkpoint through checkpointTurnStarted. This
@@ -462,8 +474,8 @@ export class SupervisedAgentDelivery {
         sourceMessage: item.source_message,
         activation: item.activation,
         actionId: item.action_id,
-        charter: agent.charter,
-        observedContext: (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message),
+        charter: turnConfiguration.charter,
+        observedContext,
       }, { beforeNativeDispatch: async () => {
         if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
         // The provider cannot call turn/start until this durable causal edge

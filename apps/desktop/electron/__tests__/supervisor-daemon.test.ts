@@ -77,6 +77,7 @@ async function startWireDaemon(
   implementationVersion = SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
   controlTurnDelayMs = 0,
   unresponsiveAfterPrepare = false,
+  agentLifecycleCapability = true,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
@@ -94,7 +95,7 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
@@ -376,6 +377,27 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.prepare_room_move")?.params, { entry_id: "agent_1", destination_room_id: "room_2", request_id: "request_1", daemon_generation: 39 });
     await assert.rejects(() => client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: undefined as unknown as string, daemonGeneration: 39 }), /exact typed/);
     await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("agent lifecycle RPCs are negotiated before any mutation is sent", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    40,
+    undefined,
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    false,
+  );
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    await assert.rejects(() => client.setDesiredState("agent_1", "stopped"), /too old for durable agent lifecycle/);
+    await assert.rejects(() => client.retireAgent("agent_1", 40), /too old for durable agent lifecycle/);
+    await assert.rejects(() => client.purgeAgent("agent_1", 40), /too old for durable agent lifecycle/);
+    assert.equal(wire.requests.some((request) => ["manifest.set_desired_state", "supervisor.retire_agent", "supervisor.purge_agent"].includes(request.method)), false);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
