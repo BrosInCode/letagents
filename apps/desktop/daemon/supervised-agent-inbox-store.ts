@@ -27,11 +27,23 @@ export type SupervisedEffectRecord = {
   mcp_request_id: string; tool_name: string; request: unknown; state: "prepared" | "executing" | "completed" | "failed";
   result: unknown | null; error: string | null;
 };
+export type AgentInspectorDetail = {
+  availability: "available" | "pruned" | "not_loaded";
+  entry_id: string; room_id: string; inbox_item_id: string | null;
+  source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: InboxActivation | null } | null;
+  receipt: { state: SupervisedInboxState; attempt_count: number; provider_turn_id: string | null; outcome: unknown; last_error: string | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
+  terminal: { outcome: string; normalized_text: string | null; evidence_source: string; observed_at: string } | null;
+  publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
+  timeline: SupervisedInboxEvent[];
+  items: Array<{ source_message_id: string; inbox_item_id: string; state: SupervisedInboxState; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: unknown; provider_turn_id: string | null; last_error: string | null; canonical_message_id: string | null }>;
+  history_boundary: { earliest_retained_observed_message_id: string | null; earliest_retained_inbox_message_id: string | null; earliest_retained_receipt_sequence: number | null; pruned_before_message_id: string | null; pruned_at: string | null } | null;
+};
 type Row = Record<string, unknown>;
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
 const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"]);
 const RETAINED_TERMINAL_RECEIPTS_PER_AGENT = 200;
 const RETAINED_OBSERVED_MESSAGES_PER_AGENT = 500;
+const RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT = 2_000;
 const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInboxState[]>> = {
   pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "retryable", "blocked"],
   awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "retryable", "blocked"],
@@ -141,6 +153,55 @@ export class SupervisedAgentInboxStore {
   }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
+  }
+  /** Atomically checkpoint the canonical API identity with its acknowledgement. */
+  async checkpointPublication(input: { inbox_item_id: string; room_id: string; canonical_message_id: string }): Promise<SupervisedInboxItem> {
+    this.require(input.inbox_item_id, "inbox_item_id"); this.require(input.room_id, "room_id"); this.require(input.canonical_message_id, "canonical_message_id");
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
+      if (!row) throw new Error("Unknown supervised inbox publication.");
+      const item = rowToItem(row);
+      if (item.room_id !== input.room_id) throw new Error("Canonical publication room does not match the inbox item.");
+      const existing = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
+      if (existing && (String(existing.room_id) !== input.room_id || String(existing.client_message_id) !== item.reply_client_message_id || String(existing.canonical_message_id) !== input.canonical_message_id)) throw new Error("Canonical publication conflicts with a prior checkpoint.");
+      if (item.state !== "publishing" && !(item.state === "acknowledged" && existing)) throw new Error("Canonical publication requires a publishing inbox item or an idempotently acknowledged publication.");
+      const timestamp = this.now();
+      if (item.state === "publishing") {
+        run(database.prepare(`INSERT INTO supervised_agent_publications(inbox_item_id,agent_id,room_id,client_message_id,canonical_message_id,published_at)
+          VALUES (?,?,?,?,?,?) ON CONFLICT(inbox_item_id) DO NOTHING`), item.inbox_item_id, item.agent_id, item.room_id, item.reply_client_message_id, input.canonical_message_id, timestamp);
+        run(database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged',updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"), timestamp, timestamp, item.inbox_item_id);
+        this.recordEvent(database, item.inbox_item_id, `published:${item.attempt_count}`, "published", timestamp, input.canonical_message_id);
+      }
+      this.pruneAgentHistory(database, item.agent_id);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+    }));
+  }
+  /** Exact-entry, exact-room, bounded renderer-safe projection. */
+  async detail(agentId: string, roomId: string, sourceMessageId?: string | null): Promise<AgentInspectorDetail> {
+    return this.read(async (database) => {
+      const boundary = database.prepare("SELECT * FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?").get(agentId, roomId) as Row | undefined;
+      // Work rows are newest-first so a reopened Inspector starts at current work.
+      const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,p.canonical_message_id
+        FROM supervised_agent_inbox i LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
+        WHERE i.agent_id=? AND i.room_id=? ORDER BY i.fifo_sequence DESC LIMIT 50`).all(agentId, roomId) as Row[]).map(rowToInspectorItem);
+      const row = sourceMessageId ? database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId) as Row | undefined : undefined;
+      const history = boundary ? boundaryToDetail(boundary) : null;
+      if (!row) {
+        const pruned = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_pruned_sources WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
+        const observed = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
+        const availability: AgentInspectorDetail["availability"] = pruned ? "pruned" : observed ? "not_loaded" : "not_loaded";
+        return { availability, entry_id: agentId, room_id: roomId, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items, history_boundary: history };
+      }
+      const item = rowToItem(row);
+      const events = (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
+      const terminal = database.prepare("SELECT outcome,normalized_text,evidence_source,observed_at FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
+      const publication = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
+      return { availability: "available", entry_id: agentId, room_id: roomId, inbox_item_id: item.inbox_item_id,
+        source_message: safeSource(item.source_message, item.source_message_id, roomId, item.activation),
+        receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms },
+        terminal: terminal ? { outcome: String(terminal.outcome), normalized_text: terminal.normalized_text === null ? null : String(terminal.normalized_text), evidence_source: String(terminal.evidence_source), observed_at: String(terminal.observed_at) } : null,
+        publication: { client_message_id: item.reply_client_message_id, canonical_message_id: publication ? String(publication.canonical_message_id) : null, room_id: publication ? String(publication.room_id) : null }, timeline: events, items, history_boundary: history };
+    });
   }
   async transition(inboxItemId: string, next: SupervisedInboxState, patch: Partial<Pick<SupervisedInboxItem, "provider_turn_id" | "outcome" | "last_error" | "next_attempt_at_ms" | "blocked_by_inbox_item_id">> = {}): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
@@ -534,6 +595,9 @@ export class SupervisedAgentInboxStore {
       run(database.prepare("DELETE FROM supervised_agent_observed_messages WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=?"), agentId);
+      // removeAgent is a purge, not PR4's future retire operation.
+      run(database.prepare("DELETE FROM supervised_agent_history_boundaries WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_agent_pruned_sources WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_inbox WHERE agent_id=?"), agentId);
     }));
   }
@@ -571,7 +635,7 @@ export class SupervisedAgentInboxStore {
       )`), inboxItemId, inboxItemId, idempotencyKey, phase, observedAt, detail, inboxItemId, idempotencyKey);
   }
   private pruneAgentHistory(database: DatabaseSync, agentId: string): void {
-    const stale = database.prepare(`SELECT i.inbox_item_id,i.provider_turn_id
+    const stale = database.prepare(`SELECT i.inbox_item_id,i.provider_turn_id,i.room_id,i.source_message_id
       FROM supervised_agent_inbox i
       WHERE i.agent_id=?
         AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
@@ -583,15 +647,36 @@ export class SupervisedAgentInboxStore {
       ORDER BY i.fifo_sequence DESC LIMIT -1 OFFSET ?`).all(agentId, RETAINED_TERMINAL_RECEIPTS_PER_AGENT) as Row[];
     const deleteEffects = database.prepare("DELETE FROM supervised_agent_effects WHERE agent_id=? AND provider_turn_id=? AND state IN ('completed','failed')");
     const deleteInbox = database.prepare("DELETE FROM supervised_agent_inbox WHERE inbox_item_id=?");
+    const prunedByRoom = new Map<string, string>();
     for (const row of stale) {
+      if (!prunedByRoom.has(String(row.room_id))) prunedByRoom.set(String(row.room_id), String(row.source_message_id));
+      run(database.prepare("INSERT INTO supervised_agent_pruned_sources(agent_id,room_id,source_message_id,pruned_at) VALUES (?,?,?,?) ON CONFLICT(agent_id,room_id,source_message_id) DO NOTHING"), agentId, String(row.room_id), String(row.source_message_id), this.now());
       if (row.provider_turn_id !== null) run(deleteEffects, agentId, String(row.provider_turn_id));
       run(deleteInbox, String(row.inbox_item_id));
     }
+    const observedStale = database.prepare(`SELECT room_id,source_message_id FROM supervised_agent_observed_messages
+      WHERE agent_id=? AND rowid NOT IN (SELECT rowid FROM supervised_agent_observed_messages WHERE agent_id=? ORDER BY rowid DESC LIMIT ?)
+      ORDER BY rowid DESC`).all(agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT) as Row[];
     run(database.prepare(`DELETE FROM supervised_agent_observed_messages
       WHERE agent_id=? AND rowid NOT IN (
         SELECT rowid FROM supervised_agent_observed_messages
         WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
       )`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
+    const rooms = database.prepare("SELECT DISTINCT room_id FROM supervised_agent_inbox WHERE agent_id=? UNION SELECT DISTINCT room_id FROM supervised_agent_observed_messages WHERE agent_id=?").all(agentId, agentId) as Row[];
+    for (const row of observedStale) if (!prunedByRoom.has(String(row.room_id))) prunedByRoom.set(String(row.room_id), String(row.source_message_id));
+    for (const room of rooms) this.updateHistoryBoundary(database, agentId, String(room.room_id), prunedByRoom.get(String(room.room_id)) ?? null);
+    for (const [roomId, marker] of prunedByRoom) if (!rooms.some((room) => String(room.room_id) === roomId)) this.updateHistoryBoundary(database, agentId, roomId, marker);
+    run(database.prepare(`DELETE FROM supervised_agent_pruned_sources WHERE agent_id=? AND rowid NOT IN (
+      SELECT rowid FROM supervised_agent_pruned_sources WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
+    )`), agentId, agentId, RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT);
+  }
+  private updateHistoryBoundary(database: DatabaseSync, agentId: string, roomId: string, prunedMarker: string | null): void {
+    const observed = database.prepare("SELECT source_message_id FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? ORDER BY rowid LIMIT 1").get(agentId, roomId) as Row | undefined;
+    const inbox = database.prepare("SELECT source_message_id,fifo_sequence FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? ORDER BY fifo_sequence LIMIT 1").get(agentId, roomId) as Row | undefined;
+    const prior = database.prepare("SELECT pruned_before_message_id,pruned_at FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?").get(agentId, roomId) as Row | undefined;
+    run(database.prepare(`INSERT INTO supervised_agent_history_boundaries(agent_id,room_id,earliest_retained_observed_message_id,earliest_retained_inbox_message_id,earliest_retained_receipt_sequence,pruned_before_message_id,pruned_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(agent_id,room_id) DO UPDATE SET earliest_retained_observed_message_id=excluded.earliest_retained_observed_message_id,earliest_retained_inbox_message_id=excluded.earliest_retained_inbox_message_id,earliest_retained_receipt_sequence=excluded.earliest_retained_receipt_sequence,pruned_before_message_id=COALESCE(excluded.pruned_before_message_id,supervised_agent_history_boundaries.pruned_before_message_id),pruned_at=COALESCE(excluded.pruned_at,supervised_agent_history_boundaries.pruned_at),updated_at=excluded.updated_at`),
+      agentId, roomId, observed ? String(observed.source_message_id) : null, inbox ? String(inbox.source_message_id) : null, inbox ? Number(inbox.fifo_sequence) : null, prunedMarker ?? (prior?.pruned_before_message_id ?? null), prunedMarker ? this.now() : (prior?.pruned_at ?? null), this.now());
   }
 }
 
@@ -617,6 +702,11 @@ function isNewerCursor(candidate: string, current: string | null): boolean {
 function rowToItem(row: Row): SupervisedInboxItem {
   return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
 }
+function rowToEvent(row: Row): SupervisedInboxEvent { return { phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail) }; }
+function rowToInspectorItem(row: Row): AgentInspectorDetail["items"][number] { const source = safeSource(JSON.parse(String(row.source_message_json)), String(row.source_message_id), "", {}); return { source_message_id: String(row.source_message_id), inbox_item_id: String(row.inbox_item_id), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), updated_at: String(row.updated_at), sender: source?.sender ?? null, text_preview: source?.text ? source.text.slice(0, 240) : null, created_at: source?.created_at ?? null, outcome: safeOutcome(row.outcome === null ? null : String(row.outcome)), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), last_error: row.last_error === null ? null : String(row.last_error), canonical_message_id: row.canonical_message_id === null ? null : String(row.canonical_message_id) }; }
+function safeOutcome(outcome: string | null): unknown { try { return outcome ? JSON.parse(outcome) : null; } catch { return null; } }
+function safeSource(source: unknown, id: string, roomId: string, activation: InboxActivation): AgentInspectorDetail["source_message"] { const value = source && typeof source === "object" ? source as Record<string, unknown> : {}; const reply = value.reply_to && typeof value.reply_to === "object" ? value.reply_to as Record<string, unknown> : {}; return { id, room_id: roomId, sender: typeof value.sender === "string" ? value.sender : null, text: typeof value.text === "string" ? value.text : null, created_at: typeof value.timestamp === "string" ? value.timestamp : null, reply_to: typeof value.thread_reply_to_id === "string" ? value.thread_reply_to_id : typeof reply.id === "string" ? reply.id : null, thread_root_id: typeof value.thread_root_id === "string" ? value.thread_root_id : null, activation }; }
+function boundaryToDetail(row: Row): NonNullable<AgentInspectorDetail["history_boundary"]> { return { earliest_retained_observed_message_id: row.earliest_retained_observed_message_id === null ? null : String(row.earliest_retained_observed_message_id), earliest_retained_inbox_message_id: row.earliest_retained_inbox_message_id === null ? null : String(row.earliest_retained_inbox_message_id), earliest_retained_receipt_sequence: row.earliest_retained_receipt_sequence === null ? null : Number(row.earliest_retained_receipt_sequence), pruned_before_message_id: row.pruned_before_message_id === null ? null : String(row.pruned_before_message_id), pruned_at: row.pruned_at === null ? null : String(row.pruned_at) }; }
 
 function rowToEffect(row: Row): SupervisedEffectRecord {
   return {

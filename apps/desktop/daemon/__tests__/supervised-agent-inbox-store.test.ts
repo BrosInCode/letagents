@@ -164,6 +164,25 @@ test("terminal receipts and observed context are bounded while prepared effects 
       await store.transition(item.inbox_item_id, "acknowledged_no_reply");
     }
     assert.equal((await store.receipts("bounded")).length, 200);
+    const firstBoundary = await store.detail("bounded", "room");
+    assert.equal(firstBoundary.history_boundary?.pruned_before_message_id, "1004");
+    assert.ok(firstBoundary.history_boundary?.pruned_at, "first retention wave records an explicit pruning time");
+    assert.equal((await store.detail("bounded", "room", "1004")).availability, "pruned", "newest pruned receipt wins over its retained observed-message context");
+    const next = await store.ingestPoll({ agent_id: "bounded", room_id: "room", last_observed_message_id: "1206", messages: [
+      { source_message_id: "1205", source_message: { index: 205 }, activation: {} },
+      { source_message_id: "1206", source_message: { index: 206 }, activation: {} },
+    ] });
+    for (const item of next) {
+      await store.transition(item.inbox_item_id, "dispatching");
+      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${item.source_message_id}`);
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, "acknowledged_no_reply");
+    }
+    const secondBoundary = await store.detail("bounded", "room");
+    assert.equal(secondBoundary.history_boundary?.pruned_before_message_id, "1006", "later pruning advances the durable watermark");
+    assert.ok(secondBoundary.history_boundary?.pruned_at);
+    assert.equal((await store.detail("bounded", "room", "1006")).availability, "pruned");
+    assert.equal((await store.detail("bounded", "room", "1000")).availability, "pruned", "exact evidence survives later pruning waves");
     await store.close();
 
     const afterPrune = new DatabaseSync(env.database);
@@ -189,6 +208,66 @@ test("terminal receipts and observed context are bounded while prepared effects 
       "agent removal must cascade through its retained timeline",
     );
     afterRemoval.close();
+  } finally { await env.cleanup(); }
+});
+
+test("inspector detail checkpoints canonical publication and records a monotonic prune boundary", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-23T12:00:00.000Z");
+    const items = await store.ingestPoll({ agent_id: "detail", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: { id: "1", sender: "Ada", text: "ship it", timestamp: "2026-07-23T12:00:00.000Z", thread_root_id: "1" }, activation: { decision: "activate" } }] });
+    const item = items[0]!;
+    await store.transition(item.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-detail");
+    await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "detail", execution_generation_id: "run", provider_turn_id: "turn-detail", outcome: "reply", text: "done", evidence: "transcript", terminal_evidence: { provider: "normalized-only" } });
+    await store.transition(item.inbox_item_id, "awaiting_result");
+    await store.transition(item.inbox_item_id, "publishing");
+    await store.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: "room", canonical_message_id: "msg_99" });
+    await store.close();
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    const detail = await reopened.detail("detail", "room", "1");
+    assert.equal(detail.availability, "available");
+    assert.equal(detail.receipt?.provider_turn_id, "turn-detail");
+    assert.equal(detail.publication?.canonical_message_id, "msg_99");
+    assert.equal(detail.source_message?.text, "ship it");
+    assert.deepEqual(detail.timeline.map((event) => event.phase).slice(-2), ["publish_started", "published"]);
+    assert.equal(detail.items[0]?.sender, "Ada");
+    assert.equal(detail.items[0]?.text_preview, "ship it");
+    await reopened.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: "room", canonical_message_id: "msg_99" });
+    const [noReply] = await reopened.ingestPoll({ agent_id: "no-reply", room_id: "room", last_observed_message_id: "2", messages: [{ source_message_id: "2", source_message: { id: "2" }, activation: {} }] });
+    await reopened.transition(noReply!.inbox_item_id, "dispatching");
+    await reopened.transition(noReply!.inbox_item_id, "awaiting_result");
+    await reopened.transition(noReply!.inbox_item_id, "acknowledged_no_reply");
+    await assert.rejects(() => reopened.checkpointPublication({ inbox_item_id: noReply!.inbox_item_id, room_id: "room", canonical_message_id: "msg_never" }), /publishing inbox item/);
+    await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
+test("v8 validation rejects malformed table and required-index shapes", async () => {
+  for (const mutation of [
+    `DROP INDEX supervised_agent_publications_agent_room; CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(room_id,agent_id)`,
+    `DROP TABLE supervised_agent_publications; CREATE TABLE supervised_agent_publications (inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id),agent_id TEXT NOT NULL,room_id TEXT NOT NULL,client_message_id TEXT NOT NULL,canonical_message_id TEXT NOT NULL,published_at INTEGER NOT NULL,UNIQUE(room_id,client_message_id),UNIQUE(room_id,canonical_message_id)) STRICT`,
+  ]) {
+    const env = await fixture(); try {
+      const store = new SupervisedAgentInboxStore(env.database); await store.receipts("shape"); await store.close();
+      const database = new DatabaseSync(env.database); database.exec(mutation); database.close();
+      const rejected = new SupervisedAgentInboxStore(env.database);
+      await assert.rejects(() => rejected.receipts("shape"), /Daemon state v8 (?:table|index)/);
+      await rejected.close();
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("older marker with physical v7 delivery tables installs v8 before advancing", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database); await store.receipts("repair-v8"); await store.close();
+    const database = new DatabaseSync(env.database);
+    database.exec(`DROP INDEX supervised_agent_publications_agent_room; DROP INDEX supervised_agent_history_boundaries_updated; DROP INDEX supervised_agent_pruned_sources_retention; DROP TABLE supervised_agent_publications; DROP TABLE supervised_agent_history_boundaries; DROP TABLE supervised_agent_pruned_sources; UPDATE manifest_metadata SET schema_version=5 WHERE singleton=1; PRAGMA user_version=5;`);
+    database.close();
+    const reopened = new SupervisedAgentInboxStore(env.database); await reopened.receipts("repair-v8"); await reopened.close();
+    const inspection = new DatabaseSync(env.database);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.ok(inspection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='supervised_agent_pruned_sources'").get());
+    inspection.close();
   } finally { await env.cleanup(); }
 });
 
@@ -248,7 +327,7 @@ test("v7 repair adds a missing causal-event table without rewriting canonical in
     await first.close();
     const partialV7 = new DatabaseSync(env.database);
     partialV7.exec("DROP TABLE supervised_agent_inbox_events");
-    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
+    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
     partialV7.close();
     const repaired = new SupervisedAgentInboxStore(env.database);
     const preserved = (await repaired.receipts("repair"))[0]!;
@@ -343,7 +422,7 @@ test("a post-COMMIT v6 scrub interruption leaves a durable marker that a reopen 
     await prepareSecretBearingV5(env);
     const interrupted = new DatabaseSync(env.database);
     assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
-    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 7);
+    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
     assert.equal((interrupted.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
     interrupted.close();
     const reopened = new DatabaseSync(env.database);

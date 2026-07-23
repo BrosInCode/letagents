@@ -248,6 +248,7 @@ const api: DesktopApi = {
     controlTurn: (input) => ipcRenderer.invoke("desktop:supervisor:control-turn", input),
     resolveTurnControl: (input) => ipcRenderer.invoke("desktop:supervisor:resolve-turn-control", input),
     readAttempt: (id) => ipcRenderer.invoke("desktop:supervisor:read-attempt", id),
+    getAgentInspectorDetail: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-inspector-detail", input),
     onActivity: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
       ipcRenderer.on("desktop:supervisor:activity", listener);

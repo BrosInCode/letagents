@@ -12,6 +12,7 @@ import {
   SUPERVISOR_DAEMON_PROTOCOL_VERSION,
   type DaemonHandoffDiagnostic,
   type DaemonProcessIdentity,
+  mapAgentInspectorDetail,
   mapEntry,
   SupervisorDaemonClient,
   onSupervisorActivity,
@@ -93,7 +94,7 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
@@ -128,6 +129,8 @@ async function startWireDaemon(
           duplicate: false,
           stages: ["delivered", "interrupting", "applied", "resumed"],
         };
+      } else if (request.method === "supervisor.get_agent_inspector_detail") {
+        result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
       } else if (request.method === "lane.reserve_legacy") {
         const owner = {
           reservation_id: request.params!.reservation_id,
@@ -315,6 +318,42 @@ test("causal manifest projection drops malformed nested state and malformed rece
   const projected = mapEntry(malformed as unknown as Parameters<typeof mapEntry>[0]);
   assert.equal(projected.roomAgentState, null);
   assert.deepEqual(projected.deliveryReceipts, []);
+});
+
+test("agent inspector detail mapper validates every bounded wire section", () => {
+  const input = { entryId: "agent_1", roomId: "room_1", sourceMessageId: "msg_1" };
+  const wire = {
+    availability: "available", entry_id: "agent_1", room_id: "room_1", inbox_item_id: "inbox_1",
+    source_message: { id: "msg_1", room_id: "room_1", sender: "Ada", text: "ship it", created_at: "2026-01-01T00:00:00.000Z", reply_to: null, thread_root_id: "msg_1", activation: { decision: "activate" } },
+    receipt: { state: "acknowledged", attempt_count: 1, provider_turn_id: "turn_1", outcome: { kind: "reply", text: "done", evidence: "transcript" }, last_error: null, blocked_by_inbox_item_id: null, next_attempt_at_ms: null },
+    terminal: { outcome: "reply", normalized_text: "done", evidence_source: "transcript", observed_at: "2026-01-01T00:00:01.000Z" },
+    publication: { client_message_id: "client_1", canonical_message_id: "msg_2", room_id: "room_1" },
+    timeline: [{ phase: "published", observed_at: "2026-01-01T00:00:02.000Z", detail: "msg_2" }],
+    items: [{ source_message_id: "msg_1", inbox_item_id: "inbox_1", state: "acknowledged", attempt_count: 1, updated_at: "2026-01-01T00:00:02.000Z", sender: "Ada", text_preview: "ship it", created_at: "2026-01-01T00:00:00.000Z", outcome: { kind: "reply", text: "done" }, provider_turn_id: "turn_1", last_error: null, canonical_message_id: "msg_2" }],
+    history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
+  };
+  const mapped = mapAgentInspectorDetail(wire, input);
+  assert.equal(mapped.items[0]?.sender, "Ada");
+  assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, room_id: "room_2" }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, source_message: { ...wire.source_message, id: "msg_other" } }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail(wire, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }), /invalid or unfenced/);
+  assert.doesNotThrow(() => mapAgentInspectorDetail({ ...wire, availability: "not_loaded", inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [] }, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }));
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, items: [{ ...wire.items[0], state: "invented" }] }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: Array.from({ length: 101 }, () => wire.timeline[0]) }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, history_boundary: { ...wire.history_boundary, earliest_retained_receipt_sequence: -1 } }, input), /invalid or unfenced/);
+});
+
+test("agent inspector detail is capability-negotiated and preserves its optional exact-source fence", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 36);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const detail = await client.getAgentInspectorDetail({ entryId: "agent_1", roomId: "room_1", sourceMessageId: null });
+    assert.equal(detail.availability, "not_loaded");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.get_agent_inspector_detail")?.params, { entry_id: "agent_1", room_id: "room_1", source_message_id: null });
+    await assert.rejects(() => client.getAgentInspectorDetail({ entryId: "", roomId: "room_1" }), /exact non-empty/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
 test("room delivery retry is capability-negotiated and carries the exact current daemon generation", async () => {
