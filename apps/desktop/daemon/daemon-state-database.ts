@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 11;
+export const DAEMON_STATE_SCHEMA_VERSION = 12;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -71,11 +71,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV10ToV11(database);
     return;
   }
+  if (existingVersion === 11) {
+    this.migrateV11ToV12(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV11Shape(database);
+    this.repairAndValidateV12Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -349,8 +353,8 @@ createSchema(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -374,8 +378,8 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -400,8 +404,8 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -426,8 +430,8 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.applyV4Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -491,8 +495,8 @@ migrateV4ToV5(database: DatabaseSync): void {
     // tables, so complete and validate the current shape before advancing
     // either version marker.
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -543,8 +547,8 @@ migrateV5ToV6(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -567,8 +571,8 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.validateV6Shape(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -587,8 +591,8 @@ migrateV7ToV8(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -605,8 +609,8 @@ migrateV8ToV9(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -622,8 +626,8 @@ migrateV9ToV10(database: DatabaseSync): void {
   this.repairAndValidateV9Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -639,8 +643,25 @@ migrateV10ToV11(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     if (this.tableColumns(database, "agent_purge_operations").size) this.rebuildPurgeOperationsV11(database);
-    this.applyV11Shape(database);
-    this.validateV11Shape(database);
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V12 records the crash-safe local state of every supervisor worker mint. */
+migrateV11ToV12(database: DatabaseSync): void {
+  this.repairAndValidateV11Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV12Shape(database);
+    this.validateV12Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -903,6 +924,81 @@ repairAndValidateV11Shape(database: DatabaseSync): void {
     this.applyV11Shape(database); this.validateV11Shape(database); database.exec("COMMIT");
   }
   catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+}
+
+private applyV12Shape(database: DatabaseSync): void {
+  this.applyV11Shape(database);
+  const existed = this.tableColumns(database, "supervised_worker_mint_states").size > 0;
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS supervised_worker_mint_states (
+      agent_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      agent_instance_id TEXT NOT NULL,
+      phase TEXT NOT NULL CHECK(phase IN ('never_minted','minting_unknown','exact')),
+      agent_session_id TEXT,
+      updated_at TEXT NOT NULL,
+      CHECK(
+        (phase='exact' AND agent_session_id IS NOT NULL)
+        OR
+        (phase IN ('never_minted','minting_unknown') AND agent_session_id IS NULL)
+      )
+    ) STRICT;
+  `);
+  if (existed) return;
+
+  // V11 had no mint journal. Seed only facts that its durable records can
+  // actually prove; omitted legacy bindings deliberately remain unknown.
+  const now = new Date().toISOString();
+  run(database.prepare(`
+    INSERT INTO supervised_worker_mint_states
+      (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
+    SELECT b.agent_id,m.room_id,'daemon:' || b.agent_id,
+      CASE WHEN b.binding_agent_session_id IS NULL THEN 'minting_unknown' ELSE 'exact' END,
+      b.binding_agent_session_id,COALESCE(b.binding_updated_at,?)
+    FROM retained_worker_bindings b
+    JOIN agent_room_memberships m USING(agent_id)
+    WHERE b.last_worker_binding_present=1
+  `), now);
+  run(database.prepare(`
+    INSERT OR REPLACE INTO supervised_worker_mint_states
+      (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
+    SELECT agent_id,room_id,'daemon:' || agent_id,'exact',agent_session_id,updated_at
+    FROM supervised_worker_sessions
+  `));
+}
+
+private validateV12Shape(database: DatabaseSync): void {
+  this.validateV11Shape(database);
+  const expectedColumns = ["agent_id", "room_id", "agent_instance_id", "phase", "agent_session_id", "updated_at"];
+  const details = database.prepare("PRAGMA table_xinfo(supervised_worker_mint_states)")
+    .all() as Array<{ name: string; hidden: number }>;
+  const actualColumns = details.map((column) => String(column.name));
+  if (actualColumns.length !== expectedColumns.length
+    || expectedColumns.some((column, index) => actualColumns[index] !== column)
+    || details.some((column) => Number(column.hidden) !== 0)) {
+    throw new Error("Daemon state v12 mint-state table has invalid columns.");
+  }
+  if (actualColumns.some((column) => /(token|bearer|credential|secret)/i.test(column))) {
+    throw new Error("Daemon state v12 mint-state table must never persist worker credentials.");
+  }
+  const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replaceAll('"', "").replaceAll("`", "").replaceAll("[", "").replaceAll("]", "").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").replace(/\)\s*strict$/i, ")strict").trim().toLowerCase();
+  const canonical = `CREATE TABLE supervised_worker_mint_states (agent_id TEXT PRIMARY KEY,room_id TEXT NOT NULL,agent_instance_id TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('never_minted','minting_unknown','exact')),agent_session_id TEXT,updated_at TEXT NOT NULL,CHECK((phase='exact' AND agent_session_id IS NOT NULL) OR (phase IN ('never_minted','minting_unknown') AND agent_session_id IS NULL))) STRICT`;
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_worker_mint_states'").get() as Row | undefined;
+  const info = (database.prepare("PRAGMA table_list").all() as Row[])
+    .find((row) => row.name === "supervised_worker_mint_states" && row.type === "table");
+  if (!definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonical)
+    || !info || Number(info.strict) !== 1 || Number(info.wr) !== 0) {
+    throw new Error("Daemon state v12 mint-state table does not match its canonical strict definition.");
+  }
+}
+
+repairAndValidateV12Shape(database: DatabaseSync): void {
+  this.repairAndValidateV11Shape(database);
+  const columns = this.tableColumns(database, "supervised_worker_mint_states");
+  if (columns.size === 0) {
+    throw new Error("Daemon state v12 is missing its mint-state table and cannot safely reconstruct erased mint attempts.");
+  }
+  this.validateV12Shape(database);
 }
 
 private applyV8Shape(database: DatabaseSync): void {

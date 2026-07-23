@@ -331,39 +331,50 @@ export class ManifestStore {
   }
 
   /**
-   * Resolve only durable worker-session evidence. An explicit retained null
-   * proves no session was minted; an absent legacy field remains unknown even
-   * when the history tables are empty.
+   * Resolve only durable worker-session evidence. A mint attempt is an
+   * irreversible uncertainty boundary until its idempotent remote response is
+   * recorded. Exact evidence outranks older explicit-none facts, while
+   * conflicting exact ids and legacy omissions fail closed.
    */
   async durablePurgeWorkerSessionAttestation(agentId: string): Promise<{
     workerSessionAttestation: "exact" | "none" | "unknown";
     agentSessionId: string | null;
   }> {
     const database = await this.getDatabase();
+    const mint = database.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+      .get(agentId) as Row | undefined;
+    if (mint?.phase === "minting_unknown") {
+      return { workerSessionAttestation: "unknown", agentSessionId: null };
+    }
+    const ids = new Set<string>();
+    const addExact = (value: unknown) => {
+      const sessionId = nullableString(value)?.trim();
+      if (sessionId) ids.add(sessionId);
+    };
+    if (mint?.phase === "exact") addExact(mint.agent_session_id);
+
     const retained = database.prepare("SELECT last_worker_binding_present,binding_agent_session_id FROM retained_worker_bindings WHERE agent_id=?").get(agentId) as Row | undefined;
     if (retained && bool(retained.last_worker_binding_present)) {
-      const sessionId = nullableString(retained.binding_agent_session_id)?.trim() ?? "";
-      return sessionId
-        ? { workerSessionAttestation: "exact", agentSessionId: sessionId }
-        : { workerSessionAttestation: "none", agentSessionId: null };
+      addExact(retained.binding_agent_session_id);
     }
     const current = database.prepare("SELECT agent_session_id FROM supervised_worker_sessions WHERE agent_id=?").get(agentId) as Row | undefined;
-    const currentSessionId = nullableString(current?.agent_session_id)?.trim() ?? "";
-    if (currentSessionId) return { workerSessionAttestation: "exact", agentSessionId: currentSessionId };
-    const ids = new Set<string>();
+    addExact(current?.agent_session_id);
     for (const [table, column] of [
       ["worker_session_bindings", "entry_id"],
       ["worker_binding_publications", "entry_id"],
       ["worker_generation_verifications", "entry_id"],
     ] as const) {
       const rows = database.prepare(`SELECT DISTINCT agent_session_id FROM ${table} WHERE ${column}=?`).all(agentId) as Row[];
-      for (const row of rows) {
-        const sessionId = nullableString(row.agent_session_id)?.trim();
-        if (sessionId) ids.add(sessionId);
-      }
+      for (const row of rows) addExact(row.agent_session_id);
     }
-    if (ids.size === 0) return { workerSessionAttestation: "unknown", agentSessionId: null };
     if (ids.size === 1) return { workerSessionAttestation: "exact", agentSessionId: [...ids][0]! };
+    if (ids.size > 1) return { workerSessionAttestation: "unknown", agentSessionId: null };
+
+    const retainedProvesNone = Boolean(retained && bool(retained.last_worker_binding_present)
+      && nullableString(retained.binding_agent_session_id) === null);
+    if (retainedProvesNone && mint?.phase === "never_minted") {
+      return { workerSessionAttestation: "none", agentSessionId: null };
+    }
     return { workerSessionAttestation: "unknown", agentSessionId: null };
   }
 
@@ -485,7 +496,7 @@ export class ManifestStore {
         for (const [table, column] of [
           ["supervised_agent_effects", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
           ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
-          ["supervised_worker_sessions", "agent_id"], ["supervised_agent_inbox", "agent_id"], ["worker_binding_publications", "entry_id"],
+          ["supervised_worker_mint_states", "agent_id"], ["supervised_worker_sessions", "agent_id"], ["supervised_agent_inbox", "agent_id"], ["worker_binding_publications", "entry_id"],
           ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],
           ["agent_room_moves", "agent_id"],
         ] as const) run(database.prepare(`DELETE FROM ${table} WHERE ${column}=?`), input.agentId);
@@ -895,7 +906,7 @@ export class ManifestStore {
       const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
       const count = Number((database.prepare("SELECT COUNT(*) AS count FROM agent_identities").get() as Row).count);
       if (current !== 0 || count !== 0) throw new Error("Refusing to import a legacy manifest into non-empty daemon state.");
-      this.replaceEntries(database, stored.manifest.entries);
+      this.replaceEntries(database, stored.manifest.entries, false);
       this.replaceLegacyLaneOwners(database, stored.manifest.legacy_lane_owners ?? []);
       run(database.prepare("UPDATE manifest_metadata SET generation = ? WHERE singleton = 1"), stored.manifest.generation);
       run(database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)"), migrationKey, stored.checksum, new Date().toISOString());
@@ -923,8 +934,10 @@ export class ManifestStore {
     await rename(this.legacyJsonPath, `${this.legacyJsonPath}.migrated-backup`);
   }
 
-  private replaceEntries(database: DatabaseSync, entries: DaemonManifestEntry[]): void {
+  private replaceEntries(database: DatabaseSync, entries: DaemonManifestEntry[], initializeNewMintStates = true): void {
     const configurations = new Map((database.prepare("SELECT * FROM agent_configurations").all() as Row[]).map((row) => [String(row.agent_id), row]));
+    const existingIdentities = new Set((database.prepare("SELECT agent_id FROM agent_identities").all() as Row[])
+      .map((row) => String(row.agent_id)));
     database.exec("DELETE FROM agent_identities");
     entries.forEach((entry, index) => {
       const normalized = canonicalManifestEntry(entry);
@@ -934,6 +947,18 @@ export class ManifestStore {
         this.preserveInspectorConfiguration(projection, configuration);
       }
       this.insertProjection(database, projection, index);
+      if (initializeNewMintStates && !existingIdentities.has(normalized.id)
+        && (normalized.delivery_mode ?? "mcp_polling") === "daemon_inbox"
+        && Object.hasOwn(normalized, "last_worker_binding")) {
+        const binding = normalized.last_worker_binding ?? null;
+        run(database.prepare(`
+          INSERT OR IGNORE INTO supervised_worker_mint_states
+            (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
+          VALUES (?,?,?,?,?,?)
+        `), normalized.id, normalized.room_id, `daemon:${normalized.id}`,
+        binding ? "exact" : "never_minted", binding?.agent_session_id ?? null,
+        binding?.updated_at ?? new Date().toISOString());
+      }
     });
   }
 

@@ -34,6 +34,14 @@ export type SupervisedWorkerSession = {
   expires_at: string | null;
   updated_at: string;
 };
+export type SupervisedWorkerMintState = {
+  agent_id: string;
+  room_id: string;
+  agent_instance_id: string;
+  phase: "never_minted" | "minting_unknown" | "exact";
+  agent_session_id: string | null;
+  updated_at: string;
+};
 type Row = Record<string, unknown>;
 type Reservation = { reservationId: string; binding: WorkerSessionBinding; bindingEpoch: number; sequence: number; observedAt: string; observedAtMs: number };
 type LegacyWorkerSessionBinding = WorkerSessionBindingInput & Pick<WorkerSessionBinding, "room_cursor" | "last_sequence" | "last_observed_at_ms" | "updated_at">;
@@ -84,6 +92,63 @@ export class WorkerBindingStore {
   }
   async list(): Promise<WorkerSessionBinding[]> {
     return this.withMutation(async (database) => (database.prepare("SELECT * FROM worker_session_bindings ORDER BY entry_id").all() as Row[]).map(rowToBinding));
+  }
+
+  /** Commit the uncertainty boundary before any remote mint request is sent. */
+  async beginSupervisedWorkerSessionMint(input: {
+    agent_id: string;
+    room_id: string;
+    agent_instance_id: string;
+  }): Promise<SupervisedWorkerMintState> {
+    for (const field of ["agent_id", "room_id", "agent_instance_id"] as const) {
+      if (!input[field].trim()) throw new Error(`Supervised worker mint ${field} is required.`);
+    }
+    return this.withMutation(async (database) => this.transaction(database, () => {
+      const updatedAt = new Date().toISOString();
+      run(database.prepare(`
+        INSERT INTO supervised_worker_mint_states
+          (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
+        VALUES (?,?,?,'minting_unknown',NULL,?)
+        ON CONFLICT(agent_id) DO UPDATE SET
+          room_id=excluded.room_id,agent_instance_id=excluded.agent_instance_id,
+          phase='minting_unknown',agent_session_id=NULL,updated_at=excluded.updated_at
+      `), input.agent_id, input.room_id, input.agent_instance_id, updatedAt);
+      return this.readSupervisedWorkerMintState(database, input.agent_id)!;
+    }));
+  }
+
+  /**
+   * A successful idempotent POST response becomes durable before its bearer is
+   * cached or any provider-generation metadata is written.
+   */
+  async recordExactSupervisedWorkerSessionMint(input: {
+    agent_id: string;
+    room_id: string;
+    agent_instance_id: string;
+    agent_session_id: string;
+  }): Promise<SupervisedWorkerMintState> {
+    for (const field of ["agent_id", "room_id", "agent_instance_id", "agent_session_id"] as const) {
+      if (!input[field].trim()) throw new Error(`Supervised worker mint ${field} is required.`);
+    }
+    return this.withMutation(async (database) => this.transaction(database, () => {
+      const current = this.readSupervisedWorkerMintState(database, input.agent_id);
+      if (!current || current.room_id !== input.room_id
+        || current.agent_instance_id !== input.agent_instance_id
+        || (current.phase !== "minting_unknown"
+          && !(current.phase === "exact" && current.agent_session_id === input.agent_session_id))) {
+        throw new Error("Supervised worker mint response is stale or lacks its durable pre-POST fence.");
+      }
+      run(database.prepare(`
+        UPDATE supervised_worker_mint_states
+        SET phase='exact',agent_session_id=?,updated_at=?
+        WHERE agent_id=?
+      `), input.agent_session_id, new Date().toISOString(), input.agent_id);
+      return this.readSupervisedWorkerMintState(database, input.agent_id)!;
+    }));
+  }
+
+  async supervisedWorkerMintState(agentId: string): Promise<SupervisedWorkerMintState | null> {
+    return this.withMutation(async (database) => this.readSupervisedWorkerMintState(database, agentId));
   }
 
   /** Public session metadata only; the raw bearer deliberately has no durable home. */
@@ -373,6 +438,16 @@ export class WorkerBindingStore {
         last_sequence=MAX(worker_binding_watermarks.last_sequence, excluded.last_sequence),
         last_observed_at_ms=MAX(worker_binding_watermarks.last_observed_at_ms, excluded.last_observed_at_ms),
         updated_at=CASE WHEN excluded.last_observed_at_ms >= worker_binding_watermarks.last_observed_at_ms THEN excluded.updated_at ELSE worker_binding_watermarks.updated_at END`), entryId, bindingEpoch, lastSequence, lastObservedAtMs, updatedAt);
+  }
+  private readSupervisedWorkerMintState(database: DatabaseSync, agentId: string): SupervisedWorkerMintState | null {
+    const row = database.prepare("SELECT * FROM supervised_worker_mint_states WHERE agent_id=?").get(agentId) as Row | undefined;
+    return row ? {
+      agent_id: String(row.agent_id), room_id: String(row.room_id),
+      agent_instance_id: String(row.agent_instance_id),
+      phase: String(row.phase) as SupervisedWorkerMintState["phase"],
+      agent_session_id: typeof row.agent_session_id === "string" ? row.agent_session_id : null,
+      updated_at: String(row.updated_at),
+    } : null;
   }
   private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); if (input.credential_ref !== undefined && !input.credential_ref.trim()) throw new Error("Worker binding credential_ref is required when supplied."); const url = new URL(input.api_url); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
   private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }

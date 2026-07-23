@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 
 async function fixture() {
@@ -260,8 +261,8 @@ test("a canonical v4 database with no later additive tables upgrades through the
     await upgraded.close();
     const current = new DatabaseSync(env.database);
     try {
-      assert.equal(Number((current.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 11);
-      assert.equal(Number((current.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get() as { schema_version: number }).schema_version), 11);
+      assert.equal(Number((current.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), DAEMON_STATE_SCHEMA_VERSION);
+      assert.equal(Number((current.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get() as { schema_version: number }).schema_version), DAEMON_STATE_SCHEMA_VERSION);
       for (const table of ["supervised_agent_terminal_results", "supervised_agent_publications", "agent_room_moves", "agent_purge_operations"]) {
         assert.ok(current.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), `${table} was created before version markers advanced`);
       }

@@ -6,9 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
 
 test("Inspector configuration revisions are optimistic, durable, and do not alter the flat manifest", async () => {
   const env = await fixture();
@@ -120,6 +122,7 @@ test("purge proves preconditions and deletes local agent rows atomically without
     try {
       for (const [table, column, value] of [
         ["agent_identities", "agent_id", stopped.id], ["worker_session_bindings", "entry_id", stopped.id], ["supervised_agent_inbox", "agent_id", stopped.id],
+        ["supervised_worker_mint_states", "agent_id", stopped.id],
         ["work_attempts", "work_attempt_id", attemptId], ["work_attempt_lease_epochs", "work_attempt_id", attemptId],
         ["work_attempt_checkpoints", "work_attempt_id", attemptId], ["work_attempt_executions", "work_attempt_id", attemptId],
       ] as const) {
@@ -130,6 +133,89 @@ test("purge proves preconditions and deletes local agent rows atomically without
     await reopened.close();
   } finally {
     await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("mint-state evidence is none only before an attempt, unknown across crashes, exact after recovery, and conflict-safe", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "legacy-worker-bindings.json"), undefined, env.databasePath);
+  const stopped: DaemonManifestEntry = {
+    ...entry,
+    id: "agent_mint_state",
+    delivery_mode: "daemon_inbox",
+    desired_state: "stopped",
+    observed_state: "stopped",
+    condition: "none",
+    workspace_path: null,
+    work_attempt_id: null,
+    provider_ref: null,
+    activity: [],
+    turn_control: null,
+    last_worker_binding: null,
+  };
+  try {
+    await store.write(0, [stopped]);
+    assert.equal((await bindings.supervisedWorkerMintState(stopped.id))?.phase, "never_minted");
+    assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+      workerSessionAttestation: "none",
+      agentSessionId: null,
+    });
+
+    await bindings.beginSupervisedWorkerSessionMint({
+      agent_id: stopped.id,
+      room_id: stopped.room_id,
+      agent_instance_id: `daemon:${stopped.id}`,
+    });
+    assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+      workerSessionAttestation: "unknown",
+      agentSessionId: null,
+    }, "the committed pre-POST fence survives as unknown");
+
+    await bindings.close();
+    const recoveredBindings = new WorkerBindingStore(join(env.root, "legacy-worker-bindings.json"), undefined, env.databasePath);
+    try {
+      assert.equal((await recoveredBindings.supervisedWorkerMintState(stopped.id))?.phase, "minting_unknown");
+      await recoveredBindings.recordExactSupervisedWorkerSessionMint({
+        agent_id: stopped.id,
+        room_id: stopped.room_id,
+        agent_instance_id: `daemon:${stopped.id}`,
+        agent_session_id: "session_exact_recovered",
+      });
+      assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+        workerSessionAttestation: "exact",
+        agentSessionId: "session_exact_recovered",
+      }, "the exact recovered response outranks retained explicit none");
+
+      const conflict = new DatabaseSync(env.databasePath);
+      try {
+        conflict.prepare(`INSERT INTO supervised_worker_sessions
+          (agent_id,room_id,agent_session_id,execution_generation_id,credential_ref,expires_at,updated_at)
+          VALUES (?,?,?,?,?,?,?)`)
+          .run(stopped.id, stopped.room_id, "session_conflicting", "execution_conflicting", "opaque-public-id", null, new Date().toISOString());
+      } finally { conflict.close(); }
+      assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+        workerSessionAttestation: "unknown",
+        agentSessionId: null,
+      }, "conflicting exact durable ids fail closed");
+
+      const cleanup = new DatabaseSync(env.databasePath);
+      try { cleanup.prepare("DELETE FROM supervised_worker_sessions WHERE agent_id=?").run(stopped.id); }
+      finally { cleanup.close(); }
+      await recoveredBindings.beginSupervisedWorkerSessionMint({
+        agent_id: stopped.id,
+        room_id: stopped.room_id,
+        agent_instance_id: `daemon:${stopped.id}`,
+      });
+      assert.deepEqual(await store.durablePurgeWorkerSessionAttestation(stopped.id), {
+        workerSessionAttestation: "unknown",
+        agentSessionId: null,
+      }, "a later mint attempt vetoes older exact evidence until its response is durable");
+    } finally { await recoveredBindings.close(); }
+  } finally {
+    await bindings.close().catch(() => undefined);
+    await store.close();
     await env.cleanup();
   }
 });
@@ -230,7 +316,7 @@ test("purge rejection leaves generation, identity, and journal unchanged", async
   } finally { await store.close(); await env.cleanup(); }
 });
 
-test("v11 canonical validation rejects a malformed durable-operation index", async () => {
+test("v12 canonical validation rejects a malformed durable-operation index", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try { await store.write(0, [entry]); } finally { await store.close(); }
@@ -243,7 +329,116 @@ test("v11 canonical validation rejects a malformed durable-operation index", asy
   finally { await reopened.close(); await env.cleanup(); }
 });
 
-test("v10 state migrates to v11 with an exact-session purge fence before version markers advance", async () => {
+test("v12 canonical validation rejects a mint-state table that could persist unchecked evidence", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try { await store.write(0, [entry]); } finally { await store.close(); }
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    database.exec(`
+      DROP TABLE supervised_worker_mint_states;
+      CREATE TABLE supervised_worker_mint_states (
+        agent_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        agent_instance_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        agent_session_id TEXT,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+    `);
+  } finally { database.close(); }
+  const reopened = new ManifestStore(env.databasePath);
+  try {
+    await assert.rejects(
+      () => reopened.load(),
+      /mint-state table does not match its canonical strict definition/,
+    );
+  } finally { await reopened.close(); await env.cleanup(); }
+});
+
+test("v11 mint evidence migrates transactionally to unknown and exact without credential columns", async () => {
+  const env = await fixture();
+  const neverMinted: DaemonManifestEntry = {
+    ...entry,
+    id: "agent_v11_never_minted",
+    delivery_mode: "daemon_inbox",
+    desired_state: "stopped",
+    observed_state: "stopped",
+    condition: "none",
+    workspace_path: null,
+    work_attempt_id: null,
+    provider_ref: null,
+    activity: [],
+    turn_control: null,
+    last_worker_binding: null,
+  };
+  const exact: DaemonManifestEntry = {
+    ...neverMinted,
+    id: "agent_v11_exact",
+    last_worker_binding: {
+      agent_session_id: "session_v11_exact",
+      work_attempt_id: "attempt_v11_exact",
+      execution_generation_id: "execution_v11_exact",
+      updated_at: "2026-07-20T00:00:00.000Z",
+    },
+  };
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    await initialized.write(0, [neverMinted, exact]);
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec(`
+      DROP TABLE supervised_worker_mint_states;
+      UPDATE manifest_metadata SET schema_version=11 WHERE singleton=1;
+      PRAGMA user_version=11;
+    `);
+    historical.close();
+
+    const interrupted = new ManifestStore(env.databasePath, undefined, undefined, () => {
+      throw new Error("interrupt v12 mint-state migration");
+    });
+    await assert.rejects(() => interrupted.load(), /interrupt v12/);
+    await interrupted.close();
+    const afterInterruption = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal((afterInterruption.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+      assert.equal(
+        (afterInterruption.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1")
+          .get() as { schema_version: number }).schema_version,
+        11,
+      );
+      assert.equal(
+        afterInterruption.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='supervised_worker_mint_states'").get(),
+        undefined,
+        "interrupted schema creation rolls back with the version markers",
+      );
+    } finally { afterInterruption.close(); }
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    await migrated.close();
+    const inspection = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+      const neverMintedState = inspection.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+        .get(neverMinted.id) as { phase: string; agent_session_id: string | null };
+      assert.equal(neverMintedState.phase, "minting_unknown", "v11 explicit null may have crossed the old lost-response window");
+      assert.equal(neverMintedState.agent_session_id, null);
+      const exactState = inspection.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+        .get(exact.id) as { phase: string; agent_session_id: string | null };
+      assert.equal(exactState.phase, "exact");
+      assert.equal(exactState.agent_session_id, "session_v11_exact");
+      const columns = (inspection.prepare("PRAGMA table_info(supervised_worker_mint_states)").all() as Array<{ name: string }>)
+        .map((column) => column.name);
+      assert.equal(columns.some((column) => /(token|bearer|credential|secret)/i.test(column)), false);
+    } finally { inspection.close(); }
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("v10 state migrates through the exact-session purge fence to the current schema before version markers advance", async () => {
   const env = await fixture();
   const initialized = new ManifestStore(env.databasePath);
   try {
@@ -321,10 +516,10 @@ test("v10 state migrates to v11 with an exact-session purge fence before version
     assert.equal(committed.purge.phase, "complete");
     await completion.close();
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.equal(
       (inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get() as { schema_version: number }).schema_version,
-      11,
+      DAEMON_STATE_SCHEMA_VERSION,
     );
     const columns = inspection.prepare("PRAGMA table_info(agent_purge_operations)").all() as Array<{ name: string }>;
     assert.equal(columns.some((column) => column.name === "agent_session_id"), true);
@@ -552,8 +747,8 @@ function removePostV5DeliveryTables(database: DatabaseSync): void {
 }
 
 function assertRoomScopedV9DeliveryShape(database: DatabaseSync): void {
-  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
-  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 11);
+  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, DAEMON_STATE_SCHEMA_VERSION);
   const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as { sql: string };
   const observed = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_observed_messages'").get() as { sql: string };
   const publications = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as { sql: string };
@@ -695,14 +890,15 @@ test("a post-commit backup failure retries idempotently without reimporting", as
 
 test("future SQLite schema versions are rejected without being downgraded", async () => {
   const env = await fixture();
+  const futureVersion = DAEMON_STATE_SCHEMA_VERSION + 1;
   const database = new DatabaseSync(env.databasePath);
-  database.exec("PRAGMA user_version = 12");
+  database.exec(`PRAGMA user_version = ${futureVersion}`);
   database.close();
   const store = new ManifestStore(env.databasePath);
   try {
-    await assert.rejects(() => store.load(), /schema version 12/);
+    await assert.rejects(() => store.load(), new RegExp(`schema version ${futureVersion}`));
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 12);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, futureVersion);
     inspection.close();
   } finally {
     await store.close();
@@ -712,15 +908,16 @@ test("future SQLite schema versions are rejected without being downgraded", asyn
 
 test("manifest metadata schema disagreement is rejected on reopen", async () => {
   const env = await fixture();
+  const futureVersion = DAEMON_STATE_SCHEMA_VERSION + 1;
   const initialized = new ManifestStore(env.databasePath);
   try {
     await initialized.load();
     await initialized.close();
     const database = new DatabaseSync(env.databasePath);
-    database.prepare("UPDATE manifest_metadata SET schema_version = 12 WHERE singleton = 1").run();
+    database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1").run(futureVersion);
     database.close();
     const reopened = new ManifestStore(env.databasePath);
-    await assert.rejects(() => reopened.load(), /metadata schema version 12/);
+    await assert.rejects(() => reopened.load(), new RegExp(`metadata schema version ${futureVersion}`));
     await reopened.close();
   } finally {
     await initialized.close();
@@ -729,10 +926,11 @@ test("manifest metadata schema disagreement is rejected on reopen", async () => 
 });
 
 test("contradictory SQLite and metadata version pairs reject before migration", async () => {
+  const futureVersion = DAEMON_STATE_SCHEMA_VERSION + 1;
   for (const pair of [
     { userVersion: 1, metadataVersion: 2, pattern: /version pair is inconsistent/ },
     { userVersion: 2, metadataVersion: 1, pattern: /version pair is inconsistent/ },
-    { userVersion: 1, metadataVersion: 12, pattern: /metadata schema version 12/ },
+    { userVersion: 1, metadataVersion: futureVersion, pattern: new RegExp(`metadata schema version ${futureVersion}`) },
   ]) {
     const env = await fixture();
     const initialized = new ManifestStore(env.databasePath);
@@ -759,7 +957,7 @@ test("contradictory SQLite and metadata version pairs reject before migration", 
   }
 });
 
-test("physical v1-v4 databases with no delivery tables advance to the complete v11 shape before stamping markers", async () => {
+test("physical v1-v4 databases with no delivery tables advance to the complete current shape before stamping markers", async () => {
   for (const version of [1, 2, 3, 4]) {
     const env = await fixture();
     const initial = new ManifestStore(env.databasePath);
@@ -854,8 +1052,8 @@ test("v1 daemon state migrates transactionally to v2 and normalizes exit timesta
     await migrated.close();
 
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
-    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 11);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.equal((inspection.prepare("SELECT provider_launch_policy_undefined FROM agent_configurations WHERE agent_id = ?").get(entry.id) as { provider_launch_policy_undefined: number }).provider_launch_policy_undefined, 0);
     assert.equal((inspection.prepare("SELECT provider_process_identity_present FROM runtime_deployments WHERE agent_id = ?").get(entry.id) as { provider_process_identity_present: number }).provider_process_identity_present, 0);
     const preservedRuntime = inspection.prepare("SELECT deployment_id, run_id FROM runtime_deployments WHERE agent_id = ?").get(invalid.id) as { deployment_id: string; run_id: string };
@@ -935,8 +1133,8 @@ test("partially migrated v2 state is repaired transactionally before reads", asy
     partial.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
     partial.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[404,505]", entry.id);
     partial.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
-    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
-    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 11);
+    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, DAEMON_STATE_SCHEMA_VERSION);
     partial.close();
 
     const repaired = new ManifestStore(env.databasePath);

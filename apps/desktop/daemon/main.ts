@@ -4647,6 +4647,16 @@ export class SupervisorDaemon {
     let lastError: unknown = null;
     let attempts = 0;
     let lastRetryable = false;
+    const agentInstanceId = `daemon:${entry.id}`;
+    if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
+    // Commit uncertainty before the first byte of the remote POST can leave
+    // this process. A crash or lost response can now only resolve to unknown,
+    // never to the stale never-minted proof.
+    await this.workerBindings.beginSupervisedWorkerSessionMint({
+      agent_id: entry.id,
+      room_id: entry.room_id,
+      agent_instance_id: agentInstanceId,
+    });
     for (let attempt = 1; attempt <= WORKER_MINT_MAX_ATTEMPTS; attempt += 1) {
       if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
       attempts = attempt;
@@ -4661,12 +4671,25 @@ export class SupervisorDaemon {
       }, WORKER_MINT_TIMEOUT_MS);
       timeout.unref();
       try {
-        return await Promise.race([this.supervisorGrantHttp.createWorkerSession({
-          apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
-          grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
-          agentInstanceId: `daemon:${entry.id}`, provider: entry.provider,
-          displayName: entry.display_name, signal: controller.signal,
-        }), timedOut]);
+        const request = (async () => {
+          const minted = await this.supervisorGrantHttp.createWorkerSession({
+            apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
+            grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
+            agentInstanceId, provider: entry.provider,
+            displayName: entry.display_name, signal: controller.signal,
+          });
+          // The server serializes this stable agent-instance tuple and reuses
+          // its live session id. Persist that exact public id before the
+          // returned bearer is cached or coupled to a provider generation.
+          await this.workerBindings.recordExactSupervisedWorkerSessionMint({
+            agent_id: entry.id,
+            room_id: entry.room_id,
+            agent_instance_id: agentInstanceId,
+            agent_session_id: minted.sessionId,
+          });
+          return minted;
+        })();
+        return await Promise.race([request, timedOut]);
       } catch (error) {
         lastError = error;
         const retryable = retryableWorkerMintFailure(error);
