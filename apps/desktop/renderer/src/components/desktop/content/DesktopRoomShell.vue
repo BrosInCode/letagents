@@ -2043,6 +2043,7 @@ function agentTargetForManagedSession(session: DesktopManagedAgentSession): Agen
   const displayName = managedAgentSessionDisplayName(session);
   return {
     messageId: null,
+    clientMessageId: null,
     actorLabel: session.actorLabel,
     displayName,
     ownerAttribution: ownerAttributionLabel(session.ownerLabel),

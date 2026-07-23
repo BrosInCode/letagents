@@ -470,6 +470,8 @@ export interface DesktopRoomAgentCausalEvent {
 export interface DesktopRoomAgentDeliveryReceipt {
   inboxItemId: string;
   sourceMessageId: string;
+  /** Deterministic daemon publication identity for this exact reply. */
+  replyClientMessageId: string;
   /** Exact room message created by this supervised reply, when one exists. */
   canonicalMessageId: string | null;
   state: DesktopRoomAgentReceiptState;

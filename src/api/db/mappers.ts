@@ -215,6 +215,7 @@ export function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): Mess
 export function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
+    client_message_id: row.client_message_id ?? null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
@@ -246,6 +247,7 @@ export function toMessageWithReply(
 ): Message {
   return {
     id: formatMessageId(row.number),
+    client_message_id: row.client_message_id ?? null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),

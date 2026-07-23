@@ -2,6 +2,12 @@ import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
 export interface Message {
   id: string;
+  /**
+   * Caller-owned idempotency identity. This is intentionally returned with
+   * the canonical message so trusted clients can join a durable publication
+   * back to the operation that created it.
+   */
+  client_message_id: string | null;
   sender: string;
   text: string;
   agent_prompt_kind: AgentPromptKind | null;

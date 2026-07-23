@@ -218,6 +218,7 @@ describe("useRoomActivityViewModel", () => {
       activityParticipantToAgentTarget(model.selectedLiveParticipant.value!),
       {
         messageId: null,
+        clientMessageId: null,
         actorLabel: "MapleRidge",
         displayName: "MapleRidge",
         ownerAttribution: "Local desktop's agent",

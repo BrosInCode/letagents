@@ -5602,6 +5602,7 @@ function projectDeliveryReceipts(receipts: readonly SupervisedInboxReceiptWithTi
   return receipts.map((receipt) => ({
     inbox_item_id: receipt.inbox_item_id,
     source_message_id: receipt.source_message_id,
+    reply_client_message_id: receipt.reply_client_message_id,
     canonical_message_id: receipt.canonical_message_id,
     state: receipt.receipt_state,
     attempt_count: receipt.attempt_count,

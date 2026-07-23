@@ -243,6 +243,8 @@ export interface DesktopRoomMessageAttachment {
 
 export interface DesktopRoomMessage {
   id: string;
+  /** Exact idempotency identity supplied by the message publisher. */
+  clientMessageId?: string | null;
   sender: string;
   text: string;
   attachments: DesktopRoomMessageAttachment[];

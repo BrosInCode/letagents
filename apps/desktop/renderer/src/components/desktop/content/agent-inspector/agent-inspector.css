@@ -1,19 +1,22 @@
-.desktop-room-shell[data-agent-inspector-open="true"] {
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 420px);
-}
-
-.desktop-room-shell[data-agent-inspector-open="true"] > :is(.desktop-room-header, .desktop-room-control-rail, .room-tab-page) {
-  grid-column: 1;
-}
-
 .agent-inspector-host-wide {
-  grid-column: 2;
-  grid-row: 1 / 4;
+  /*
+   * The inspector shares only the room-body grid cell. It must never create a
+   * second shell column: doing so narrows the header tabs and feeds the
+   * resulting resize back into the compact/wide breakpoint.
+   */
+  position: relative;
+  z-index: 45;
+  grid-column: 1;
+  grid-row: 3;
+  justify-self: end;
+  width: clamp(360px, 34vw, 420px);
+  height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   border-left: 1px solid rgba(255, 255, 255, 0.09);
   background: #111112;
+  box-shadow: -24px 0 52px rgba(0, 0, 0, 0.34);
 }
 
 .agent-inspector-surface {

@@ -7,6 +7,7 @@ export function activityParticipantToAgentTarget(
   const displayName = participant.label || participant.actorLabel || "Agent";
   return {
     messageId: null,
+    clientMessageId: null,
     actorLabel: participant.actorLabel,
     displayName,
     ownerAttribution: ownerAttribution(participant.ownerLabel),
