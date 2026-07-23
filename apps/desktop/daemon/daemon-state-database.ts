@@ -657,6 +657,7 @@ private applyV10Shape(database: DatabaseSync): void {
       updated_at TEXT NOT NULL,
       source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK(source_cursor_present IN (0,1)),
       source_cursor TEXT,
+      source_credentials_revoked INTEGER NOT NULL DEFAULT 0 CHECK(source_credentials_revoked IN (0,1)),
       CHECK(source_room_id <> destination_room_id),
       CHECK((work_attempt_id IS NULL) = (execution_generation_id IS NULL))
     ) STRICT;
@@ -688,7 +689,7 @@ private validateV10Shape(database: DatabaseSync): void {
     if (!columns.has(column)) throw new Error(`Daemon state v10 is missing agent configuration column ${column}.`);
   }
   const moves = this.tableColumns(database, "agent_room_moves");
-  for (const column of ["operation_id", "request_id", "agent_id", "source_room_id", "destination_room_id", "daemon_generation", "work_attempt_id", "execution_generation_id", "agent_session_id", "activating_inbox_item_id", "provider_turn_id", "effect_id", "phase", "remote_room_id", "destination_cursor", "created_at", "updated_at", "source_cursor_present", "source_cursor"]) {
+  for (const column of ["operation_id", "request_id", "agent_id", "source_room_id", "destination_room_id", "daemon_generation", "work_attempt_id", "execution_generation_id", "agent_session_id", "activating_inbox_item_id", "provider_turn_id", "effect_id", "phase", "remote_room_id", "destination_cursor", "source_credentials_revoked", "created_at", "updated_at", "source_cursor_present", "source_cursor"]) {
     if (!moves.has(column)) throw new Error(`Daemon state v10 is missing room-move column ${column}.`);
   }
   const purges = this.tableColumns(database, "agent_purge_operations");
@@ -697,7 +698,7 @@ private validateV10Shape(database: DatabaseSync): void {
   }
   const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replaceAll('"', "").replaceAll("`", "").replaceAll("[", "").replaceAll("]", "").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").replace(/\)\s*strict$/i, ")strict").trim().toLowerCase();
   const canonicalTables: Record<string, string> = {
-    agent_room_moves: `CREATE TABLE agent_room_moves (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,source_room_id TEXT NOT NULL,destination_room_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),work_attempt_id TEXT,execution_generation_id TEXT,agent_session_id TEXT,activating_inbox_item_id TEXT,provider_turn_id TEXT,effect_id TEXT,phase TEXT NOT NULL CHECK(phase IN ('prepared','waiting_for_current_turn','joining_destination','membership_committed','rotating_credentials','bootstrapping_destination_tail','active','failed','rollback_required')),remote_room_id TEXT,destination_cursor TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK(source_cursor_present IN (0,1)),source_cursor TEXT,CHECK(source_room_id <> destination_room_id),CHECK((work_attempt_id IS NULL) = (execution_generation_id IS NULL))) STRICT`,
+    agent_room_moves: `CREATE TABLE agent_room_moves (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,source_room_id TEXT NOT NULL,destination_room_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),work_attempt_id TEXT,execution_generation_id TEXT,agent_session_id TEXT,activating_inbox_item_id TEXT,provider_turn_id TEXT,effect_id TEXT,phase TEXT NOT NULL CHECK(phase IN ('prepared','waiting_for_current_turn','joining_destination','membership_committed','rotating_credentials','bootstrapping_destination_tail','active','failed','rollback_required')),remote_room_id TEXT,destination_cursor TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK(source_cursor_present IN (0,1)),source_cursor TEXT,source_credentials_revoked INTEGER NOT NULL DEFAULT 0 CHECK(source_credentials_revoked IN (0,1)),CHECK(source_room_id <> destination_room_id),CHECK((work_attempt_id IS NULL) = (execution_generation_id IS NULL))) STRICT`,
     agent_purge_operations: `CREATE TABLE agent_purge_operations (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,attached_work_attempt_id TEXT,preserved_workspace_path TEXT) STRICT`,
   };
   const strictTables = database.prepare("PRAGMA table_list").all() as Row[];
@@ -736,6 +737,7 @@ repairAndValidateV10Shape(database: DatabaseSync): void {
   const columns = this.tableColumns(database, "agent_configurations");
   const purgeColumns = this.tableColumns(database, "agent_purge_operations");
   if (columns.has("reasoning_effort") && columns.has("config_revision") && columns.has("runtime_configuration_revision") && this.tableColumns(database, "agent_room_moves").has("source_cursor_present")
+    && this.tableColumns(database, "agent_room_moves").has("source_credentials_revoked")
     && purgeColumns.has("attached_work_attempt_id") && purgeColumns.has("preserved_workspace_path")) {
     this.applyV10Shape(database);
     this.validateV10Shape(database);
@@ -755,6 +757,9 @@ repairAndValidateV10Shape(database: DatabaseSync): void {
     }
     if (moveColumns.size && !moveColumns.has("source_cursor")) {
       database.exec("ALTER TABLE agent_room_moves ADD COLUMN source_cursor TEXT");
+    }
+    if (moveColumns.size && !moveColumns.has("source_credentials_revoked")) {
+      database.exec("ALTER TABLE agent_room_moves ADD COLUMN source_credentials_revoked INTEGER NOT NULL DEFAULT 0 CHECK(source_credentials_revoked IN (0,1))");
     }
     const purgeColumns = this.tableColumns(database, "agent_purge_operations");
     if (purgeColumns.size && !purgeColumns.has("attached_work_attempt_id")) {

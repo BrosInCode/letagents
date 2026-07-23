@@ -38,6 +38,7 @@ function roomMoveFromRow(row: Row): DaemonRoomMoveRecord {
     work_attempt_id: nullableString(row.work_attempt_id), execution_generation_id: nullableString(row.execution_generation_id), agent_session_id: nullableString(row.agent_session_id),
     activating_inbox_item_id: nullableString(row.activating_inbox_item_id), provider_turn_id: nullableString(row.provider_turn_id), effect_id: nullableString(row.effect_id),
     phase: String(row.phase) as DaemonRoomMovePhase, remote_room_id: nullableString(row.remote_room_id), destination_cursor: nullableString(row.destination_cursor),
+    source_credentials_revoked: bool(row.source_credentials_revoked),
     source_cursor_present: bool(row.source_cursor_present), source_cursor: nullableString(row.source_cursor),
     error: nullableString(row.error), created_at: String(row.created_at), updated_at: String(row.updated_at),
   };
@@ -210,7 +211,7 @@ export class ManifestStore {
     return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision) };
   }
 
-  async prepareRoomMove(input: Omit<DaemonRoomMoveRecord, "phase" | "remote_room_id" | "destination_cursor" | "source_cursor_present" | "source_cursor" | "error" | "created_at" | "updated_at"> & { phase: "prepared" | "waiting_for_current_turn" }): Promise<{ created: boolean; move: DaemonRoomMoveRecord }> {
+  async prepareRoomMove(input: Omit<DaemonRoomMoveRecord, "phase" | "remote_room_id" | "destination_cursor" | "source_credentials_revoked" | "source_cursor_present" | "source_cursor" | "error" | "created_at" | "updated_at"> & { phase: "prepared" | "waiting_for_current_turn" }): Promise<{ created: boolean; move: DaemonRoomMoveRecord }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
@@ -248,7 +249,7 @@ export class ManifestStore {
     return rows.map(roomMoveFromRow);
   }
 
-  async advanceRoomMove(input: { operationId: string; agentId: string; expectedDaemonGeneration: number; expectedExecutionGenerationId: string | null; from: DaemonRoomMovePhase[]; to: DaemonRoomMovePhase; remoteRoomId?: string | null; destinationCursor?: string | null; error?: string | null; adoptDaemonGeneration?: number }): Promise<DaemonRoomMoveRecord> {
+  async advanceRoomMove(input: { operationId: string; agentId: string; expectedDaemonGeneration: number; expectedExecutionGenerationId: string | null; from: DaemonRoomMovePhase[]; to: DaemonRoomMovePhase; remoteRoomId?: string | null; destinationCursor?: string | null; sourceCredentialsRevoked?: boolean; error?: string | null; adoptDaemonGeneration?: number }): Promise<DaemonRoomMoveRecord> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       database.exec("BEGIN IMMEDIATE");
@@ -258,7 +259,7 @@ export class ManifestStore {
         const current = roomMoveFromRow(row);
         if (current.agent_id !== input.agentId || current.daemon_generation !== input.expectedDaemonGeneration || current.execution_generation_id !== input.expectedExecutionGenerationId || !input.from.includes(current.phase)) throw new ManifestConflictError("Room-move phase fence changed.");
         const updatedAt = new Date().toISOString();
-        run(database.prepare(`UPDATE agent_room_moves SET phase=?,daemon_generation=?,remote_room_id=COALESCE(?,remote_room_id),destination_cursor=COALESCE(?,destination_cursor),error=?,updated_at=? WHERE operation_id=?`), input.to, input.adoptDaemonGeneration ?? current.daemon_generation, input.remoteRoomId ?? null, input.destinationCursor ?? null, input.error ?? null, updatedAt, input.operationId);
+        run(database.prepare(`UPDATE agent_room_moves SET phase=?,daemon_generation=?,remote_room_id=COALESCE(?,remote_room_id),destination_cursor=COALESCE(?,destination_cursor),source_credentials_revoked=CASE WHEN ? THEN 1 ELSE source_credentials_revoked END,error=?,updated_at=? WHERE operation_id=?`), input.to, input.adoptDaemonGeneration ?? current.daemon_generation, input.remoteRoomId ?? null, input.destinationCursor ?? null, input.sourceCredentialsRevoked ? 1 : 0, input.error ?? null, updatedAt, input.operationId);
         const updated = database.prepare("SELECT * FROM agent_room_moves WHERE operation_id=?").get(input.operationId) as Row;
         database.exec("COMMIT");
         return roomMoveFromRow(updated);

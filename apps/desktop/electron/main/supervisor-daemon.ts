@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.46";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.47";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -523,6 +523,24 @@ export class SupervisorDaemonClient {
     return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.commit_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 15_000), input.entryId, input.operationId);
   }
 
+  async acknowledgeRoomMoveSourceRevocation(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput & { sourceAgentSessionId: string }): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.sourceAgentSessionId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move credential acknowledgement requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.acknowledge_room_move_source_revocation", {
+      operation_id: input.operationId, entry_id: input.entryId, source_agent_session_id: input.sourceAgentSessionId, daemon_generation: input.daemonGeneration,
+    }), input.entryId, input.operationId);
+  }
+
+  async rollbackRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput & { error: string }): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.error) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move rollback requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.rollback_room_move", {
+      operation_id: input.operationId, entry_id: input.entryId, error: input.error, daemon_generation: input.daemonGeneration,
+    }), input.entryId, input.operationId);
+  }
+
   async getRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move status requires exact typed coordinates.");
     const status = await this.ensureRunning();
@@ -950,10 +968,10 @@ function mapRoomMove(value: Record<string, unknown>, entryId: string, operationI
   const phase = enumValue(value.phase, ["prepared", "waiting_for_current_turn", "joining_destination", "membership_committed", "rotating_credentials", "bootstrapping_destination_tail", "active", "failed", "rollback_required"] as const) ?? fail();
   const mappedOperation = nonEmpty("operation_id");
   const daemonGeneration = typeof value.daemon_generation === "number" && Number.isSafeInteger(value.daemon_generation) && value.daemon_generation > 0 ? value.daemon_generation : fail();
-  if (nonEmpty("agent_id") !== entryId || (operationId !== undefined && mappedOperation !== operationId)) fail();
+  if (nonEmpty("agent_id") !== entryId || (operationId !== undefined && mappedOperation !== operationId) || typeof value.source_credentials_revoked !== "boolean") fail();
   return { operationId: mappedOperation, requestId: nonEmpty("request_id"), entryId, sourceRoomId: nonEmpty("source_room_id"), destinationRoomId: nonEmpty("destination_room_id"), daemonGeneration,
     workAttemptId: nullable("work_attempt_id"), executionGenerationId: nullable("execution_generation_id"), agentSessionId: nullable("agent_session_id"), phase,
-    remoteRoomId: nullable("remote_room_id"), destinationCursor: nullable("destination_cursor"), error: nullable("error"), createdAt: nonEmpty("created_at"), updatedAt: nonEmpty("updated_at") };
+    remoteRoomId: nullable("remote_room_id"), destinationCursor: nullable("destination_cursor"), sourceCredentialsRevoked: value.source_credentials_revoked as boolean, error: nullable("error"), createdAt: nonEmpty("created_at"), updatedAt: nonEmpty("updated_at") };
 }
 
 function booleanField(value: unknown, key: string): boolean {

@@ -35,6 +35,16 @@ type StoredGrantRegistry = {
   version: 4;
   grants: Record<string, StoredGrant>;
   entryAgentKeys: Record<string, string>;
+  /**
+   * A DELETE acknowledgement must survive an Electron restart until the
+   * daemon consumes it. Without this receipt, a missing registry or mapping
+   * is an ambiguity, not proof that the remote grant was revoked.
+   */
+  purgeRevocationReceipts: Record<string, {
+    agentKey: string;
+    grantId: string;
+    acknowledgedAt: string;
+  }>;
 };
 const MANUAL_GRANT_KEY = "__manual__";
 const registryMutationTails = new Map<string, Promise<void>>();
@@ -113,17 +123,34 @@ function isRegistry(value: unknown): value is StoredGrantRegistry {
 
 function registryFrom(value: unknown): StoredGrantRegistry | null {
   if (isRegistry(value)) {
-    const legacy = value as { grants: Record<string, StoredGrant>; entryAgentKeys?: Record<string, unknown> };
+    const legacy = value as {
+      grants: Record<string, StoredGrant>;
+      entryAgentKeys?: Record<string, unknown>;
+      purgeRevocationReceipts?: Record<string, unknown>;
+    };
     const entryAgentKeys: Record<string, string> = {};
+    const purgeRevocationReceipts: StoredGrantRegistry["purgeRevocationReceipts"] = {};
     for (const [entryId, agentKey] of Object.entries(legacy.entryAgentKeys ?? {})) {
       if (typeof agentKey === "string" && entryId.trim() && agentKey.trim()) entryAgentKeys[entryId] = canonicalSupervisorGrantAgentKey(agentKey);
+    }
+    for (const [entryId, receipt] of Object.entries(legacy.purgeRevocationReceipts ?? {})) {
+      if (!entryId.trim() || !receipt || typeof receipt !== "object") continue;
+      const candidate = receipt as { agentKey?: unknown; grantId?: unknown; acknowledgedAt?: unknown };
+      if (typeof candidate.agentKey !== "string" || !candidate.agentKey.trim()
+        || typeof candidate.grantId !== "string" || !candidate.grantId.trim()
+        || typeof candidate.acknowledgedAt !== "string" || !candidate.acknowledgedAt.trim()) continue;
+      purgeRevocationReceipts[entryId] = {
+        agentKey: canonicalSupervisorGrantAgentKey(candidate.agentKey),
+        grantId: candidate.grantId.trim(),
+        acknowledgedAt: candidate.acknowledgedAt,
+      };
     }
     // v3 recorded the durable entry beside each grant.  Preserve that mapping
     // when upgrading, rather than guessing from a display name.
     for (const grant of Object.values(legacy.grants)) {
       if (grant.entryId?.trim() && grant.agentKey?.trim()) entryAgentKeys[grant.entryId] = canonicalSupervisorGrantAgentKey(grant.agentKey);
     }
-    return { version: 4, grants: legacy.grants, entryAgentKeys };
+    return { version: 4, grants: legacy.grants, entryAgentKeys, purgeRevocationReceipts };
   }
   if (!value || typeof value !== "object" || !("encryptedToken" in value)) return null;
   // Version 1 had one desktop-wide grant. Treat it as manual unless it was
@@ -132,7 +159,7 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
   if (!legacy.grantId || !legacy.encryptedToken) return null;
   const candidate = legacy.allowedAgentKeys.length === 1 ? legacy.allowedAgentKeys[0] : MANUAL_GRANT_KEY;
   const agentKey = candidate === MANUAL_GRANT_KEY ? candidate : canonicalSupervisorGrantAgentKey(candidate);
-  return { version: 4, grants: { [agentKey]: { ...legacy, agentKey } }, entryAgentKeys: {} };
+  return { version: 4, grants: { [agentKey]: { ...legacy, agentKey } }, entryAgentKeys: {}, purgeRevocationReceipts: {} };
 }
 
 async function readRegistry(): Promise<StoredGrantRegistry | null> {
@@ -255,7 +282,12 @@ export async function provisionDesktopSupervisorGrant(
       }
       const agentKey = canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!);
       const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant, storage);
-      await writeRegistry({ version: 4, grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } }, entryAgentKeys: registry?.entryAgentKeys ?? {} });
+      await writeRegistry({
+        version: 4,
+        grants: { [agentKey]: { ...metadata, agentKey, encryptedToken } },
+        entryAgentKeys: registry?.entryAgentKeys ?? {},
+        purgeRevocationReceipts: registry?.purgeRevocationReceipts ?? {},
+      });
       return metadata;
     } catch (error) {
       await request(`/supervisor-host-grants/${encodeURIComponent(response.grant_id)}`, { method: "DELETE" }).catch(() => {});
@@ -315,8 +347,13 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
     throw new Error("A per-agent desktop grant must be scoped to that exact one agent identity.");
   }
   await withRegistryMutation(async () => {
-    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {} };
-    if (input.entryId?.trim()) registry.entryAgentKeys[input.entryId.trim()] = agentKey;
+    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {}, purgeRevocationReceipts: {} };
+    if (input.entryId?.trim()) {
+      registry.entryAgentKeys[input.entryId.trim()] = agentKey;
+      // A newly provisioned exact grant supersedes any receipt belonging to a
+      // previous lifecycle that happened to use the same durable entry id.
+      delete registry.purgeRevocationReceipts[input.entryId.trim()];
+    }
     registry.grants[agentKey] = {
       ...input.metadata,
       agentKey,
@@ -484,20 +521,46 @@ export async function revokeDesktopSupervisorGrantForEntry(entryId: string, opti
   const request = options.apiFetch ?? apiFetch;
   await withRegistryMutation(async () => {
     const registry = await readRegistry();
-    if (!registry) return;
+    if (!registry) {
+      throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: the local supervisor-grant registry is missing. Restore its recovery data before retrying purge; local agent state was preserved.`);
+    }
+    if (registry.purgeRevocationReceipts[normalizedEntryId]) return;
     const agentKey = registry.entryAgentKeys[normalizedEntryId];
-    const stored = agentKey ? registry.grants[agentKey] : undefined;
-    if (stored) {
-      try { await request(`/supervisor-host-grants/${encodeURIComponent(stored.grantId)}`, { method: "DELETE" }); }
-      catch (error) { if (!(error instanceof DesktopApiError && error.status === 404)) throw error; }
+    if (!agentKey) {
+      throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: its local entry-to-agent mapping is missing. Restore that recovery mapping before retrying purge; local agent state was preserved.`);
+    }
+    const stored = registry.grants[agentKey];
+    if (!stored?.grantId?.trim() || (stored.entryId?.trim() && stored.entryId.trim() !== normalizedEntryId)) {
+      throw new Error(`Cannot attest credential revocation for ${normalizedEntryId}: its exact local grant mapping is missing or inconsistent. Restore that recovery mapping before retrying purge; local agent state was preserved.`);
+    }
+    try {
+      await request(`/supervisor-host-grants/${encodeURIComponent(stored.grantId)}`, { method: "DELETE" });
+    } catch (error) {
+      if (!(error instanceof DesktopApiError && error.status === 404)) {
+        const detail = error instanceof Error && error.message.trim() ? ` ${error.message}` : "";
+        throw new Error(`Credential revocation for ${normalizedEntryId} was not acknowledged; local recovery state was preserved.${detail}`, { cause: error });
+      }
     }
     const current = await readRegistry();
-    if (!current) return;
+    if (!current) {
+      throw new Error(`Credential revocation for ${normalizedEntryId} was acknowledged, but its local recovery registry disappeared before the durable receipt could be recorded. Restore the registry and retry purge.`);
+    }
+    if (current.purgeRevocationReceipts[normalizedEntryId]) return;
     const currentKey = current.entryAgentKeys[normalizedEntryId];
-    if (stored && currentKey === agentKey && current.grants[agentKey!]?.grantId === stored.grantId) delete current.grants[agentKey!];
-    if (currentKey === agentKey) delete current.entryAgentKeys[normalizedEntryId];
-    if (Object.keys(current.grants).length === 0 && Object.keys(current.entryAgentKeys).length === 0) await rm(storePath(), { force: true });
-    else await writeRegistry(current);
+    if (currentKey !== agentKey || current.grants[agentKey]?.grantId !== stored.grantId) {
+      throw new Error(`Credential revocation for ${normalizedEntryId} was acknowledged, but its local grant identity changed before the durable receipt could be recorded. Retry purge after reconciling the saved grant.`);
+    }
+    delete current.grants[agentKey];
+    delete current.entryAgentKeys[normalizedEntryId];
+    current.purgeRevocationReceipts[normalizedEntryId] = {
+      agentKey,
+      grantId: stored.grantId,
+      acknowledgedAt: new Date().toISOString(),
+    };
+    // Never remove the last file here: this receipt is what makes a restart
+    // retry safe without pretending that arbitrary missing local state proves
+    // a remote DELETE.
+    await writeRegistry(current);
   });
 }
 
@@ -528,7 +591,7 @@ export async function getOrCreateDesktopCodexAgentIdentity(input: {
   }
   const agentKey = canonicalSupervisorGrantAgentKey(created.canonical_key);
   await withRegistryMutation(async () => {
-    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {} };
+    const registry = (await readRegistry()) ?? { version: 4, grants: {}, entryAgentKeys: {}, purgeRevocationReceipts: {} };
     // The server response is the authority for canonical casing. Parallel
     // calls converge on the same deterministic identity.
     registry.entryAgentKeys[entryId] = agentKey;
@@ -556,10 +619,19 @@ export async function revokeDesktopSupervisorGrant(options: GrantStorageOptions 
     }));
     const current = await readRegistry();
     if (!current) return;
+    const acknowledgedAt = new Date().toISOString();
     for (const [agentKey, stored] of Object.entries(snapshot.grants)) {
-      if (current.grants[agentKey]?.grantId === stored.grantId) delete current.grants[agentKey];
+      if (current.grants[agentKey]?.grantId !== stored.grantId) continue;
+      delete current.grants[agentKey];
+      for (const [entryId, mappedAgentKey] of Object.entries(current.entryAgentKeys)) {
+        if (mappedAgentKey !== agentKey) continue;
+        delete current.entryAgentKeys[entryId];
+        current.purgeRevocationReceipts[entryId] = { agentKey, grantId: stored.grantId, acknowledgedAt };
+      }
     }
-    if (Object.keys(current.grants).length === 0) await rm(storePath(), { force: true });
+    if (Object.keys(current.grants).length === 0
+      && Object.keys(current.entryAgentKeys).length === 0
+      && Object.keys(current.purgeRevocationReceipts).length === 0) await rm(storePath(), { force: true });
     else await writeRegistry(current);
   });
 }

@@ -4,8 +4,8 @@ import test from "node:test";
 import { SupervisorGrantCoordinator, type SupervisorGrantCoordinatorOperations } from "../main/supervisor-grant-coordinator.js";
 import type { DesktopSupervisorManifestEntry } from "../ipc-types.js";
 
-const metadata = (key: string, id = "grant_1") => ({
-  grantId: id, hostId: "host_1", installationId: "install_1", allowedRoomIds: ["room_1"],
+const metadata = (key: string, id = "grant_1", roomId = "room_1") => ({
+  grantId: id, hostId: "host_1", installationId: "install_1", allowedRoomIds: [roomId],
   allowedAgentKeys: [key], generation: 1, expiresAt: "2099-01-01T00:00:00.000Z",
 });
 
@@ -292,4 +292,148 @@ test("canonical room reuse avoids alias-triggered reprovision while independent 
   }, async () => "room_canonical");
   await independent.reconcileDesiredRunning();
   assert.deepEqual(installs.sort(), ["supervised_launch_1234567", "supervised_second_1234567"]);
+});
+
+test("room move rotates exact destination authority, acknowledges the source session, then installs", async () => {
+  const h = harness();
+  const key = "owner/supervised_launch_1234567";
+  const moved = { ...entry(), roomId: "room_2" };
+  h.grants.set(key, {
+    metadata: metadata(key, "grant_source", "room_1"), token: "secret_source",
+    entryId: moved.id, lastInstalledDaemonGeneration: 7,
+  });
+  const events: string[] = [];
+  const daemon = {
+    ...h.daemon,
+    async list() { return [moved]; },
+    async acknowledgeRoomMoveSourceRevocation(input: { sourceAgentSessionId: string }) {
+      events.push(`ack:${input.sourceAgentSessionId}`);
+      return {};
+    },
+    async installHostGrant(input: { roomId: string; supervisorGrant: string }) {
+      events.push(`install:${input.roomId}:${input.supervisorGrant}`);
+      return "installed" as const;
+    },
+  };
+  const operations: SupervisorGrantCoordinatorOperations = {
+    ...h.operations,
+    async provision(input) {
+      events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}`);
+      return {
+        metadata: metadata(input.agentKey, "grant_destination", "room_2"),
+        token: "secret_destination", entryId: input.entryId, lastInstalledDaemonGeneration: null,
+      };
+    },
+    async replaceGrant(input) {
+      events.push(`persist:${input.metadata.allowedRoomIds[0]}:${input.lastInstalledDaemonGeneration ?? "none"}`);
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never, (async () => { throw new Error("unexpected"); }) as never,
+    () => "host_1", operations, async (room) => room,
+  );
+  await coordinator.prepareRoomMoveDestination({
+    operationId: "move_1", requestId: "request_1", entryId: moved.id,
+    sourceRoomId: "room_1", destinationRoomId: "room_2", daemonGeneration: 7,
+    workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+    agentSessionId: "session_1", phase: "rotating_credentials",
+    remoteRoomId: "room_2", destinationCursor: null, sourceCredentialsRevoked: false,
+    error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+  });
+  assert.deepEqual(events.slice(0, 5), [
+    "provision:room_2:true", "persist:room_2:none", "ack:session_1",
+    "install:room_2:secret_destination", "persist:room_2:7",
+  ]);
+  assert.equal(events.some((event) => event.includes("secret_source")), false, "the source-scoped grant is never reinstalled against destination membership");
+});
+
+test("room-move destination handshake recovers a lost acknowledgement response without reprovisioning", async () => {
+  const h = harness();
+  const key = "owner/supervised_launch_1234567";
+  const moved = { ...entry(), roomId: "room_2" };
+  h.grants.set(key, {
+    metadata: metadata(key, "grant_destination", "room_2"), token: "secret_destination",
+    entryId: moved.id, lastInstalledDaemonGeneration: null,
+  });
+  let acknowledgements = 0;
+  let installs = 0;
+  let durablyAcknowledged = false;
+  const daemon = {
+    ...h.daemon,
+    async list() { return [moved]; },
+    async acknowledgeRoomMoveSourceRevocation() {
+      acknowledgements += 1;
+      if (!durablyAcknowledged) {
+        durablyAcknowledged = true;
+        throw new Error("lost acknowledgement response");
+      }
+      return {};
+    },
+    async getRoomMove() { return { sourceCredentialsRevoked: durablyAcknowledged }; },
+    async installHostGrant() { installs += 1; return "installed" as const; },
+  };
+  const operations: SupervisorGrantCoordinatorOperations = {
+    ...h.operations,
+    async provision() { throw new Error("destination grant must be reused"); },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never, (async () => { throw new Error("unexpected"); }) as never,
+    () => "host_1", operations, async (room) => room,
+  );
+  const move = {
+    operationId: "move_1", requestId: "request_1", entryId: moved.id,
+    sourceRoomId: "room_1", destinationRoomId: "room_2", daemonGeneration: 7,
+    workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+    agentSessionId: "session_1", phase: "rotating_credentials" as const,
+    remoteRoomId: "room_2", destinationCursor: null, sourceCredentialsRevoked: false,
+    error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+  };
+  await coordinator.prepareRoomMoveDestination(move);
+  assert.equal(acknowledgements, 1);
+  assert.equal(installs, 1);
+});
+
+test("room-move rollback force-restores a source-scoped grant before compensation", async () => {
+  const h = harness();
+  const key = "owner/supervised_launch_1234567";
+  const source = entry();
+  h.grants.set(key, {
+    metadata: metadata(key, "grant_destination", "room_2"), token: "secret_destination",
+    entryId: source.id, lastInstalledDaemonGeneration: null,
+  });
+  const events: string[] = [];
+  const daemon = {
+    ...h.daemon,
+    async list() { return [source]; },
+    async installHostGrant(input: { roomId: string; supervisorGrant: string }) {
+      events.push(`install:${input.roomId}:${input.supervisorGrant}`);
+      return "installed" as const;
+    },
+  };
+  const operations: SupervisorGrantCoordinatorOperations = {
+    ...h.operations,
+    async provision(input) {
+      events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}`);
+      return {
+        metadata: metadata(input.agentKey, "grant_source_recovered", "room_1"),
+        token: "secret_source_recovered", entryId: input.entryId, lastInstalledDaemonGeneration: null,
+      };
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never, (async () => { throw new Error("unexpected"); }) as never,
+    () => "host_1", operations, async (room) => room,
+  );
+  await coordinator.prepareRoomMoveSourceRollback({
+    operationId: "move_1", requestId: "request_1", entryId: source.id,
+    sourceRoomId: "room_1", destinationRoomId: "room_2", daemonGeneration: 7,
+    workAttemptId: "attempt_1", executionGenerationId: "execution_1",
+    agentSessionId: "session_1", phase: "rollback_required",
+    remoteRoomId: "room_2", destinationCursor: null, sourceCredentialsRevoked: false,
+    error: "destination provisioning failed", createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:01.000Z",
+  });
+  assert.equal(events[0], "provision:room_1:true");
+  assert.equal(events.some((event) => event === "install:room_1:secret_source_recovered"), true);
+  assert.equal(events.some((event) => event.includes("secret_destination")), false);
 });

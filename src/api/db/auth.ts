@@ -961,13 +961,15 @@ export async function getRoomAgentSessionByCredentials(input: {
 export async function getSupervisorRoomAgentSession(input: {
   session_id: string;
   supervisor_grant_id: string;
+  include_ended?: boolean;
 }): Promise<RoomAgentSession | null> {
-  const [row] = await db.select().from(room_agent_sessions).where(and(
+  const conditions = [
     eq(room_agent_sessions.session_id, input.session_id),
     eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
     eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
-    isNull(room_agent_sessions.ended_at),
-  )).limit(1);
+  ];
+  if (!input.include_ended) conditions.push(isNull(room_agent_sessions.ended_at));
+  const [row] = await db.select().from(room_agent_sessions).where(and(...conditions)).limit(1);
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
 }
 
@@ -1094,11 +1096,14 @@ export async function endRoomAgentSession(input: {
     const [session] = await tx.select().from(room_agent_sessions).where(and(
       eq(room_agent_sessions.session_id, input.session_id),
       ...(input.owner_account_id ? [eq(room_agent_sessions.owner_account_id, input.owner_account_id)] : []),
+      eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
       eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
-      isNull(room_agent_sessions.ended_at),
     )).limit(1);
     if (!session?.agent_instance_id) throw new SupervisorGrantFenceStaleError();
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${session.owner_account_id}:${session.room_id}:${session.agent_key}:${session.agent_instance_id}`}, 0))`);
+    // A lost response after the first commit must be safely replayable under
+    // the same exact current grant fence and session coordinates.
+    if (session.ended_at) return toRoomAgentSession(session as RoomAgentSessionRow);
   }
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];

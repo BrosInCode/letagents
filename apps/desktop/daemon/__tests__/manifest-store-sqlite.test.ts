@@ -65,13 +65,17 @@ test("room-move journal is request-idempotent and exact-generation phase fenced"
     assert.equal(prepared.created, true);
     assert.equal(prepared.move.source_cursor_present, true);
     assert.equal(prepared.move.source_cursor, "msg_17");
+    assert.equal(prepared.move.source_credentials_revoked, false);
     assert.equal((await store.prepareRoomMove(coordinates)).created, false);
     await assert.rejects(() => store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 8, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" }), ManifestConflictError);
     const waiting = await store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 7, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" });
     assert.equal(waiting.phase, "waiting_for_current_turn");
+    const acknowledged = await store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 7, expectedExecutionGenerationId: "run_1", from: ["waiting_for_current_turn"], to: "waiting_for_current_turn", sourceCredentialsRevoked: true });
+    assert.equal(acknowledged.source_credentials_revoked, true);
     await store.close();
     const reopened = new ManifestStore(env.databasePath);
     assert.equal((await reopened.pendingRoomMoves(entry.id))[0]?.operation_id, "move_1");
+    assert.equal((await reopened.pendingRoomMoves(entry.id))[0]?.source_credentials_revoked, true);
     await reopened.close();
   } finally {
     await store.close().catch(() => undefined);

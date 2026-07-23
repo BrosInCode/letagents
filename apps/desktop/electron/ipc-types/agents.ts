@@ -411,6 +411,7 @@ export interface DesktopSupervisorRoomMove {
   phase: DesktopSupervisorRoomMovePhase;
   remoteRoomId: string | null;
   destinationCursor: string | null;
+  sourceCredentialsRevoked: boolean;
   error: string | null;
   createdAt: string;
   updatedAt: string;
