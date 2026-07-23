@@ -495,6 +495,13 @@ test("production create durably proves no mint, grant-only purge survives restar
     };
     const created = await client.create(createInput);
     assert.equal(created.id, "supervised_production_never_minted");
+    const createdDatabase = new DatabaseSync(paths.manifestPath);
+    try {
+      const mintState = createdDatabase.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+        .get(created.id) as { phase: string; agent_session_id: string | null };
+      assert.equal(mintState.phase, "never_minted");
+      assert.equal(mintState.agent_session_id, null);
+    } finally { createdDatabase.close(); }
     assert.equal((await client.setDesiredState(created.id, "stopped")).desiredState, "stopped");
 
     const agentKey = "owner/production-never-minted";
@@ -565,6 +572,12 @@ test("production create durably proves no mint, grant-only purge survives restar
         Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM agent_identities WHERE agent_id=?")
           .get(created.id) as { count: number }).count),
         0,
+      );
+      assert.equal(
+        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM supervised_worker_mint_states WHERE agent_id=?")
+          .get(created.id) as { count: number }).count),
+        0,
+        "the permanent purge tombstone survives while all per-agent mint state is removed",
       );
     } finally { tombstoneDatabase.close(); }
     const distinct = await client.create({
@@ -885,7 +898,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces the prior 2.0.47 implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the prior 2.0.48 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -904,11 +917,11 @@ test("desktop replaces the prior 2.0.47 implementation and accepts only the new 
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.47",
+    "2.0.48",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.47", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.notEqual("2.0.48", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -926,7 +939,7 @@ test("desktop replaces the prior 2.0.47 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.48");
+    assert.equal(status.implementationVersion, "2.0.49");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

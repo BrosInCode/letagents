@@ -1076,7 +1076,7 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
   }
 });
 
-test("daemon host-grant bind failure retains the exact spawned provider for a later credential retry", async () => {
+test("worker mint crash windows stay unknown until exact public identity precedes manifest binding", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -1090,6 +1090,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
   let spawns = 0;
   let stops = 0;
   const mintCalls: Array<{ grantGeneration: number; agentInstanceId: string }> = [];
+  let remoteLiveSessionId: string | null = null;
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
@@ -1100,6 +1101,28 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
   const grants = {
     createWorkerSession: async (input: { grantGeneration: number; agentInstanceId: string }) => {
       mintCalls.push(input);
+      const prePost = new DatabaseSync(paths.manifestPath);
+      try {
+        const mintState = prePost.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+          .get("host_grant_bind_retry") as { phase: string; agent_session_id: string | null };
+        assert.equal(mintState.phase, "minting_unknown", "the durable none fact becomes unknown before the remote POST starts");
+        assert.equal(mintState.agent_session_id, null);
+      } finally { prePost.close(); }
+      const evidence = new ManifestStore(paths.manifestPath);
+      try {
+        assert.deepEqual(await evidence.durablePurgeWorkerSessionAttestation("host_grant_bind_retry"), {
+          workerSessionAttestation: "unknown",
+          agentSessionId: null,
+        }, "pre-POST and lost-response windows can never authorize grant-only purge");
+      } finally { await evidence.close(); }
+      if (mintCalls.length === 1) {
+        // The server committed this stable instance tuple, but its response was
+        // lost. A retry must recover the same live session rather than minting
+        // a second identity.
+        remoteLiveSessionId = "session-host";
+        throw new Error("simulated lost response after the idempotent remote mint committed");
+      }
+      assert.equal(remoteLiveSessionId, "session-host");
       return { sessionId: "session-host", bearer: "host-bearer-secret", bearerId: "bearer-host", expiresAt: "2030-01-01T00:00:00.000Z" };
     },
   };
@@ -1114,7 +1137,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     internals.workerBindings.bind = async () => { throw new Error("simulated binding write failure"); };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "host_grant_bind_retry", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
-      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id, last_worker_binding: null,
     } });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(spawns, 0, "daemon_inbox Codex cannot spawn without the desktop grant");
@@ -1125,6 +1148,25 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "coordination_blocked", "post-spawn binding failure");
     assert.equal(spawns, 1);
     assert.equal(stops, 0, "credential failure must never stop the spawned provider");
+    const exactMintState = await internals.workerBindings.supervisedWorkerMintState("host_grant_bind_retry");
+    assert.deepEqual(exactMintState, {
+      agent_id: "host_grant_bind_retry",
+      room_id: entry.room_id,
+      agent_instance_id: "daemon:host_grant_bind_retry",
+      phase: "exact",
+      agent_session_id: "session-host",
+      updated_at: exactMintState!.updated_at,
+    });
+    assert.equal((await internals.workerBindings.supervisedWorkerSession("host_grant_bind_retry"))?.agent_session_id, "session-host");
+    const beforeManifestBinding = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(beforeManifestBinding.last_worker_binding, null, "the exact public mint precedes the manifest binding");
+    const exactEvidence = new ManifestStore(paths.manifestPath);
+    try {
+      assert.deepEqual(await exactEvidence.durablePurgeWorkerSessionAttestation("host_grant_bind_retry"), {
+        workerSessionAttestation: "exact",
+        agentSessionId: "session-host",
+      }, "exact mint/session evidence outranks the retained explicit none fact");
+    } finally { await exactEvidence.close(); }
     const beforeRetry = await daemonRequest(paths.socketPath, "attempt.read", { id: "host_grant_bind_retry" });
     assert.equal((beforeRetry.result as { execution_generations: Array<{ terminal: unknown }> }).execution_generations[0]?.terminal, null);
     internals.workerBindings.bind = originalBind;
@@ -1132,6 +1174,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     assert.equal(retryInstall.ok, true, retryInstall.error);
     await eventually(async () => Boolean(await internals.workerBindings.get("host_grant_bind_retry")), "host worker binding retry");
     assert.equal(spawns, 1, "retry rebinds the exact provider rather than spawning a replacement");
+    assert.equal(remoteLiveSessionId, "session-host", "lost-response recovery retains one remote live session id");
     assert.equal(mintCalls.every((call) => call.grantGeneration === 7 && call.agentInstanceId === "daemon:host_grant_bind_retry"), true);
     const raw = await readFile(paths.manifestPath);
     assert.equal(raw.includes(Buffer.from("host-grant-secret")), false);

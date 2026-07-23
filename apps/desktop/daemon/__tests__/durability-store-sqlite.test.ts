@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { AttemptNotFoundError, CorruptAttemptStoreError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
 
@@ -253,7 +254,7 @@ test("SQLite attempt initialization creates no JSON and keeps owner-only databas
     assert.equal((await stat(env.database)).mode & 0o777, 0o600);
     const inspection = new DatabaseSync(env.database);
     assert.equal(String((inspection.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toLowerCase(), "wal");
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
     inspection.close();
   } finally { await env.cleanup(); }
 });
