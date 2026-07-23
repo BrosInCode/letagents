@@ -17,7 +17,7 @@ import { advanceReconciliationState, beginReconciliationAction, completeReconcil
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
-import { resolveProviderConfigurationSnapshot, type ProviderReasoningEffort } from "./provider-configuration.js";
+import { deriveProviderConfigurationSnapshot, resolveProviderConfigurationSnapshot, type ProviderReasoningEffort } from "./provider-configuration.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { SupervisedAgentInboxStore, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
@@ -2248,45 +2248,40 @@ export class SupervisorDaemon {
     const model = input.configuration.model;
     const charter = input.configuration.charter;
     const profile = input.configuration.permission_profile_id;
-    const policy = input.configuration.provider_launch_policy;
     if (!Object.hasOwn(input.configuration, "model") || !Object.hasOwn(input.configuration, "reasoning_effort")
       || !Object.hasOwn(input.configuration, "charter") || !Object.hasOwn(input.configuration, "permission_profile_id")
-      || !Object.hasOwn(input.configuration, "provider_launch_policy")
+      || Object.hasOwn(input.configuration, "provider_launch_policy")
       || (effort !== null && !["low", "medium", "high", "xhigh", "max"].includes(String(effort)))
       || (model !== null && (typeof model !== "string" || !model.trim() || model.length > 256))
       || typeof charter !== "string" || !charter.trim()
       || charter.length > 32_768
-      || (profile !== null && (typeof profile !== "string" || !profile.trim() || profile.length > 128))
-      || policy === null || typeof policy !== "object" || Array.isArray(policy)) {
-      return { outcome: "invalid", error: "The selected provider does not accept this model, effort, charter, permission profile, or launch policy." };
+      || (profile !== null && (typeof profile !== "string" || !profile.trim() || profile.length > 128))) {
+      return { outcome: "invalid", error: "The selected provider does not accept this model, effort, charter, or permission profile. Native launch policy is managed by the desktop supervisor." };
     }
     const currentConfiguration = await this.store.getAgentConfiguration(input.entryId);
     if (!currentConfiguration) return { outcome: "invalid", error: "The exact agent no longer exists." };
     try {
-      resolveProviderConfigurationSnapshot({
+      const normalized = deriveProviderConfigurationSnapshot({
         provider: currentConfiguration.provider,
         model: model === null ? null : (model as string).trim(),
         reasoningEffort: effort as ProviderReasoningEffort,
         permissionProfileId: profile === null ? null : (profile as string).trim(),
-        launchPolicy: policy,
         configurationRevision: input.expectedRevision + 1,
+      }, currentConfiguration.provider_launch_policy);
+      return this.serializeManifestMutation(async () => {
+        await this.singleton.assertCurrent();
+        const result = await this.store.updateAgentConfiguration(this.manifestGeneration, {
+          agentId: input.entryId, expectedRevision: input.expectedRevision, model: normalized.model,
+          reasoningEffort: normalized.reasoningEffort, charter: charter.trim(),
+          permissionProfileId: normalized.permissionProfileId, providerLaunchPolicy: normalized.launchPolicy,
+        }, (commit) => this.fenceDaemonCommit(commit));
+        this.manifestGeneration = result.generation;
+        if (result.outcome === "invalid") return { outcome: "invalid", error: "The exact agent no longer exists." };
+        return { outcome: result.outcome, configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration) };
       });
     } catch (error) {
       return { outcome: "invalid", error: schedulerErrorDetail(error) };
     }
-    // Provider is deliberately absent from this mutation. A provider is bound at
-    // creation and changing it would create an unfenced runtime identity.
-    return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const result = await this.store.updateAgentConfiguration(this.manifestGeneration, {
-        agentId: input.entryId, expectedRevision: input.expectedRevision, model: model === null ? null : (model as string).trim(),
-        reasoningEffort: effort === null ? null : effort as DaemonManifestEntry["reasoning_effort"], charter: charter.trim(),
-        permissionProfileId: profile === null ? null : (profile as string).trim(), providerLaunchPolicy: policy,
-      }, (commit) => this.fenceDaemonCommit(commit));
-      this.manifestGeneration = result.generation;
-      if (result.outcome === "invalid") return { outcome: "invalid", error: "The exact agent no longer exists." };
-      return { outcome: result.outcome, configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration) };
-    });
   }
 
   /** Retire preserves the identity, durable receipts, and on-disk worktree. */

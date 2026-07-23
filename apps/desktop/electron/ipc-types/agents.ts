@@ -390,7 +390,8 @@ export interface DesktopSupervisorAgentConfigurationUpdateInput {
   entryId: string;
   daemonGeneration: number;
   expectedRevision: number;
-  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId" | "providerLaunchPolicy">;
+  /** User-editable values only. Native provider policy is daemon-owned. */
+  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId">;
 }
 export type DesktopSupervisorAgentConfigurationUpdateResult =
   | { outcome: "updated"; configuration: DesktopSupervisorAgentConfiguration }

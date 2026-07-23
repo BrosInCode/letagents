@@ -7,7 +7,7 @@ import type {
 
 export type AgentInspectorConfigurationDraft = Pick<
   DesktopSupervisorAgentConfiguration,
-  "model" | "reasoningEffort" | "charter" | "permissionProfileId" | "providerLaunchPolicy"
+  "model" | "reasoningEffort" | "charter" | "permissionProfileId"
 >;
 
 export type AgentInspectorConfigurationResource = {
@@ -124,8 +124,6 @@ export function configurationDraft(configuration: DesktopSupervisorAgentConfigur
     reasoningEffort: configuration.reasoningEffort,
     charter: configuration.charter,
     permissionProfileId: configuration.permissionProfileId,
-    // The daemon owns provider policy. Preserve unknown policy verbatim.
-    providerLaunchPolicy: configuration.providerLaunchPolicy,
   };
 }
 

@@ -19,6 +19,12 @@ type ConfigurationInput = {
   configurationRevision: number;
 };
 
+/**
+ * Input accepted from the Inspector.  The renderer deliberately cannot send a
+ * native launch policy: those fields are provider authority, not UI state.
+ */
+export type ProviderConfigurationSelection = Omit<ConfigurationInput, "launchPolicy">;
+
 const efforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium", "high", "xhigh", "max"]);
 const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort"]);
 
@@ -102,6 +108,45 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     },
     configurationRevision: input.configurationRevision,
   };
+}
+
+/**
+ * Rebuild a native launch policy from a previously trusted, persisted policy
+ * and a user-facing profile selection.  This is intentionally separate from
+ * `resolveProviderConfigurationSnapshot`: the latter attests a complete
+ * provider request at launch time, while this function is the only path that
+ * may translate an Inspector profile change into native authority.
+ *
+ * Non-authority provider options survive.  Authority-owned fields are removed
+ * before the selected profile is applied, so switching e.g. Claude read-only
+ * to full access cannot retain a stale `permissionMode`, and a compromised
+ * renderer has no policy object through which to inject native flags.
+ */
+export function deriveProviderConfigurationSnapshot(
+  selection: ProviderConfigurationSelection,
+  currentTrustedLaunchPolicy: unknown,
+): ProviderConfigurationSnapshot {
+  const provider = selection.provider.trim().toLowerCase();
+  const existing = plainPolicy(currentTrustedLaunchPolicy, provider);
+  const stripped = stripProfileAuthority(provider, existing);
+  return resolveProviderConfigurationSnapshot({
+    ...selection,
+    provider,
+    launchPolicy: stripped,
+  });
+}
+
+function stripProfileAuthority(provider: string, policy: Record<string, unknown>): Record<string, unknown> {
+  const authorityKeys = provider === "codex" || provider === "open-model"
+    ? ["approvalPolicy", "sandboxPolicy"]
+    : provider === "claude-code" || provider === "claude"
+      ? ["permissionMode", "dangerouslySkipPermissions"]
+      : provider === "cursor"
+        ? ["mode", "force", "sandbox"]
+        : [];
+  const next = { ...policy };
+  for (const key of authorityKeys) delete next[key];
+  return next;
 }
 
 function plainPolicy(value: unknown, provider: string): Record<string, unknown> {
