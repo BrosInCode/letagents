@@ -14,7 +14,7 @@ const SECRET_SUFFIX_SOURCE = String.raw`(?:token|secret(?:[_ .-]?key)?|password|
 const SECRET_IDENTIFIER_SOURCE = String.raw`(?:(?:[a-z0-9]+)(?:[_\-.][a-z0-9]+)*[_\-.])?${SECRET_SUFFIX_SOURCE}`;
 const SECRET_IDENTIFIER = new RegExp(String.raw`^${SECRET_IDENTIFIER_SOURCE}$`, "i");
 const SECRET_ASSIGNMENT_START = new RegExp(String.raw`\b(${SECRET_IDENTIFIER_SOURCE})\b(?:\\?["'])?\s*[:=]\s*`, "gi");
-const PRIVATE_KEY_BLOCK = /-----BEGIN (PGP PRIVATE KEY BLOCK|PRIVATE KEY|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY)-----[\s\S]*?-----END \1-----/gi;
+const PRIVATE_KEY_BLOCK = /-----BEGIN (PGP PRIVATE KEY BLOCK|PRIVATE KEY|ENCRYPTED PRIVATE KEY|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY)-----[\s\S]*?-----END \1-----/gi;
 const COOKIE_HEADER = /\b(?:cookie|set-cookie)\s*:\s*[^\r\n]*/gi;
 const BEARER_VALUE = /\bbearer\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi;
 const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/gi;

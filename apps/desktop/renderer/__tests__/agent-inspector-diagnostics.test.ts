@@ -56,6 +56,7 @@ test("diagnostics redacts secrets embedded in arbitrary string leaves", () => {
     `https://user:${CANARY}@example.com/private`,
     `Bearer ${CANARY}`,
     `-----BEGIN PRIVATE KEY-----\n${CANARY}\n-----END PRIVATE KEY-----`,
+    `-----BEGIN ENCRYPTED PRIVATE KEY-----\n${CANARY}\n-----END ENCRYPTED PRIVATE KEY-----`,
     `-----BEGIN RSA PRIVATE KEY-----\n${CANARY}\n-----END RSA PRIVATE KEY-----`,
     `-----BEGIN OPENSSH PRIVATE KEY-----\n${CANARY}\n-----END OPENSSH PRIVATE KEY-----`,
     `-----BEGIN EC PRIVATE KEY-----\n${CANARY}\n-----END EC PRIVATE KEY-----`,
@@ -66,6 +67,22 @@ test("diagnostics redacts secrets embedded in arbitrary string leaves", () => {
     assert.doesNotMatch(JSON.stringify(result.value), new RegExp(CANARY), hostile);
     assert.equal(result.redacted, true, hostile);
   }
+});
+
+test("encrypted PKCS#8 is redacted from escaped string leaves and copied reports", () => {
+  const encryptedPrivateKey = `-----BEGIN ENCRYPTED PRIVATE KEY-----\n${CANARY}\n-----END ENCRYPTED PRIVATE KEY-----`;
+  const escapedPrivateKey = JSON.stringify(encryptedPrivateKey);
+  const leaf = sanitizeAgentInspectorDiagnosticsValue(escapedPrivateKey);
+  assert.equal(leaf.redacted, true);
+  assert.doesNotMatch(JSON.stringify(leaf.value), new RegExp(CANARY));
+
+  const source = projection([{ ...event(1, escapedPrivateKey), summary: escapedPrivateKey }]);
+  source.entry.lastError = escapedPrivateKey;
+  const result = projectAgentInspectorDiagnostics(source);
+  assert.doesNotMatch(result.activity[0]?.summary ?? "", new RegExp(CANARY));
+  assert.doesNotMatch(result.activity[0]?.payloadPreview ?? "", new RegExp(CANARY));
+  assert.doesNotMatch(result.recovery.lastError ?? "", new RegExp(CANARY));
+  assert.doesNotMatch(agentInspectorDiagnosticsReport(result), new RegExp(CANARY));
 });
 
 test("diagnostics preserves benign identifier near-misses", () => {
