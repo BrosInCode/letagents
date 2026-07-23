@@ -2797,6 +2797,11 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
   } as const)[kind];
 }
 
+function openReasoningFromAgentDetail(sessionId: string): void {
+  closeAgentDetail();
+  openReasoningInspector(sessionId);
+}
+
 function openAgentRepoPicker(): void {
   addAgentModalOpen.value = false;
   emit("choose-repo");

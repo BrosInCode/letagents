@@ -32,7 +32,7 @@ test("Activity opens the exact shared Inspector for supervised and generic parti
 });
 
 test("the shared Inspector keeps external and exact local-managed participants distinct", () => {
-  assert.match(host, /projectAgentInspectorParticipant\(props\.selection, props\.managedSessions\)/);
+  assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
   assert.match(host, /selection\.kind === "external"/);
   assert.match(participantSurface, /projection\.kind === 'local_managed'/);
   assert.match(participantSurface, /participant-inspector-stop-turn/);
