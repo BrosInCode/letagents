@@ -10,8 +10,72 @@ export type RoomAgentDeliveryGroup = "listening" | "responding" | "attention" | 
 
 type RoomAgentActivityEntry = Pick<
   DesktopSupervisorManifestEntry,
-  "agentSessionId" | "desiredState" | "observedState" | "roomAgentState" | "roomId"
+  "id" | "agentKey" | "agentSessionId" | "desiredState" | "observedState" | "roomAgentState" | "roomId"
 >;
+
+export interface SupervisedActivityIdentity {
+  canonicalParticipantKeys: ReadonlySet<string>;
+  agentKeys: ReadonlySet<string>;
+  agentSessionIds: ReadonlySet<string>;
+}
+
+export interface ActivityParticipantIdentity {
+  key: string;
+  agentKey: string | null;
+  agentSessionId: string | null;
+}
+
+function exactIdentity(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed || null;
+}
+
+function isSpecificAgentKey(value: string | null): value is string {
+  return Boolean(value && /[/:]/.test(value));
+}
+
+/**
+ * Activity may receive the same local agent through a daemon projection,
+ * presence, or the room roster.  These are durable identity joins only: a
+ * display label is intentionally not part of this shape because same-name
+ * agents are valid room participants.
+ *
+ * `agentSessionId` is the active binding when live and the daemon's last
+ * verified binding when historical, so it also suppresses a stale presence
+ * echo after a restart without guessing at a replacement session.
+ */
+export function supervisedActivityIdentity(
+  entries: readonly RoomAgentActivityEntry[],
+  roomId: string | null,
+): SupervisedActivityIdentity {
+  const canonicalParticipantKeys = new Set<string>();
+  const agentKeys = new Set<string>();
+  const agentSessionIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.roomId !== roomId) continue;
+    canonicalParticipantKeys.add(`desktop-supervisor-agent:${entry.id}`);
+    const agentKey = exactIdentity(entry.agentKey);
+    if (isSpecificAgentKey(agentKey)) agentKeys.add(agentKey);
+    const sessionId = exactIdentity(entry.agentSessionId);
+    if (sessionId) agentSessionIds.add(sessionId);
+  }
+  return { canonicalParticipantKeys, agentKeys, agentSessionIds };
+}
+
+/** Never collapse participants by their display name: only exact supervisor identity is authoritative. */
+export function isProjectedSupervisedActivityParticipant(
+  identity: SupervisedActivityIdentity,
+  participant: ActivityParticipantIdentity,
+): boolean {
+  const key = exactIdentity(participant.key);
+  const agentKey = exactIdentity(participant.agentKey);
+  const sessionId = exactIdentity(participant.agentSessionId);
+  return Boolean(
+    (key && identity.canonicalParticipantKeys.has(key))
+    || (agentKey && identity.agentKeys.has(agentKey))
+    || (sessionId && identity.agentSessionIds.has(sessionId)),
+  );
+}
 
 /**
  * A stopped supervisor record is history, but its session identity must still

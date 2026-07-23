@@ -554,6 +554,8 @@ export interface DesktopSupervisorManifestEntry {
     actionId: string;
     workAttemptId: string;
     executionGenerationId: string;
+    /** Whether the durable action was a correction rather than a stop. */
+    hasCorrection?: boolean;
     status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
     capability: "native_interrupt" | "restart_resume" | "unsupported";
     interrupted: boolean | null;

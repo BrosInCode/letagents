@@ -171,17 +171,35 @@ export function resolveAgentInspectorManagedSessions(
   sessions: readonly DesktopManagedAgentSession[],
   selection: AgentInspectorSelection | null,
 ): DesktopManagedAgentSession[] {
-  if (!selection) return [];
+  const resolution = resolveAgentInspectorManagedSession(sessions, selection);
+  return resolution.state === "matched" ? [resolution.session] : [];
+}
+
+export type AgentInspectorManagedSessionResolution =
+  | { state: "matched"; session: DesktopManagedAgentSession }
+  | { state: "unmatched" }
+  | { state: "ambiguous" };
+
+/**
+ * Resolve one control-bearing local session without collapsing ambiguity into
+ * "external". Display labels and provider labels are deliberately excluded.
+ */
+export function resolveAgentInspectorManagedSession(
+  sessions: readonly DesktopManagedAgentSession[],
+  selection: AgentInspectorSelection | null,
+): AgentInspectorManagedSessionResolution {
+  if (!selection) return { state: "unmatched" };
   if (selection.kind === "supervised") {
     const matches = sessions.filter((session) => session.supervisorEntryId === selection.supervisorEntryId);
-    return matches.length === 1 ? matches : [];
+    if (matches.length > 1) return { state: "ambiguous" };
+    return matches.length === 1 ? { state: "matched", session: matches[0]! } : { state: "unmatched" };
   }
-  if (selection.kind !== "external") return [];
+  if (selection.kind !== "external") return { state: "unmatched" };
 
   const sessionId = exactIdentity(selection.agentSessionId);
   const agentKey = exactIdentity(selection.agentKey);
   const specificAgentKey = agentKey && /[/:]/.test(agentKey) ? agentKey : null;
-  if (!sessionId && !specificAgentKey) return [];
+  if (!sessionId && !specificAgentKey) return { state: "unmatched" };
 
   const sessionMatches = sessionId
     ? sessions.filter((session) => exactIdentity(session.agentSessionId) === sessionId)
@@ -189,13 +207,22 @@ export function resolveAgentInspectorManagedSessions(
   const keyMatches = specificAgentKey
     ? sessions.filter((session) => exactIdentity(session.agentKey) === specificAgentKey)
     : [];
-  if (sessionMatches.length > 1 || keyMatches.length > 1) return [];
+  if (sessionMatches.length > 1 || keyMatches.length > 1) return { state: "ambiguous" };
   if (sessionId && specificAgentKey) {
-    if (sessionMatches.length !== 1 || keyMatches.length !== 1) return [];
-    return sessionMatches[0]!.id === keyMatches[0]!.id ? [sessionMatches[0]!] : [];
+    if (sessionMatches.length === 0 && keyMatches.length === 0) return { state: "unmatched" };
+    if (sessionMatches.length !== 1 || keyMatches.length !== 1) return { state: "ambiguous" };
+    return sessionMatches[0]!.id === keyMatches[0]!.id
+      ? { state: "matched", session: sessionMatches[0]! }
+      : { state: "ambiguous" };
   }
-  if (sessionId) return sessionMatches.length === 1 ? sessionMatches : [];
-  return keyMatches.length === 1 ? keyMatches : [];
+  if (sessionId) {
+    return sessionMatches.length === 1
+      ? { state: "matched", session: sessionMatches[0]! }
+      : { state: "unmatched" };
+  }
+  return keyMatches.length === 1
+    ? { state: "matched", session: keyMatches[0]! }
+    : { state: "unmatched" };
 }
 
 export function resolveAgentInspectorSelection(

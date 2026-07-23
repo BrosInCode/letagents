@@ -75,10 +75,15 @@ const overflowRoot = ref<HTMLElement | null>(null);
 const overflowMenu = ref<HTMLElement | null>(null);
 const overflowTrigger = ref<HTMLButtonElement | null>(null);
 const confirmDanger = ref(false);
-const availableActions = computed(() => props.actions.filter((action) => action.available && !action.danger));
+// Turn control belongs beside the live "Now" state. Keeping it out of the
+// generic lifecycle bar prevents a destructive-looking stop control from
+// competing with routine agent actions.
+const availableActions = computed(() => props.actions.filter((action) => action.available && !action.danger && action.kind !== "stop_turn"));
 const compactPriority: Record<AgentInspectorActionAvailability["kind"], number> = {
   retry_delivery: 0,
   stop_turn: 1,
+  steer_turn: 1,
+  resolve_turn_control: 1,
   mention: 2,
   reconnect: 3,
   recover: 3,

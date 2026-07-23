@@ -2,17 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentInspectorTurnControlActionId,
+  agentInspectorTurnControlActionIdIfCurrent,
+  agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
+  clearAgentInspectorActionStateIfMatching,
   agentInspectorOverallState,
   projectAgentInspector,
+  projectAgentInspectorTurnControl,
 } from "../src/domain/agent-inspector";
-import { projectAgentInspectorsWhenEnabled } from "../src/domain/agent-inspector-feature";
+import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
   SUPERVISOR_ACTIVITY_CAP,
 } from "../src/domain/supervisor-entries-resource";
+import {
+  isProjectedSupervisedActivityParticipant,
+  supervisedActivityIdentity,
+} from "../src/domain/room-agent-delivery";
 import { roomMentionCandidates } from "../src/domain/participants";
 import type {
   DesktopParticipantSummary,
@@ -200,6 +209,222 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
     ],
   });
   assert.equal(projectAgentInspector(rawOnly, { roomId: "focus_1" })?.now?.summary, "Working on the room message");
+
+  const detailedFallback = entry({
+    ...responding,
+    activity: [activity(1, { kind: "provider_event", summary: "opaque provider notification" })],
+    roomAgentState: {
+      ...responding.roomAgentState!,
+      turn: { state: "responding", inboxItemId: delivery.inboxItemId, sourceMessageId: "message_1", providerTurnId: "turn_1", detail: "Reviewing the latest room context" },
+    },
+  });
+  assert.equal(projectAgentInspector(detailedFallback, { roomId: "focus_1" })?.now?.summary, "Reviewing the latest room context");
+
+  const finished = entry({ ...responding, roomAgentState: { ...responding.roomAgentState!, turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } } });
+  assert.equal(projectAgentInspector(finished, { roomId: "focus_1" })?.now, null, "completion clears active Now instead of retaining a stale progress echo");
+});
+
+test("turn control is available only for the exact responding provider turn", () => {
+  const responding = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const control = projectAgentInspectorTurnControl(responding);
+  assert.ok(control);
+  assert.equal(control.status, "ready");
+  assert.equal(control.canStop, true);
+  assert.equal(control.canCorrect, true);
+  assert.equal(projectAgentInspector(responding, { roomId: "focus_1" })?.actions.find((action) => action.kind === "stop_turn")?.available, true);
+
+  const uncheckpointed = projectAgentInspectorTurnControl(entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: null, detail: null },
+    },
+  }));
+  assert.ok(uncheckpointed);
+  assert.equal(uncheckpointed.canStop, false, "a turn without its provider checkpoint cannot be interrupted");
+  assert.equal(uncheckpointed.canCorrect, false);
+});
+
+test("an uncertain durable control gates new actions until a verified outcome is recorded", () => {
+  const uncertain = entry({
+    turnControl: {
+      actionId: "control_1",
+      workAttemptId: "attempt_1",
+      executionGenerationId: "generation_1",
+      hasCorrection: true,
+      status: "uncertain",
+      capability: "native_interrupt",
+      interrupted: null,
+      resumed: null,
+      state: null,
+      stages: ["delivered"],
+      error: "The provider connection closed before confirming the result.",
+      recordedAt: "2026-07-23T10:00:00.000Z",
+      updatedAt: "2026-07-23T10:00:01.000Z",
+    },
+  });
+  const control = projectAgentInspectorTurnControl(uncertain);
+  assert.ok(control);
+  assert.equal(control.status, "uncertain");
+  assert.equal(control.canStop, false);
+  assert.equal(control.canCorrect, false);
+  assert.equal(control.canResolve, true);
+
+  const staleJournal = projectAgentInspectorTurnControl(entry({
+    turnControl: { ...uncertain.turnControl!, executionGenerationId: "generation_old" },
+  }));
+  assert.ok(staleJournal);
+  assert.equal(staleJournal.canResolve, false, "the operator cannot settle an outcome for a different generation");
+});
+
+test("turn-control completions are fenced to exact agent, room, work, generation, daemon, and provider turn", () => {
+  const current = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const fence = {
+    entryId: "supervised_1",
+    roomId: "focus_1",
+    workAttemptId: "attempt_1",
+    executionGenerationId: "generation_1",
+    providerTurnId: "turn_1",
+    inboxItemId: "inbox_1",
+    sourceMessageId: "message_1",
+    daemonGeneration: 7,
+  };
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, current, 7), true);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({ roomId: "other_room" }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({ workAttemptId: "attempt_2" }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({ executionGenerationId: "generation_2" }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, current, 8), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { ...current.roomAgentState!.turn, providerTurnId: "turn_2" } },
+  }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { ...current.roomAgentState!.turn, providerTurnId: null } },
+  }), 7), false, "a new responding turn without a checkpoint must not inherit the old turn's control request");
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { state: "failed", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } },
+  }), 7), false, "a missing checkpoint is only a completion proof for a genuinely idle turn");
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { ...current.roomAgentState!.turn, inboxItemId: "inbox_2", sourceMessageId: "message_2" } },
+  }), 7), false, "a matching provider turn id still cannot cross a different causal room item");
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } },
+  }), 7), true, "a stop is allowed to leave the same session idle");
+});
+
+test("lost Inspector control responses retry the same exact durable action id", async () => {
+  const base = {
+    entryId: "supervised_1",
+    roomId: "focus_1",
+    workAttemptId: "attempt_1",
+    executionGenerationId: "generation_1",
+    providerTurnId: "turn_1",
+    inboxItemId: "inbox_1",
+    sourceMessageId: "message_1",
+    correction: "Use the smaller dataset.",
+  };
+  const first = await agentInspectorTurnControlActionId(base);
+  const retryAfterLostResponse = await agentInspectorTurnControlActionId({ ...base });
+  assert.equal(first, retryAfterLostResponse, "a retry reaches the existing durable journal action, not a second native effect");
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, correction: "Use the full dataset." }));
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, providerTurnId: "turn_2" }));
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, executionGenerationId: "generation_2" }));
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, sourceMessageId: "message_2", inboxItemId: "inbox_2" }));
+});
+
+test("a supervisor push advancing the turn while the action digest yields prevents the native IPC effect", async () => {
+  let resolveDigest: (value: string) => void = () => undefined;
+  const deferredDigest = new Promise<string>((resolve) => { resolveDigest = resolve; });
+  const fence = {
+    entryId: "supervised_1",
+    roomId: "focus_1",
+    workAttemptId: "attempt_1",
+    executionGenerationId: "generation_1",
+    providerTurnId: "turn_1",
+    inboxItemId: "inbox_1",
+    sourceMessageId: "message_1",
+    daemonGeneration: 7,
+  };
+  let supervisorPushedEntry = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  let actionState: AgentInspectorActionState | null = {
+    operationId: "operation_1",
+    entryId: "supervised_1",
+    kind: "stop_turn" as const,
+    status: "running" as const,
+    message: "Stopping the current turn…",
+  };
+  const submitted: string[] = [];
+  const pendingActionId = agentInspectorTurnControlActionIdIfCurrent(
+    deferredDigest,
+    () => agentInspectorTurnControlFenceMatches(fence, supervisorPushedEntry, 7),
+  )
+    .then((actionId) => {
+      if (actionId) submitted.push(actionId);
+      return actionId;
+    });
+
+  // This mirrors a supervisor push: the selected entry advances while the
+  // asynchronous WebCrypto digest is unresolved.
+  supervisorPushedEntry = entry({
+    roomAgentState: {
+      ...supervisorPushedEntry.roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_2", sourceMessageId: "message_2", providerTurnId: "turn_2", detail: null },
+    },
+  });
+  resolveDigest("inspector-turn:deferred");
+
+  assert.equal(await pendingActionId, null);
+  actionState = clearAgentInspectorActionStateIfMatching(actionState, "operation_1");
+  assert.deepEqual(submitted, [], "the stale action must not reach controlTurn IPC");
+  assert.equal(actionState, null, "the rejected operation must not strand the Inspector in a running state");
+  assert.equal(agentInspectorActionStateForEntry(actionState, "supervised_1")?.status === "running", false, "turn controls are re-enabled once the stale action is discarded");
+});
+
+test("Activity suppresses only exact supervised identity, including a sessionless entry", () => {
+  const identity = supervisedActivityIdentity([
+    entry({ id: "supervised_one", agentKey: "emmymay/gardensignal", agentSessionId: "session_historical", agentSessionBindingState: "historical" }),
+    entry({ id: "supervised_two", agentKey: "emmymay/mapleridge", agentSessionId: null, agentSessionBindingState: "none" }),
+    entry({ id: "other_room", roomId: "other_room", agentKey: "emmymay/other", agentSessionId: "session_other" }),
+  ], "focus_1");
+
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "desktop-supervisor-agent:supervised_two",
+    agentKey: null,
+    agentSessionId: null,
+  }), true, "the canonical supervisor participant key suppresses a sessionless supervised agent");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:session_historical",
+    agentKey: null,
+    agentSessionId: "session_historical",
+  }), true, "the retained historical binding suppresses a stale presence echo");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:another-session",
+    agentKey: "emmymay/gardensignal",
+    agentSessionId: "another-session",
+  }), true, "the exact canonical agent key is sufficient when presence rotates its session");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:unrelated",
+    agentKey: "another/gardensignal",
+    agentSessionId: "unrelated",
+  }), false, "same display labels never suppress an unrelated agent");
+  assert.equal(isProjectedSupervisedActivityParticipant(identity, {
+    key: "agent:session_other",
+    agentKey: "emmymay/other",
+    agentSessionId: "session_other",
+  }), false, "a supervisor entry from another room cannot suppress this room's roster");
 });
 
 test("Assigned work excludes terminal historical assignments while retaining exact active work", () => {
@@ -252,6 +477,17 @@ test("stale resources preserve last-good facts but disable state-dependent actio
   assert.equal(stale?.actions.find((action) => action.kind === "mention")?.available, true);
   assert.equal(stale?.actions.find((action) => action.kind === "pause")?.available, false);
   assert.equal(stale?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+
+  const active = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const staleActive = projectAgentInspector(active, { roomId: "focus_1", resourceFreshness: "stale" });
+  assert.equal(staleActive?.turnControl?.canStop, false);
+  assert.equal(staleActive?.turnControl?.canCorrect, false);
+  assert.match(staleActive?.turnControl?.detail ?? "", /Live supervisor state/);
 });
 
 test("the shell resource folds exact pushes and preserves capped activity across polls", () => {
@@ -308,17 +544,6 @@ test("switching agents hides the previous action and fences its late completion"
     roomIdentifier: "focus_1",
     inspectorRequestVersion: 4,
   }, "focus_1", 5), false);
-});
-
-test("the disabled foundation does not evaluate its new projection", () => {
-  const throwingOptions = Object.defineProperty({}, "roomId", {
-    get(): never { throw new Error("projection evaluated while disabled"); },
-  });
-  assert.deepEqual(projectAgentInspectorsWhenEnabled(
-    false,
-    [entry()],
-    throwingOptions as Parameters<typeof projectAgentInspectorsWhenEnabled>[2],
-  ), []);
 });
 
 test("duplicate supervised names resolve to exact canonical agent mentions", () => {

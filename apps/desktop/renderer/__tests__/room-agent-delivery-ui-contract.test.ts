@@ -54,7 +54,7 @@ describe("durable room delivery UI contracts", () => {
     assert.equal(roomAgentDeliverySummary(state("connected", "blocked", "responding").roomAgentState!), "Delivery needs attention");
   });
 
-  it("keeps reconnect exact-runtime-only and labels replacement as explicit recovery", async () => {
+  it("keeps reconnect exact-runtime-only and routes all controls through the Inspector", async () => {
     const exact = {
       deliveryMode: "daemon_inbox", desiredState: "running",
       observedState: "working", condition: "none",
@@ -76,19 +76,18 @@ describe("durable room delivery UI contracts", () => {
     assert.equal(canRecoverSavedRoomAgent(starting as never), false,
       "a normal pre-runtime launch must not be presented as a recovery");
 
-    const [activity, shell] = await Promise.all([
+    const [activity, shell, inspectorDomain] = await Promise.all([
       source("src/components/desktop/content/RoomActivityTabView.vue"),
       source("src/components/desktop/content/DesktopRoomShell.vue"),
+      source("src/domain/agent-inspector.ts"),
     ]);
-    assert.match(activity, /desktop-room-agent-recover/);
-    assert.match(activity, /Recovery starts a new runtime for this saved agent/);
-    assert.match(activity, /recover-room-agent/);
-    assert.match(shell, /@recover-room-agent="recoverRoomAgent"/);
-    assert.match(shell, /supervisor\.setDesiredState\(entryId, "running"\)/);
-    assert.match(shell, /Recovery started for this saved agent/);
+    assert.doesNotMatch(activity, /desktop-room-agent-(?:reconnect|recover)|reconnect-room-agent|recover-room-agent/);
+    assert.match(shell, /<AgentInspectorHost/);
+    assert.match(inspectorDomain, /kind: "reconnect"/);
+    assert.match(inspectorDomain, /kind: "recover"/);
   });
 
-  it("deduplicates only matching projected legacy roster rows and retains mixed rollout rows", async () => {
+  it("deduplicates only matching supervised roster rows and leaves other participants inspectable", async () => {
     const stopped = {
       roomId: "focus_37",
       roomAgentState: { connection: { state: "disconnected" } },
@@ -107,20 +106,16 @@ describe("durable room delivery UI contracts", () => {
     assert.deepEqual([...projection.projectedSessionIds], ["agent_session_stale", "agent_session_live"]);
 
     const activity = await source("src/components/desktop/content/RoomActivityTabView.vue");
-    assert.match(activity, /const inspectorTruthfulAgents = computed\(\(\) => props\.agentInspectorFoundationEnabled/);
-    assert.match(activity, /const legacyTruthfulProjection = computed\(\(\) => props\.agentInspectorFoundationEnabled/);
+    assert.match(activity, /const inspectorTruthfulAgents = computed\(\(\) =>/);
+    assert.match(activity, /supervisedActivityIdentity\(\s*props\.agentProjections\.map/);
     assert.match(activity, /!hasLiveActivity/);
-    assert.match(activity, /projectedSessionIds/);
     assert.match(activity, /legacyReachableAgents/);
     assert.match(activity, /legacyWorkingAgents/);
     for (const group of ["listening", "responding", "reconnecting", "needs_attention", "starting", "paused", "disconnected"]) {
       assert.match(activity, new RegExp(`key: "${group}"`));
     }
-    assert.match(activity, /Assigned work<\/span>/);
-    assert.match(activity, /desktop-room-agent-reconnect/);
-    assert.match(activity, /reconnect-room-agent/);
     assert.match(activity, /selectInspectorAgent\(agent\)/);
-    assert.match(activity, /legacyTruthfulLabel\(agent\)/);
+    assert.match(activity, /selectParticipantAgent\(agent\)/);
   });
 
   it("routes loaded main and thread links directly, then requests bounded history for an unloaded target", () => {
