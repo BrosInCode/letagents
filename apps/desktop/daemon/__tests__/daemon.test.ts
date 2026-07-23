@@ -1551,7 +1551,10 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
         retirementConflictInjected = true;
         const admitted = await store.getEntry(id);
         assert(admitted);
-        await originalReplace(expected, { ...admitted, charter: `${admitted.charter} admitted-before-handoff` }, async (commit) => commit());
+        // Charter is Inspector-owned configuration and must survive unrelated
+        // lifecycle replacement. Use profile metadata to model the admitted
+        // concurrent mutation this handoff fallback must preserve.
+        await originalReplace(expected, { ...admitted, display_name: `${admitted.display_name} admitted-before-handoff` }, async (commit) => commit());
         throw new ManifestConflictError("injected admitted mutation advanced the manifest generation");
       }
       return originalReplace(expected, updated, fence);
@@ -1577,7 +1580,7 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
     const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: Array<{ execution_generation_id: string; terminal: unknown }> };
     assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
-    assert.match(current.charter, /admitted-before-handoff/);
+    assert.match(current.display_name, /admitted-before-handoff/);
     assert.equal(result.execution_generations.length, 1);
     assert.equal(result.execution_generations[0]?.execution_generation_id, current.provider_ref?.execution_generation_id);
     assert.equal(result.execution_generations[0]?.terminal, null);

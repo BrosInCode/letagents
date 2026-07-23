@@ -78,6 +78,41 @@ export type DaemonAgentRoomMembership = {
   room_id: string;
 };
 
+export type DaemonRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
+export type DaemonRoomMoveRecord = {
+  operation_id: string;
+  request_id: string;
+  agent_id: string;
+  source_room_id: string;
+  destination_room_id: string;
+  daemon_generation: number;
+  work_attempt_id: string | null;
+  execution_generation_id: string | null;
+  agent_session_id: string | null;
+  activating_inbox_item_id: string | null;
+  provider_turn_id: string | null;
+  effect_id: string | null;
+  phase: DaemonRoomMovePhase;
+  remote_room_id: string | null;
+  destination_cursor: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DaemonPurgePhase = "prepared" | "revoking_credentials" | "local_commit" | "complete" | "failed";
+export type DaemonPurgeRecord = {
+  operation_id: string;
+  request_id: string;
+  agent_id: string;
+  daemon_generation: number;
+  phase: DaemonPurgePhase;
+  external_revoke_required: boolean;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 /** Provider behavior, charter, and authority selected for an agent. */
 export type DaemonAgentConfiguration = {
   agent_id: string;

@@ -6,6 +6,7 @@ import {
   readDesktopSupervisorGrantAgentKeyForEntry,
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
+  revokeDesktopSupervisorGrantForEntry,
   type DesktopSupervisorGrantMetadata,
 } from "./supervisor-grant.js";
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
@@ -214,6 +215,11 @@ export class SupervisorGrantCoordinator {
     }
     const status = await this.daemon.ensureRunning();
     await this.reconcileEntry(entry, status.generation, true);
+  }
+
+  /** Complete the external half of the daemon's durable purge journal. */
+  async revokeEntryForPurge(entryId: string): Promise<void> {
+    await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntry(entryId, { apiFetch: this.request }));
   }
 
   private async reconcileEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number, credentialOnly = false): Promise<void> {

@@ -16,6 +16,10 @@ import type {
   DaemonManifestEntry,
   DaemonProviderConnection,
   DaemonProviderRuntimeReference,
+  DaemonPurgePhase,
+  DaemonPurgeRecord,
+  DaemonRoomMovePhase,
+  DaemonRoomMoveRecord,
   DaemonTurnControlEffect,
   ExecutionTerminalPayload,
   LegacyLaneOwner,
@@ -26,6 +30,21 @@ import type {
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
 type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number };
+
+function roomMoveFromRow(row: Row): DaemonRoomMoveRecord {
+  return {
+    operation_id: String(row.operation_id), request_id: String(row.request_id), agent_id: String(row.agent_id),
+    source_room_id: String(row.source_room_id), destination_room_id: String(row.destination_room_id), daemon_generation: Number(row.daemon_generation),
+    work_attempt_id: nullableString(row.work_attempt_id), execution_generation_id: nullableString(row.execution_generation_id), agent_session_id: nullableString(row.agent_session_id),
+    activating_inbox_item_id: nullableString(row.activating_inbox_item_id), provider_turn_id: nullableString(row.provider_turn_id), effect_id: nullableString(row.effect_id),
+    phase: String(row.phase) as DaemonRoomMovePhase, remote_room_id: nullableString(row.remote_room_id), destination_cursor: nullableString(row.destination_cursor),
+    error: nullableString(row.error), created_at: String(row.created_at), updated_at: String(row.updated_at),
+  };
+}
+
+function purgeFromRow(row: Row): DaemonPurgeRecord {
+  return { operation_id: String(row.operation_id), request_id: String(row.request_id), agent_id: String(row.agent_id), daemon_generation: Number(row.daemon_generation), phase: String(row.phase) as DaemonPurgePhase, external_revoke_required: bool(row.external_revoke_required), error: nullableString(row.error), created_at: String(row.created_at), updated_at: String(row.updated_at) };
+}
 
 /**
  * This is the version for the *entire* daemon-state database, not only the
@@ -181,19 +200,196 @@ export class ManifestStore {
     const database = await this.getDatabase();
     const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
     if (!row) return undefined;
-    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : null, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision) };
+    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision) };
+  }
+
+  async prepareRoomMove(input: Omit<DaemonRoomMoveRecord, "phase" | "remote_room_id" | "destination_cursor" | "error" | "created_at" | "updated_at"> & { phase: "prepared" | "waiting_for_current_turn" }): Promise<{ created: boolean; move: DaemonRoomMoveRecord }> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const existing = database.prepare("SELECT * FROM agent_room_moves WHERE request_id=?").get(input.request_id) as Row | undefined;
+        if (existing) {
+          const move = roomMoveFromRow(existing);
+          if (move.operation_id !== input.operation_id || move.agent_id !== input.agent_id || move.source_room_id !== input.source_room_id || move.destination_room_id !== input.destination_room_id || move.execution_generation_id !== input.execution_generation_id) throw new Error("Room-move request id is already bound to different coordinates.");
+          database.exec("COMMIT");
+          return { created: false, move };
+        }
+        const now = new Date().toISOString();
+        run(database.prepare(`INSERT INTO agent_room_moves(operation_id,request_id,agent_id,source_room_id,destination_room_id,daemon_generation,work_attempt_id,execution_generation_id,agent_session_id,activating_inbox_item_id,provider_turn_id,effect_id,phase,remote_room_id,destination_cursor,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?)`),
+          input.operation_id, input.request_id, input.agent_id, input.source_room_id, input.destination_room_id, input.daemon_generation, input.work_attempt_id, input.execution_generation_id, input.agent_session_id, input.activating_inbox_item_id, input.provider_turn_id, input.effect_id, input.phase, now, now);
+        const row = database.prepare("SELECT * FROM agent_room_moves WHERE operation_id=?").get(input.operation_id) as Row;
+        database.exec("COMMIT");
+        return { created: true, move: roomMoveFromRow(row) };
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+    });
+  }
+
+  async getRoomMove(operationId: string): Promise<DaemonRoomMoveRecord | null> {
+    const row = (await this.getDatabase()).prepare("SELECT * FROM agent_room_moves WHERE operation_id=?").get(operationId) as Row | undefined;
+    return row ? roomMoveFromRow(row) : null;
+  }
+
+  async pendingRoomMoves(agentId?: string): Promise<DaemonRoomMoveRecord[]> {
+    const database = await this.getDatabase();
+    const rows = (agentId
+      ? database.prepare("SELECT * FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') ORDER BY created_at").all(agentId)
+      : database.prepare("SELECT * FROM agent_room_moves WHERE phase NOT IN ('active','failed') ORDER BY created_at").all()) as Row[];
+    return rows.map(roomMoveFromRow);
+  }
+
+  async advanceRoomMove(input: { operationId: string; agentId: string; expectedDaemonGeneration: number; expectedExecutionGenerationId: string | null; from: DaemonRoomMovePhase[]; to: DaemonRoomMovePhase; remoteRoomId?: string | null; destinationCursor?: string | null; error?: string | null; adoptDaemonGeneration?: number }): Promise<DaemonRoomMoveRecord> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const row = database.prepare("SELECT * FROM agent_room_moves WHERE operation_id=?").get(input.operationId) as Row | undefined;
+        if (!row) throw new Error("Unknown room-move operation.");
+        const current = roomMoveFromRow(row);
+        if (current.agent_id !== input.agentId || current.daemon_generation !== input.expectedDaemonGeneration || current.execution_generation_id !== input.expectedExecutionGenerationId || !input.from.includes(current.phase)) throw new ManifestConflictError("Room-move phase fence changed.");
+        const updatedAt = new Date().toISOString();
+        run(database.prepare(`UPDATE agent_room_moves SET phase=?,daemon_generation=?,remote_room_id=COALESCE(?,remote_room_id),destination_cursor=COALESCE(?,destination_cursor),error=?,updated_at=? WHERE operation_id=?`), input.to, input.adoptDaemonGeneration ?? current.daemon_generation, input.remoteRoomId ?? null, input.destinationCursor ?? null, input.error ?? null, updatedAt, input.operationId);
+        const updated = database.prepare("SELECT * FROM agent_room_moves WHERE operation_id=?").get(input.operationId) as Row;
+        database.exec("COMMIT");
+        return roomMoveFromRow(updated);
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+    });
+  }
+
+  async preparePurge(expectedGeneration: number, input: { operationId: string; requestId: string; agentId: string; daemonGeneration: number; externalRevokeRequired: boolean }): Promise<{ generation: number; created: boolean; purge: DaemonPurgeRecord }> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
+        if (generation !== expectedGeneration) throw new ManifestConflictError("Manifest generation changed before purge preparation.");
+        const existing = database.prepare("SELECT * FROM agent_purge_operations WHERE request_id=?").get(input.requestId) as Row | undefined;
+        if (existing) {
+          const purge = purgeFromRow(existing);
+          if (purge.operation_id !== input.operationId || purge.agent_id !== input.agentId) throw new Error("Purge request id is already bound to another operation.");
+          database.exec("COMMIT");
+          return { generation, created: false, purge };
+        }
+        this.assertPurgePreconditions(database, input.agentId);
+        const now = new Date().toISOString();
+        const phase: DaemonPurgePhase = input.externalRevokeRequired ? "revoking_credentials" : "local_commit";
+        run(database.prepare("INSERT INTO agent_purge_operations(operation_id,request_id,agent_id,daemon_generation,phase,external_revoke_required,error,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,?,?)"), input.operationId, input.requestId, input.agentId, input.daemonGeneration, phase, input.externalRevokeRequired ? 1 : 0, now, now);
+        const purge = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);
+        database.exec("COMMIT");
+        return { generation, created: true, purge };
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+    });
+  }
+
+  async getPurge(operationId: string): Promise<DaemonPurgeRecord | null> {
+    const row = (await this.getDatabase()).prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(operationId) as Row | undefined;
+    return row ? purgeFromRow(row) : null;
+  }
+
+  async pendingPurges(): Promise<DaemonPurgeRecord[]> {
+    return ((await this.getDatabase()).prepare("SELECT * FROM agent_purge_operations WHERE phase IN ('revoking_credentials','local_commit') ORDER BY created_at").all() as Row[]).map(purgeFromRow);
+  }
+
+  async markPurgeCredentialsRevoked(input: { operationId: string; agentId: string; expectedDaemonGeneration: number; adoptDaemonGeneration?: number }): Promise<DaemonPurgeRecord> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const row = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
+        if (!row) throw new Error("Unknown purge operation.");
+        const purge = purgeFromRow(row);
+        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.expectedDaemonGeneration || !["revoking_credentials", "local_commit"].includes(purge.phase)) throw new ManifestConflictError("Purge credential-revocation fence changed.");
+        run(database.prepare("UPDATE agent_purge_operations SET phase=?,daemon_generation=?,error=NULL,updated_at=? WHERE operation_id=?"), purge.phase === "revoking_credentials" ? "local_commit" : purge.phase, input.adoptDaemonGeneration ?? purge.daemon_generation, new Date().toISOString(), input.operationId);
+        const updated = purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row);
+        database.exec("COMMIT");
+        return updated;
+      } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
+    });
+  }
+
+  /** One transaction proves all durable preconditions, removes every agent-owned row, advances generation, and completes the journal. */
+  async commitPurge(expectedGeneration: number, input: { operationId: string; agentId: string; daemonGeneration: number }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; purge: DaemonPurgeRecord }> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      let transactionOpen = false;
+      let committed = false;
+      const commit = async () => {
+        database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
+        const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
+        if (generation !== expectedGeneration) throw new ManifestConflictError("Manifest generation changed before purge commit.");
+        const purgeRow = database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row | undefined;
+        if (!purgeRow) throw new Error("Unknown purge operation.");
+        const purge = purgeFromRow(purgeRow);
+        if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
+        this.assertPurgePreconditions(database, input.agentId);
+        for (const [table, column] of [
+          ["supervised_agent_effects", "agent_id"], ["supervised_agent_observed_messages", "agent_id"], ["supervised_agent_ingress_health", "agent_id"],
+          ["supervised_agent_ingress_cursors", "agent_id"], ["supervised_agent_history_boundaries", "agent_id"], ["supervised_agent_pruned_sources", "agent_id"],
+          ["supervised_worker_sessions", "agent_id"], ["supervised_agent_inbox", "agent_id"], ["worker_binding_publications", "entry_id"],
+          ["worker_generation_verifications", "entry_id"], ["worker_binding_watermarks", "entry_id"], ["worker_session_bindings", "entry_id"],
+        ] as const) run(database.prepare(`DELETE FROM ${table} WHERE ${column}=?`), input.agentId);
+        const deleted = database.prepare("DELETE FROM agent_identities WHERE agent_id=?").run(input.agentId);
+        if (Number(deleted.changes) !== 1) throw new Error("Purge target disappeared before local commit.");
+        const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
+        if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during purge commit.");
+        run(database.prepare("UPDATE agent_purge_operations SET phase='complete',error=NULL,updated_at=? WHERE operation_id=?"), new Date().toISOString(), input.operationId);
+        database.exec("COMMIT"); transactionOpen = false; committed = true;
+      };
+      try { if (commitFence) await commitFence(commit); else await commit(); if (!committed) throw new Error("Purge commit fence returned without committing."); }
+      catch (error) { if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} } throw error; }
+      return { generation: expectedGeneration + 1, purge: purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row) };
+    });
+  }
+
+  private assertPurgePreconditions(database: DatabaseSync, agentId: string): void {
+    const state = database.prepare(`SELECT l.desired_state,d.observed_state,d.work_attempt_id,d.provider_execution_generation_id,t.turn_control_present,t.status AS turn_status
+      FROM agent_launch_intents l JOIN runtime_deployments d USING(agent_id) JOIN turn_control_journals t USING(agent_id) WHERE l.agent_id=?`).get(agentId) as Row | undefined;
+    if (!state || state.desired_state !== "stopped" || !["absent", "stopped", "failed"].includes(String(state.observed_state))) throw new Error("Purge requires a fully stopped durable lifecycle.");
+    if (state.provider_execution_generation_id !== null) {
+      if (typeof state.provider_execution_generation_id !== "string" || typeof state.work_attempt_id !== "string") throw new Error("Purge encountered invalid durable provider coordinates.");
+      const execution = database.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=?").get(state.provider_execution_generation_id, state.work_attempt_id) as Row | undefined;
+      if (!execution || execution.terminal_json === null) throw new Error("Purge cannot remove an agent with a live provider execution.");
+    }
+    if (bool(state.turn_control_present) && ![null, "completed"].includes(state.turn_status as string | null)) throw new Error("Purge cannot remove an agent with nonterminal turn control.");
+    const blockers = [
+      database.prepare("SELECT 1 FROM worker_session_bindings WHERE entry_id=? LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move') LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM supervised_agent_effects WHERE agent_id=? AND state IN ('prepared','executing') LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM supervised_agent_ingress_health WHERE agent_id=? AND state NOT IN ('stopped','blocked') LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(agentId),
+    ];
+    if (blockers.some(Boolean)) throw new Error("Purge has a durable provider, credential, turn, effect, ingress, or room-move blocker.");
   }
 
   async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
-    const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const current = database.prepare("SELECT provider,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(input.agentId) as Row | undefined;
-      if (!current) return { outcome: "invalid" as const };
-      if (Number(current.config_revision) !== input.expectedRevision) return { outcome: "conflict" as const };
-      const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);
-      return Number(changed.changes) === 1 ? { outcome: "updated" as const } : { outcome: "conflict" as const };
-    }, commitFence);
-    const configuration = await this.getAgentConfiguration(input.agentId);
-    return { generation: result.generation, outcome: result.value.outcome, ...(configuration ? { configuration } : {}) };
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      const currentGeneration = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
+      if (currentGeneration !== expectedGeneration) throw new ManifestConflictError(`Manifest generation ${currentGeneration} does not match expected ${expectedGeneration}.`);
+      const current = database.prepare("SELECT config_revision FROM agent_configurations WHERE agent_id=?").get(input.agentId) as Row | undefined;
+      if (!current) return { generation: currentGeneration, outcome: "invalid" as const };
+      if (Number(current.config_revision) !== input.expectedRevision) {
+        return { generation: currentGeneration, outcome: "conflict" as const, configuration: await this.getAgentConfiguration(input.agentId) };
+      }
+      let committed = false;
+      let transactionOpen = false;
+      const commit = async () => {
+        database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
+        const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
+        if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
+        const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);
+        if (Number(changed.changes) !== 1) throw new ManifestConflictError("Agent configuration revision changed during update.");
+        database.exec("COMMIT"); transactionOpen = false; committed = true;
+      };
+      try {
+        if (commitFence) await commitFence(commit); else await commit();
+        if (!committed) throw new Error("Configuration commit fence returned without committing.");
+      } catch (error) {
+        if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
+        throw error;
+      }
+      return { generation: expectedGeneration + 1, outcome: "updated" as const, configuration: await this.getAgentConfiguration(input.agentId) };
+    });
   }
 
   private readEntryFromDatabase(database: DatabaseSync, agentId: string): DaemonManifestEntry | undefined {
@@ -260,17 +456,9 @@ export class ManifestStore {
       // Configuration revisions are Inspector-owned state, intentionally not
       // part of the legacy flat manifest projection. Preserve them through
       // unrelated lifecycle/runtime replacements.
-      const configuration = database.prepare("SELECT reasoning_effort,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(normalized.id) as Row;
-      const priorRuntime = database.prepare("SELECT provider_execution_generation_id FROM runtime_deployments WHERE agent_id=?").get(normalized.id) as Row;
+      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?").get(normalized.id) as Row;
       const projection = projectDaemonManifestEntry(normalized);
-      projection.configuration.reasoning_effort = nullableString(configuration.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"];
-      projection.configuration.config_revision = Number(configuration.config_revision);
-      // A config save never touches the native provider. Only a *new* durable
-      // provider execution consumes the latest revision.
-      projection.configuration.runtime_configuration_revision = normalized.provider_ref?.execution_generation_id
-        && normalized.provider_ref.execution_generation_id !== nullableString(priorRuntime.provider_execution_generation_id)
-        ? Number(configuration.config_revision)
-        : Number(configuration.runtime_configuration_revision);
+      this.preserveInspectorConfiguration(projection, configuration);
       run(database.prepare("DELETE FROM agent_identities WHERE agent_id = ?"), normalized.id);
       this.insertProjection(database, projection, Number(row.sort_order));
       const persisted = this.readEntryFromDatabase(database, normalized.id);
@@ -295,8 +483,11 @@ export class ManifestStore {
       for (const entry of normalized) {
         const row = findOrder.get(entry.id) as Row | undefined;
         if (!row) throw new Error(`Unknown daemon manifest entry: ${entry.id}`);
+        const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?").get(entry.id) as Row;
+        const projection = projectDaemonManifestEntry(entry);
+        this.preserveInspectorConfiguration(projection, configuration);
         run(remove, entry.id);
-        this.insertProjection(database, projectDaemonManifestEntry(entry), Number(row.sort_order));
+        this.insertProjection(database, projection, Number(row.sort_order));
       }
       return normalized.map((entry) => {
         const persisted = this.readEntryFromDatabase(database, entry.id);
@@ -319,6 +510,19 @@ export class ManifestStore {
       return undefined;
     }, commitFence);
     return { generation: result.generation };
+  }
+
+  async markRuntimeConfigurationApplied(expectedGeneration: number, input: { agentId: string; executionGenerationId: string; appliedRevision: number }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; configuration: StoredAgentConfiguration }> {
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const row = database.prepare(`SELECT c.config_revision,c.runtime_configuration_revision,d.provider_execution_generation_id FROM agent_configurations c JOIN runtime_deployments d USING(agent_id) WHERE c.agent_id=?`).get(input.agentId) as Row | undefined;
+      if (!row || row.provider_execution_generation_id !== input.executionGenerationId) throw new ManifestConflictError("Provider execution changed before its configuration revision was applied.");
+      if (!Number.isSafeInteger(input.appliedRevision) || input.appliedRevision < 1 || input.appliedRevision > Number(row.config_revision)) throw new Error("Applied runtime configuration revision is invalid.");
+      if (Number(row.runtime_configuration_revision) > input.appliedRevision) throw new ManifestConflictError("Runtime configuration revision cannot move backwards.");
+      run(database.prepare("UPDATE agent_configurations SET runtime_configuration_revision=? WHERE agent_id=?"), input.appliedRevision, input.agentId);
+    }, commitFence);
+    const configuration = await this.getAgentConfiguration(input.agentId);
+    if (!configuration) throw new Error("Agent disappeared after runtime configuration apply.");
+    return { generation: result.generation, configuration };
   }
 
   async appendActivity(
@@ -534,8 +738,32 @@ export class ManifestStore {
   }
 
   private replaceEntries(database: DatabaseSync, entries: DaemonManifestEntry[]): void {
+    const configurations = new Map((database.prepare("SELECT * FROM agent_configurations").all() as Row[]).map((row) => [String(row.agent_id), row]));
     database.exec("DELETE FROM agent_identities");
-    entries.forEach((entry, index) => this.insertProjection(database, projectDaemonManifestEntry(canonicalManifestEntry(entry)), index));
+    entries.forEach((entry, index) => {
+      const normalized = canonicalManifestEntry(entry);
+      const projection = projectDaemonManifestEntry(normalized);
+      const configuration = configurations.get(normalized.id);
+      if (configuration) {
+        this.preserveInspectorConfiguration(projection, configuration);
+      }
+      this.insertProjection(database, projection, index);
+    });
+  }
+
+  private preserveInspectorConfiguration(projection: DaemonManifestDomainProjection, row: Row): void {
+    projection.configuration.provider = String(row.provider);
+    projection.configuration.model = nullableString(row.model);
+    projection.configuration.reasoning_effort = nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"];
+    projection.configuration.charter = String(row.charter);
+    projection.configuration.permission_profile_id = nullableString(row.permission_profile_id);
+    projection.configuration.config_revision = Number(row.config_revision);
+    projection.configuration.runtime_configuration_revision = Number(row.runtime_configuration_revision);
+    if (bool(row.provider_launch_policy_present)) {
+      projection.configuration.provider_launch_policy = bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json);
+    } else {
+      delete projection.configuration.provider_launch_policy;
+    }
   }
 
   private insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
