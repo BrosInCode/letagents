@@ -1130,13 +1130,16 @@ export function registerDesktopIpcHandlers(
   });
   targetIpcMain.handle("desktop:supervisor:get-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) =>
     supervisorDaemonClient.getRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:get-current-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorCurrentRoomMoveInput) =>
+    supervisorDaemonClient.getCurrentRoomMove(input));
   targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
     supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration));
   targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
-    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, false);
+    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null);
     if (prepared.outcome !== "revocation_required") return prepared;
-    await supervisorGrantCoordinator.revokeEntryForPurge(input.entryId);
-    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, true);
+    if (!prepared.agentSessionId) return { outcome: "invalid" as const, error: "Purge did not identify the exact worker session to revoke." };
+    await supervisorGrantCoordinator.revokeEntryForPurge(input.entryId, prepared.agentSessionId);
+    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, prepared.agentSessionId);
     return committed.outcome === "revocation_required" ? { outcome: "invalid" as const, error: "Purge credential revocation was not durably acknowledged." } : committed;
   });
   if (!supervisorActivityBridgeRegistered) {

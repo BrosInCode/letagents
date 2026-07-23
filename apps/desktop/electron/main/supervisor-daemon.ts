@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.47";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.48";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -548,6 +548,17 @@ export class SupervisorDaemonClient {
     return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.get_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }), input.entryId, input.operationId);
   }
 
+  async getCurrentRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorCurrentRoomMoveInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove | null> {
+    if (!nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Current room-move discovery requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    const result = await this.request<Record<string, unknown> | null>("supervisor.get_current_room_move", {
+      entry_id: input.entryId,
+      daemon_generation: input.daemonGeneration,
+    });
+    return result === null ? null : mapRoomMove(result, input.entryId);
+  }
+
   async retireAgent(entryId: string, daemonGeneration: number): Promise<void> {
     if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Retire requires exact typed coordinates.");
     const status = await this.ensureRunning();
@@ -555,13 +566,21 @@ export class SupervisorDaemonClient {
     await this.request("supervisor.retire_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
   }
 
-  async purgeAgent(entryId: string, daemonGeneration: number, credentialsRevoked = false): Promise<{ outcome: "purged" | "invalid" | "revocation_required"; operationId?: string; error?: string }> {
-    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1 || typeof credentialsRevoked !== "boolean") throw new Error("Purge requires exact typed coordinates.");
+  async purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null = null): Promise<{ outcome: "purged" | "invalid" | "revocation_required"; operationId?: string; agentSessionId?: string; error?: string }> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1
+      || !(revokedAgentSessionId === null || nonEmptyString(revokedAgentSessionId))) throw new Error("Purge requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
-    const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", { entry_id: entryId, daemon_generation: daemonGeneration, credentials_revoked: credentialsRevoked });
+    const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", {
+      entry_id: entryId,
+      daemon_generation: daemonGeneration,
+      revoked_agent_session_id: revokedAgentSessionId,
+    });
     if (result.outcome === "purged") return { outcome: "purged" };
-    if (result.outcome === "revocation_required" && typeof result.operation_id === "string" && result.operation_id.trim()) return { outcome: "revocation_required", operationId: result.operation_id };
+    if (result.outcome === "revocation_required" && typeof result.operation_id === "string" && result.operation_id.trim()
+      && typeof result.agent_session_id === "string" && result.agent_session_id.trim()) {
+      return { outcome: "revocation_required", operationId: result.operation_id, agentSessionId: result.agent_session_id };
+    }
     if (result.outcome === "invalid" && typeof result.error === "string" && result.error.trim()) return { outcome: "invalid", error: result.error };
     throw new Error("Supervisor returned an invalid purge result.");
   }

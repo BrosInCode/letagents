@@ -849,6 +849,14 @@ export class SupervisorDaemon {
           daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
         });
       }
+      if (request.method === "supervisor.get_current_room_move") {
+        const params = this.paramsRecord(request.params);
+        const error = "Current room-move discovery requires exact typed coordinates.";
+        return this.getCurrentInspectorRoomMove({
+          entryId: this.requiredStringParam(params, "entry_id", error),
+          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
+        });
+      }
       if (request.method === "supervisor.retire_agent") {
         const params = this.paramsRecord(request.params);
         const error = "Retire requires exact typed coordinates.";
@@ -860,11 +868,13 @@ export class SupervisorDaemon {
       if (request.method === "supervisor.purge_agent") {
         const params = this.paramsRecord(request.params);
         const error = "Purge requires exact typed coordinates.";
-        if (params.credentials_revoked !== undefined && typeof params.credentials_revoked !== "boolean") throw new Error(error);
+        if (!(params.revoked_agent_session_id === undefined || params.revoked_agent_session_id === null
+          || (typeof params.revoked_agent_session_id === "string" && params.revoked_agent_session_id.trim()
+            && params.revoked_agent_session_id === params.revoked_agent_session_id.trim()))) throw new Error(error);
         return this.purgeAgent(
           this.requiredStringParam(params, "entry_id", error),
           this.positiveIntegerParam(params, "daemon_generation", error),
-          params.credentials_revoked === true,
+          typeof params.revoked_agent_session_id === "string" ? params.revoked_agent_session_id : null,
         );
       }
       if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
@@ -1714,6 +1724,20 @@ export class SupervisorDaemon {
     return move;
   }
 
+  private async getCurrentInspectorRoomMove(input: {
+    entryId: string;
+    daemonGeneration: number;
+  }): Promise<DaemonRoomMoveRecord | null> {
+    if (!input.entryId.trim() || !Number.isSafeInteger(input.daemonGeneration)
+      || input.daemonGeneration !== this.singleton.currentGeneration) {
+      throw new Error("Current room-move discovery is stale or invalid.");
+    }
+    const moves = await this.store.pendingRoomMoves(input.entryId);
+    if (moves.length > 1) throw new Error("More than one nonterminal room move exists for this agent.");
+    const move = moves[0] ?? null;
+    return move?.daemon_generation === input.daemonGeneration ? move : null;
+  }
+
   /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
   private async startSupervisedDelivery(entryId: string): Promise<void> {
     if (this.handoffScheduled || !this.supervisedDelivery || !this.providerPort?.runRoomTurn) return;
@@ -2267,7 +2291,7 @@ export class SupervisorDaemon {
   }
 
   /** Purge is intentionally stricter than retire and never removes a worktree. */
-  private async purgeAgent(entryId: string, daemonGeneration: number, credentialsRevoked = false) {
+  private async purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null = null) {
     if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Purge is fenced by a stale daemon generation.");
     return this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
@@ -2278,11 +2302,16 @@ export class SupervisorDaemon {
       if (this.liveHandles.has(entryId)) return { outcome: "invalid" as const, error: "Purge requires no live provider or bounded delivery turn." };
       if (!purge) {
         try {
+          const binding = await this.workerBindings.get(entryId);
+          const exactAgentSessionId = entry.last_worker_binding?.agent_session_id
+            ?? binding?.agent_session_id
+            ?? null;
           purge = (await this.store.preparePurge(this.manifestGeneration, {
             operationId, requestId: operationId, agentId: entryId, daemonGeneration,
             // Electron is the durable grant custodian, so every daemon-inbox
             // identity requires an owner-authenticated revoke acknowledgement.
             externalRevokeRequired: this.requiresHostGrant(entry),
+            agentSessionId: exactAgentSessionId,
           })).purge;
         } catch (error) {
           return { outcome: "invalid" as const, error: schedulerErrorDetail(error) };
@@ -2291,10 +2320,18 @@ export class SupervisorDaemon {
       if (purge.daemon_generation !== daemonGeneration) {
         purge = await this.store.adoptPurgeDaemonGeneration({ operationId, agentId: entryId, expectedDaemonGeneration: purge.daemon_generation, daemonGeneration });
       }
-      if (credentialsRevoked && purge.phase === "revoking_credentials") {
-        purge = await this.store.markPurgeCredentialsRevoked({ operationId, agentId: entryId, expectedDaemonGeneration: daemonGeneration });
+      if (revokedAgentSessionId && purge.phase === "revoking_credentials") {
+        purge = await this.store.markPurgeCredentialsRevoked({
+          operationId,
+          agentId: entryId,
+          expectedDaemonGeneration: daemonGeneration,
+          agentSessionId: revokedAgentSessionId,
+        });
       }
-      if (purge.phase === "revoking_credentials") return { outcome: "revocation_required" as const, operation_id: operationId };
+      if (purge.phase === "revoking_credentials") {
+        if (!purge.agent_session_id) return { outcome: "invalid" as const, error: "Purge is missing its exact retained worker session." };
+        return { outcome: "revocation_required" as const, operation_id: operationId, agent_session_id: purge.agent_session_id };
+      }
       if (purge.phase === "complete") return { outcome: "purged" as const };
       if (purge.phase !== "local_commit") return { outcome: "invalid" as const, error: purge.error ?? "Purge journal is not committable." };
       try {
@@ -2311,7 +2348,7 @@ export class SupervisorDaemon {
   private async recoverPreparedPurges(): Promise<void> {
     for (const purge of await this.store.pendingPurges()) {
       if (purge.phase !== "local_commit") continue; // Electron must finish external revocation.
-      await this.purgeAgent(purge.agent_id, this.singleton.currentGeneration, true).catch(() => undefined);
+      await this.purgeAgent(purge.agent_id, this.singleton.currentGeneration, null).catch(() => undefined);
     }
   }
 

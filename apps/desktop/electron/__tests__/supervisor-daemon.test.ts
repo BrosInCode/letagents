@@ -134,7 +134,9 @@ async function startWireDaemon(
         result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
       } else if (request.method === "supervisor.get_agent_configuration") {
         result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
-      } else if (["supervisor.prepare_room_move", "supervisor.commit_room_move", "supervisor.get_room_move", "supervisor.acknowledge_room_move_source_revocation", "supervisor.rollback_room_move"].includes(request.method)) {
+      } else if (request.method === "supervisor.get_current_room_move" && request.params!.entry_id === "agent_none") {
+        result = null;
+      } else if (["supervisor.prepare_room_move", "supervisor.commit_room_move", "supervisor.get_room_move", "supervisor.get_current_room_move", "supervisor.acknowledge_room_move_source_revocation", "supervisor.rollback_room_move"].includes(request.method)) {
         result = { operation_id: request.params!.operation_id ?? `inspector-room-move:${request.params!.entry_id}:${request.params!.request_id}`, request_id: request.params!.request_id ? `inspector:${request.params!.request_id}` : "inspector:request_1", agent_id: request.params!.entry_id, source_room_id: "room_1", destination_room_id: "room_2", daemon_generation: request.params!.daemon_generation, work_attempt_id: "attempt_1", execution_generation_id: "execution_1", agent_session_id: "session_1", phase: request.method === "supervisor.prepare_room_move" ? "prepared" : "bootstrapping_destination_tail", remote_room_id: request.method === "supervisor.prepare_room_move" ? null : "room_2", destination_cursor: null, source_credentials_revoked: request.method !== "supervisor.prepare_room_move", error: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:01.000Z" };
       } else if (request.method === "lane.reserve_legacy") {
         const owner = {
@@ -376,10 +378,14 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
     assert.equal(committed.phase, "bootstrapping_destination_tail");
     const acknowledged = await client.acknowledgeRoomMoveSourceRevocation({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39, sourceAgentSessionId: "session_1" });
     assert.equal(acknowledged.sourceCredentialsRevoked, true);
+    const current = await client.getCurrentRoomMove({ entryId: "agent_1", daemonGeneration: 39 });
+    assert.equal(current?.entryId, "agent_1");
+    assert.equal(await client.getCurrentRoomMove({ entryId: "agent_none", daemonGeneration: 39 }), null);
     await client.rollbackRoomMove({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39, error: "owner API unavailable" });
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.prepare_room_move")?.params, { entry_id: "agent_1", destination_room_id: "room_2", request_id: "request_1", daemon_generation: 39 });
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.acknowledge_room_move_source_revocation")?.params, { operation_id: prepared.operationId, entry_id: "agent_1", source_agent_session_id: "session_1", daemon_generation: 39 });
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.rollback_room_move")?.params, { operation_id: prepared.operationId, entry_id: "agent_1", error: "owner API unavailable", daemon_generation: 39 });
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.get_current_room_move")?.params, { entry_id: "agent_1", daemon_generation: 39 });
     await assert.rejects(() => client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: undefined as unknown as string, daemonGeneration: 39 }), /exact typed/);
     await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
@@ -707,7 +713,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces the prior 2.0.46 implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the prior 2.0.47 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -726,11 +732,11 @@ test("desktop replaces the prior 2.0.46 implementation and accepts only the new 
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.46",
+    "2.0.47",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.46", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.notEqual("2.0.47", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -748,7 +754,7 @@ test("desktop replaces the prior 2.0.46 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.47");
+    assert.equal(status.implementationVersion, "2.0.48");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

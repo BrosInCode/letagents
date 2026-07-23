@@ -218,8 +218,8 @@ export class SupervisorGrantCoordinator {
   }
 
   /** Complete the external half of the daemon's durable purge journal. */
-  async revokeEntryForPurge(entryId: string): Promise<void> {
-    await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntry(entryId, { apiFetch: this.request }));
+  async revokeEntryForPurge(entryId: string, agentSessionId: string): Promise<void> {
+    await this.serialize(entryId, () => revokeDesktopSupervisorGrantForEntry(entryId, agentSessionId, { apiFetch: this.request }));
   }
 
   /**
@@ -240,7 +240,13 @@ export class SupervisorGrantCoordinator {
         || entry.executionGenerationId !== move.executionGenerationId) {
         throw new Error("Room-move destination no longer matches the exact live provider generation.");
       }
-      const { agentKey, grant } = await this.exactGrantForRoom(entry, destination, status.generation, false);
+      const { agentKey, grant } = await this.exactGrantForRoom(
+        entry,
+        destination,
+        status.generation,
+        false,
+        move.agentSessionId,
+      );
       try {
         await this.daemon.acknowledgeRoomMoveSourceRevocation({
           operationId: move.operationId, entryId: move.entryId, daemonGeneration: status.generation,
@@ -270,7 +276,13 @@ export class SupervisorGrantCoordinator {
         || entry.executionGenerationId !== move.executionGenerationId) {
         throw new Error("Room-move rollback no longer matches the exact source provider generation.");
       }
-      const { agentKey, grant } = await this.exactGrantForRoom(entry, move.sourceRoomId, status.generation, true);
+      const { agentKey, grant } = await this.exactGrantForRoom(
+        entry,
+        move.sourceRoomId,
+        status.generation,
+        true,
+        entry.agentSessionId ?? undefined,
+      );
       await this.install(entry, agentKey, grant, status.generation, true);
     });
   }
@@ -344,6 +356,7 @@ export class SupervisorGrantCoordinator {
     roomId: string,
     daemonGeneration: number,
     alwaysReprovision: boolean,
+    sourceAgentSessionId?: string,
   ): Promise<{
     agentKey: string;
     grant: NonNullable<Awaited<ReturnType<SupervisorGrantCoordinatorOperations["readGrant"]>>>;
@@ -360,6 +373,7 @@ export class SupervisorGrantCoordinator {
       hostId: this.hostId(), entryId: entry.id, agentKey,
       roomScopes: [{ requestedRoomId: roomId, canonicalRoomId: roomId }],
       forceReprovision: true,
+      sourceAgentSessionId,
     }, { apiFetch: this.request });
     if (grant.entryId !== entry.id || !this.grantExactlyScopes(grant, roomId, agentKey)) {
       throw new Error("Owner authority provisioning returned a grant outside the exact room-move scope.");

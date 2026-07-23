@@ -3190,7 +3190,7 @@ test("lifecycle handlers advertise support and reject coercible or imprecise coo
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
       entry_id: " strict-lifecycle",
       daemon_generation: status.generation,
-      credentials_revoked: false,
+      revoked_agent_session_id: null,
     })).ok, false, "whitespace-altered identities are rejected at the socket boundary");
     const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(current.id, "strict-lifecycle");
@@ -6129,6 +6129,16 @@ test("alias room move journals its canonical destination before local membership
     assert.equal(resumed.source_credentials_revoked, false, "missing process-memory source grant is never treated as revocation evidence");
     assert.equal(resumed.remote_room_id, canonicalDestination);
     assert.equal((await internals.store.getEntry(moving.id))?.room_id, canonicalDestination);
+    const discovered = await daemonRequest(paths.socketPath, "supervisor.get_current_room_move", {
+      entry_id: moving.id,
+      daemon_generation: resumed.daemon_generation,
+    });
+    assert.equal(discovered.ok, true);
+    assert.equal((discovered.result as DaemonRoomMoveRecord).operation_id, resumed.operation_id);
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.get_current_room_move", {
+      entry_id: moving.id,
+      daemon_generation: resumed.daemon_generation + 1,
+    })).ok, false, "current move discovery is fenced by the exact daemon generation");
 
     const wrongAck = await daemonRequest(paths.socketPath, "supervisor.acknowledge_room_move_source_revocation", {
       operation_id: resumed.operation_id, entry_id: resumed.agent_id,
@@ -6153,6 +6163,12 @@ test("alias room move journals its canonical destination before local membership
     assert.equal(resumed.phase, "active");
     assert.equal(resumed.remote_room_id, canonicalDestination);
     assert.equal((await internals.store.getEntry(moving.id))?.room_id, canonicalDestination);
+    const noCurrent = await daemonRequest(paths.socketPath, "supervisor.get_current_room_move", {
+      entry_id: moving.id,
+      daemon_generation: resumed.daemon_generation,
+    });
+    assert.equal(noCurrent.ok, true);
+    assert.equal(noCurrent.result, null, "terminal moves are not returned by current-move discovery");
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();

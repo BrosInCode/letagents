@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 10;
+export const DAEMON_STATE_SCHEMA_VERSION = 11;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -67,11 +67,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV9ToV10(database);
     return;
   }
+  if (existingVersion === 10) {
+    this.migrateV10ToV11(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV10Shape(database);
+    this.repairAndValidateV11Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -345,8 +349,8 @@ createSchema(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -370,8 +374,8 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -396,8 +400,8 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -422,8 +426,8 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.applyV4Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -487,8 +491,8 @@ migrateV4ToV5(database: DatabaseSync): void {
     // tables, so complete and validate the current shape before advancing
     // either version marker.
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -539,8 +543,8 @@ migrateV5ToV6(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -563,8 +567,8 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.validateV6Shape(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -583,8 +587,8 @@ migrateV7ToV8(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -601,8 +605,8 @@ migrateV8ToV9(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -618,8 +622,8 @@ migrateV9ToV10(database: DatabaseSync): void {
   this.repairAndValidateV9Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -630,7 +634,27 @@ migrateV9ToV10(database: DatabaseSync): void {
   }
 }
 
-private applyV10Shape(database: DatabaseSync): void {
+/** V11 binds every external purge acknowledgement to its exact worker session. */
+migrateV10ToV11(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const columns = this.tableColumns(database, "agent_purge_operations");
+    if (!columns.has("agent_session_id")) {
+      database.exec("ALTER TABLE agent_purge_operations ADD COLUMN agent_session_id TEXT");
+    }
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+private applyV11Shape(database: DatabaseSync): void {
   const columns = this.tableColumns(database, "agent_configurations");
   if (!columns.has("reasoning_effort")) database.exec("ALTER TABLE agent_configurations ADD COLUMN reasoning_effort TEXT");
   if (!columns.has("config_revision")) database.exec("ALTER TABLE agent_configurations ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 1 CHECK(config_revision >= 1)");
@@ -675,7 +699,8 @@ private applyV10Shape(database: DatabaseSync): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       attached_work_attempt_id TEXT,
-      preserved_workspace_path TEXT
+      preserved_workspace_path TEXT,
+      agent_session_id TEXT
     ) STRICT;
     CREATE INDEX IF NOT EXISTS agent_purge_operations_agent_updated ON agent_purge_operations(agent_id,updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_agent_purge ON agent_purge_operations(agent_id)
@@ -683,32 +708,32 @@ private applyV10Shape(database: DatabaseSync): void {
   `);
 }
 
-private validateV10Shape(database: DatabaseSync): void {
+private validateV11Shape(database: DatabaseSync): void {
   const columns = this.tableColumns(database, "agent_configurations");
   for (const column of ["reasoning_effort", "config_revision", "runtime_configuration_revision"]) {
-    if (!columns.has(column)) throw new Error(`Daemon state v10 is missing agent configuration column ${column}.`);
+    if (!columns.has(column)) throw new Error(`Daemon state v11 is missing agent configuration column ${column}.`);
   }
   const moves = this.tableColumns(database, "agent_room_moves");
   for (const column of ["operation_id", "request_id", "agent_id", "source_room_id", "destination_room_id", "daemon_generation", "work_attempt_id", "execution_generation_id", "agent_session_id", "activating_inbox_item_id", "provider_turn_id", "effect_id", "phase", "remote_room_id", "destination_cursor", "source_credentials_revoked", "created_at", "updated_at", "source_cursor_present", "source_cursor"]) {
-    if (!moves.has(column)) throw new Error(`Daemon state v10 is missing room-move column ${column}.`);
+    if (!moves.has(column)) throw new Error(`Daemon state v11 is missing room-move column ${column}.`);
   }
   const purges = this.tableColumns(database, "agent_purge_operations");
-  for (const column of ["operation_id", "request_id", "agent_id", "daemon_generation", "phase", "external_revoke_required", "created_at", "updated_at", "attached_work_attempt_id", "preserved_workspace_path"]) {
-    if (!purges.has(column)) throw new Error(`Daemon state v10 is missing purge-operation column ${column}.`);
+  for (const column of ["operation_id", "request_id", "agent_id", "daemon_generation", "phase", "external_revoke_required", "created_at", "updated_at", "attached_work_attempt_id", "preserved_workspace_path", "agent_session_id"]) {
+    if (!purges.has(column)) throw new Error(`Daemon state v11 is missing purge-operation column ${column}.`);
   }
   const normalizeSql = (value: string) => value.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replaceAll('"', "").replaceAll("`", "").replaceAll("[", "").replaceAll("]", "").replace(/\s+/g, " ").replace(/\s*([(),=<>])\s*/g, "$1").replace(/\)\s*strict$/i, ")strict").trim().toLowerCase();
   const canonicalTables: Record<string, string> = {
     agent_room_moves: `CREATE TABLE agent_room_moves (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,source_room_id TEXT NOT NULL,destination_room_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),work_attempt_id TEXT,execution_generation_id TEXT,agent_session_id TEXT,activating_inbox_item_id TEXT,provider_turn_id TEXT,effect_id TEXT,phase TEXT NOT NULL CHECK(phase IN ('prepared','waiting_for_current_turn','joining_destination','membership_committed','rotating_credentials','bootstrapping_destination_tail','active','failed','rollback_required')),remote_room_id TEXT,destination_cursor TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,source_cursor_present INTEGER NOT NULL DEFAULT 0 CHECK(source_cursor_present IN (0,1)),source_cursor TEXT,source_credentials_revoked INTEGER NOT NULL DEFAULT 0 CHECK(source_credentials_revoked IN (0,1)),CHECK(source_room_id <> destination_room_id),CHECK((work_attempt_id IS NULL) = (execution_generation_id IS NULL))) STRICT`,
-    agent_purge_operations: `CREATE TABLE agent_purge_operations (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,attached_work_attempt_id TEXT,preserved_workspace_path TEXT) STRICT`,
+    agent_purge_operations: `CREATE TABLE agent_purge_operations (operation_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,agent_id TEXT NOT NULL,daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),phase TEXT NOT NULL CHECK(phase IN ('prepared','revoking_credentials','local_commit','complete','failed')),external_revoke_required INTEGER NOT NULL CHECK(external_revoke_required IN (0,1)),error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,attached_work_attempt_id TEXT,preserved_workspace_path TEXT,agent_session_id TEXT) STRICT`,
   };
   const strictTables = database.prepare("PRAGMA table_list").all() as Row[];
   for (const table of ["agent_room_moves", "agent_purge_operations"]) {
     const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
-    if (!definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalTables[table]!)) throw new Error(`Daemon state v10 table ${table} does not match its canonical definition.`);
+    if (!definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalTables[table]!)) throw new Error(`Daemon state v11 table ${table} does not match its canonical definition.`);
     const info = strictTables.find((row) => row.name === table && row.type === "table");
-    if (!info || Number(info.strict) !== 1 || Number(info.wr) !== 0) throw new Error(`Daemon state v10 table ${table} must be a strict rowid table.`);
+    if (!info || Number(info.strict) !== 1 || Number(info.wr) !== 0) throw new Error(`Daemon state v11 table ${table} must be a strict rowid table.`);
     const fk = database.prepare(`PRAGMA foreign_key_check(${table})`).get();
-    if (fk) throw new Error(`Daemon state v10 table ${table} contains a broken foreign key.`);
+    if (fk) throw new Error(`Daemon state v11 table ${table} contains a broken foreign key.`);
   }
   const indexes: Record<string, { table: string; unique: number; partial: number; columns: string[] }> = {
     agent_room_moves_agent_updated: { table: "agent_room_moves", unique: 0, partial: 0, columns: ["agent_id", "updated_at"] },
@@ -726,21 +751,22 @@ private validateV10Shape(database: DatabaseSync): void {
     const listed = (database.prepare(`PRAGMA index_list(${expected.table})`).all() as Row[]).find((row) => row.name === name);
     const terms = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Row[]).filter((row) => Number(row.key) === 1).sort((a, b) => Number(a.seqno) - Number(b.seqno));
     const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(name) as Row | undefined;
-    if (!listed || String(listed.origin) !== "c" || Number(listed.unique) !== expected.unique || Number(listed.partial) !== expected.partial || !definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalIndexes[name]!) || terms.length !== expected.columns.length || terms.some((term, index) => Number(term.cid) < 0 || term.name !== expected.columns[index] || Number(term.desc) !== 0 || String(term.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v10 index ${name} is invalid.`);
+    if (!listed || String(listed.origin) !== "c" || Number(listed.unique) !== expected.unique || Number(listed.partial) !== expected.partial || !definition || normalizeSql(String(definition.sql)) !== normalizeSql(canonicalIndexes[name]!) || terms.length !== expected.columns.length || terms.some((term, index) => Number(term.cid) < 0 || term.name !== expected.columns[index] || Number(term.desc) !== 0 || String(term.coll).toUpperCase() !== "BINARY")) throw new Error(`Daemon state v11 index ${name} is invalid.`);
   }
   const integrity = database.prepare("PRAGMA integrity_check").get() as Row | undefined;
-  if (!integrity || Object.values(integrity)[0] !== "ok" || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v10 failed SQLite integrity validation.");
+  if (!integrity || Object.values(integrity)[0] !== "ok" || database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v11 failed SQLite integrity validation.");
 }
 
-repairAndValidateV10Shape(database: DatabaseSync): void {
+repairAndValidateV11Shape(database: DatabaseSync): void {
   this.repairAndValidateV9Shape(database);
   const columns = this.tableColumns(database, "agent_configurations");
   const purgeColumns = this.tableColumns(database, "agent_purge_operations");
   if (columns.has("reasoning_effort") && columns.has("config_revision") && columns.has("runtime_configuration_revision") && this.tableColumns(database, "agent_room_moves").has("source_cursor_present")
     && this.tableColumns(database, "agent_room_moves").has("source_credentials_revoked")
-    && purgeColumns.has("attached_work_attempt_id") && purgeColumns.has("preserved_workspace_path")) {
-    this.applyV10Shape(database);
-    this.validateV10Shape(database);
+    && purgeColumns.has("attached_work_attempt_id") && purgeColumns.has("preserved_workspace_path")
+    && purgeColumns.has("agent_session_id")) {
+    this.applyV11Shape(database);
+    this.validateV11Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -768,7 +794,10 @@ repairAndValidateV10Shape(database: DatabaseSync): void {
     if (purgeColumns.size && !purgeColumns.has("preserved_workspace_path")) {
       database.exec("ALTER TABLE agent_purge_operations ADD COLUMN preserved_workspace_path TEXT");
     }
-    this.applyV10Shape(database); this.validateV10Shape(database); database.exec("COMMIT");
+    if (purgeColumns.size && !purgeColumns.has("agent_session_id")) {
+      database.exec("ALTER TABLE agent_purge_operations ADD COLUMN agent_session_id TEXT");
+    }
+    this.applyV11Shape(database); this.validateV11Shape(database); database.exec("COMMIT");
   }
   catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; }
 }

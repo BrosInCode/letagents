@@ -345,7 +345,7 @@ test("older marker with physical v7 delivery tables installs v9 before advancing
     database.close();
     const reopened = new SupervisedAgentInboxStore(env.database); await reopened.receipts("repair-v8"); await reopened.close();
     const inspection = new DatabaseSync(env.database);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
     assert.ok(inspection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='supervised_agent_pruned_sources'").get());
     inspection.close();
   } finally { await env.cleanup(); }
@@ -407,7 +407,7 @@ test("v7 repair adds a missing causal-event table without rewriting canonical in
     await first.close();
     const partialV7 = new DatabaseSync(env.database);
     partialV7.exec("DROP TABLE supervised_agent_inbox_events");
-    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
     partialV7.close();
     const repaired = new SupervisedAgentInboxStore(env.database);
     const preserved = (await repaired.receipts("repair"))[0]!;
@@ -502,7 +502,7 @@ test("a post-COMMIT v6 scrub interruption leaves a durable marker that a reopen 
     await prepareSecretBearingV5(env);
     const interrupted = new DatabaseSync(env.database);
     assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
-    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
     assert.equal((interrupted.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
     interrupted.close();
     const reopened = new DatabaseSync(env.database);

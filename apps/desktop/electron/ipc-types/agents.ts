@@ -418,6 +418,7 @@ export interface DesktopSupervisorRoomMove {
 }
 export interface DesktopSupervisorRoomMovePrepareInput { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }
 export interface DesktopSupervisorRoomMoveOperationInput { operationId: string; entryId: string; daemonGeneration: number }
+export interface DesktopSupervisorCurrentRoomMoveInput { entryId: string; daemonGeneration: number }
 
 export interface DesktopSupervisorLivenessAxis {
   state: string;

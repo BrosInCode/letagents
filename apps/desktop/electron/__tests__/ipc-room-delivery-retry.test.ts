@@ -46,20 +46,21 @@ test("registerDesktopIpcHandlers routes exact room-delivery retries and propagat
   }
 });
 
-test("purge IPC never attests credentials_revoked when local revocation identity is unavailable", async () => {
+test("purge IPC never attests an exact worker session when local revocation identity is unavailable", async () => {
   const originalPurge = supervisorDaemonClient.purgeAgent;
   const originalRevoke = supervisorGrantCoordinator.revokeEntryForPurge;
-  const calls: boolean[] = [];
+  const calls: Array<string | null> = [];
   try {
     (supervisorDaemonClient as unknown as {
-      purgeAgent(entryId: string, daemonGeneration: number, credentialsRevoked?: boolean): Promise<{ outcome: "revocation_required"; operationId: string }>;
-    }).purgeAgent = async (_entryId, _daemonGeneration, credentialsRevoked = false) => {
-      calls.push(credentialsRevoked);
-      return { outcome: "revocation_required", operationId: "purge:agent_1" };
+      purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId?: string | null): Promise<{ outcome: "revocation_required"; operationId: string; agentSessionId: string }>;
+    }).purgeAgent = async (_entryId, _daemonGeneration, revokedAgentSessionId = null) => {
+      calls.push(revokedAgentSessionId);
+      return { outcome: "revocation_required", operationId: "purge:agent_1", agentSessionId: "session_1" };
     };
     (supervisorGrantCoordinator as unknown as {
-      revokeEntryForPurge(entryId: string): Promise<void>;
-    }).revokeEntryForPurge = async () => {
+      revokeEntryForPurge(entryId: string, agentSessionId: string): Promise<void>;
+    }).revokeEntryForPurge = async (_entryId, agentSessionId) => {
+      assert.equal(agentSessionId, "session_1");
       throw new Error("local supervisor-grant registry is missing; local agent state was preserved");
     };
     const handler = handlers.get("desktop:supervisor:purge-agent");
@@ -68,7 +69,37 @@ test("purge IPC never attests credentials_revoked when local revocation identity
       async () => { await handler!({}, { entryId: "agent_1", daemonGeneration: 40 }); },
       /registry is missing.*local agent state was preserved/,
     );
-    assert.deepEqual(calls, [false], "the daemon purge journal remains at revocation_required");
+    assert.deepEqual(calls, [null], "the daemon purge journal remains at revocation_required");
+  } finally {
+    (supervisorDaemonClient as unknown as { purgeAgent: typeof originalPurge }).purgeAgent = originalPurge;
+    (supervisorGrantCoordinator as unknown as { revokeEntryForPurge: typeof originalRevoke }).revokeEntryForPurge = originalRevoke;
+  }
+});
+
+test("purge IPC advances only with the exact session whose end and grant revoke were acknowledged", async () => {
+  const originalPurge = supervisorDaemonClient.purgeAgent;
+  const originalRevoke = supervisorGrantCoordinator.revokeEntryForPurge;
+  const calls: Array<string | null> = [];
+  try {
+    (supervisorDaemonClient as unknown as {
+      purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId?: string | null): Promise<any>;
+    }).purgeAgent = async (_entryId, _daemonGeneration, revokedAgentSessionId = null) => {
+      calls.push(revokedAgentSessionId);
+      return revokedAgentSessionId === null
+        ? { outcome: "revocation_required", operationId: "purge:agent_1", agentSessionId: "session_exact" }
+        : { outcome: "purged" };
+    };
+    (supervisorGrantCoordinator as unknown as {
+      revokeEntryForPurge(entryId: string, agentSessionId: string): Promise<void>;
+    }).revokeEntryForPurge = async (entryId, agentSessionId) => {
+      assert.equal(entryId, "agent_1");
+      assert.equal(agentSessionId, "session_exact");
+    };
+    registerDesktopIpcHandlers(fakeIpcMain as never);
+    const handler = handlers.get("desktop:supervisor:purge-agent");
+    const result = await handler!({}, { entryId: "agent_1", daemonGeneration: 40 });
+    assert.deepEqual(result, { outcome: "purged" });
+    assert.deepEqual(calls, [null, "session_exact"]);
   } finally {
     (supervisorDaemonClient as unknown as { purgeAgent: typeof originalPurge }).purgeAgent = originalPurge;
     (supervisorGrantCoordinator as unknown as { revokeEntryForPurge: typeof originalRevoke }).revokeEntryForPurge = originalRevoke;

@@ -37,6 +37,7 @@ import type {
   DesktopSupervisorAgentConfigurationUpdateInput,
   DesktopSupervisorAgentConfigurationUpdateResult,
   DesktopSupervisorRoomMove,
+  DesktopSupervisorCurrentRoomMoveInput,
   DesktopSupervisorRoomMoveOperationInput,
   DesktopSupervisorRoomMovePrepareInput,
   DesktopSupervisorCreateInput,
@@ -327,6 +328,7 @@ export interface DesktopApi {
     prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
     getRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
+    getCurrentRoomMove: (input: DesktopSupervisorCurrentRoomMoveInput) => Promise<DesktopSupervisorRoomMove | null>;
     retireAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<void>;
     purgeAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<{ outcome: "purged" | "invalid"; error?: string }>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;

@@ -318,7 +318,7 @@ test("room move rotates exact destination authority, acknowledges the source ses
   const operations: SupervisorGrantCoordinatorOperations = {
     ...h.operations,
     async provision(input) {
-      events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}`);
+      events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}:${input.sourceAgentSessionId ?? "none"}`);
       return {
         metadata: metadata(input.agentKey, "grant_destination", "room_2"),
         token: "secret_destination", entryId: input.entryId, lastInstalledDaemonGeneration: null,
@@ -341,7 +341,7 @@ test("room move rotates exact destination authority, acknowledges the source ses
     error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
   });
   assert.deepEqual(events.slice(0, 5), [
-    "provision:room_2:true", "persist:room_2:none", "ack:session_1",
+    "provision:room_2:true:session_1", "persist:room_2:none", "ack:session_1",
     "install:room_2:secret_destination", "persist:room_2:7",
   ]);
   assert.equal(events.some((event) => event.includes("secret_source")), false, "the source-scoped grant is never reinstalled against destination membership");
@@ -413,7 +413,7 @@ test("room-move rollback force-restores a source-scoped grant before compensatio
   const operations: SupervisorGrantCoordinatorOperations = {
     ...h.operations,
     async provision(input) {
-      events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}`);
+      events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}:${input.sourceAgentSessionId ?? "none"}`);
       return {
         metadata: metadata(input.agentKey, "grant_source_recovered", "room_1"),
         token: "secret_source_recovered", entryId: input.entryId, lastInstalledDaemonGeneration: null,
@@ -433,7 +433,7 @@ test("room-move rollback force-restores a source-scoped grant before compensatio
     error: "destination provisioning failed", createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:01.000Z",
   });
-  assert.equal(events[0], "provision:room_1:true");
+  assert.equal(events[0], "provision:room_1:true:session_1");
   assert.equal(events.some((event) => event === "install:room_1:secret_source_recovered"), true);
   assert.equal(events.some((event) => event.includes("secret_destination")), false);
 });

@@ -8,6 +8,7 @@ import {
   getAgentIdentityByCanonicalKey,
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
+  isSupervisorGrantProvisionConflictError,
   isRebindAttestationCause,
   isSupervisorGrantFenceStaleError,
   isUuidShapedExecutionId,
@@ -132,6 +133,10 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       });
       res.status(201).json({ ...created.grant, supervisor_grant: created.token });
     } catch (error) {
+      if (isSupervisorGrantProvisionConflictError(error)) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithInternalError(res, "POST /supervisor-host-grants", error, "Supervisor grant could not be provisioned.");
     }
   });

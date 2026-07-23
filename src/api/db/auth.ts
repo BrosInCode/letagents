@@ -357,6 +357,21 @@ export function isSupervisorGrantFenceStaleError(error: unknown): error is Super
   return error instanceof SupervisorGrantFenceStaleError;
 }
 
+export class SupervisorGrantProvisionConflictError extends Error {
+  readonly code = "supervisor_grant_provision_conflict";
+
+  constructor() {
+    super("An active supervisor grant already exists for this host installation with different authority.");
+    this.name = "SupervisorGrantProvisionConflictError";
+  }
+}
+
+export function isSupervisorGrantProvisionConflictError(
+  error: unknown,
+): error is SupervisorGrantProvisionConflictError {
+  return error instanceof SupervisorGrantProvisionConflictError;
+}
+
 export async function assertSupervisorGrantFenceTx(tx: any, fence: SupervisorGrantFence): Promise<boolean> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_grant:${fence.grant_id}`}, 0))`);
   const [grant] = await tx.select({ grant_id: supervisor_host_grants.grant_id }).from(supervisor_host_grants).where(and(
@@ -785,26 +800,64 @@ export async function createSupervisorHostGrant(input: {
   allowed_agent_keys: string[];
   expires_at: string;
 }): Promise<{ grant: SupervisorHostGrant; token: string }> {
-  const now = new Date().toISOString();
-  const token = makeSupervisorGrantToken();
-  const record = {
-    grant_id: await nextPrefixedId("supervisor_host_grants", "supervisor_grant"),
-    owner_account_id: input.owner_account_id,
-    host_id: input.host_id,
-    installation_id: input.installation_id,
-    token_hash: hashToken(token),
-    token_version: 1,
-    allowed_room_ids: input.allowed_room_ids,
-    allowed_agent_keys: input.allowed_agent_keys,
-    current_generation: 1,
-    issued_at: now,
-    expires_at: input.expires_at,
-    revoked_at: null,
-    created_at: now,
-    updated_at: now,
-  };
-  const [created] = await db.insert(supervisor_host_grants).values(record).returning();
-  return { grant: toSupervisorHostGrant(created), token };
+  return db.transaction(async (tx) => {
+    const installationFence = `supervisor_grant_installation:${input.owner_account_id}:${input.host_id}:${input.installation_id}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${installationFence}, 0))`);
+    const activeGrants = await tx.select().from(supervisor_host_grants).where(and(
+      eq(supervisor_host_grants.owner_account_id, input.owner_account_id),
+      eq(supervisor_host_grants.host_id, input.host_id),
+      eq(supervisor_host_grants.installation_id, input.installation_id),
+      isNull(supervisor_host_grants.revoked_at),
+    ));
+    // Pre-upgrade concurrent creates may have left multiple live rows. Never
+    // select one arbitrarily and leave another credential authoritative.
+    if (activeGrants.length > 1) throw new SupervisorGrantProvisionConflictError();
+    const [active] = activeGrants;
+    const exactSet = (left: readonly string[], right: readonly string[]) =>
+      left.length === right.length && left.every((value) => right.includes(value));
+    const now = new Date().toISOString();
+    const token = makeSupervisorGrantToken();
+    if (active) {
+      if (!exactSet(active.allowed_room_ids, input.allowed_room_ids)
+        || !exactSet(active.allowed_agent_keys, input.allowed_agent_keys)) {
+        throw new SupervisorGrantProvisionConflictError();
+      }
+      // An owner retry after the server committed but the response was lost
+      // recovers the exact grant identity and scope while rotating away the
+      // unknown bearer. Repeating this operation is always safe: only the
+      // latest returned token remains usable.
+      const [recovered] = await tx.update(supervisor_host_grants).set({
+        token_hash: hashToken(token),
+        token_version: active.token_version + 1,
+        expires_at: input.expires_at,
+        updated_at: now,
+      }).where(and(
+        eq(supervisor_host_grants.grant_id, active.grant_id),
+        eq(supervisor_host_grants.token_version, active.token_version),
+        isNull(supervisor_host_grants.revoked_at),
+      )).returning();
+      if (!recovered) throw new SupervisorGrantProvisionConflictError();
+      return { grant: toSupervisorHostGrant(recovered), token };
+    }
+    const record = {
+      grant_id: await nextPrefixedId("supervisor_host_grants", "supervisor_grant", tx),
+      owner_account_id: input.owner_account_id,
+      host_id: input.host_id,
+      installation_id: input.installation_id,
+      token_hash: hashToken(token),
+      token_version: 1,
+      allowed_room_ids: input.allowed_room_ids,
+      allowed_agent_keys: input.allowed_agent_keys,
+      current_generation: 1,
+      issued_at: now,
+      expires_at: input.expires_at,
+      revoked_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const [created] = await tx.insert(supervisor_host_grants).values(record).returning();
+    return { grant: toSupervisorHostGrant(created), token };
+  });
 }
 
 export async function getSupervisorHostGrantByToken(token: string): Promise<SupervisorHostGrant | null> {
