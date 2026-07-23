@@ -52,7 +52,6 @@
       v-if="actionState?.message"
       class="agent-inspector-action-message"
       :data-state="actionState.status"
-      aria-live="polite"
     >
       {{ actionState.message }}
     </p>
