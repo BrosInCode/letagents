@@ -133,6 +133,33 @@ function withRuntimeIdentity(item: DaemonManifestEntry): DaemonManifestEntry {
   return runId ? { ...item, run_id: runId, deployment_id: serializeDaemonDeploymentId(item.id, runId) } : item;
 }
 
+function removePostV5DeliveryTables(database: DatabaseSync): void {
+  database.exec(`
+    DROP TABLE IF EXISTS supervised_agent_publications;
+    DROP TABLE IF EXISTS supervised_agent_history_boundaries;
+    DROP TABLE IF EXISTS supervised_agent_pruned_sources;
+    DROP TABLE IF EXISTS supervised_agent_effects;
+    DROP TABLE IF EXISTS supervised_agent_ingress_health;
+    DROP TABLE IF EXISTS supervised_agent_observed_messages;
+    DROP TABLE IF EXISTS supervised_agent_terminal_results;
+    DROP TABLE IF EXISTS supervised_agent_inbox_events;
+    DROP TABLE IF EXISTS supervised_agent_ingress_cursors;
+    DROP TABLE IF EXISTS supervised_agent_inbox;
+  `);
+}
+
+function assertRoomScopedV9DeliveryShape(database: DatabaseSync): void {
+  assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+  assert.equal((database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
+  const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as { sql: string };
+  const observed = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_observed_messages'").get() as { sql: string };
+  const publications = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as { sql: string };
+  assert.match(inbox.sql, /UNIQUE\s*\(\s*agent_id\s*,\s*room_id\s*,\s*source_message_id\s*\)/i);
+  assert.match(observed.sql, /PRIMARY KEY\s*\(\s*agent_id\s*,\s*room_id\s*,\s*source_message_id\s*\)/i);
+  assert.match(publications.sql, /FOREIGN KEY\s*\(\s*inbox_item_id\s*,\s*agent_id\s*,\s*room_id\s*\)/i);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+}
+
 test("SQLite manifest round-trips the flat wire projection from relational domain tables", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
@@ -246,13 +273,13 @@ test("a post-commit backup failure retries idempotently without reimporting", as
 test("future SQLite schema versions are rejected without being downgraded", async () => {
   const env = await fixture();
   const database = new DatabaseSync(env.databasePath);
-  database.exec("PRAGMA user_version = 9");
+  database.exec("PRAGMA user_version = 10");
   database.close();
   const store = new ManifestStore(env.databasePath);
   try {
-    await assert.rejects(() => store.load(), /schema version 9/);
+    await assert.rejects(() => store.load(), /schema version 10/);
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
     inspection.close();
   } finally {
     await store.close();
@@ -267,10 +294,10 @@ test("manifest metadata schema disagreement is rejected on reopen", async () => 
     await initialized.load();
     await initialized.close();
     const database = new DatabaseSync(env.databasePath);
-    database.prepare("UPDATE manifest_metadata SET schema_version = 9 WHERE singleton = 1").run();
+    database.prepare("UPDATE manifest_metadata SET schema_version = 10 WHERE singleton = 1").run();
     database.close();
     const reopened = new ManifestStore(env.databasePath);
-    await assert.rejects(() => reopened.load(), /metadata schema version 9/);
+    await assert.rejects(() => reopened.load(), /metadata schema version 10/);
     await reopened.close();
   } finally {
     await initialized.close();
@@ -282,7 +309,7 @@ test("contradictory SQLite and metadata version pairs reject before migration", 
   for (const pair of [
     { userVersion: 1, metadataVersion: 2, pattern: /version pair is inconsistent/ },
     { userVersion: 2, metadataVersion: 1, pattern: /version pair is inconsistent/ },
-    { userVersion: 1, metadataVersion: 9, pattern: /metadata schema version 9/ },
+    { userVersion: 1, metadataVersion: 10, pattern: /metadata schema version 10/ },
   ]) {
     const env = await fixture();
     const initialized = new ManifestStore(env.databasePath);
@@ -304,6 +331,46 @@ test("contradictory SQLite and metadata version pairs reject before migration", 
       inspection.close();
     } finally {
       await initialized.close();
+      await env.cleanup();
+    }
+  }
+});
+
+test("physical v1-v4 databases with no delivery tables advance to the complete v9 shape before stamping markers", async () => {
+  for (const version of [1, 2, 3, 4]) {
+    const env = await fixture();
+    const initial = new ManifestStore(env.databasePath);
+    try {
+      const expected = await initial.write(0, [entry]);
+      await initial.close();
+      const historical = new DatabaseSync(env.databasePath);
+      removePostV5DeliveryTables(historical);
+      historical.exec(`UPDATE manifest_metadata SET schema_version = ${version} WHERE singleton = 1; PRAGMA user_version = ${version}`);
+      assert.equal(
+        (historical.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as { count: number }).count,
+        0,
+        `v${version} fixture has no delivery inbox table`,
+      );
+      historical.close();
+
+      const migrated = new ManifestStore(env.databasePath);
+      assert.deepEqual(await migrated.load(), expected, `v${version} preserves manifest data`);
+      await migrated.close();
+
+      const inspection = new DatabaseSync(env.databasePath);
+      assertRoomScopedV9DeliveryShape(inspection);
+      assert.equal(
+        (inspection.prepare("SELECT run_id FROM runtime_deployments WHERE agent_id=?").get(entry.id) as { run_id: string }).run_id,
+        entry.provider_ref?.execution_generation_id,
+        `v${version} retains runtime identity`,
+      );
+      inspection.close();
+
+      const reopened = new ManifestStore(env.databasePath);
+      assert.deepEqual(await reopened.load(), expected, `v${version} second reopen is stable`);
+      await reopened.close();
+    } finally {
+      await initial.close();
       await env.cleanup();
     }
   }
@@ -364,8 +431,8 @@ test("v1 daemon state migrates transactionally to v2 and normalizes exit timesta
     await migrated.close();
 
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
-    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 8);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
     assert.equal((inspection.prepare("SELECT provider_launch_policy_undefined FROM agent_configurations WHERE agent_id = ?").get(entry.id) as { provider_launch_policy_undefined: number }).provider_launch_policy_undefined, 0);
     assert.equal((inspection.prepare("SELECT provider_process_identity_present FROM runtime_deployments WHERE agent_id = ?").get(entry.id) as { provider_process_identity_present: number }).provider_process_identity_present, 0);
     const preservedRuntime = inspection.prepare("SELECT deployment_id, run_id FROM runtime_deployments WHERE agent_id = ?").get(invalid.id) as { deployment_id: string; run_id: string };
@@ -445,8 +512,8 @@ test("partially migrated v2 state is repaired transactionally before reads", asy
     partial.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
     partial.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[404,505]", entry.id);
     partial.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
-    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
-    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 8);
+    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
     partial.close();
 
     const repaired = new ManifestStore(env.databasePath);

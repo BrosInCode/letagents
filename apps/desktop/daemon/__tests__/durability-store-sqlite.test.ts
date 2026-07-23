@@ -253,7 +253,7 @@ test("SQLite attempt initialization creates no JSON and keeps owner-only databas
     assert.equal((await stat(env.database)).mode & 0o777, 0o600);
     const inspection = new DatabaseSync(env.database);
     assert.equal(String((inspection.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toLowerCase(), "wal");
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 8);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
     inspection.close();
   } finally { await env.cleanup(); }
 });

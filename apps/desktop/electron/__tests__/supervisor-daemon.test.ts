@@ -659,7 +659,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces a stale same-protocol daemon and launches the replacement from a stable cwd", async () => {
+test("desktop replaces the prior 2.0.44 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -678,10 +678,11 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.0-stale",
+    "2.0.44",
   );
   oldServer = old.server;
   try {
+    assert.notEqual("2.0.44", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -699,6 +700,7 @@ test("desktop replaces a stale same-protocol daemon and launches the replacement
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.equal(status.implementationVersion, "2.0.45");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

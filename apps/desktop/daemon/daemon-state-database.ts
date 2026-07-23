@@ -340,12 +340,7 @@ createSchema(database: DatabaseSync): void {
     this.applyV3Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
-    this.applyV7Shape(database);
-    this.validateV7Shape(database);
-    this.applyV8Shape(database);
-    this.validateV8Shape(database);
-    this.applyV9Shape(database);
-    this.validateV9Shape(database);
+    this.advanceDeliveryToCurrent(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -368,6 +363,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.applyV3Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -391,6 +387,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.applyV3Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -414,6 +411,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.applyV4Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -473,6 +471,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -522,10 +521,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
-    this.applyBoundedDeliveryV6Shape(database);
-    this.validateBoundedDeliveryV6Shape(database);
-    if (!this.hasV9DeliveryHistoryShape(database)) this.applyV9Shape(database);
-    this.validateV9Shape(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -547,13 +543,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     this.validateV6Shape(database);
-    this.validateBoundedDeliveryV6Shape(database);
-    this.applyV7Shape(database);
-    this.validateV7Shape(database);
-    this.applyV8Shape(database);
-    this.validateV8Shape(database);
-    this.applyV9Shape(database);
-    this.validateV9Shape(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -571,11 +561,7 @@ migrateV7ToV8(database: DatabaseSync): void {
   this.repairAndValidateV7Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.validateV7Shape(database);
-    this.applyV8Shape(database);
-    this.validateV8Shape(database);
-    this.applyV9Shape(database);
-    this.validateV9Shape(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -591,9 +577,7 @@ migrateV8ToV9(database: DatabaseSync): void {
   this.repairAndValidateV8Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.validateV8Shape(database);
-    this.applyV9Shape(database);
-    this.validateV9Shape(database);
+    this.advanceDeliveryToCurrent(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -822,6 +806,27 @@ private validateV9Shape(database: DatabaseSync): void {
 private hasV9DeliveryHistoryShape(database: DatabaseSync): boolean {
   const publication = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_publications'").get() as Row | undefined;
   return Boolean(publication && /FOREIGN KEY\s*\(\s*inbox_item_id\s*,\s*agent_id\s*,\s*room_id\s*\)/i.test(String(publication.sql)));
+}
+
+/**
+ * All legacy markers must reach this exact physical delivery shape before
+ * either version marker advances. Older schemas have no inbox tables at all,
+ * while interrupted upgrades can already have v6-v8 tables, so this path is
+ * intentionally additive until the final v9 rebuild.
+ */
+private advanceDeliveryToCurrent(database: DatabaseSync): void {
+  if (this.hasV9DeliveryHistoryShape(database)) {
+    this.validateV9Shape(database);
+    return;
+  }
+  this.applyBoundedDeliveryV6Shape(database);
+  this.validateBoundedDeliveryV6Shape(database);
+  this.applyV7Shape(database);
+  this.validateV7Shape(database);
+  this.applyV8Shape(database);
+  this.validateV8Shape(database);
+  this.applyV9Shape(database);
+  this.validateV9Shape(database);
 }
 
 repairAndValidateV9Shape(database: DatabaseSync): void {
