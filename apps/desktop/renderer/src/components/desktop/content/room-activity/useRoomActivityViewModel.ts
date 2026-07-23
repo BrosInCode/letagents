@@ -28,7 +28,11 @@ import type {
 
 export type { RoomActivityViewModelInput } from "./types";
 
-export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
+export function useRoomActivityViewModel(
+  props: RoomActivityViewModelInput,
+  options: { autoSelectLive?: boolean } = {},
+) {
+  const autoSelectLive = options.autoSelectLive ?? true;
   const activeView = ref<"live" | "history">("live");
   const selectedLiveKey = ref<string | null>(null);
   const selectedHistoryKey = ref<string | null>(null);
@@ -124,7 +128,9 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
     return [...participants.values()];
   });
   const selectedLiveParticipant = computed(() =>
-    liveRosterAgents.value.find((participant) => participant.key === selectedLiveKey.value) || liveRosterAgents.value[0] || null
+    liveRosterAgents.value.find((participant) => participant.key === selectedLiveKey.value)
+      || (autoSelectLive ? liveRosterAgents.value[0] : null)
+      || null
   );
   const selectedHistoryEntry = computed(() =>
     props.recentActivity.find((entry) => entry.id === selectedHistoryKey.value) || props.recentActivity[0] || null
@@ -135,7 +141,10 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
       selectedLiveKey.value = null;
       return;
     }
-    if (!selectedLiveKey.value || !next.some((participant) => participant.key === selectedLiveKey.value)) {
+    if (selectedLiveKey.value && !next.some((participant) => participant.key === selectedLiveKey.value)) {
+      selectedLiveKey.value = null;
+    }
+    if (autoSelectLive && !selectedLiveKey.value) {
       selectedLiveKey.value = next[0].key;
     }
   }, { immediate: true });

@@ -359,6 +359,20 @@ function insertMention(mentionText: string): void {
   void nextTick(() => textareaElement.value?.focus());
 }
 
+/** Canonical entry point for non-composer surfaces such as the Agent Inspector. */
+function focusWithMention(mentionText: string): void {
+  const separator = draft.value && !/\s$/.test(draft.value) ? " " : "";
+  draft.value = `${draft.value}${separator}@${mentionText} `;
+  mentionQuery.value = null;
+  syncDraftToShell();
+  void nextTick(() => {
+    syncTextareaHeight();
+    const input = textareaElement.value;
+    input?.focus();
+    input?.setSelectionRange(draft.value.length, draft.value.length);
+  });
+}
+
 function syncDraftToShell(): void {
   emit("draft-change", draft.value);
 }
@@ -375,4 +389,6 @@ function syncTextareaHeight(): void {
 function openEventPreview(event: ComposerEventPreview): void {
   emit("open-event-preview", event);
 }
+
+defineExpose({ focusWithMention });
 </script>

@@ -77,6 +77,7 @@
 
         <RoomComposer
           v-else
+          ref="roomComposer"
           :attaching="attaching"
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"
@@ -314,6 +315,7 @@ const activeThreadParentId = ref<string | null>(null);
 const threadRevealTargetId = ref<string | null>(null);
 const replyTarget = ref<RoomReplyTarget | null>(null);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
+const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
 const threadLayoutElement = ref<HTMLElement | null>(null);
 const threadLayoutWidth = ref(0);
 const threadReturnFocusElement = ref<HTMLElement | null>(null);
@@ -806,7 +808,11 @@ onMounted(() => {
   window.addEventListener("resize", syncThreadLayoutWidth);
 });
 
-defineExpose({ openThread });
+function focusComposerWithMention(mentionText: string): void {
+  roomComposer.value?.focusWithMention(mentionText);
+}
+
+defineExpose({ openThread, focusComposerWithMention });
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", syncThreadLayoutWidth);
