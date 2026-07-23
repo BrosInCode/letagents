@@ -481,9 +481,11 @@ import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-age
 import {
   canReconnectRoomAgent,
   canRecoverSavedRoomAgent,
+  isProjectedSupervisedActivityParticipant,
   roomAgentActivityProjection,
   roomAgentDeliveryGroup,
   roomAgentDeliverySummary,
+  supervisedActivityIdentity,
 } from "../../../domain/room-agent-delivery";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import {
@@ -608,13 +610,15 @@ const legacyTruthfulAgents = computed(() => legacyTruthfulProjection.value.liveA
 const inspectorTruthfulAgents = computed(() => props.agentInspectorFoundationEnabled
   ? props.agentProjections.filter((agent) => agent.overallState !== "retired")
   : []);
-const projectedSessionIds = computed(() => new Set(
+const projectedSupervisedIdentity = computed(() => supervisedActivityIdentity(
   props.agentInspectorFoundationEnabled
-    ? props.agentProjections.map((agent) => agent.entry.agentSessionId).filter((value): value is string => Boolean(value))
-    : legacyTruthfulProjection.value.projectedSessionIds,
+    ? props.agentProjections.map((agent) => agent.entry)
+    : props.supervisorEntries,
+  props.roomIdentifier,
 ));
-const isProjectedLegacyAgent = (agent: ActivityParticipant) => Boolean(
-  agent.agentSessionId && projectedSessionIds.value.has(agent.agentSessionId),
+const isProjectedLegacyAgent = (agent: ActivityParticipant) => isProjectedSupervisedActivityParticipant(
+  projectedSupervisedIdentity.value,
+  agent,
 );
 const legacyReachableAgents = computed(() => reachableAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
 const legacyWorkingAgents = computed(() => workingAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
