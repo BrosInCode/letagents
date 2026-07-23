@@ -363,7 +363,7 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
-  capabilities: { roomDeliveryRetry: boolean };
+  capabilities: { roomDeliveryRetry: boolean; agentInspectorDetail: boolean };
 }
 
 export interface DesktopSupervisorLivenessAxis {
@@ -576,6 +576,18 @@ export interface DesktopSupervisorAttemptDetail {
   lastTerminal: Record<string, unknown> | null;
   restartCount: number;
   activity: DesktopSupervisorActivityEvent[];
+}
+export interface DesktopSupervisorAgentInspectorDetailInput { entryId: string; roomId: string; sourceMessageId?: string | null; }
+export interface DesktopSupervisorAgentInspectorHistoryBoundary { earliest_retained_observed_message_id: string | null; earliest_retained_inbox_message_id: string | null; earliest_retained_receipt_sequence: number | null; pruned_before_message_id: string | null; pruned_at: string | null; }
+export interface DesktopSupervisorAgentInspectorItem { source_message_id: string; inbox_item_id: string; state: Exclude<DesktopRoomAgentReceiptState, "queued_behind_blocked">; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; provider_turn_id: string | null; last_error: string | null; canonical_message_id: string | null; }
+export interface DesktopSupervisorAgentInspectorDetail {
+  availability: "available" | "pruned" | "not_loaded";
+  entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
+  source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: Record<string, unknown> | null } | null;
+  receipt: { state: DesktopRoomAgentReceiptState; attempt_count: number; provider_turn_id: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; last_error: string | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
+  terminal: { outcome: string; normalized_text: string | null; evidence_source: string; observed_at: string } | null;
+  publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
+  timeline: DesktopRoomAgentCausalEvent[]; items: DesktopSupervisorAgentInspectorItem[]; history_boundary: DesktopSupervisorAgentInspectorHistoryBoundary | null;
 }
 
 export interface DesktopOpenModelSettingsStatus {

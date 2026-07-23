@@ -159,7 +159,7 @@ function lastRoomMessageId(messages: readonly Record<string, unknown>[]): string
 }
 
 /** The daemon talks to the room API only through the live worker bearer. */
-const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
+export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
   async poll(input) {
     const query = new URLSearchParams({ timeout: String(DEFAULT_ROOM_POLL_MAX_MS) });
@@ -185,6 +185,11 @@ const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       signal: input.signal,
     });
     if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
+    const message = await response.json() as Record<string, unknown>;
+    const messageId = typeof message.id === "string" && message.id.trim() ? message.id : null;
+    const roomId = typeof message.room_id === "string" && message.room_id.trim() ? message.room_id : null;
+    if (!messageId || !roomId || roomId !== input.roomId) throw new Error("Supervised room publication response omitted its canonical message identity.");
+    return { messageId, roomId };
   },
 };
 
@@ -722,6 +727,18 @@ export class SupervisorDaemon {
         });
         return { accepted: true };
       }
+      if (request.method === "supervisor.get_agent_inspector_detail") {
+        const params = this.paramsRecord(request.params);
+        const entryId = params.entry_id;
+        const roomId = params.room_id;
+        const sourceMessageId = params.source_message_id;
+        if (typeof entryId !== "string" || typeof roomId !== "string"
+          || !Object.hasOwn(params, "source_message_id")
+          || !(sourceMessageId === null || typeof sourceMessageId === "string")) {
+          throw new Error("Agent inspector detail requires string entry_id, string room_id, and source_message_id as string or null.");
+        }
+        return this.getAgentInspectorDetail(entryId, roomId, sourceMessageId);
+      }
       if (request.method === "supervisor.prepare_bounded_effect") {
         const params = this.paramsRecord(request.params);
         return this.prepareBoundedEffect({
@@ -1075,6 +1092,15 @@ export class SupervisorDaemon {
       daemonGeneration: agent.daemonGeneration, providerContinuationId: agent.handle.providerContinuationId, pid: agent.handle.pid,
     })) throw new Error("The room delivery binding is no longer current; refresh before retrying.");
     await this.supervisedDelivery.retry(agent, input.sourceMessageId);
+  }
+
+  /** Inspector reads are exact-entry scoped; a room mismatch never falls back to history. */
+  private async getAgentInspectorDetail(entryId: string, roomId: string, sourceMessageId: string | null) {
+    if (!entryId.trim() || !roomId.trim() || (sourceMessageId !== null && !sourceMessageId.trim())) throw new Error("Agent inspector detail requires an exact entry and room identity.");
+    const entry = await this.store.getEntry(entryId);
+    if (!entry) throw new Error("The exact supervisor entry is no longer present; inspector history is not queryable without its manifest fence.");
+    if (entry.room_id !== roomId) throw new Error("The agent inspector room does not match the exact supervisor entry.");
+    return this.supervisedInbox.detail(entryId, roomId, sourceMessageId);
   }
 
   private async exactActiveBoundedContext(input: {
@@ -1641,7 +1667,7 @@ export class SupervisorDaemon {
       healthy: true,
       protocol_version: DAEMON_PROTOCOL_VERSION,
       implementation_version: DAEMON_IMPLEMENTATION_VERSION,
-      capabilities: { room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn) },
+      capabilities: { room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn), agent_inspector_detail_v1: true },
       generation: this.singleton.currentGeneration,
       pid: process.pid,
       started_at: this.startedAt,

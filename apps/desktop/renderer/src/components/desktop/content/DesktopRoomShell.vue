@@ -270,9 +270,16 @@
       :projection="selectedAgentDetailProjection"
       :selection="selectedAgentDetailTarget"
       :action-state="selectedAgentInspectorActionState"
+      :work-resource="agentInspectorWorkResource"
+      :selected-work-source-message-id="agentInspectorWorkSourceMessageId"
+      :work-artifacts="selectedAgentInspectorWorkArtifacts"
       @close="closeAgentDetail"
       @action="runAgentInspectorAction"
       @presentation-change="agentInspectorCompact = $event"
+      @work-selected="openAgentInspectorWork"
+      @work-retry="loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true)"
+      @work-source-select="selectAgentInspectorWorkSource"
+      @reveal-message="revealAgentInspectorWorkMessage"
     />
 
     <DesktopAgentDetailModal
@@ -377,6 +384,13 @@ import {
   type AgentInspectorActionIntent,
   type AgentInspectorActionState,
 } from "../../../domain/agent-inspector";
+import {
+  agentInspectorWorkArtifacts,
+  defaultAgentInspectorWorkSource,
+  emptyAgentInspectorWorkResource,
+  isCurrentAgentInspectorWorkResponse,
+  type AgentInspectorWorkResource,
+} from "../../../domain/agent-inspector-work";
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
@@ -498,6 +512,9 @@ const selectedAgentDetailRequestVersion = ref(0);
 const agentInspectorFoundationEnabled = AGENT_INSPECTOR_FOUNDATION_ENABLED;
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
+const agentInspectorWorkResource = ref<AgentInspectorWorkResource>(emptyAgentInspectorWorkResource());
+const agentInspectorWorkSourceMessageId = ref<string | null>(null);
+let agentInspectorWorkRequestToken = 0;
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
@@ -587,6 +604,10 @@ const selectedAgentInspectorActionState = computed(() => {
     agentInspectorActionState.value,
     target?.kind === "supervised" ? target.supervisorEntryId : null,
   );
+});
+const selectedAgentInspectorWorkArtifacts = computed(() => {
+  const projection = selectedAgentDetailProjection.value;
+  return projection ? agentInspectorWorkArtifacts(projection.assignedWork, props.roomArtifacts) : [];
 });
 const deliveryReceiptsByMessage = computed(() => {
   const grouped: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>> = {};
@@ -836,6 +857,9 @@ watch(() => props.room.identifier, () => {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
   agentInspectorActionState.value = null;
+  agentInspectorWorkRequestToken += 1;
+  agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
+  agentInspectorWorkSourceMessageId.value = null;
   activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
   refreshedEnvironmentRepoStatus.value = null;
@@ -1963,12 +1987,92 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
   agentInspectorActionState.value = null;
+  agentInspectorWorkRequestToken += 1;
+  agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
+  agentInspectorWorkSourceMessageId.value = null;
 }
 
 function closeAgentDetail(): void {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
   agentInspectorActionState.value = null;
+  agentInspectorWorkRequestToken += 1;
+  agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
+  agentInspectorWorkSourceMessageId.value = null;
+}
+
+function agentInspectorWorkRequestStillCurrent(entryId: string, roomId: string, sourceMessageId: string | null, token: number): boolean {
+  const target = selectedAgentDetailTarget.value;
+  return agentInspectorFoundationEnabled
+    && token === agentInspectorWorkRequestToken
+    && props.room.identifier === roomId
+    && target?.kind === "supervised"
+    && target.supervisorEntryId === entryId
+    && agentInspectorWorkSourceMessageId.value === sourceMessageId;
+}
+
+function selectAgentInspectorWorkSource(sourceMessageId: string): void {
+  if (!sourceMessageId.trim()) return;
+  agentInspectorWorkSourceMessageId.value = sourceMessageId;
+  // A work item is a fenced causal record, not a generic detail cache. Never
+  // leave the previous message visible while the exact new source is loading.
+  agentInspectorWorkResource.value = { status: "loading", detail: null, error: null, sourceMessageId };
+  void loadAgentInspectorWorkDetail(sourceMessageId);
+}
+
+function openAgentInspectorWork(): void {
+  const projection = selectedAgentDetailProjection.value;
+  const sourceMessageId = projection
+    ? defaultAgentInspectorWorkSource(projection.entry, agentInspectorWorkResource.value.detail)
+    : null;
+  agentInspectorWorkSourceMessageId.value = sourceMessageId;
+  // Re-entering Work reconciles the exact active source and receipt; manifest
+  // activity may have advanced while another tab was selected.
+  void loadAgentInspectorWorkDetail(sourceMessageId, true);
+}
+
+async function loadAgentInspectorWorkDetail(sourceMessageId: string | null = agentInspectorWorkSourceMessageId.value, force = false): Promise<void> {
+  if (!agentInspectorFoundationEnabled) return;
+  const target = selectedAgentDetailTarget.value;
+  const projection = selectedAgentDetailProjection.value;
+  if (target?.kind !== "supervised" || !projection || projection.roomId !== props.room.identifier) return;
+  if (!desktopIpc.supervisor?.getAgentInspectorDetail || !supervisorStatus.value?.capabilities.agentInspectorDetail) {
+    agentInspectorWorkResource.value = { status: "unavailable", detail: null, error: null, sourceMessageId };
+    return;
+  }
+  if (!force && agentInspectorWorkResource.value.status === "ready" && agentInspectorWorkSourceMessageId.value === sourceMessageId) return;
+  agentInspectorWorkSourceMessageId.value = sourceMessageId;
+  const token = ++agentInspectorWorkRequestToken;
+  const cached = agentInspectorWorkResource.value.detail;
+  const previous = agentInspectorWorkResource.value.sourceMessageId === sourceMessageId
+    && cached
+    && isCurrentAgentInspectorWorkResponse(cached, target.supervisorEntryId, projection.roomId, sourceMessageId)
+    ? cached
+    : null;
+  agentInspectorWorkResource.value = { status: previous ? "refreshing" : "loading", detail: previous, error: null, sourceMessageId };
+  try {
+    const detail = await desktopIpc.supervisor.getAgentInspectorDetail({ entryId: target.supervisorEntryId, roomId: projection.roomId, sourceMessageId });
+    if (!agentInspectorWorkRequestStillCurrent(target.supervisorEntryId, projection.roomId, sourceMessageId, token)
+      || !isCurrentAgentInspectorWorkResponse(detail, target.supervisorEntryId, projection.roomId, sourceMessageId)) return;
+    const defaultSource = defaultAgentInspectorWorkSource(projection.entry, detail);
+    agentInspectorWorkResource.value = { status: "ready", detail, error: null, sourceMessageId };
+    if (sourceMessageId === null && defaultSource && defaultSource !== agentInspectorWorkSourceMessageId.value) {
+      agentInspectorWorkSourceMessageId.value = defaultSource;
+      void loadAgentInspectorWorkDetail(defaultSource);
+    }
+  } catch (error) {
+    if (!agentInspectorWorkRequestStillCurrent(target.supervisorEntryId, projection.roomId, sourceMessageId, token)) return;
+    agentInspectorWorkResource.value = { status: "error", detail: previous, error: error instanceof Error ? error.message : "Could not load retained work.", sourceMessageId };
+  }
+}
+
+async function revealAgentInspectorWorkMessage(canonicalMessageId: string): Promise<void> {
+  const detail = agentInspectorWorkResource.value.detail;
+  const target = selectedAgentDetailTarget.value;
+  if (!canonicalMessageId.trim() || !detail || target?.kind !== "supervised" || detail.entry_id !== target.supervisorEntryId || detail.room_id !== props.room.identifier || detail.publication?.canonical_message_id !== canonicalMessageId) return;
+  activeTab.value = "chat";
+  await revealRoomMessage(canonicalMessageId);
+  if (agentInspectorCompact.value) closeAgentDetail();
 }
 
 function currentAgentInspectorAction(

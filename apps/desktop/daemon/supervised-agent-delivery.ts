@@ -46,7 +46,7 @@ export interface SupervisedDeliveryHttp {
    * means "from the beginning", which must never become a new agent's inbox.
    */
   latest?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ messages?: Array<Record<string, unknown>> }>;
-  publish(input: { roomId: string; apiUrl: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<void>;
+  publish(input: { roomId: string; apiUrl: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<{ messageId: string; roomId: string }>;
 }
 
 export type SupervisedPollWait = (delayMs: number, signal: AbortSignal) => Promise<void>;
@@ -425,7 +425,7 @@ export class SupervisedAgentDelivery {
         await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: item.outcome });
         if (!await this.publish(agent, item, persistedReply, controller)) return;
         if (!await this.hasExecutionAuthority(agent, controller)) return;
-        await this.inbox.transition(item.inbox_item_id, "acknowledged");
+        await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -522,7 +522,7 @@ export class SupervisedAgentDelivery {
       setActive("publishing");
       if (!await this.publish(agent, item, text, controller)) return;
       if (!await this.hasExecutionAuthority(agent, controller)) return;
-      await this.inbox.transition(item.inbox_item_id, "acknowledged");
+      await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
       await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
     } catch (error) {
       if (error instanceof AuthorityLostError || this.fenced || controller.signal.aborted) return;
@@ -560,15 +560,27 @@ export class SupervisedAgentDelivery {
     }
   }
 
+  private readonly publishedIds = new Map<string, string>();
   private async publish(agent: SupervisedIngressAgent, item: SupervisedInboxItem, text: string, parent: AbortController): Promise<boolean> {
     if (!await this.hasExecutionAuthority(agent, parent)) return false;
     const controller = new AbortController();
     const relayAbort = () => controller.abort();
     parent.signal.addEventListener("abort", relayAbort, { once: true });
     try {
-      await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
-      return this.hasExecutionAuthority(agent, parent);
-    } finally { parent.signal.removeEventListener("abort", relayAbort); }
+      const publication = await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
+      if (!publication.messageId?.trim() || !publication.roomId?.trim() || publication.roomId !== agent.roomId) throw new Error("Room publication did not return a nonempty canonical message id in the matching room.");
+      this.publishedIds.set(item.inbox_item_id, publication.messageId);
+      const current = await this.hasExecutionAuthority(agent, parent);
+      if (!current) this.publishedIds.delete(item.inbox_item_id);
+      return current;
+    } catch (error) { this.publishedIds.delete(item.inbox_item_id); throw error; }
+    finally { parent.signal.removeEventListener("abort", relayAbort); }
+  }
+  private async publishedMessageId(agent: SupervisedIngressAgent, item: SupervisedInboxItem): Promise<string> {
+    const id = this.publishedIds.get(item.inbox_item_id);
+    if (!id) throw new Error("Room publication acknowledgement was lost before its canonical identity could be checkpointed.");
+    this.publishedIds.delete(item.inbox_item_id);
+    return id;
   }
 
   private awaitProviderResultOrRetirement<T>(providerTurn: Promise<T>, controller: AbortController): Promise<T> {
