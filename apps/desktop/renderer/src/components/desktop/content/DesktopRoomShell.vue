@@ -124,7 +124,7 @@
       @load-older="loadOlderMessages"
       @open-reasoning="openReasoningInspector"
       @open-agent-reasoning-fallback="openAgentReasoningFallback"
-      @open-agent-detail="openAgentDetail"
+      @open-agent-detail="openAgentDetailFromParticipant"
       @open-add-agent="openAddAgentModal"
       @open-permission-detail="openComposerPermissionDetail"
       @retry-delivery="retryRoomAgentDelivery"
@@ -223,7 +223,7 @@
         :supervisor-entries="supervisorEntries"
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
-        @open-agent-detail="openAgentDetail"
+        @open-agent-detail="openAgentDetailRequest"
         @refresh-room="emit('refresh-room')"
         @reconnect-room-agent="reconnectRoomAgent"
         @recover-room-agent="recoverRoomAgent"
@@ -265,10 +265,15 @@
       :open="Boolean(selectedAgentDetailTarget)"
       :room-identifier="room.identifier"
       :target="selectedAgentDetailTarget"
+      :request-version="selectedAgentDetailRequestVersion"
       :reasoning-sessions="reasoningSessions"
-      @close="selectedAgentDetailTarget = null"
+      :supervisor-resource="supervisorEntriesResource"
+      :supervisor-status="supervisorStatus"
+      @close="closeAgentDetail"
       @open-add-agent="openAddAgentModalFromDetail"
       @open-reasoning="openReasoningFromAgentDetail"
+      @refresh-supervisor="refreshManagedAgentSessions"
+      @supervisor-entry-updated="upsertSupervisorEntry"
     />
 
     <AddAgentModal
@@ -308,6 +313,7 @@ import type {
   DesktopReasoningSession,
   DesktopSnapshotSourceStates,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorDaemonStatus,
   DesktopTaskSummary,
   RepoStatus,
   WorkerSnapshot,
@@ -339,6 +345,13 @@ import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
+import {
+  isCurrentAgentInspectorSupervisorUpdate,
+  participantAgentInspectorRequest,
+  resolveAgentInspectorSelection,
+  type AgentInspectorSupervisorEntryUpdate,
+  type SupervisorEntriesResource,
+} from "../../../domain/agent-inspector-identity";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
@@ -368,7 +381,12 @@ import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import { buildComposerEventPreview } from "./room-chat/composer-event-preview";
-import type { AgentModalTarget, GitHubEventPresentation } from "./desktop-chat-message/types";
+import type {
+  AgentInspectorSelection,
+  AgentInspectorRequest,
+  AgentModalTarget,
+  GitHubEventPresentation,
+} from "./desktop-chat-message/types";
 import {
   isLowSignalGitHubCheckMessage,
   parseGitHubEvent,
@@ -445,7 +463,8 @@ const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
 const revealedMessageId = ref<string | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
-const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
+const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
+const selectedAgentDetailRequestVersion = ref(0);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
@@ -482,6 +501,38 @@ const eventsUnseenCount = ref(0);
 const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
+const supervisorEntriesError = ref<string | null>(null);
+const supervisorEntriesHaveLoaded = ref(false);
+const supervisorEntriesUpdatedAt = ref<string | null>(null);
+const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
+const supervisorEntriesResource = computed<SupervisorEntriesResource>(() => {
+  if (supervisorEntriesState.value === "error") {
+    return {
+      state: "error",
+      roomIdentifier: props.room.identifier,
+      updatedAt: supervisorEntriesUpdatedAt.value,
+      data: supervisorEntries.value,
+      error: supervisorEntriesError.value || "Supervisor daemon unavailable.",
+    };
+  }
+  return {
+    state: supervisorEntriesState.value,
+    roomIdentifier: props.room.identifier,
+    updatedAt: supervisorEntriesUpdatedAt.value,
+    data: supervisorEntries.value,
+    error: null,
+  } as SupervisorEntriesResource;
+});
+const selectedAgentDetailTarget = computed<AgentInspectorSelection | null>(() => {
+  const request = selectedAgentDetailRequest.value;
+  if (!request) return null;
+  return resolveAgentInspectorSelection(
+    supervisorEntriesResource.value,
+    request,
+    props.room.identifier,
+  );
+});
 const deliveryReceiptsByMessage = computed(() => {
   const grouped: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>> = {};
   for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
@@ -503,6 +554,7 @@ let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
 let managedAgentSessionsRefreshRequestId = 0;
 let managedAgentSessionsMutationVersion = 0;
+let supervisorEntriesMutationVersion = 0;
 let managedAgentSessionsRefreshInFlight: Promise<void> | null = null;
 let managedAgentSessionsRefreshQueued = false;
 let managedAgentSessionsRefreshOwnerActive = true;
@@ -707,11 +759,17 @@ watch(() => props.githubEvents, (nextPage) => {
 }, { immediate: true });
 
 watch(() => props.room.identifier, () => {
+  selectedAgentDetailRequestVersion.value += 1;
+  selectedAgentDetailRequest.value = null;
   activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
   refreshedEnvironmentRepoStatus.value = null;
   managedAgentSessions.value = [];
   supervisorEntries.value = [];
+  supervisorEntriesState.value = "loading";
+  supervisorEntriesError.value = null;
+  supervisorEntriesHaveLoaded.value = false;
+  supervisorEntriesUpdatedAt.value = null;
   composerPermissionError.value = null;
   resolvingComposerPermissionIds.value = {};
   eventsTaskFilterId.value = null;
@@ -858,8 +916,12 @@ onBeforeUnmount(() => {
 
 onMounted(() => {
   void desktopIpc.supervisor?.getStatus().then((status) => {
+    supervisorStatus.value = status;
     deliveryRetryNegotiated.value = status.capabilities.roomDeliveryRetry;
-  }).catch(() => { deliveryRetryNegotiated.value = false; });
+  }).catch(() => {
+    supervisorStatus.value = null;
+    deliveryRetryNegotiated.value = false;
+  });
   document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
     if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
@@ -1640,13 +1702,21 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
   const roomIdentifier = props.room.identifier;
   const requestId = ++managedAgentSessionsRefreshRequestId;
   const mutationVersion = managedAgentSessionsMutationVersion;
-  const [sessions, entries] = await Promise.all([
+  const supervisorMutationVersion = supervisorEntriesMutationVersion;
+  supervisorEntriesState.value = supervisorEntriesHaveLoaded.value ? "refreshing" : "loading";
+  supervisorEntriesError.value = null;
+  const [sessions, entriesResult] = await Promise.all([
     desktopIpc.workers?.listManagedAgentSessions
       ? desktopIpc.workers.listManagedAgentSessions(roomIdentifier).catch(() => null)
       : Promise.resolve(null),
     desktopIpc.supervisor?.listAgents
-      ? desktopIpc.supervisor.listAgents(roomIdentifier).catch(() => null)
-      : Promise.resolve(null),
+      ? desktopIpc.supervisor.listAgents(roomIdentifier)
+        .then((entries) => ({ ok: true as const, entries }))
+        .catch((error: unknown) => ({
+          ok: false as const,
+          error: error instanceof Error ? error.message : "Supervisor daemon unavailable.",
+        }))
+      : Promise.resolve({ ok: true as const, entries: [] as DesktopSupervisorManifestEntry[] }),
   ]);
   if (
     !managedAgentSessionsRefreshOwnerActive
@@ -1667,8 +1737,22 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
       managedAgentSessions.value = scoped;
     }
   }
-  if (entries && JSON.stringify(entries) !== JSON.stringify(supervisorEntries.value)) {
-    supervisorEntries.value = entries;
+  if (supervisorMutationVersion === supervisorEntriesMutationVersion) {
+    if (entriesResult.ok) {
+      if (JSON.stringify(entriesResult.entries) !== JSON.stringify(supervisorEntries.value)) {
+        supervisorEntries.value = entriesResult.entries;
+      }
+      supervisorEntriesHaveLoaded.value = true;
+      supervisorEntriesUpdatedAt.value = new Date().toISOString();
+      supervisorEntriesState.value = "ready";
+      supervisorEntriesError.value = null;
+    } else {
+      // Keep the last successfully loaded entries. Consumers receive an error
+      // resource instead of an empty list, so supervised identity cannot be
+      // reclassified as external during a transient daemon failure.
+      supervisorEntriesState.value = "error";
+      supervisorEntriesError.value = entriesResult.error;
+    }
   }
 }
 
@@ -1678,6 +1762,23 @@ function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
     managedAgentSessions.value,
     session,
   );
+}
+
+function upsertSupervisorEntry(update: AgentInspectorSupervisorEntryUpdate): void {
+  if (!isCurrentAgentInspectorSupervisorUpdate(
+    update,
+    props.room.identifier,
+    selectedAgentDetailRequestVersion.value,
+  )) return;
+  supervisorEntriesMutationVersion += 1;
+  supervisorEntries.value = [
+    update.entry,
+    ...supervisorEntries.value.filter((candidate) => candidate.id !== update.entry.id),
+  ];
+  supervisorEntriesHaveLoaded.value = true;
+  supervisorEntriesUpdatedAt.value = new Date().toISOString();
+  supervisorEntriesState.value = "ready";
+  supervisorEntriesError.value = null;
 }
 
 async function resolveComposerPermission(
@@ -1713,7 +1814,16 @@ async function resolveComposerPermission(
 }
 
 function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval): void {
-  openAgentDetail(agentTargetForManagedSession(approval.session));
+  const target = agentTargetForManagedSession(approval.session);
+  if (approval.session.supervisorEntryId) {
+    openAgentDetailRequest({
+      kind: "supervised",
+      supervisorEntryId: approval.session.supervisorEntryId,
+      target,
+    });
+    return;
+  }
+  openAgentDetailFromParticipant(target);
 }
 
 function agentTargetForManagedSession(session: DesktopManagedAgentSession): AgentModalTarget {
@@ -1753,17 +1863,27 @@ function stopManagedAgentSessionsRefreshTimer(): void {
   }
 }
 
-function openAgentDetail(target: AgentModalTarget): void {
-  selectedAgentDetailTarget.value = target;
+function openAgentDetailFromParticipant(target: AgentModalTarget): void {
+  openAgentDetailRequest(participantAgentInspectorRequest(target));
+}
+
+function openAgentDetailRequest(request: AgentInspectorRequest): void {
+  selectedAgentDetailRequestVersion.value += 1;
+  selectedAgentDetailRequest.value = request;
+}
+
+function closeAgentDetail(): void {
+  selectedAgentDetailRequestVersion.value += 1;
+  selectedAgentDetailRequest.value = null;
 }
 
 function openAddAgentModalFromDetail(): void {
-  selectedAgentDetailTarget.value = null;
+  closeAgentDetail();
   addAgentModalOpen.value = true;
 }
 
 function openReasoningFromAgentDetail(sessionId: string): void {
-  selectedAgentDetailTarget.value = null;
+  closeAgentDetail();
   openReasoningInspector(sessionId);
 }
 

@@ -444,7 +444,7 @@ describe("room chat helpers", () => {
     assert.equal(hasReasoningStreamSurface({ ...target, ideLabel: null }, [presenceEntry()]), true);
   });
 
-  it("enriches a clicked rebound message sender with its unique current room session", () => {
+  it("keeps Inspector identity raw while retaining presence enrichment for legacy reasoning", () => {
     const target = {
       actorLabel: "DawnHarbor | EmmyMay's agent | Codex",
       displayName: "DawnHarbor",
@@ -475,7 +475,7 @@ describe("room chat helpers", () => {
 
     launcher.openAgentModal(target);
 
-    assert.equal(openedTarget?.agentSessionId, "agent_session_403");
+    assert.equal(openedTarget?.agentSessionId, null, "Inspector resolution must bypass actor-label presence inference");
     assert.equal(agentTargetWithPresenceSession(target, [sameProviderPeer, dawn]).agentSessionId, "agent_session_403");
   });
 
