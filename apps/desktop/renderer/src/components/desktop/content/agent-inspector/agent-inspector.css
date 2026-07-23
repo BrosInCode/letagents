@@ -211,6 +211,20 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
 .agent-inspector-context-list dd { margin: 0; color: var(--text-secondary, #a1a1aa); font-size: 0.73rem; line-height: 1.4; }
 .agent-inspector-context-list dd span { display: block; }
 
+.agent-inspector-diagnostics { display: grid; gap: 12px; }
+.agent-inspector-diagnostics-copy { min-height: 44px; padding: 0 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.055); color: var(--text,#fafafa); font: inherit; font-size: .7rem; font-weight: 670; cursor: pointer; transition: transform 120ms var(--inspector-ease-out), background-color 140ms ease, border-color 140ms ease; }
+.agent-inspector-diagnostics-copy:active { transform: scale(.97); }
+.agent-inspector-diagnostics-copy:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+.agent-inspector-diagnostics-events { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
+.agent-inspector-diagnostics-events li { display: grid; gap: 5px; padding: 11px; border: 1px solid rgba(255,255,255,.07); border-radius: 11px; background: rgba(255,255,255,.025); }
+.agent-inspector-diagnostics-events li > div:first-child { display: grid; gap: 3px; }
+.agent-inspector-diagnostics-events strong { overflow: hidden; font-size: .75rem; font-weight: 690; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.agent-inspector-diagnostics-events span, .agent-inspector-diagnostics-events p, .agent-inspector-diagnostics-flags { color: var(--text-secondary,#a1a1aa); font-size: .67rem; line-height: 1.35; }
+.agent-inspector-diagnostics-events p { margin: 0; overflow-wrap: anywhere; }
+.agent-inspector-diagnostics-payload { display: grid; gap: 5px; margin-top: 3px; }
+.agent-inspector-diagnostics-payload > span, .agent-inspector-diagnostics-flags { color: #fde68a; font-weight: 650; }
+.agent-inspector-diagnostics-payload pre { max-height: 180px; margin: 0; overflow: auto; padding: 9px; border-radius: 8px; background: rgba(0,0,0,.24); color: #d4d4da; font: 500 .65rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .agent-inspector-scrim { position: fixed; z-index: 120; inset: 0; padding: 0; border: 0; background: rgba(0, 0, 0, 0.58); backdrop-filter: blur(3px); }
 
 .agent-inspector-surface[data-compact="true"] .agent-inspector-actions > button {
@@ -230,6 +244,7 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
   .agent-inspector-overflow-trigger:hover,
   .agent-inspector-actions > button:hover,
   .agent-inspector-overflow-menu button:hover { border-color: rgba(255, 255, 255, 0.17); background: rgba(255, 255, 255, 0.095); }
+  .agent-inspector-diagnostics-copy:hover { border-color: rgba(255,255,255,.2); background: rgba(255,255,255,.09); }
 }
 
 @media (prefers-reduced-motion: reduce) {
