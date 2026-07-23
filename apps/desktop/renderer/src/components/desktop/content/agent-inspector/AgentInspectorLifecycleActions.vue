@@ -11,7 +11,7 @@
       {{ action.label }}
     </button>
 
-    <div v-if="hasOverflow" class="agent-inspector-overflow">
+    <div v-if="hasOverflow" ref="overflowRoot" class="agent-inspector-overflow" @focusout="handleOverflowFocusOut">
       <button
         ref="overflowTrigger"
         type="button"
@@ -37,7 +37,7 @@
         >
           {{ action.label }}
         </button>
-        <p v-if="confirmDanger">This retires the saved agent. Its history and worktree stay available.</p>
+        <p v-if="confirmDanger">{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
         <button
           v-if="dangerAction"
           type="button"
@@ -54,11 +54,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   AgentInspectorActionAvailability,
   AgentInspectorActionIntent,
 } from "../../../../domain/agent-inspector";
+import { AGENT_INSPECTOR_RETIRE_CONFIRMATION } from "../../../../domain/agent-inspector-settings";
 
 const props = defineProps<{
   entryId: string;
@@ -70,6 +71,7 @@ const props = defineProps<{
 const emit = defineEmits<{ action: [intent: AgentInspectorActionIntent] }>();
 
 const overflowOpen = ref(false);
+const overflowRoot = ref<HTMLElement | null>(null);
 const overflowMenu = ref<HTMLElement | null>(null);
 const overflowTrigger = ref<HTMLButtonElement | null>(null);
 const confirmDanger = ref(false);
@@ -116,14 +118,28 @@ function emitOverflowIntent(action: AgentInspectorActionAvailability): void {
   confirmDanger.value = false;
 }
 
-function closeOverflow(): void { overflowOpen.value = false; void nextTick(() => overflowTrigger.value?.focus()); }
+function closeOverflow(returnFocus = true): void {
+  if (!overflowOpen.value) return;
+  overflowOpen.value = false;
+  confirmDanger.value = false;
+  if (returnFocus) void nextTick(() => overflowTrigger.value?.focus());
+}
 function toggleOverflow(): void {
-  overflowOpen.value = !overflowOpen.value;
-  if (overflowOpen.value) void nextTick(() => overflowMenu.value?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus());
+  if (overflowOpen.value) {
+    closeOverflow(false);
+    return;
+  }
+  overflowOpen.value = true;
+  void nextTick(() => overflowMenu.value?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus());
 }
 
 function handleMenuKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") { event.preventDefault(); closeOverflow(); return; }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeOverflow();
+    return;
+  }
   if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
   const items = [...(overflowMenu.value?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? [])];
   if (!items.length) return;
@@ -133,6 +149,19 @@ function handleMenuKeydown(event: KeyboardEvent): void {
   items[next]?.focus();
 }
 
+function handleDocumentPointerDown(event: PointerEvent): void {
+  if (!overflowOpen.value || overflowRoot.value?.contains(event.target as Node)) return;
+  closeOverflow(false);
+}
+
+function handleOverflowFocusOut(event: FocusEvent): void {
+  const next = event.relatedTarget as Node | null;
+  if (next && overflowRoot.value?.contains(next)) return;
+  void nextTick(() => {
+    if (!overflowRoot.value?.contains(document.activeElement)) closeOverflow(false);
+  });
+}
+
 function handleDanger(): void {
   if (!dangerAction.value) return;
   if (!confirmDanger.value) {
@@ -140,7 +169,9 @@ function handleDanger(): void {
     return;
   }
   emitIntent(dangerAction.value);
-  overflowOpen.value = false;
-  confirmDanger.value = false;
+  closeOverflow();
 }
+
+onMounted(() => document.addEventListener("pointerdown", handleDocumentPointerDown));
+onBeforeUnmount(() => document.removeEventListener("pointerdown", handleDocumentPointerDown));
 </script>
