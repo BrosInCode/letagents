@@ -1,4 +1,7 @@
-import type { DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
+import type {
+  DesktopManagedAgentSession,
+  DesktopSupervisorManifestEntry,
+} from "../../../electron/ipc-types";
 import type {
   AgentInspectorSelection,
   AgentInspectorRequest,
@@ -10,6 +13,22 @@ export type SupervisorEntriesResource =
   | { state: "refreshing"; roomIdentifier: string; updatedAt: string | null; data: readonly DesktopSupervisorManifestEntry[]; error: null }
   | { state: "ready"; roomIdentifier: string; updatedAt: string; data: readonly DesktopSupervisorManifestEntry[]; error: null }
   | { state: "error"; roomIdentifier: string; updatedAt: string | null; data: readonly DesktopSupervisorManifestEntry[]; error: string };
+
+export interface AgentInspectorSupervisorEntryUpdate {
+  entry: DesktopSupervisorManifestEntry;
+  roomIdentifier: string;
+  inspectorRequestVersion: number;
+}
+
+export function isCurrentAgentInspectorSupervisorUpdate(
+  update: AgentInspectorSupervisorEntryUpdate,
+  currentRoomIdentifier: string,
+  currentInspectorRequestVersion: number,
+): boolean {
+  return update.roomIdentifier === currentRoomIdentifier
+    && update.entry.roomId === currentRoomIdentifier
+    && update.inspectorRequestVersion === currentInspectorRequestVersion;
+}
 
 export interface ExactSupervisorIdentity {
   agentSessionId: string | null;
@@ -85,6 +104,43 @@ export function supervisedAgentInspectorRequest(
 
 export function participantAgentInspectorRequest(target: AgentModalTarget): AgentInspectorRequest {
   return { kind: "participant", target };
+}
+
+/**
+ * Resolve control-bearing local sessions using only exact durable identity.
+ * Presentation and reasoning relationships are intentionally excluded: they
+ * may help render context, but they must never grant stop/retry/permission
+ * controls. Duplicates and disagreeing session/key identities fail closed.
+ */
+export function resolveAgentInspectorManagedSessions(
+  sessions: readonly DesktopManagedAgentSession[],
+  selection: AgentInspectorSelection | null,
+): DesktopManagedAgentSession[] {
+  if (!selection) return [];
+  if (selection.kind === "supervised") {
+    const matches = sessions.filter((session) => session.supervisorEntryId === selection.supervisorEntryId);
+    return matches.length === 1 ? matches : [];
+  }
+  if (selection.kind !== "external") return [];
+
+  const sessionId = exactIdentity(selection.agentSessionId);
+  const agentKey = exactIdentity(selection.agentKey);
+  const specificAgentKey = agentKey && /[/:]/.test(agentKey) ? agentKey : null;
+  if (!sessionId && !specificAgentKey) return [];
+
+  const sessionMatches = sessionId
+    ? sessions.filter((session) => exactIdentity(session.agentSessionId) === sessionId)
+    : [];
+  const keyMatches = specificAgentKey
+    ? sessions.filter((session) => exactIdentity(session.agentKey) === specificAgentKey)
+    : [];
+  if (sessionMatches.length > 1 || keyMatches.length > 1) return [];
+  if (sessionId && specificAgentKey) {
+    if (sessionMatches.length !== 1 || keyMatches.length !== 1) return [];
+    return sessionMatches[0]!.id === keyMatches[0]!.id ? [sessionMatches[0]!] : [];
+  }
+  if (sessionId) return sessionMatches.length === 1 ? sessionMatches : [];
+  return keyMatches.length === 1 ? keyMatches : [];
 }
 
 export function resolveAgentInspectorSelection(

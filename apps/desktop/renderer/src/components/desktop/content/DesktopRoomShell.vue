@@ -265,6 +265,7 @@
       :open="Boolean(selectedAgentDetailTarget)"
       :room-identifier="room.identifier"
       :target="selectedAgentDetailTarget"
+      :request-version="selectedAgentDetailRequestVersion"
       :reasoning-sessions="reasoningSessions"
       :supervisor-resource="supervisorEntriesResource"
       :supervisor-status="supervisorStatus"
@@ -345,8 +346,10 @@ import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import {
+  isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
   resolveAgentInspectorSelection,
+  type AgentInspectorSupervisorEntryUpdate,
   type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
 import type { SidebarMode } from "../types";
@@ -461,6 +464,7 @@ const revealedMessageId = ref<string | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
+const selectedAgentDetailRequestVersion = ref(0);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
@@ -755,6 +759,7 @@ watch(() => props.githubEvents, (nextPage) => {
 }, { immediate: true });
 
 watch(() => props.room.identifier, () => {
+  selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
   activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
@@ -1759,9 +1764,17 @@ function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
   );
 }
 
-function upsertSupervisorEntry(entry: DesktopSupervisorManifestEntry): void {
+function upsertSupervisorEntry(update: AgentInspectorSupervisorEntryUpdate): void {
+  if (!isCurrentAgentInspectorSupervisorUpdate(
+    update,
+    props.room.identifier,
+    selectedAgentDetailRequestVersion.value,
+  )) return;
   supervisorEntriesMutationVersion += 1;
-  supervisorEntries.value = [entry, ...supervisorEntries.value.filter((candidate) => candidate.id !== entry.id)];
+  supervisorEntries.value = [
+    update.entry,
+    ...supervisorEntries.value.filter((candidate) => candidate.id !== update.entry.id),
+  ];
   supervisorEntriesHaveLoaded.value = true;
   supervisorEntriesUpdatedAt.value = new Date().toISOString();
   supervisorEntriesState.value = "ready";
@@ -1855,10 +1868,12 @@ function openAgentDetailFromParticipant(target: AgentModalTarget): void {
 }
 
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
+  selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
 }
 
 function closeAgentDetail(): void {
+  selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
 }
 

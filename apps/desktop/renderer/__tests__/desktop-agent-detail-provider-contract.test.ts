@@ -15,7 +15,7 @@ test("agent inspector renders the shared provider artwork and accessible exact-b
   assert.match(detailModalSource, /data-testid="desktop-agent-detail-managed-provider"/);
   assert.match(detailModalSource, /target\.kind !== "supervised"/);
   assert.match(detailModalSource, /entry\.id === target\.supervisorEntryId/);
-  assert.match(detailModalSource, /session\.supervisorEntryId === target\.supervisorEntryId/);
+  assert.match(detailModalSource, /resolveAgentInspectorManagedSessions\(eligible, props\.target\)/);
   assert.match(detailModalSource, /managedAgentProviderIdentityForEntry\(matchingSupervisorEntries\.value\[0\]\)/);
   assert.match(detailModalSource, /target\.kind === 'external' && showExternalFallback/);
   assert.doesNotMatch(detailModalSource, /managedAgentDetailSelection\(/);
