@@ -17,8 +17,13 @@ interface HostNode {
   focusCount: number;
   value: unknown;
   options: unknown[];
+  classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void; contains: (name: string) => boolean };
+  ownerDocument: typeof testDocument;
+  offsetHeight: number;
   focus: () => void;
   contains: (candidate: unknown) => boolean;
+  closest: (selector: string) => HostNode | null;
+  getBoundingClientRect: () => { width: number };
   querySelector: (selector: string) => HostNode | null;
   querySelectorAll: (selector: string) => HostNode[];
   addEventListener: (name: string, listener: EventListener) => void;
@@ -28,6 +33,9 @@ interface HostNode {
 const documentListeners = new Map<string, Set<EventListener>>();
 const testDocument = {
   activeElement: null as HostNode | null,
+  body: null as unknown as HostNode,
+  documentElement: null as unknown as HostNode,
+  querySelector: (_selector: string) => null as HostNode | null,
   addEventListener(name: string, listener: EventListener) {
     const listeners = documentListeners.get(name) ?? new Set<EventListener>();
     listeners.add(listener);
@@ -38,7 +46,27 @@ const testDocument = {
   },
 };
 const originalDocument = globalThis.document;
-Object.assign(globalThis, { document: testDocument });
+const originalWindow = globalThis.window;
+const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+const testWindow = {
+  addEventListener: () => undefined,
+  removeEventListener: () => undefined,
+  getComputedStyle: () => ({
+    transitionDelay: "",
+    transitionDuration: "",
+    animationDelay: "",
+    animationDuration: "",
+    transitionProperty: "",
+  }),
+};
+Object.assign(globalThis, {
+  document: testDocument,
+  window: testWindow,
+  requestAnimationFrame: (callback: FrameRequestCallback) => {
+    callback(0);
+    return 0;
+  },
+});
 
 function descendants(node: HostNode): HostNode[] {
   return [node, ...node.children.flatMap(descendants)];
@@ -47,11 +75,13 @@ function descendants(node: HostNode): HostNode[] {
 function matches(node: HostNode, selector: string): boolean {
   if (selector === "button:not([disabled])") return node.type === "button" && !node.props.disabled;
   if (selector === "button") return node.type === "button";
+  if (selector === '[role="menu"]') return node.props.role === "menu";
   return false;
 }
 
 function hostNode(type: string, text = ""): HostNode {
   const listeners = new Map<string, EventListener>();
+  const classes = new Set<string>();
   const node = {
     type,
     text,
@@ -61,12 +91,30 @@ function hostNode(type: string, text = ""): HostNode {
     focusCount: 0,
     value: "",
     options: [],
+    classList: {
+      add: (...names: string[]) => names.forEach((name) => classes.add(name)),
+      remove: (...names: string[]) => names.forEach((name) => classes.delete(name)),
+      contains: (name: string) => classes.has(name),
+    },
+    ownerDocument: testDocument,
+    offsetHeight: 0,
     focus() {
       node.focusCount += 1;
       testDocument.activeElement = node;
     },
     contains(candidate: unknown) {
       return descendants(node).includes(candidate as HostNode);
+    },
+    closest(selector: string) {
+      let candidate: HostNode | null = node;
+      while (candidate) {
+        if (matches(candidate, selector)) return candidate;
+        candidate = candidate.parent;
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 800 };
     },
     querySelector(selector: string) {
       return descendants(node).find((candidate) => candidate !== node && matches(candidate, selector)) ?? null;
@@ -83,6 +131,10 @@ function hostNode(type: string, text = ""): HostNode {
   } satisfies HostNode;
   return node;
 }
+
+const testBody = hostNode("body");
+testDocument.body = testBody;
+testDocument.documentElement = hostNode("html");
 
 const renderer = createRenderer<HostNode, HostNode>({
   patchProp(node, key, _previous, next) {
@@ -114,7 +166,7 @@ const renderer = createRenderer<HostNode, HostNode>({
     const siblings = node.parent?.children ?? [];
     return siblings[siblings.indexOf(node) + 1] ?? null;
   },
-  querySelector: () => null,
+  querySelector: (selector) => selector === "body" ? testBody : null,
   setScopeId: () => undefined,
   cloneNode(node) { return { ...node, props: { ...node.props }, children: [...node.children] }; },
   insertStaticContent(content, parent, anchor) {
@@ -173,6 +225,12 @@ async function attachClientRender(component: object, modulePath: string): Promis
 let vite: ViteDevServer;
 let AgentInspectorSettings: object;
 let AgentInspectorLifecycleActions: object;
+let AgentInspectorHost: object;
+let AgentInspectorSurface: object;
+let AgentInspectorOverview: object;
+let AgentInspectorNow: object;
+let AgentInspectorReadinessRail: object;
+let ProviderBadge: object;
 
 before(async () => {
   vite = await createServer({
@@ -183,9 +241,21 @@ before(async () => {
   });
   AgentInspectorSettings = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSettings.vue")).default;
   AgentInspectorLifecycleActions = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue")).default;
+  AgentInspectorSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue")).default;
+  AgentInspectorHost = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorHost.vue")).default;
+  AgentInspectorOverview = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorOverview.vue")).default;
+  AgentInspectorNow = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorNow.vue")).default;
+  AgentInspectorReadinessRail = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorReadinessRail.vue")).default;
+  ProviderBadge = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/desktop-chat-message/ProviderBadge.vue")).default;
   await Promise.all([
     attachClientRender(AgentInspectorSettings, "components/desktop/content/agent-inspector/AgentInspectorSettings.vue"),
     attachClientRender(AgentInspectorLifecycleActions, "components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue"),
+    attachClientRender(AgentInspectorSurface, "components/desktop/content/agent-inspector/AgentInspectorSurface.vue"),
+    attachClientRender(AgentInspectorHost, "components/desktop/content/agent-inspector/AgentInspectorHost.vue"),
+    attachClientRender(AgentInspectorOverview, "components/desktop/content/agent-inspector/AgentInspectorOverview.vue"),
+    attachClientRender(AgentInspectorNow, "components/desktop/content/agent-inspector/AgentInspectorNow.vue"),
+    attachClientRender(AgentInspectorReadinessRail, "components/desktop/content/agent-inspector/AgentInspectorReadinessRail.vue"),
+    attachClientRender(ProviderBadge, "components/desktop/content/desktop-chat-message/ProviderBadge.vue"),
   ]);
 });
 
@@ -193,6 +263,10 @@ after(async () => {
   await vite?.close();
   if (originalDocument) Object.assign(globalThis, { document: originalDocument });
   else Reflect.deleteProperty(globalThis, "document");
+  if (originalWindow) Object.assign(globalThis, { window: originalWindow });
+  else Reflect.deleteProperty(globalThis, "window");
+  if (originalRequestAnimationFrame) Object.assign(globalThis, { requestAnimationFrame: originalRequestAnimationFrame });
+  else Reflect.deleteProperty(globalThis, "requestAnimationFrame");
 });
 
 const configuration = {
@@ -391,5 +465,132 @@ test("overflow Escape stops propagation, closes, and returns focus; outside and 
   await nextTick();
   await nextTick();
   assert.equal(descendants(mounted.root).some((node) => node.props.role === "menu"), false);
+  mounted.app.unmount();
+});
+
+test("compact Host gives the overflow menu first Escape ownership before closing the Inspector", async () => {
+  const unsavedCharter = "Keep this unsaved inspector draft.";
+  let closeCount = 0;
+  let currentCharter = readyResource.draft!.charter;
+  testDocument.activeElement = null;
+
+  const projection = {
+    entryId: "agent_a",
+    roomId: "room_a",
+    agentKey: "emmymay/gardensignal",
+    displayName: "GardenSignal",
+    ownerAttribution: "EmmyMay's agent",
+    provider: "codex",
+    model: "gpt-next",
+    charter: readyResource.draft!.charter,
+    overallState: "listening",
+    overallLabel: "Listening",
+    overallDetail: "Ready for room work.",
+    readiness: [],
+    now: null,
+    assignedWork: [],
+    recentOutcome: null,
+    actions: [
+      { kind: "mention", label: "Mention", available: true },
+      { kind: "pause", label: "Pause", available: true },
+      { kind: "reconnect", label: "Reconnect", available: true },
+    ],
+    mentionInsertText: "agent:emmymay/gardensignal",
+    resourceFreshness: "fresh",
+    entry: { agentKey: "emmymay/gardensignal", workspacePath: "/tmp/worktree" },
+  };
+
+  const Harness = Vue.defineComponent({
+    setup() {
+      const open = Vue.ref(true);
+      const settingsResource = Vue.ref<AgentInspectorConfigurationResource>({
+        ...readyResource,
+        draft: { ...readyResource.draft! },
+      });
+      return () => Vue.h(AgentInspectorHost, {
+        open: open.value,
+        projection,
+        selection: { kind: "managed" },
+        actionState: null,
+        workResource: { status: "idle", detail: null, error: null, sourceMessageId: null },
+        selectedWorkSourceMessageId: null,
+        workArtifacts: [],
+        settingsResource: settingsResource.value,
+        roomMoveResource: noMove,
+        roomMoveAvailable: true,
+        providers: [provider],
+        destinations: [],
+        settingsConflict: false,
+        onSettingsPatch: (patch: Partial<NonNullable<AgentInspectorConfigurationResource["draft"]>>) => {
+          settingsResource.value = {
+            ...settingsResource.value,
+            draft: { ...settingsResource.value.draft!, ...patch },
+          };
+          currentCharter = settingsResource.value.draft!.charter;
+        },
+        onClose: () => {
+          closeCount += 1;
+          open.value = false;
+        },
+      });
+    },
+  });
+
+  const mounted = mount(Harness, {});
+  await nextTick();
+  await nextTick();
+  assert.ok(nodeByProp(testBody, "role", "dialog"), "compact Inspector should be mounted");
+
+  (buttonByText(testBody, "Settings").props.onClick as () => void)();
+  await nextTick();
+  const charter = descendants(testBody).find((node) => node.type === "textarea");
+  assert.ok(charter, "expected the mounted Settings charter field");
+  (charter.props.onInput as (event: object) => void)({ target: { value: unsavedCharter } });
+  await nextTick();
+  assert.equal(currentCharter, unsavedCharter);
+
+  const trigger = nodeByProp(testBody, "aria-label", "More agent actions");
+  (trigger.props.onClick as () => void)();
+  await nextTick();
+  const menu = nodeByProp(testBody, "role", "menu");
+  const menuItem = buttonByText(menu, "Pause");
+  let firstPrevented = false;
+  let firstStopped = false;
+  const firstEscape = {
+    key: "Escape",
+    target: menuItem,
+    preventDefault: () => { firstPrevented = true; },
+    stopPropagation: () => { firstStopped = true; },
+  };
+  for (const listener of documentListeners.get("keydown") ?? []) {
+    listener(firstEscape as unknown as Event);
+  }
+  assert.equal(closeCount, 0, "document capture must yield Escape to the open menu");
+  (menu.props.onKeydown as (event: object) => void)(firstEscape);
+  await nextTick();
+
+  assert.equal(firstPrevented, true);
+  assert.equal(firstStopped, true);
+  assert.equal(descendants(testBody).some((node) => node.props.role === "menu"), false);
+  assert.equal(trigger.focusCount, 1);
+  assert.equal(testDocument.activeElement, trigger);
+  assert.ok(nodeByProp(testBody, "role", "dialog"), "Inspector remains open after menu dismissal");
+  assert.equal(currentCharter, unsavedCharter, "menu dismissal must preserve the Settings draft");
+  assert.equal(descendants(testBody).find((node) => node.type === "textarea")?.props.value, unsavedCharter);
+
+  let secondPrevented = false;
+  const secondEscape = {
+    key: "Escape",
+    target: trigger,
+    preventDefault: () => { secondPrevented = true; },
+    stopPropagation: () => undefined,
+  };
+  for (const listener of documentListeners.get("keydown") ?? []) {
+    listener(secondEscape as unknown as Event);
+  }
+  await nextTick();
+  assert.equal(secondPrevented, true);
+  assert.equal(closeCount, 1);
+  assert.equal(descendants(testBody).some((node) => node.props.role === "dialog"), false);
   mounted.app.unmount();
 });

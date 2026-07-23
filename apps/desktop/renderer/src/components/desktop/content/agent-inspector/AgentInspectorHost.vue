@@ -159,6 +159,8 @@ watch(surfaceKind, () => {
 
 function handleHostKeydown(event: KeyboardEvent): void {
   if (!props.open || !compact.value || event.key !== "Escape") return;
+  const target = event.target as (EventTarget & { closest?: (selector: string) => Element | null }) | null;
+  if (target?.closest?.('[role="menu"]')) return;
   event.preventDefault();
   event.stopPropagation();
   emit("close");
