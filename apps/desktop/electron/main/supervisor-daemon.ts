@@ -355,6 +355,10 @@ export class SupervisorDaemonClient {
       workplace_liveness: { state: "unknown", observed_at: null, detail: "Awaiting room registration." },
       native_liveness: { state: "unknown", observed_at: null, detail: "Awaiting native provider launch." },
       activity: [],
+      // Creation is the one authoritative point where the desktop can prove
+      // no worker session has ever been minted for this immutable entry id.
+      // Legacy entries that omitted this field remain revocation-unknown.
+      last_worker_binding: null,
     };
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.put", { entry }));

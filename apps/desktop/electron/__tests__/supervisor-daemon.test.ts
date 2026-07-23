@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
@@ -20,6 +21,11 @@ import {
   supervisorDaemonSpawnEnvironment,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
+import {
+  readDesktopSupervisorGrantForAgent,
+  replaceDesktopSupervisorGrantForAgent,
+  revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
+} from "../main/supervisor-grant.js";
 import { apiUrl as configuredApiUrl } from "../main/paths.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
@@ -447,6 +453,136 @@ test("purge RPC preserves exact worker-session and grant-only acknowledgement mo
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
+test("production create durably proves no mint, grant-only purge survives restart, and its identity tombstone is permanent", async () => {
+  const env = await fixture();
+  const previousPlatformOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  const previousGrantStore = process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = join(env.root, "supervisor-grants.json");
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: env.socketPath,
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemonModulePath = ["..", "..", "daemon", "main.js"].join("/");
+  const { SupervisorDaemon: InProcessSupervisorDaemon } = await import(daemonModulePath) as {
+    SupervisorDaemon: new (
+      daemonPaths: typeof paths,
+      platform: NodeJS.Platform,
+    ) => { start(): Promise<void>; stop(): Promise<void> };
+  };
+  const storage = {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(`keychain:${value}`),
+    decryptString: (value: Buffer) => value.toString("utf8").replace("keychain:", ""),
+  };
+  let daemon = new InProcessSupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      spawnDaemon: () => { throw new Error("the real in-process daemon must be reused"); },
+    });
+    const createInput = {
+      creationRequestId: "production_never_minted",
+      roomIdentifier: "room_production_never_minted",
+      displayName: "Production never minted",
+      providerId: "codex" as const,
+      charter: "Remain paused until explicitly activated.",
+      repoRootPath: env.root,
+    };
+    const created = await client.create(createInput);
+    assert.equal(created.id, "supervised_production_never_minted");
+    assert.equal((await client.setDesiredState(created.id, "stopped")).desiredState, "stopped");
+
+    const agentKey = "owner/production-never-minted";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        grantId: "grant_production_never_minted",
+        hostId: "desktop_host",
+        installationId: "installation_production_never_minted",
+        allowedRoomIds: [created.roomId],
+        allowedAgentKeys: [agentKey],
+        generation: 1,
+        expiresAt: "2026-08-01T00:00:00.000Z",
+      },
+      token: "lashg_production_never_minted",
+      entryId: created.id,
+    }, { storage });
+
+    const generation = (await client.ensureRunning()).generation;
+    assert.deepEqual(await client.purgeAgent(created.id, generation), {
+      outcome: "revocation_required",
+      operationId: `purge:${created.id}`,
+      revocationKind: "grant_only",
+    });
+    const database = new DatabaseSync(paths.manifestPath);
+    try {
+      const purge = database.prepare("SELECT phase,worker_session_attestation,agent_session_id FROM agent_purge_operations WHERE operation_id=?")
+        .get(`purge:${created.id}`) as { phase: string; worker_session_attestation: string; agent_session_id: string | null };
+      assert.equal(purge.phase, "revoking_credentials");
+      assert.equal(purge.worker_session_attestation, "none");
+      assert.equal(purge.agent_session_id, null);
+    } finally { database.close(); }
+
+    const requests: string[] = [];
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(created.id, {
+      storage,
+      apiFetch: (async <T>(requestPath: string) => {
+        requests.push(requestPath);
+        return {} as T;
+      }) as never,
+    });
+    assert.deepEqual(requests, ["/supervisor-host-grants/grant_production_never_minted"]);
+    assert.equal(requests.some((requestPath) => requestPath.includes("/worker-sessions/") || requestPath.endsWith("/end")), false);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage }), null);
+
+    await daemon.stop();
+    daemon = new InProcessSupervisorDaemon(paths, "darwin");
+    await daemon.start();
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(created.id, {
+      storage,
+      apiFetch: (async () => { throw new Error("durable grant-only receipt must suppress a repeated remote revoke"); }) as never,
+    });
+    assert.deepEqual(requests, ["/supervisor-host-grants/grant_production_never_minted"]);
+    const restartedGeneration = (await client.ensureRunning()).generation;
+    assert.deepEqual(await client.purgeAgent(created.id, restartedGeneration, null, true), { outcome: "purged" });
+    await assert.rejects(
+      () => client.create(createInput),
+      /permanently purged.*new creation request id/,
+    );
+    const tombstoneDatabase = new DatabaseSync(paths.manifestPath);
+    try {
+      assert.equal(
+        (tombstoneDatabase.prepare("SELECT phase FROM agent_purge_operations WHERE operation_id=?")
+          .get(`purge:${created.id}`) as { phase: string }).phase,
+        "complete",
+      );
+      assert.equal(
+        Number((tombstoneDatabase.prepare("SELECT COUNT(*) AS count FROM agent_identities WHERE agent_id=?")
+          .get(created.id) as { count: number }).count),
+        0,
+      );
+    } finally { tombstoneDatabase.close(); }
+    const distinct = await client.create({
+      ...createInput,
+      creationRequestId: "production_new_identity",
+      displayName: "Production new identity",
+    });
+    assert.equal(distinct.id, "supervised_production_new_identity");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    if (previousPlatformOverride === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousPlatformOverride;
+    if (previousGrantStore === undefined) delete process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH;
+    else process.env.LETAGENTS_SUPERVISOR_GRANT_STORE_PATH = previousGrantStore;
+    await env.cleanup();
+  }
+});
+
 test("room delivery retry is capability-negotiated and carries the exact current daemon generation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -564,6 +700,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const createInput = { creationRequestId: "request_alpha", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Durable Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
     const created = await client.create(createInput);
     assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
+    assert.equal(wire.entries[0]?.last_worker_binding, null, "production creation durably attests that no worker session exists yet");
     const retried = await client.create(createInput);
     assert.equal(retried.id, created.id, "one Start request is idempotent across retries");
     const second = await client.create({ ...createInput, creationRequestId: "request_bravo", displayName: "Second durable Codex" });

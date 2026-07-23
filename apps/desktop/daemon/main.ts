@@ -2405,6 +2405,10 @@ export class SupervisorDaemon {
     this.validateEntry(entry);
     const updated = await this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
+      const purgeTombstone = await this.store.getPurge(`purge:${entry.id}`);
+      if (purgeTombstone?.phase === "complete") {
+        throw new Error(`Supervised entry '${entry.id}' was permanently purged. Start a genuinely new agent with a new creation request id.`);
+      }
       const manifest = await this.store.load();
       const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
       const existing = manifest.entries.find((candidate) => candidate.id === entry.id);
