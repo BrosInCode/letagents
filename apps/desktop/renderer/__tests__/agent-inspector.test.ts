@@ -6,7 +6,6 @@ import {
   agentInspectorOverallState,
   projectAgentInspector,
 } from "../src/domain/agent-inspector";
-import { projectAgentInspectorsWhenEnabled } from "../src/domain/agent-inspector-feature";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import {
   foldSupervisorActivityPush,
@@ -359,17 +358,6 @@ test("switching agents hides the previous action and fences its late completion"
     roomIdentifier: "focus_1",
     inspectorRequestVersion: 4,
   }, "focus_1", 5), false);
-});
-
-test("the disabled foundation does not evaluate its new projection", () => {
-  const throwingOptions = Object.defineProperty({}, "roomId", {
-    get(): never { throw new Error("projection evaluated while disabled"); },
-  });
-  assert.deepEqual(projectAgentInspectorsWhenEnabled(
-    false,
-    [entry()],
-    throwingOptions as Parameters<typeof projectAgentInspectorsWhenEnabled>[2],
-  ), []);
 });
 
 test("duplicate supervised names resolve to exact canonical agent mentions", () => {

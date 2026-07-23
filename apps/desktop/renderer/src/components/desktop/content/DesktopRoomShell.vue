@@ -2,7 +2,7 @@
   <section
     class="desktop-room-shell"
     :data-liquid-glass="liquidGlassEnabled"
-    :data-agent-inspector-open="Boolean(agentInspectorFoundationEnabled && selectedAgentDetailTarget && !agentInspectorCompact)"
+    :data-agent-inspector-open="Boolean(selectedAgentDetailTarget && !agentInspectorCompact)"
     data-testid="desktop-room-shell"
   >
     <DesktopRoomHeader
@@ -223,13 +223,10 @@
         :workers="workers"
         :supervisor-entries="supervisorEntries"
         :agent-projections="agentInspectorProjections"
-        :agent-inspector-foundation-enabled="agentInspectorFoundationEnabled"
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
         @refresh-room="emit('refresh-room')"
-        @reconnect-room-agent="reconnectRoomAgent"
-        @recover-room-agent="recoverRoomAgent"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
       />
 
@@ -265,7 +262,7 @@
     />
 
     <AgentInspectorHost
-      v-if="agentInspectorFoundationEnabled && selectedAgentDetailTarget"
+      v-if="selectedAgentDetailTarget"
       :open="true"
       :projection="selectedAgentDetailProjection"
       :selection="selectedAgentDetailTarget"
@@ -300,22 +297,6 @@
       @room-move-commit="commitAgentInspectorRoomMove"
       @retire="retireAgentInspectorAgent"
       @purge="purgeAgentInspectorAgent"
-    />
-
-    <DesktopAgentDetailModal
-      v-if="!agentInspectorFoundationEnabled"
-      :open="Boolean(selectedAgentDetailTarget)"
-      :room-identifier="room.identifier"
-      :target="selectedAgentDetailTarget"
-      :request-version="selectedAgentDetailRequestVersion"
-      :reasoning-sessions="reasoningSessions"
-      :supervisor-resource="supervisorEntriesResource"
-      :supervisor-status="supervisorStatus"
-      @close="closeAgentDetail"
-      @open-add-agent="openAddAgentModalFromDetail"
-      @open-reasoning="openReasoningFromAgentDetail"
-      @refresh-supervisor="refreshManagedAgentSessions"
-      @supervisor-entry-updated="upsertSupervisorEntry"
     />
 
     <AddAgentModal
@@ -398,15 +379,12 @@ import {
   type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
 import {
-  AGENT_INSPECTOR_FOUNDATION_ENABLED,
-  projectAgentInspectorsWhenEnabled,
-} from "../../../domain/agent-inspector-feature";
-import {
   isCurrentAgentInspectorParticipantSessionUpdate,
   type AgentInspectorParticipantSessionUpdate,
 } from "../../../domain/agent-inspector-participant";
 import {
   agentInspectorActionStateForEntry,
+  projectAgentInspectors,
   type AgentInspectorActionIntent,
   type AgentInspectorActionState,
 } from "../../../domain/agent-inspector";
@@ -438,7 +416,6 @@ import {
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
-import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
@@ -549,7 +526,6 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
-const agentInspectorFoundationEnabled = AGENT_INSPECTOR_FOUNDATION_ENABLED;
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
 const agentInspectorWorkResource = ref<AgentInspectorWorkResource>(emptyAgentInspectorWorkResource());
@@ -636,8 +612,7 @@ const selectedAgentDetailTarget = computed<AgentInspectorSelection | null>(() =>
   );
 });
 const agentInspectorProjections = computed(() => {
-  if (!agentInspectorFoundationEnabled) return [];
-  return projectAgentInspectorsWhenEnabled(true, supervisorEntries.value, {
+  return projectAgentInspectors(supervisorEntries.value, {
     roomId: props.room.identifier,
     tasks: props.tasks,
     deliveryRetryAvailable: deliveryRetryAvailable.value,
@@ -1094,14 +1069,12 @@ onMounted(() => {
       }
     }
   }) || null;
-  if (agentInspectorFoundationEnabled) {
-    unsubscribeSupervisorActivity = desktopIpc.supervisor?.onActivity?.((push) => {
-      const next = foldSupervisorActivityPush(supervisorEntries.value, props.room.identifier, push);
-      if (next === supervisorEntries.value) return;
-      supervisorEntries.value = next;
-      supervisorEntriesUpdatedAt.value = new Date().toISOString();
-    }) || null;
-  }
+  unsubscribeSupervisorActivity = desktopIpc.supervisor?.onActivity?.((push) => {
+    const next = foldSupervisorActivityPush(supervisorEntries.value, props.room.identifier, push);
+    if (next === supervisorEntries.value) return;
+    supervisorEntries.value = next;
+    supervisorEntriesUpdatedAt.value = new Date().toISOString();
+  }) || null;
 });
 
 function rememberChatScrollPosition(scrollTop: number): void {
@@ -1798,38 +1771,6 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
   );
 }
 
-async function reconnectRoomAgent(entryId: string): Promise<void> {
-  if (!desktopIpc.supervisor?.reconnectAgent) {
-    pushActionToast("This desktop build cannot reconnect supervised agents yet.", "error", 6_000);
-    return;
-  }
-  try {
-    await desktopIpc.supervisor.reconnectAgent({ entryId });
-    await refreshManagedAgentSessions();
-    pushActionToast("Credential handoff was requested. The existing agent runtime was left running.", "success", 5_000);
-  } catch {
-    await refreshManagedAgentSessions();
-    pushActionToast("Could not reconnect this agent. Its existing runtime was left unchanged. Check its current state and try again.", "error", 7_000);
-  }
-}
-
-async function recoverRoomAgent(entryId: string): Promise<void> {
-  if (!desktopIpc.supervisor?.setDesiredState) {
-    pushActionToast("This desktop build cannot recover supervised agents yet.", "error", 6_000);
-    return;
-  }
-  try {
-    // This is the existing explicit recovery primitive: it keeps the durable
-    // entry id but asks the daemon to converge a new provider runtime.
-    await desktopIpc.supervisor.setDesiredState(entryId, "running");
-    await refreshManagedAgentSessions();
-    pushActionToast("Recovery started for this saved agent.", "success", 5_000);
-  } catch {
-    await refreshManagedAgentSessions();
-    pushActionToast("Could not recover this saved agent. It remains available to try again.", "error", 7_000);
-  }
-}
-
 async function revealRoomMessage(messageId: string): Promise<void> {
   const revealed = await revealMessage(messageId);
   if (!revealed) {
@@ -2167,14 +2108,13 @@ function resetAgentInspectorSettings(): void {
 }
 
 function agentInspectorSettingsSelectionCurrent(entryId: string, roomId: string): boolean {
-  return agentInspectorFoundationEnabled
-    && props.room.identifier === roomId
+  return props.room.identifier === roomId
     && selectedAgentDetailTarget.value?.kind === "supervised"
     && selectedAgentDetailTarget.value.supervisorEntryId === entryId;
 }
 
 function agentInspectorSettingsCurrent(fence: AgentInspectorSettingsFence): boolean {
-  return agentInspectorFoundationEnabled && agentInspectorSettingsFenceCurrent(fence, {
+  return agentInspectorSettingsFenceCurrent(fence, {
     entryId: selectedAgentDetailTarget.value?.kind === "supervised"
       ? selectedAgentDetailTarget.value.supervisorEntryId
       : null,
@@ -2254,7 +2194,7 @@ function openAgentInspectorSettings(): void {
 }
 
 function agentInspectorRoomMoveCurrent(fence: AgentInspectorSettingsFence): boolean {
-  return agentInspectorFoundationEnabled && agentInspectorSettingsFenceCurrent(fence, {
+  return agentInspectorSettingsFenceCurrent(fence, {
     entryId: selectedAgentDetailTarget.value?.kind === "supervised"
       ? selectedAgentDetailTarget.value.supervisorEntryId
       : null,
@@ -2609,8 +2549,7 @@ async function purgeAgentInspectorAgent(): Promise<void> {
 
 function agentInspectorWorkRequestStillCurrent(entryId: string, roomId: string, sourceMessageId: string | null, token: number): boolean {
   const target = selectedAgentDetailTarget.value;
-  return agentInspectorFoundationEnabled
-    && token === agentInspectorWorkRequestToken
+  return token === agentInspectorWorkRequestToken
     && props.room.identifier === roomId
     && target?.kind === "supervised"
     && target.supervisorEntryId === entryId
@@ -2638,7 +2577,6 @@ function openAgentInspectorWork(): void {
 }
 
 async function loadAgentInspectorWorkDetail(sourceMessageId: string | null = agentInspectorWorkSourceMessageId.value, force = false): Promise<void> {
-  if (!agentInspectorFoundationEnabled) return;
   const target = selectedAgentDetailTarget.value;
   const projection = selectedAgentDetailProjection.value;
   if (target?.kind !== "supervised" || !projection || projection.roomId !== props.room.identifier) return;
@@ -2686,8 +2624,7 @@ function currentAgentInspectorActionIdentity(
   intent: AgentInspectorActionIntent,
   requestVersion: number,
 ): boolean {
-  return agentInspectorFoundationEnabled
-    && props.room.identifier === intent.roomId
+  return props.room.identifier === intent.roomId
     && selectedAgentDetailRequestVersion.value === requestVersion
     && selectedAgentDetailTarget.value?.kind === "supervised"
     && selectedAgentDetailTarget.value.supervisorEntryId === intent.entryId
@@ -2705,10 +2642,7 @@ function currentAgentInspectorAction(
 }
 
 async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Promise<void> {
-  if (
-    !agentInspectorFoundationEnabled
-    || (agentInspectorActionState.value?.status === "running" && agentInspectorActionState.value.entryId === intent.entryId)
-  ) return;
+  if (agentInspectorActionState.value?.status === "running" && agentInspectorActionState.value.entryId === intent.entryId) return;
   if (intent.roomId !== props.room.identifier) return;
   const projection = agentInspectorProjections.value.find((candidate) => candidate.entryId === intent.entryId);
   if (!projection || !projection.actions.some((action) => action.kind === intent.kind && action.available)) return;
@@ -2861,16 +2795,6 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     move_room: "Room move started.",
     purge_agent: "Durable records purged.",
   } as const)[kind];
-}
-
-function openAddAgentModalFromDetail(): void {
-  closeAgentDetail();
-  addAgentModalOpen.value = true;
-}
-
-function openReasoningFromAgentDetail(sessionId: string): void {
-  closeAgentDetail();
-  openReasoningInspector(sessionId);
 }
 
 function openAgentRepoPicker(): void {

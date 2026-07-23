@@ -28,55 +28,28 @@
 
       <template v-else>
         <div class="desktop-activity-groups">
-          <template v-if="agentInspectorFoundationEnabled">
-            <section
-              v-for="group in inspectorTruthfulGroups"
-              :key="group.key"
-              v-show="group.agents.length"
-              class="desktop-activity-group"
-              :data-room-agent-state="group.key"
+          <section
+            v-for="group in inspectorTruthfulGroups"
+            :key="group.key"
+            v-show="group.agents.length"
+            class="desktop-activity-group"
+            :data-room-agent-state="group.key"
+          >
+            <header><div><h3>{{ group.label }}</h3><p>{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
+            <button
+              v-for="agent in group.agents"
+              :key="agent.entryId"
+              class="desktop-activity-roster-item"
+              :data-selected="selectedInspectorAgent?.entryId === agent.entryId"
+              :data-state="group.key"
+              type="button"
+              @click="selectInspectorAgent(agent)"
             >
-              <header><div><h3>{{ group.label }}</h3><p>{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
-              <button
-                v-for="agent in group.agents"
-                :key="agent.entryId"
-                class="desktop-activity-roster-item"
-                :data-selected="selectedInspectorAgent?.entryId === agent.entryId"
-                :data-state="group.key"
-                type="button"
-                @click="selectInspectorAgent(agent)"
-              >
-                <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
-                <span><strong>{{ agent.displayName }}</strong><small>{{ agent.overallDetail }}</small></span>
-                <span class="desktop-activity-row-meta"><span class="state-pill" :data-state="group.key">{{ agent.overallLabel }}</span></span>
-              </button>
-            </section>
-          </template>
-
-          <template v-else>
-            <section
-              v-for="group in legacyTruthfulGroups"
-              :key="group.key"
-              v-show="group.agents.length"
-              class="desktop-activity-group"
-              :data-room-agent-state="group.key"
-            >
-              <header><div><h3>{{ group.label }}</h3><p>{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
-              <button
-                v-for="agent in group.agents"
-                :key="agent.id"
-                class="desktop-activity-roster-item"
-                :data-selected="selectedLegacyTruthfulAgent?.id === agent.id"
-                :data-state="group.key"
-                type="button"
-                @click="selectedTruthfulId = agent.id"
-              >
-                <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(legacyTruthfulLabel(agent)) }}</span>
-                <span><strong>{{ legacyTruthfulLabel(agent) }}</strong><small>{{ legacyTruthfulSummary(agent) }}</small></span>
-                <span class="desktop-activity-row-meta"><span class="state-pill" :data-state="group.key">{{ group.label }}</span></span>
-              </button>
-            </section>
-          </template>
+              <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
+              <span><strong>{{ agent.displayName }}</strong><small>{{ agent.overallDetail }}</small></span>
+              <span class="desktop-activity-row-meta"><span class="state-pill" :data-state="group.key">{{ agent.overallLabel }}</span></span>
+            </button>
+          </section>
 
           <section v-if="legacyReachableAgents.length" class="desktop-activity-group">
             <header>
@@ -91,10 +64,10 @@
               v-for="agent in legacyReachableAgents"
               :key="agent.key"
               class="desktop-activity-roster-item"
-              :data-selected="selectedLiveParticipant?.key === agent.key"
+              :data-selected="selectedLiveKey === agent.key"
               :data-state="agent.activityState || 'offline'"
               type="button"
-              @click="selectLegacyAgent(agent)"
+              @click="selectParticipantAgent(agent)"
             >
               <span class="desktop-activity-avatar" :data-state="agent.activityState || 'offline'">{{ initials(agent.label) }}</span>
               <span>
@@ -121,10 +94,10 @@
               v-for="agent in legacyWorkingAgents"
               :key="agent.key"
               class="desktop-activity-roster-item"
-              :data-selected="selectedLiveParticipant?.key === agent.key"
+              :data-selected="selectedLiveKey === agent.key"
               :data-state="agent.workState || 'working'"
               type="button"
-              @click="selectLegacyAgent(agent)"
+              @click="selectParticipantAgent(agent)"
             >
               <span class="desktop-activity-avatar" :data-state="agent.workState || 'active'">
                 <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -143,143 +116,6 @@
             </button>
           </section>
         </div>
-
-        <aside v-if="!agentInspectorFoundationEnabled && selectedLegacyTruthfulAgent" class="desktop-activity-detail" data-kind="room-agent">
-          <div class="desktop-activity-detail-header">
-            <div class="desktop-activity-detail-identity"><span class="desktop-activity-dot" :data-state="legacyTruthfulTone(selectedLegacyTruthfulAgent)" aria-hidden="true"></span><div><h3>{{ legacyTruthfulLabel(selectedLegacyTruthfulAgent) }}</h3><p>{{ selectedLegacyTruthfulAgent.provider }} · supervised room agent</p></div></div>
-            <div class="desktop-activity-detail-actions">
-              <button
-                type="button"
-                data-testid="desktop-activity-open-supervised-agent-controls"
-                @click="emit('open-agent-detail', supervisedAgentInspectorRequest(selectedLegacyTruthfulAgent, { ownerAttribution: ownerAttribution(selectedLegacyTruthfulAgent.createdBy) }))"
-              >
-                Open controls
-              </button>
-            </div>
-          </div>
-          <section class="desktop-activity-inspector-list" aria-label="Room agent state">
-            <article class="desktop-activity-inspector-row"><span>Connection</span><p>{{ selectedLegacyTruthfulAgent.roomAgentState!.connection.state }}{{ selectedLegacyTruthfulAgent.roomAgentState!.connection.detail ? ` — ${selectedLegacyTruthfulAgent.roomAgentState!.connection.detail}` : "" }}</p></article>
-            <article class="desktop-activity-inspector-row"><span>Room observation</span><p>{{ selectedLegacyTruthfulAgent.roomAgentState?.ingress?.state || "starting" }}{{ selectedLegacyTruthfulAgent.roomAgentState?.ingress?.detail ? ` — ${selectedLegacyTruthfulAgent.roomAgentState.ingress.detail}` : "" }}</p></article>
-            <article class="desktop-activity-inspector-row"><span>Inbox</span><p>{{ selectedLegacyTruthfulAgent.roomAgentState!.inbox.state }} · {{ selectedLegacyTruthfulAgent.roomAgentState!.inbox.pendingCount }} queued</p></article>
-            <article class="desktop-activity-inspector-row"><span>Current turn</span><p>{{ selectedLegacyTruthfulAgent.roomAgentState!.turn.state }}{{ selectedLegacyTruthfulAgent.roomAgentState!.turn.detail ? ` — ${selectedLegacyTruthfulAgent.roomAgentState!.turn.detail}` : "" }}</p></article>
-            <article class="desktop-activity-inspector-row"><span>Assigned work</span><p>{{ selectedLegacyTruthfulAgent.roomAgentState!.task.title || selectedLegacyTruthfulAgent.roomAgentState!.task.state }}</p></article>
-          </section>
-          <div v-if="canReconnectRoomAgent(selectedLegacyTruthfulAgent)" class="desktop-activity-detail-actions">
-            <button type="button" data-testid="desktop-room-agent-reconnect" @click="emit('reconnect-room-agent', selectedLegacyTruthfulAgent.id)">
-              Reconnect agent
-            </button>
-          </div>
-          <div v-else-if="canRecoverSavedRoomAgent(selectedLegacyTruthfulAgent)" class="desktop-activity-detail-actions">
-            <p>Its previous runtime is no longer available. Recovery starts a new runtime for this saved agent.</p>
-            <button type="button" data-testid="desktop-room-agent-recover" @click="emit('recover-room-agent', selectedLegacyTruthfulAgent.id)">
-              Recover agent
-            </button>
-          </div>
-          <section v-if="selectedTruthfulReceipt" class="desktop-activity-detail-section"><header><h4>Delivery timeline</h4><span>{{ selectedTruthfulReceipt.state }}</span></header><ol class="desktop-activity-artifact-timeline"><li v-for="event in selectedTruthfulReceipt.timeline" :key="`${event.observedAt}-${event.phase}`" class="desktop-activity-artifact-event"><div class="desktop-activity-artifact-content"><strong>{{ event.phase }}</strong><small>{{ event.detail || event.observedAt }}</small></div></li></ol></section>
-        </aside>
-        <aside v-else-if="!agentInspectorFoundationEnabled && selectedLiveParticipant" class="desktop-activity-detail" data-kind="agent">
-          <div class="desktop-activity-detail-header">
-            <div class="desktop-activity-detail-identity">
-              <span class="desktop-activity-dot" :data-state="connectionTone(selectedLiveParticipant)" aria-hidden="true"></span>
-              <div>
-                <h3>{{ selectedLiveParticipant.label }}</h3>
-                <p>
-                  {{ detailSubtitle(selectedLiveParticipant) }}
-                  <span aria-hidden="true">·</span>
-                  {{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}
-                  <span aria-hidden="true">·</span>
-                  {{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}
-                </p>
-              </div>
-            </div>
-            <div class="desktop-activity-detail-actions">
-              <span class="state-pill" :data-state="connectionTone(selectedLiveParticipant)">
-                {{ connectionDisplayLabel(selectedLiveParticipant) }}
-              </span>
-              <button
-                type="button"
-                data-testid="desktop-activity-open-agent-controls"
-                @click="emit('open-agent-detail', participantAgentInspectorRequest(activityParticipantToAgentTarget(selectedLiveParticipant)))"
-              >
-                Open controls
-              </button>
-            </div>
-          </div>
-
-          <section class="desktop-activity-inspector-list">
-            <article v-if="selectedLiveParticipant.statusText" class="desktop-activity-inspector-row" data-emphasis="true">
-              <span>Latest status</span>
-              <p>{{ selectedLiveParticipant.statusText }}</p>
-            </article>
-
-            <article v-if="selectedLiveParticipant.repoBranch" class="desktop-activity-inspector-row">
-              <span>Branch</span>
-              <p>{{ selectedLiveParticipant.repoBranch }}</p>
-            </article>
-
-            <article v-if="selectedLiveBranchMismatchLabel" class="desktop-activity-inspector-row" data-emphasis="true">
-              <span>Room branch</span>
-              <p>{{ selectedLiveBranchMismatchLabel }}</p>
-            </article>
-
-            <article class="desktop-activity-inspector-row">
-              <span>Session</span>
-              <p v-if="selectedLiveParticipant.livenessObservation">
-                {{ selectedLiveParticipant.livenessObservation.hostLabel || selectedLiveParticipant.livenessObservation.hostKind || "Agent host" }}
-                observed {{ formatRelativeTime(selectedLiveParticipant.livenessObservation.lastObservedAt) }}
-              </p>
-              <p v-else>Room presence only</p>
-            </article>
-
-            <article v-if="activeSourceBadges(selectedLiveParticipant).length" class="desktop-activity-inspector-row">
-              <span>Sources</span>
-              <p>{{ sourceSummary(selectedLiveParticipant) }}</p>
-            </article>
-          </section>
-
-          <section v-if="selectedLiveParticipant.latestReasoning" class="desktop-activity-detail-section">
-            <header>
-              <h4>Agent progress</h4>
-              <span>{{ reasoningStatus(selectedLiveParticipant.latestReasoning) }}</span>
-            </header>
-            <article class="desktop-activity-reasoning">
-              <strong>{{ reasoningTitle(selectedLiveParticipant.latestReasoning) }}</strong>
-              <p>{{ reasoningSummary(selectedLiveParticipant.latestReasoning) }}</p>
-              <div v-if="selectedLiveParticipant.latestReasoningFields.length" class="desktop-agent-modal-fields">
-                <span v-for="field in selectedLiveParticipant.latestReasoningFields" :key="field.label">
-                  <small>{{ field.label }}</small>
-                  <strong>{{ field.value }}</strong>
-                </span>
-              </div>
-            </article>
-          </section>
-
-          <section v-if="selectedLiveParticipant.currentTasks.length" class="desktop-activity-detail-section">
-            <header>
-              <h4>Current work</h4>
-              <span>{{ selectedLiveParticipant.currentTasks.length }}</span>
-            </header>
-            <article v-for="task in selectedLiveParticipant.currentTasks" :key="task.id" class="desktop-activity-task">
-              <strong>{{ task.title }}</strong>
-              <span>{{ taskStatusLabel(task.status) }}</span>
-            </article>
-          </section>
-
-          <section v-if="selectedLiveParticipant.activeReasoning.length" class="desktop-activity-detail-section">
-            <header>
-              <h4>Live progress</h4>
-              <span>{{ selectedLiveParticipant.activeReasoning.length }}</span>
-            </header>
-            <article v-for="session in selectedLiveParticipant.activeReasoning" :key="session.id" class="desktop-activity-reasoning">
-              <strong>{{ reasoningTitle(session) }}</strong>
-              <p>{{ reasoningSummary(session) }}</p>
-              <span>{{ reasoningStatus(session) }} · {{ formatRelativeTime(session.updatedAt || session.createdAt) }}</span>
-              <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
-                Open progress
-              </button>
-            </article>
-          </section>
-      </aside>
       </template>
     </div>
 
@@ -471,23 +307,13 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import type { AgentInspectorProjection } from "../../../domain/agent-inspector";
-import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget, ownerAttribution } from "./room-activity/agentTarget";
 import {
   participantAgentInspectorRequest,
   supervisedAgentInspectorRequest,
 } from "../../../domain/agent-inspector-identity";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
-import {
-  canReconnectRoomAgent,
-  canRecoverSavedRoomAgent,
-  isProjectedSupervisedActivityParticipant,
-  roomAgentActivityProjection,
-  roomAgentDeliveryGroup,
-  roomAgentDeliverySummary,
-  supervisedActivityIdentity,
-} from "../../../domain/room-agent-delivery";
-import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
+import { isProjectedSupervisedActivityParticipant, supervisedActivityIdentity } from "../../../domain/room-agent-delivery";
 import {
   findLinkedPullRequest,
   retainExpandableChangeArtifacts,
@@ -513,7 +339,6 @@ const props = defineProps<{
   workers: WorkerSnapshot[];
   supervisorEntries: DesktopSupervisorManifestEntry[];
   agentProjections: AgentInspectorProjection[];
-  agentInspectorFoundationEnabled: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -521,8 +346,6 @@ const emit = defineEmits<{
   "open-add-agent": [];
   "open-agent-detail": [request: AgentInspectorRequest];
   "refresh-room": [];
-  "reconnect-room-agent": [entryId: string];
-  "recover-room-agent": [entryId: string];
   "clear-artifact-task-filter": [];
 }>();
 
@@ -582,48 +405,30 @@ const {
   selectedHistoryKey,
   reachableAgents,
   workingAgents,
-  liveRosterAgents,
-  selectedLiveParticipant,
   selectedHistoryEntry,
   initials,
   connectionLabel,
-  connectionTone,
   formatRelativeTime,
   signalLabel,
-  reasoningStatus,
-  reasoningTitle,
-  reasoningSummary,
-  sourceBadges,
   taskStatusLabel,
-} = useRoomActivityViewModel(props, { autoSelectLive: !props.agentInspectorFoundationEnabled });
+} = useRoomActivityViewModel(props, { autoSelectLive: false });
 
-const selectedLiveBranchMismatchLabel = computed(() =>
-  selectedLiveParticipant.value
-    ? roomBranchMismatchLabel(selectedLiveParticipant.value)
-    : null
-);
 const selectedTruthfulId = ref<string | null>(null);
-const legacyTruthfulProjection = computed(() => props.agentInspectorFoundationEnabled
-  ? { liveAgents: [] as DesktopSupervisorManifestEntry[], projectedSessionIds: new Set<string>() }
-  : roomAgentActivityProjection(props.supervisorEntries, props.roomIdentifier));
-const legacyTruthfulAgents = computed(() => legacyTruthfulProjection.value.liveAgents);
-const inspectorTruthfulAgents = computed(() => props.agentInspectorFoundationEnabled
-  ? props.agentProjections.filter((agent) => agent.overallState !== "retired")
-  : []);
+const inspectorTruthfulAgents = computed(() =>
+  props.agentProjections.filter((agent) => agent.overallState !== "retired"),
+);
 const projectedSupervisedIdentity = computed(() => supervisedActivityIdentity(
-  props.agentInspectorFoundationEnabled
-    ? props.agentProjections.map((agent) => agent.entry)
-    : props.supervisorEntries,
+  props.agentProjections.map((agent) => agent.entry),
   props.roomIdentifier,
 ));
-const isProjectedLegacyAgent = (agent: ActivityParticipant) => isProjectedSupervisedActivityParticipant(
+const isProjectedSupervisedAgent = (agent: Parameters<typeof isProjectedSupervisedActivityParticipant>[1]) => isProjectedSupervisedActivityParticipant(
   projectedSupervisedIdentity.value,
   agent,
 );
-const legacyReachableAgents = computed(() => reachableAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
-const legacyWorkingAgents = computed(() => workingAgents.value.filter((agent) => !isProjectedLegacyAgent(agent)));
+const legacyReachableAgents = computed(() => reachableAgents.value.filter((agent) => !isProjectedSupervisedAgent(agent)));
+const legacyWorkingAgents = computed(() => workingAgents.value.filter((agent) => !isProjectedSupervisedAgent(agent)));
 const hasLiveActivity = computed(() => Boolean(
-  (props.agentInspectorFoundationEnabled ? inspectorTruthfulAgents.value.length : legacyTruthfulAgents.value.length)
+  inspectorTruthfulAgents.value.length
     || legacyReachableAgents.value.length
     || legacyWorkingAgents.value.length,
 ));
@@ -640,48 +445,24 @@ const inspectorTruthfulGroups = computed(() => {
   for (const agent of inspectorTruthfulAgents.value) groups.find((group) => group.key === agent.overallState)!.agents.push(agent);
   return groups;
 });
-const legacyTruthfulGroups = computed(() => {
-  const groups = [
-    { key: "listening", label: "Listening", description: "Connected and ready for a room message.", agents: [] as DesktopSupervisorManifestEntry[] },
-    { key: "responding", label: "Responding", description: "A bounded room turn is in progress.", agents: [] as DesktopSupervisorManifestEntry[] },
-    { key: "attention", label: "Needs attention", description: "Delivery is blocked or needs a retry.", agents: [] as DesktopSupervisorManifestEntry[] },
-    { key: "disconnected", label: "Disconnected", description: "The agent is not currently reachable.", agents: [] as DesktopSupervisorManifestEntry[] },
-  ];
-  for (const agent of legacyTruthfulAgents.value) groups.find((group) => group.key === roomAgentDeliveryGroup(agent))!.agents.push(agent);
-  return groups;
-});
 const selectedInspectorAgent = computed(() => inspectorTruthfulAgents.value.find((agent) => agent.entryId === selectedTruthfulId.value) || null);
-const selectedLegacyTruthfulAgent = computed(() => legacyTruthfulAgents.value.find((agent) => agent.id === selectedTruthfulId.value) || null);
-const selectedTruthfulReceipt = computed(() => selectedLegacyTruthfulAgent.value?.deliveryReceipts?.find((receipt) => receipt.sourceMessageId === selectedLegacyTruthfulAgent.value?.roomAgentState?.turn.sourceMessageId) || selectedLegacyTruthfulAgent.value?.deliveryReceipts?.[0] || null);
 watch(inspectorTruthfulAgents, (agents) => {
-  if (props.agentInspectorFoundationEnabled && selectedTruthfulId.value && !agents.some((agent) => agent.entryId === selectedTruthfulId.value)) {
+  if (selectedTruthfulId.value && !agents.some((agent) => agent.entryId === selectedTruthfulId.value)) {
     selectedTruthfulId.value = null;
   }
 });
-watch(legacyTruthfulAgents, (agents) => {
-  if (!props.agentInspectorFoundationEnabled && agents.length && !agents.some((agent) => agent.id === selectedTruthfulId.value)) {
-    selectedTruthfulId.value = agents[0]!.id;
-  }
-}, { immediate: true });
-function legacyTruthfulTone(agent: DesktopSupervisorManifestEntry): string { return roomAgentDeliveryGroup(agent) === "attention" ? "blocked" : roomAgentDeliveryGroup(agent) === "disconnected" ? "offline" : roomAgentDeliveryGroup(agent) === "responding" ? "working" : "active"; }
-function legacyTruthfulLabel(agent: DesktopSupervisorManifestEntry): string { return supervisedAgentDisplayLabel(agent.displayName, agent.id); }
-function legacyTruthfulSummary(agent: DesktopSupervisorManifestEntry): string { return roomAgentDeliverySummary(agent.roomAgentState!); }
 function selectInspectorAgent(agent: AgentInspectorProjection): void {
   selectedLiveKey.value = null;
   selectedTruthfulId.value = agent.entryId;
-  if (props.agentInspectorFoundationEnabled) {
-    emit("open-agent-detail", supervisedAgentInspectorRequest(agent.entry, {
-      ownerAttribution: ownerAttribution(agent.entry.createdBy),
-    }));
-  }
+  emit("open-agent-detail", supervisedAgentInspectorRequest(agent.entry, {
+    ownerAttribution: ownerAttribution(agent.entry.createdBy),
+  }));
 }
 
-function selectLegacyAgent(agent: ActivityParticipant): void {
+function selectParticipantAgent(agent: Parameters<typeof activityParticipantToAgentTarget>[0]): void {
   selectedTruthfulId.value = null;
   selectedLiveKey.value = agent.key;
-  if (props.agentInspectorFoundationEnabled) {
-    emit("open-agent-detail", participantAgentInspectorRequest(activityParticipantToAgentTarget(agent)));
-  }
+  emit("open-agent-detail", participantAgentInspectorRequest(activityParticipantToAgentTarget(agent)));
 }
 const artifactTimeline = computed(() =>
   roomArtifactTimelineItems(props.roomArtifacts, {
@@ -714,35 +495,14 @@ function refreshActivity(): void {
   emit("refresh-room");
 }
 
-function activeSourceBadges(participant: ActivityParticipant): Array<{ label: string; active: boolean }> {
-  return sourceBadges(participant).filter((source) => source.active);
-}
-
-function sourceSummary(participant: ActivityParticipant): string {
-  return activeSourceBadges(participant).map((source) => source.label).join(", ");
-}
-
-function connectionDisplayLabel(participant: ActivityParticipant): string {
-  const label = connectionLabel(participant);
-  return label.charAt(0).toUpperCase() + label.slice(1);
-}
-
-function branchLabel(participant: ActivityParticipant): string | null {
+function branchLabel(participant: Parameters<typeof activityParticipantToAgentTarget>[0]): string | null {
   const mismatch = roomBranchMismatchLabel(participant);
   if (mismatch) return mismatch;
   return participant.repoBranch ? `Branch ${participant.repoBranch}` : null;
 }
 
-function roomBranchMismatchLabel(
-  participant: Pick<ActivityParticipant, "repoBranch">,
-): string | null {
+function roomBranchMismatchLabel(participant: { repoBranch: string | null }): string | null {
   return managedAgentRoomBranchMismatchLabel(participant, props.roomGitRoom);
-}
-
-function detailSubtitle(participant: ActivityParticipant): string {
-  if (participant.activityState === "active" || participant.activityState === "away") return "Reachable in chat";
-  if (connectionLabel(participant) === "work update") return "Work updates available";
-  return "Not reachable in chat";
 }
 
 onMounted(refreshActivity);
