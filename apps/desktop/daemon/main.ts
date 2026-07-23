@@ -757,6 +757,25 @@ export class SupervisorDaemon {
           error: typeof params.error === "string" ? params.error : undefined,
         });
       }
+      if (request.method === "supervisor.get_agent_configuration") {
+        const params = this.paramsRecord(request.params);
+        return this.getAgentConfiguration(String(params.entry_id ?? ""), Number(params.daemon_generation ?? NaN));
+      }
+      if (request.method === "supervisor.update_agent_configuration") {
+        const params = this.paramsRecord(request.params);
+        return this.updateAgentConfiguration({
+          entryId: String(params.entry_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
+          expectedRevision: Number(params.expected_revision ?? NaN), configuration: this.paramsRecord(params.configuration),
+        });
+      }
+      if (request.method === "supervisor.retire_agent") {
+        const params = this.paramsRecord(request.params);
+        return this.retireAgent(String(params.entry_id ?? ""), Number(params.daemon_generation ?? NaN));
+      }
+      if (request.method === "supervisor.purge_agent") {
+        const params = this.paramsRecord(request.params);
+        return this.purgeAgent(String(params.entry_id ?? ""), Number(params.daemon_generation ?? NaN));
+      }
       if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
       if (request.method === "manifest.set_desired_state") {
         const params = this.paramsRecord(request.params);
@@ -1667,7 +1686,7 @@ export class SupervisorDaemon {
       healthy: true,
       protocol_version: DAEMON_PROTOCOL_VERSION,
       implementation_version: DAEMON_IMPLEMENTATION_VERSION,
-      capabilities: { room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn), agent_inspector_detail_v1: true },
+      capabilities: { room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn), agent_inspector_detail_v1: true, agent_inspector_settings_v1: true },
       generation: this.singleton.currentGeneration,
       pid: process.pid,
       started_at: this.startedAt,
@@ -1784,6 +1803,73 @@ export class SupervisorDaemon {
         : entry);
       const next = await this.writeManifest(this.manifestGeneration, entries, manifest.legacy_lane_owners);
       this.manifestGeneration = next.generation;
+    });
+  }
+
+  /** Inspector configuration is a durable optimistic-concurrency resource. */
+  private async getAgentConfiguration(entryId: string, daemonGeneration: number) {
+    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Agent configuration is fenced by a stale daemon generation.");
+    const configuration = await this.store.getAgentConfiguration(entryId);
+    if (!configuration) throw new Error("The exact agent no longer exists.");
+    return {
+      entry_id: entryId, daemon_generation: daemonGeneration, ...configuration,
+    };
+  }
+
+  private async updateAgentConfiguration(input: { entryId: string; daemonGeneration: number; expectedRevision: number; configuration: Record<string, unknown> }) {
+    if (!input.entryId || input.daemonGeneration !== this.singleton.currentGeneration || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+      return { outcome: "invalid", error: "Configuration requires an exact agent, current daemon generation, and positive expected revision." };
+    }
+    const effort = input.configuration.reasoning_effort;
+    const model = input.configuration.model;
+    const charter = input.configuration.charter;
+    const profile = input.configuration.permission_profile_id;
+    const policy = input.configuration.provider_launch_policy;
+    if ((effort !== null && effort !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(String(effort)))
+      || (model !== null && model !== undefined && (typeof model !== "string" || !model.trim()))
+      || typeof charter !== "string" || !charter.trim()
+      || (profile !== null && profile !== undefined && (typeof profile !== "string" || !profile.trim()))
+      || (policy !== null && policy !== undefined && (typeof policy !== "object" || Array.isArray(policy)))) {
+      return { outcome: "invalid", error: "The selected provider does not accept this model, effort, charter, permission profile, or launch policy." };
+    }
+    // Provider is deliberately absent from this mutation. A provider is bound at
+    // creation and changing it would create an unfenced runtime identity.
+    return this.serializeManifestMutation(async () => {
+      await this.singleton.assertCurrent();
+      const result = await this.store.updateAgentConfiguration(this.manifestGeneration, {
+        agentId: input.entryId, expectedRevision: input.expectedRevision, model: model === null ? null : String(model).trim(),
+        reasoningEffort: effort === null ? null : effort as DaemonManifestEntry["reasoning_effort"], charter: charter.trim(),
+        permissionProfileId: profile === null ? null : String(profile).trim(), providerLaunchPolicy: policy ?? {},
+      }, (commit) => this.fenceDaemonCommit(commit));
+      this.manifestGeneration = result.generation;
+      if (result.outcome === "invalid") return { outcome: "invalid", error: "The exact agent no longer exists." };
+      return { outcome: result.outcome, configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration) };
+    });
+  }
+
+  /** Retire preserves the identity, durable receipts, and on-disk worktree. */
+  private async retireAgent(entryId: string, daemonGeneration: number) {
+    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Retire is fenced by a stale daemon generation.");
+    const entry = await this.setDesiredState(entryId, "stopped");
+    return { outcome: "retired", entry: this.entryWithDerivedLiveness(entry) };
+  }
+
+  /** Purge is intentionally stricter than retire and never removes a worktree. */
+  private async purgeAgent(entryId: string, daemonGeneration: number) {
+    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Purge is fenced by a stale daemon generation.");
+    return this.serializeManifestMutation(async () => {
+      const entry = await this.store.getEntry(entryId);
+      if (!entry) return { outcome: "purged" }; // idempotent
+      const nonterminalReceipt = (await this.supervisedInbox.receipts(entryId)).some((receipt) => !["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"].includes(receipt.state));
+      if (entry.desired_state !== "stopped" || !["absent", "stopped", "failed"].includes(entry.observed_state)
+        || this.liveHandles.has(entryId) || await this.workerBindings.get(entryId) || nonterminalReceipt) {
+        return { outcome: "invalid", error: "Purge requires a stopped agent with no active provider, worker binding, or bounded turn." };
+      }
+      await this.supervisedInbox.removeAgent(entryId);
+      await this.store.removeEntry(this.manifestGeneration, entryId, (commit) => this.fenceDaemonCommit(commit));
+      this.manifestGeneration += 1;
+      this.liveBindingIdentities.delete(entryId); this.cachedWorkerAuthorizations.delete(entryId); this.hostGrants.delete(entryId);
+      return { outcome: "purged" };
     });
   }
 

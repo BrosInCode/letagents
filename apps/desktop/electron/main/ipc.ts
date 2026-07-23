@@ -1091,6 +1091,14 @@ export function registerDesktopIpcHandlers(
       return supervisorDaemonClient.getAgentInspectorDetail(input);
     },
   );
+  targetIpcMain.handle("desktop:supervisor:get-agent-configuration", async (_event, input: { entryId: string; daemonGeneration: number }) =>
+    supervisorDaemonClient.getAgentConfiguration(input.entryId, input.daemonGeneration));
+  targetIpcMain.handle("desktop:supervisor:update-agent-configuration", async (_event, input: import("../ipc-types.js").DesktopSupervisorAgentConfigurationUpdateInput) =>
+    supervisorDaemonClient.updateAgentConfiguration(input));
+  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
+    supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration));
+  targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
+    supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration));
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;
     onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));

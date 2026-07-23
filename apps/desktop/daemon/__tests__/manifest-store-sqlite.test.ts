@@ -10,6 +10,35 @@ import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 
+test("Inspector configuration revisions are optimistic, durable, and do not alter the flat manifest", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    const original = await store.getAgentConfiguration(entry.id);
+    assert.equal(original?.config_revision, 1);
+    assert.equal(original?.runtime_configuration_revision, 1);
+    const updated = await store.updateAgentConfiguration(1, {
+      agentId: entry.id, expectedRevision: 1, model: "gpt-next", reasoningEffort: "high",
+      charter: "Use the new charter on future turns.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" },
+    });
+    assert.equal(updated.outcome, "updated");
+    assert.equal(updated.configuration?.config_revision, 2);
+    assert.equal(updated.configuration?.runtime_configuration_revision, 1);
+    const conflict = await store.updateAgentConfiguration(2, {
+      agentId: entry.id, expectedRevision: 1, model: "ignored", reasoningEffort: null,
+      charter: "ignored", permissionProfileId: null, providerLaunchPolicy: {},
+    });
+    assert.equal(conflict.outcome, "conflict");
+    const manifest = await store.load();
+    assert.equal(manifest.entries[0]?.model, "gpt-next");
+    assert.equal(Object.hasOwn(manifest.entries[0]!, "config_revision"), false, "legacy manifest projection never leaks Inspector bookkeeping");
+  } finally {
+    await store.close();
+    await env.cleanup();
+  }
+});
+
 const terminal = {
   ended_at: "2026-07-19T00:03:00.000Z",
   exit_code: 17,

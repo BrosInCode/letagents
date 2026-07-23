@@ -11,6 +11,7 @@ import {
 } from "./manifest-entry-projection.js";
 import type {
   DaemonActivityEvent,
+  DaemonAgentConfiguration,
   DaemonManifest,
   DaemonManifestEntry,
   DaemonProviderConnection,
@@ -24,6 +25,7 @@ import type {
 
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
+type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number };
 
 /**
  * This is the version for the *entire* daemon-state database, not only the
@@ -103,7 +105,7 @@ export class ManifestStore {
       SELECT
         i.agent_id, i.created_by, i.created_at,
         p.display_name, m.room_id,
-        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode, c.delivery_cutover_json,
+        c.provider, c.model, c.reasoning_effort, c.charter, c.permission_profile_id, c.config_revision, c.runtime_configuration_revision, c.delivery_mode, c.delivery_cutover_json,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,
         d.deployment_id, d.run_id, d.observed_state,
@@ -175,12 +177,31 @@ export class ManifestStore {
     return this.readEntryFromDatabase(database, agentId);
   }
 
+  async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
+    const database = await this.getDatabase();
+    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
+    if (!row) return undefined;
+    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : null, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision) };
+  }
+
+  async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const current = database.prepare("SELECT provider,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(input.agentId) as Row | undefined;
+      if (!current) return { outcome: "invalid" as const };
+      if (Number(current.config_revision) !== input.expectedRevision) return { outcome: "conflict" as const };
+      const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);
+      return Number(changed.changes) === 1 ? { outcome: "updated" as const } : { outcome: "conflict" as const };
+    }, commitFence);
+    const configuration = await this.getAgentConfiguration(input.agentId);
+    return { generation: result.generation, outcome: result.value.outcome, ...(configuration ? { configuration } : {}) };
+  }
+
   private readEntryFromDatabase(database: DatabaseSync, agentId: string): DaemonManifestEntry | undefined {
     const row = database.prepare(`
       SELECT
         i.agent_id, i.created_by, i.created_at,
         p.display_name, m.room_id,
-        c.provider, c.model, c.charter, c.permission_profile_id, c.delivery_mode, c.delivery_cutover_json,
+        c.provider, c.model, c.reasoning_effort, c.charter, c.permission_profile_id, c.config_revision, c.runtime_configuration_revision, c.delivery_mode, c.delivery_cutover_json,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,
         d.deployment_id, d.run_id, d.observed_state,
@@ -236,8 +257,22 @@ export class ManifestStore {
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id = ?").get(normalized.id) as Row | undefined;
       if (!row) throw new Error(`Unknown daemon manifest entry: ${normalized.id}`);
+      // Configuration revisions are Inspector-owned state, intentionally not
+      // part of the legacy flat manifest projection. Preserve them through
+      // unrelated lifecycle/runtime replacements.
+      const configuration = database.prepare("SELECT reasoning_effort,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(normalized.id) as Row;
+      const priorRuntime = database.prepare("SELECT provider_execution_generation_id FROM runtime_deployments WHERE agent_id=?").get(normalized.id) as Row;
+      const projection = projectDaemonManifestEntry(normalized);
+      projection.configuration.reasoning_effort = nullableString(configuration.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"];
+      projection.configuration.config_revision = Number(configuration.config_revision);
+      // A config save never touches the native provider. Only a *new* durable
+      // provider execution consumes the latest revision.
+      projection.configuration.runtime_configuration_revision = normalized.provider_ref?.execution_generation_id
+        && normalized.provider_ref.execution_generation_id !== nullableString(priorRuntime.provider_execution_generation_id)
+        ? Number(configuration.config_revision)
+        : Number(configuration.runtime_configuration_revision);
       run(database.prepare("DELETE FROM agent_identities WHERE agent_id = ?"), normalized.id);
-      this.insertProjection(database, projectDaemonManifestEntry(normalized), Number(row.sort_order));
+      this.insertProjection(database, projection, Number(row.sort_order));
       const persisted = this.readEntryFromDatabase(database, normalized.id);
       if (!persisted) throw new Error(`Daemon manifest entry disappeared during replacement: ${normalized.id}`);
       return persisted;
@@ -270,6 +305,20 @@ export class ManifestStore {
       });
     }, commitFence);
     return { generation: result.generation, entries: result.value };
+  }
+
+  /** Deletes only the durable manifest identity. Callers must first prove purge preconditions. */
+  async removeEntry(
+    expectedGeneration: number,
+    agentId: string,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number }> {
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const deleted = database.prepare("DELETE FROM agent_identities WHERE agent_id=?").run(agentId);
+      if (Number(deleted.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+      return undefined;
+    }, commitFence);
+    return { generation: result.generation };
   }
 
   async appendActivity(
@@ -498,10 +547,10 @@ export class ManifestStore {
     const policyUndefined = policyPresent && configuration.provider_launch_policy === undefined;
     run(database.prepare(`
       INSERT INTO agent_configurations(
-        agent_id, provider, model, charter, permission_profile_id, delivery_mode, delivery_cutover_json,
+        agent_id, provider, model, reasoning_effort, charter, permission_profile_id, config_revision, runtime_configuration_revision, delivery_mode, delivery_cutover_json,
         provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.charter, configuration.permission_profile_id, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 
@@ -679,7 +728,7 @@ export class ManifestStore {
       identity: { agent_id: agentId, created_by: String(row.created_by), created_at: String(row.created_at) },
       profile: { agent_id: agentId, display_name: String(row.display_name) },
       membership: { agent_id: agentId, room_id: String(row.room_id) },
-      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(row.delivery_cutover_json === null ? {} : { delivery_cutover: parseJson(row.delivery_cutover_json) }), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
+      configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(row.delivery_cutover_json === null ? {} : { delivery_cutover: parseJson(row.delivery_cutover_json) }), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
       launch_intent: { agent_id: agentId, desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"], ...(bool(row.source_repo_path_present) ? { source_repo_path: nullableString(row.source_repo_path) } : {}) },
       runtime_deployment: runtime,
       lifecycle: { agent_id: agentId, condition: String(row.condition) as DaemonManifestEntry["condition"], ...(bool(row.last_error_present) ? { last_error: nullableString(row.last_error) } : {}) },

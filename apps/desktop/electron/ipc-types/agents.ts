@@ -363,8 +363,33 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
-  capabilities: { roomDeliveryRetry: boolean; agentInspectorDetail: boolean };
+  capabilities: { roomDeliveryRetry: boolean; agentInspectorDetail: boolean; agentInspectorSettings: boolean };
 }
+
+/** Revisioned, daemon-owned Inspector configuration. Provider never changes after creation. */
+export interface DesktopSupervisorAgentConfiguration {
+  entryId: string;
+  daemonGeneration: number;
+  provider: string;
+  model: string | null;
+  reasoningEffort: DesktopManagedAgentEffort | null;
+  charter: string;
+  permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
+  providerLaunchPolicy: unknown;
+  configRevision: number;
+  runtimeConfigurationRevision: number;
+}
+
+export interface DesktopSupervisorAgentConfigurationUpdateInput {
+  entryId: string;
+  daemonGeneration: number;
+  expectedRevision: number;
+  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId" | "providerLaunchPolicy">;
+}
+export type DesktopSupervisorAgentConfigurationUpdateResult =
+  | { outcome: "updated"; configuration: DesktopSupervisorAgentConfiguration }
+  | { outcome: "conflict"; configuration: DesktopSupervisorAgentConfiguration }
+  | { outcome: "invalid"; error: string };
 
 export interface DesktopSupervisorLivenessAxis {
   state: string;
