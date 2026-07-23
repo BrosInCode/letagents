@@ -64,7 +64,15 @@
     </div>
 
     <div class="agent-inspector-scroll-region">
-      <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab"><AgentInspectorOverview :projection="projection" /></div>
+      <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab">
+        <AgentInspectorOverview
+          :projection="projection"
+          :busy="actionState?.status === 'running'"
+          @stop-turn="emitTurnControl('stop_turn')"
+          @correct-turn="emitTurnControl('steer_turn', $event)"
+          @resolve-turn-control="emitTurnControl('resolve_turn_control', undefined, $event)"
+        />
+      </div>
       <AgentInspectorWork
         v-else-if="selectedTab === 'work'" id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"
         :resource="workResource" :selected-source-message-id="selectedWorkSourceMessageId" :tasks="projection.assignedWork" :artifacts="workArtifacts"
@@ -160,6 +168,20 @@ function selectTab(tab: "overview" | "work" | "settings" | "diagnostics"): void 
   selectedTab.value = tab;
   if (tab === "work") emit("work-selected");
   if (tab === "settings") emit("settings-selected");
+}
+
+function emitTurnControl(
+  kind: Extract<AgentInspectorActionIntent["kind"], "stop_turn" | "steer_turn" | "resolve_turn_control">,
+  correction?: string,
+  turnControlResolution?: "not_applied" | "applied",
+): void {
+  emit("action", {
+    entryId: props.projection.entryId,
+    roomId: props.projection.roomId,
+    kind,
+    ...(correction ? { correction } : {}),
+    ...(turnControlResolution ? { turnControlResolution } : {}),
+  });
 }
 
 function handleTabKeydown(event: KeyboardEvent): void {

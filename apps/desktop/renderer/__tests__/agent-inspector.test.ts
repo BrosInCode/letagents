@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
   agentInspectorOverallState,
   projectAgentInspector,
+  projectAgentInspectorTurnControl,
 } from "../src/domain/agent-inspector";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import {
@@ -218,6 +220,91 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
   assert.equal(projectAgentInspector(finished, { roomId: "focus_1" })?.now, null, "completion clears active Now instead of retaining a stale progress echo");
 });
 
+test("turn control is available only for the exact responding provider turn", () => {
+  const responding = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const control = projectAgentInspectorTurnControl(responding);
+  assert.ok(control);
+  assert.equal(control.status, "ready");
+  assert.equal(control.canStop, true);
+  assert.equal(control.canCorrect, true);
+  assert.equal(projectAgentInspector(responding, { roomId: "focus_1" })?.actions.find((action) => action.kind === "stop_turn")?.available, true);
+
+  const uncheckpointed = projectAgentInspectorTurnControl(entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: null, detail: null },
+    },
+  }));
+  assert.ok(uncheckpointed);
+  assert.equal(uncheckpointed.canStop, false, "a turn without its provider checkpoint cannot be interrupted");
+  assert.equal(uncheckpointed.canCorrect, false);
+});
+
+test("an uncertain durable control gates new actions until a verified outcome is recorded", () => {
+  const uncertain = entry({
+    turnControl: {
+      actionId: "control_1",
+      workAttemptId: "attempt_1",
+      executionGenerationId: "generation_1",
+      hasCorrection: true,
+      status: "uncertain",
+      capability: "native_interrupt",
+      interrupted: null,
+      resumed: null,
+      state: null,
+      stages: ["delivered"],
+      error: "The provider connection closed before confirming the result.",
+      recordedAt: "2026-07-23T10:00:00.000Z",
+      updatedAt: "2026-07-23T10:00:01.000Z",
+    },
+  });
+  const control = projectAgentInspectorTurnControl(uncertain);
+  assert.ok(control);
+  assert.equal(control.status, "uncertain");
+  assert.equal(control.canStop, false);
+  assert.equal(control.canCorrect, false);
+  assert.equal(control.canResolve, true);
+
+  const staleJournal = projectAgentInspectorTurnControl(entry({
+    turnControl: { ...uncertain.turnControl!, executionGenerationId: "generation_old" },
+  }));
+  assert.ok(staleJournal);
+  assert.equal(staleJournal.canResolve, false, "the operator cannot settle an outcome for a different generation");
+});
+
+test("turn-control completions are fenced to exact agent, room, work, generation, daemon, and provider turn", () => {
+  const current = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const fence = {
+    entryId: "supervised_1",
+    roomId: "focus_1",
+    workAttemptId: "attempt_1",
+    executionGenerationId: "generation_1",
+    providerTurnId: "turn_1",
+    daemonGeneration: 7,
+  };
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, current, 7), true);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({ roomId: "other_room" }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({ workAttemptId: "attempt_2" }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({ executionGenerationId: "generation_2" }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, current, 8), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { ...current.roomAgentState!.turn, providerTurnId: "turn_2" } },
+  }), 7), false);
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } },
+  }), 7), true, "a stop is allowed to leave the same session idle");
+});
+
 test("Activity suppresses only exact supervised identity, including a sessionless entry", () => {
   const identity = supervisedActivityIdentity([
     entry({ id: "supervised_one", agentKey: "emmymay/gardensignal", agentSessionId: "session_historical", agentSessionBindingState: "historical" }),
@@ -302,6 +389,17 @@ test("stale resources preserve last-good facts but disable state-dependent actio
   assert.equal(stale?.actions.find((action) => action.kind === "mention")?.available, true);
   assert.equal(stale?.actions.find((action) => action.kind === "pause")?.available, false);
   assert.equal(stale?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+
+  const active = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const staleActive = projectAgentInspector(active, { roomId: "focus_1", resourceFreshness: "stale" });
+  assert.equal(staleActive?.turnControl?.canStop, false);
+  assert.equal(staleActive?.turnControl?.canCorrect, false);
+  assert.match(staleActive?.turnControl?.detail ?? "", /Live supervisor state/);
 });
 
 test("the shell resource folds exact pushes and preserves capped activity across polls", () => {

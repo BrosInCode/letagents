@@ -59,6 +59,8 @@ export type AgentInspectorActionKind =
   | "reconnect"
   | "recover"
   | "stop_turn"
+  | "steer_turn"
+  | "resolve_turn_control"
   | "retry_delivery"
   | "retire_agent"
   | "save_settings"
@@ -78,7 +80,42 @@ export interface AgentInspectorActionIntent {
   roomId: string;
   kind: AgentInspectorActionKind;
   sourceMessageId?: string;
+  /** A correction stays inside the existing provider continuation; it is never a room message. */
+  correction?: string;
+  /** Only used to settle one durable, ambiguous turn-control journal record. */
+  turnControlResolution?: "not_applied" | "applied";
   presentation?: "wide" | "compact";
+}
+
+export type AgentInspectorTurnControlStatus = "ready" | "in_progress" | "uncertain" | "retryable" | "unavailable";
+
+/**
+ * A compact, user-facing projection of the daemon-owned turn-control journal.
+ * It intentionally exposes no transport controls: the shell owns action IDs,
+ * fences, retries, and the provider call.
+ */
+export interface AgentInspectorTurnControlProjection {
+  status: AgentInspectorTurnControlStatus;
+  capability: "native_interrupt" | "restart_resume" | "unsupported";
+  providerTurnId: string | null;
+  actionId: string | null;
+  workAttemptId: string | null;
+  executionGenerationId: string | null;
+  canStop: boolean;
+  canCorrect: boolean;
+  canResolve: boolean;
+  label: string;
+  detail: string;
+}
+
+/** The exact renderer-side snapshot for an asynchronous, daemon-owned control. */
+export interface AgentInspectorTurnControlFence {
+  entryId: string;
+  roomId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  providerTurnId: string | null;
+  daemonGeneration: number;
 }
 
 export interface AgentInspectorActionState {
@@ -113,6 +150,7 @@ export interface AgentInspectorProjection {
   now: AgentInspectorNowProjection | null;
   assignedWork: AgentInspectorTaskProjection[];
   recentOutcome: { label: string; observedAt: string } | null;
+  turnControl: AgentInspectorTurnControlProjection | null;
   actions: AgentInspectorActionAvailability[];
   mentionInsertText: string | null;
   resourceFreshness: "fresh" | "stale";
@@ -339,22 +377,122 @@ function recentOutcome(entry: DesktopSupervisorManifestEntry): AgentInspectorPro
   return { label: labels[receipt.state] ?? titleCase(receipt.state), observedAt: receipt.updatedAt };
 }
 
+function providerTurnControlCapability(entry: DesktopSupervisorManifestEntry): AgentInspectorTurnControlProjection["capability"] {
+  if (entry.provider === "codex" || entry.provider === "claude-code") return "native_interrupt";
+  if (entry.provider === "cursor") return "restart_resume";
+  return "unsupported";
+}
+
+function turnControlBaseIsExact(entry: DesktopSupervisorManifestEntry): boolean {
+  return entry.desiredState === "running"
+    && entry.condition === "none"
+    && entry.agentSessionBindingState === "active"
+    && Boolean(entry.workAttemptId && entry.executionGenerationId && entry.providerContinuationId)
+    && (entry.observedState === "working" || entry.observedState === "idle");
+}
+
+/**
+ * The display layer may only offer a turn action against a durable provider
+ * continuation. A live room turn additionally needs its exact provider turn
+ * checkpoint; otherwise it is still starting and cannot be safely interrupted.
+ */
+export function projectAgentInspectorTurnControl(
+  entry: DesktopSupervisorManifestEntry,
+): AgentInspectorTurnControlProjection | null {
+  const journal = entry.turnControl;
+  const capability = journal?.capability ?? providerTurnControlCapability(entry);
+  const baseExact = turnControlBaseIsExact(entry);
+  const providerTurnId = entry.roomAgentState?.turn.providerTurnId ?? null;
+  const isResponding = entry.roomAgentState?.turn.state === "responding";
+  const activeTurnIsCheckpointed = !isResponding || Boolean(providerTurnId);
+  const canControl = baseExact && capability !== "unsupported";
+
+  if (journal?.status === "uncertain") {
+    const journalMatchesExecution = journal.workAttemptId === entry.workAttemptId
+      && journal.executionGenerationId === entry.executionGenerationId;
+    return {
+      status: "uncertain",
+      capability: journal.capability,
+      providerTurnId,
+      actionId: journal.actionId,
+      workAttemptId: journal.workAttemptId,
+      executionGenerationId: journal.executionGenerationId,
+      canStop: false,
+      canCorrect: false,
+      canResolve: baseExact && journalMatchesExecution,
+      label: "Turn control needs confirmation",
+      detail: journal.error || "The last control request may have reached the provider. Confirm the outcome before another change is sent.",
+    };
+  }
+
+  if (journal && ["prepared", "dispatching"].includes(journal.status)) {
+    return {
+      status: "in_progress",
+      capability: journal.capability,
+      providerTurnId,
+      actionId: journal.actionId,
+      workAttemptId: journal.workAttemptId,
+      executionGenerationId: journal.executionGenerationId,
+      canStop: false,
+      canCorrect: false,
+      canResolve: false,
+      label: journal.hasCorrection ? "Applying correction" : "Stopping current turn",
+      detail: "The supervisor is applying this change to the existing agent session.",
+    };
+  }
+
+  const shouldShow = canControl && (isResponding || journal?.status === "retryable");
+  if (!shouldShow) return null;
+  const awaitingTurnCheckpoint = isResponding && !activeTurnIsCheckpointed;
+  return {
+    status: journal?.status === "retryable" ? "retryable" : "ready",
+    capability,
+    providerTurnId,
+    actionId: journal?.actionId ?? null,
+    workAttemptId: entry.workAttemptId,
+    executionGenerationId: entry.executionGenerationId,
+    canStop: canControl && isResponding && activeTurnIsCheckpointed,
+    canCorrect: canControl && activeTurnIsCheckpointed,
+    canResolve: false,
+    label: journal?.status === "retryable" ? "Previous change was not applied" : "Control current turn",
+    detail: awaitingTurnCheckpoint
+      ? "This turn is still starting. Wait for its provider checkpoint before interrupting it."
+      : journal?.status === "retryable"
+        ? "The previous change was verified not applied. You can safely send a new correction."
+        : "Stop ends this response. A correction interrupts this turn, then continues on the same agent session.",
+  };
+}
+
+/**
+ * A push or poll may replace the selected entry while an IPC request is away.
+ * An idle/null turn is allowed after a successful stop; a different live turn
+ * proves that the response belongs to stale work and must not update the UI.
+ */
+export function agentInspectorTurnControlFenceMatches(
+  fence: AgentInspectorTurnControlFence,
+  entry: Pick<DesktopSupervisorManifestEntry, "id" | "roomId" | "workAttemptId" | "executionGenerationId" | "roomAgentState"> | null,
+  daemonGeneration: number | null,
+): boolean {
+  if (!entry || daemonGeneration !== fence.daemonGeneration
+    || entry.id !== fence.entryId || entry.roomId !== fence.roomId
+    || entry.workAttemptId !== fence.workAttemptId
+    || entry.executionGenerationId !== fence.executionGenerationId) return false;
+  const currentProviderTurnId = entry.roomAgentState?.turn.providerTurnId ?? null;
+  return !fence.providerTurnId || !currentProviderTurnId || currentProviderTurnId === fence.providerTurnId;
+}
+
 function actionAvailability(
   entry: DesktopSupervisorManifestEntry,
   deliveryRetryAvailable: boolean,
   resourceFreshness: "fresh" | "stale",
   mentionInsertText: string | null,
+  turnControl: AgentInspectorTurnControlProjection | null,
 ): AgentInspectorActionAvailability[] {
   const blockedReceipts = entry.deliveryReceipts?.filter((receipt) =>
     receipt.state === "blocked" && Boolean(receipt.sourceMessageId.trim())) ?? [];
   const blockedReceipt = blockedReceipts.length === 1 ? blockedReceipts[0] : null;
   const stateDependentActionsAvailable = resourceFreshness === "fresh";
-  const canStopTurn = entry.desiredState === "running"
-    && entry.condition === "none"
-    && entry.agentSessionBindingState === "active"
-    && entry.roomAgentState?.turn.state === "responding"
-    && Boolean(entry.workAttemptId && entry.executionGenerationId && entry.providerContinuationId)
-    && !entry.turnControl;
+  const canStopTurn = turnControl?.canStop === true;
   return [
     { kind: "mention", label: "Mention", available: entry.desiredState !== "stopped" && Boolean(mentionInsertText) },
     { kind: "pause", label: "Pause", available: stateDependentActionsAvailable && entry.desiredState === "running" },
@@ -381,6 +519,18 @@ export function projectAgentInspector(
   const presentation = overallPresentation(overallState);
   const resourceFreshness = options.resourceFreshness ?? "fresh";
   const mentionInsertText = options.mentionInsertTextByEntryId?.get(entry.id) ?? null;
+  const rawTurnControl = projectAgentInspectorTurnControl(entry);
+  // A stale Inspector keeps its last meaningful explanation but never offers a
+  // control based on it. The next fresh supervisor projection re-enables it.
+  const turnControl = resourceFreshness === "fresh" || !rawTurnControl
+    ? rawTurnControl
+    : {
+      ...rawTurnControl,
+      canStop: false,
+      canCorrect: false,
+      canResolve: false,
+      detail: "Live supervisor state is required before this turn can be changed.",
+    };
   return {
     entryId: entry.id,
     roomId: entry.roomId,
@@ -397,7 +547,8 @@ export function projectAgentInspector(
     now: nowProjection(entry, overallState),
     assignedWork: exactAssignedWork(entry, options.tasks ?? []),
     recentOutcome: recentOutcome(entry),
-    actions: actionAvailability(entry, options.deliveryRetryAvailable ?? false, resourceFreshness, mentionInsertText),
+    turnControl,
+    actions: actionAvailability(entry, options.deliveryRetryAvailable ?? false, resourceFreshness, mentionInsertText, turnControl),
     mentionInsertText,
     resourceFreshness,
     entry,
