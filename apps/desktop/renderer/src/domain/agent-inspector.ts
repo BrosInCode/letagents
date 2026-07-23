@@ -536,6 +536,19 @@ export async function agentInspectorTurnControlActionId(
   return `inspector-turn:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+/**
+ * Hashing an idempotent action id yields to the event loop. Recheck the
+ * authoritative Inspector fence after that yield and before an IPC effect:
+ * a supervisor push may have advanced the provider turn in the meantime.
+ */
+export async function agentInspectorTurnControlActionIdIfCurrent(
+  actionId: Promise<string>,
+  isCurrent: () => boolean,
+): Promise<string | null> {
+  const resolvedActionId = await actionId;
+  return isCurrent() ? resolvedActionId : null;
+}
+
 function actionAvailability(
   entry: DesktopSupervisorManifestEntry,
   deliveryRetryAvailable: boolean,
