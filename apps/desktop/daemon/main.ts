@@ -17,8 +17,8 @@ import { advanceReconciliationState, beginReconciliationAction, completeReconcil
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
-import { deriveProviderConfigurationSnapshot, resolveProviderConfigurationSnapshot, type ProviderReasoningEffort } from "./provider-configuration.js";
-import { supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
+import { deriveProviderConfigurationSnapshot, type ProviderReasoningEffort } from "./provider-configuration.js";
+import { assertSupervisedPermissionProfileAvailable, supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { SupervisedAgentInboxStore, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
@@ -3493,14 +3493,20 @@ export class SupervisorDaemon {
       }
       const launchConfiguration = await this.store.getAgentConfiguration(entry.id);
       if (!launchConfiguration) throw new Error("Agent configuration disappeared before provider launch.");
-      const launchSnapshot = resolveProviderConfigurationSnapshot({
+      // Stored rows can predate the supervised Inspector contract. Re-check
+      // admission at the last possible boundary so a stale generic default
+      // cannot reach the native provider launch path.
+      const permissionProfileId = assertSupervisedPermissionProfileAvailable(
+        launchConfiguration.provider,
+        launchConfiguration.permission_profile_id,
+      );
+      const launchSnapshot = deriveProviderConfigurationSnapshot({
         provider: launchConfiguration.provider,
         model: launchConfiguration.model,
         reasoningEffort: launchConfiguration.reasoning_effort ?? null,
-        permissionProfileId: launchConfiguration.permission_profile_id,
-        launchPolicy: launchConfiguration.provider_launch_policy,
+        permissionProfileId,
         configurationRevision: launchConfiguration.config_revision,
-      });
+      }, launchConfiguration.provider_launch_policy);
       const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
       const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
       if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
