@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentInspectorTurnControlActionId,
   agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
   agentInspectorOverallState,
@@ -290,6 +291,8 @@ test("turn-control completions are fenced to exact agent, room, work, generation
     workAttemptId: "attempt_1",
     executionGenerationId: "generation_1",
     providerTurnId: "turn_1",
+    inboxItemId: "inbox_1",
+    sourceMessageId: "message_1",
     daemonGeneration: 7,
   };
   assert.equal(agentInspectorTurnControlFenceMatches(fence, current, 7), true);
@@ -301,8 +304,37 @@ test("turn-control completions are fenced to exact agent, room, work, generation
     roomAgentState: { ...current.roomAgentState!, turn: { ...current.roomAgentState!.turn, providerTurnId: "turn_2" } },
   }), 7), false);
   assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { ...current.roomAgentState!.turn, providerTurnId: null } },
+  }), 7), false, "a new responding turn without a checkpoint must not inherit the old turn's control request");
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { state: "failed", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } },
+  }), 7), false, "a missing checkpoint is only a completion proof for a genuinely idle turn");
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
+    roomAgentState: { ...current.roomAgentState!, turn: { ...current.roomAgentState!.turn, inboxItemId: "inbox_2", sourceMessageId: "message_2" } },
+  }), 7), false, "a matching provider turn id still cannot cross a different causal room item");
+  assert.equal(agentInspectorTurnControlFenceMatches(fence, entry({
     roomAgentState: { ...current.roomAgentState!, turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } },
   }), 7), true, "a stop is allowed to leave the same session idle");
+});
+
+test("lost Inspector control responses retry the same exact durable action id", async () => {
+  const base = {
+    entryId: "supervised_1",
+    roomId: "focus_1",
+    workAttemptId: "attempt_1",
+    executionGenerationId: "generation_1",
+    providerTurnId: "turn_1",
+    inboxItemId: "inbox_1",
+    sourceMessageId: "message_1",
+    correction: "Use the smaller dataset.",
+  };
+  const first = await agentInspectorTurnControlActionId(base);
+  const retryAfterLostResponse = await agentInspectorTurnControlActionId({ ...base });
+  assert.equal(first, retryAfterLostResponse, "a retry reaches the existing durable journal action, not a second native effect");
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, correction: "Use the full dataset." }));
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, providerTurnId: "turn_2" }));
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, executionGenerationId: "generation_2" }));
+  assert.notEqual(first, await agentInspectorTurnControlActionId({ ...base, sourceMessageId: "message_2", inboxItemId: "inbox_2" }));
 });
 
 test("Activity suppresses only exact supervised identity, including a sessionless entry", () => {

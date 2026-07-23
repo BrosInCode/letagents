@@ -18,6 +18,8 @@ test("the Inspector routes a correction and uncertain resolution through durable
   assert.match(surface, /emitTurnControl\('resolve_turn_control', undefined, \$event\)/);
   assert.match(shell, /desktopIpc\.supervisor\.controlTurn\(/);
   assert.match(shell, /desktopIpc\.supervisor\.resolveTurnControl\(/);
+  assert.match(shell, /agentInspectorTurnControlActionId\(/);
+  assert.doesNotMatch(shell, /controlTurn\(\{[\s\S]{0,500}actionId: globalThis\.crypto\.randomUUID\(\)/);
   assert.match(shell, /const correction = intent\.kind === "steer_turn" \? intent\.correction\?\.trim\(\) \|\| null : null/);
   assert.match(shell, /if \(intent\.kind === "steer_turn" && !correction\) throw new Error\("Write a correction before applying it\."\)/);
   assert.match(shell, /resolution: intent\.turnControlResolution/);
@@ -26,6 +28,8 @@ test("the Inspector routes a correction and uncertain resolution through durable
 test("the Inspector fences stale control completions and makes uncertainty recoverable instead of retrying blindly", () => {
   assert.match(shell, /let turnControlFence: AgentInspectorTurnControlFence \| null = null/);
   assert.match(shell, /agentInspectorTurnControlFenceMatches\(turnControlFence, currentEntry, supervisorStatus\.value\?\.generation \?\? null\)/);
+  assert.match(shell, /inboxItemId: entry\.roomAgentState\?\.turn\.inboxItemId \?\? null/);
+  assert.match(shell, /sourceMessageId: entry\.roomAgentState\?\.turn\.sourceMessageId \?\? null/);
   assert.match(control, /Mark as applied/);
   assert.match(control, /Mark as not applied/);
   assert.match(control, /Confirming “not applied” unlocks a new request; it never replays the old one\./);

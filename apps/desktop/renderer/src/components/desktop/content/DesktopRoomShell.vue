@@ -384,6 +384,7 @@ import {
 } from "../../../domain/agent-inspector-participant";
 import {
   agentInspectorActionStateForEntry,
+  agentInspectorTurnControlActionId,
   agentInspectorTurnControlFenceMatches,
   projectAgentInspectors,
   type AgentInspectorTurnControlFence,
@@ -2725,6 +2726,8 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         workAttemptId: entry.workAttemptId,
         executionGenerationId: entry.executionGenerationId,
         providerTurnId: control.providerTurnId,
+        inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
+        sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
         daemonGeneration: status.generation,
       };
       const currentEntry = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
@@ -2747,7 +2750,16 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
           entryId: entry.id,
           workAttemptId: entry.workAttemptId,
           executionGenerationId: entry.executionGenerationId,
-          actionId: globalThis.crypto.randomUUID(),
+          actionId: await agentInspectorTurnControlActionId({
+            entryId: entry.id,
+            roomId: entry.roomId,
+            workAttemptId: entry.workAttemptId,
+            executionGenerationId: entry.executionGenerationId,
+            providerTurnId: control.providerTurnId,
+            inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
+            sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
+            correction,
+          }),
           correction,
         });
       }

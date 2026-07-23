@@ -115,7 +115,26 @@ export interface AgentInspectorTurnControlFence {
   workAttemptId: string;
   executionGenerationId: string;
   providerTurnId: string | null;
+  inboxItemId: string | null;
+  sourceMessageId: string | null;
   daemonGeneration: number;
+}
+
+/**
+ * The exact causal identity of one idempotent native turn-control effect.
+ * The action id is derived from every meaningful input so a retry after an
+ * ambiguous IPC response reaches the daemon's existing journal record rather
+ * than creating a second native interrupt/resume request.
+ */
+export interface AgentInspectorTurnControlActionIdentity {
+  entryId: string;
+  roomId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  providerTurnId: string | null;
+  inboxItemId: string | null;
+  sourceMessageId: string | null;
+  correction: string | null;
 }
 
 export interface AgentInspectorActionState {
@@ -477,8 +496,44 @@ export function agentInspectorTurnControlFenceMatches(
     || entry.id !== fence.entryId || entry.roomId !== fence.roomId
     || entry.workAttemptId !== fence.workAttemptId
     || entry.executionGenerationId !== fence.executionGenerationId) return false;
-  const currentProviderTurnId = entry.roomAgentState?.turn.providerTurnId ?? null;
-  return !fence.providerTurnId || !currentProviderTurnId || currentProviderTurnId === fence.providerTurnId;
+  const currentTurn = entry.roomAgentState?.turn;
+  const currentProviderTurnId = currentTurn?.providerTurnId ?? null;
+  // A null provider checkpoint only proves the old turn ended when the room
+  // turn is genuinely idle. During dispatch/respond/publish/retry it could be
+  // a newer turn that has not published its checkpoint yet; failed/unknown is
+  // not a completion proof either.
+  if (!currentProviderTurnId) return currentTurn?.state === "idle";
+  if (!fence.providerTurnId || currentProviderTurnId !== fence.providerTurnId) return false;
+  // Once the exact provider turn is still live, bind its causal room item too.
+  // An idle turn has intentionally cleared those fields after completion.
+  if (currentProviderTurnId) {
+    if (fence.inboxItemId && currentTurn?.inboxItemId !== fence.inboxItemId) return false;
+    if (fence.sourceMessageId && currentTurn?.sourceMessageId !== fence.sourceMessageId) return false;
+  }
+  return true;
+}
+
+/**
+ * A renderer retry must keep the same id even if the first IPC response was
+ * lost. SHA-256 keeps the durable action id bounded without allowing a
+ * different correction, turn, inbox item, or generation to collide with it.
+ */
+export async function agentInspectorTurnControlActionId(
+  identity: AgentInspectorTurnControlActionIdentity,
+): Promise<string> {
+  const canonical = JSON.stringify([
+    "agent-inspector-turn-control-v1",
+    identity.entryId,
+    identity.roomId,
+    identity.workAttemptId,
+    identity.executionGenerationId,
+    identity.providerTurnId,
+    identity.inboxItemId,
+    identity.sourceMessageId,
+    identity.correction,
+  ]);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return `inspector-turn:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function actionAvailability(
