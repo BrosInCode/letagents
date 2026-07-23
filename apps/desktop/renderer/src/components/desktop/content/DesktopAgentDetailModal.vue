@@ -50,7 +50,7 @@
                   :disabled="loadingManagedSessions"
                   :title="loadingManagedSessions ? 'Refreshing agent status' : 'Refresh agent status'"
                   aria-label="Refresh agent status"
-                  @click="() => loadManagedSessions()"
+                  @click="refreshAgentStatus"
                 >
                   <RefreshCw :size="16" aria-hidden="true" />
                 </button>
@@ -227,7 +227,17 @@
               <p>Its durable lifecycle and exact room binding are available in Supervision below.</p>
             </div>
 
-            <div v-else-if="detailSelection.showExternalFallback" class="desktop-agent-detail-empty">
+            <div
+              v-else-if="target.kind === 'resolving' || target.kind === 'unavailable' || (target.kind === 'supervised' && !matchingSupervisorEntries.length)"
+              class="desktop-agent-detail-empty"
+              data-testid="desktop-agent-detail-supervisor-unavailable"
+            >
+              <strong>{{ supervisorUnavailableTitle }}</strong>
+              <p>{{ supervisorUnavailableDetail }}</p>
+              <button type="button" @click="emit('refresh-supervisor')">Try again</button>
+            </div>
+
+            <div v-else-if="target.kind === 'external' && showExternalFallback" class="desktop-agent-detail-empty">
               <strong>No local agent session matched this agent.</strong>
               <p>External agents still appear here through their published room activity.</p>
               <button type="button" @click="emit('open-add-agent')">Add agent</button>
@@ -447,7 +457,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { Ban, Power, RefreshCw, ShieldCheck, Square, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentChangeSummary,
@@ -472,18 +482,19 @@ import {
 } from "../../../domain/reasoning";
 import {
   canStopManagedAgentTurn,
-  exactSupervisorEntriesForTarget,
-  managedAgentDetailSelection,
+  isVisibleManagedAgentSession,
+  managedAgentProviderIdentityForEntry,
   managedAgentSessionDisplayName,
+  managedAgentSessionMatchesReasoning,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSummary,
   managedAgentSessionStatusLabel,
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
+import type { SupervisorEntriesResource } from "../../../domain/agent-inspector-identity";
 import { formatShortDateTime } from "../../../domain/time";
-import { shouldSkipPollTick } from "../../../domain/visibility-polling";
-import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { AgentInspectorSelection } from "./desktop-chat-message/types";
 import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
 import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -503,21 +514,25 @@ import { useManagedAgentSessionsContext } from "./add-agent/managed-agent-sessio
 const props = defineProps<{
   open: boolean;
   roomIdentifier: string;
-  target: AgentModalTarget | null;
+  target: AgentInspectorSelection | null;
   reasoningSessions: DesktopReasoningSession[];
+  supervisorResource: SupervisorEntriesResource;
+  supervisorStatus: DesktopSupervisorDaemonStatus | null;
 }>();
 
 const emit = defineEmits<{
   close: [];
   "open-add-agent": [];
   "open-reasoning": [sessionId: string];
+  "refresh-supervisor": [];
+  "supervisor-entry-updated": [entry: DesktopSupervisorManifestEntry];
 }>();
 
 const dialogElement = ref<HTMLElement | null>(null);
 const managedSessionsContext = useManagedAgentSessionsContext();
 const managedSessions = computed(() => managedSessionsContext.sessions.value);
-const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
-const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
+const supervisorEntries = computed(() => props.supervisorResource.data);
+const supervisorStatus = computed(() => props.supervisorStatus);
 const supervisorError = ref<string | null>(null);
 const updatingSupervisorEntryId = ref<string | null>(null);
 const controllingSupervisorEntryId = ref<string | null>(null);
@@ -533,7 +548,6 @@ const turnControlActions = new Map<string, {
 const stopAgentConfirmEntryId = ref<string | null>(null);
 const stoppingSupervisorEntryId = ref<string | null>(null);
 const expandedSupervisorActivity = ref<Record<string, boolean>>({});
-const knownSupervisorEntryIds = ref<string[]>([]);
 const loadingManagedSessions = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
@@ -546,8 +560,6 @@ const managedChangeSummaries = ref<Record<string, DesktopManagedAgentChangeSumma
 const loadingChangeSummaryIds = ref<Record<string, boolean>>({});
 const expandedChangeSummaryIds = ref<Record<string, boolean>>({});
 const resolvingPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
-let refreshTimer: number | null = null;
-let periodicRefreshInFlight = false;
 let modalStateVersion = 0;
 let previousFocusElement: HTMLElement | null = null;
 
@@ -573,25 +585,29 @@ const reasoningRows = computed(() =>
   latestReasoning.value ? reasoningFieldRows(latestReasoning.value) : []
 );
 
-const detailSelection = computed(() => managedAgentDetailSelection(
-  managedSessions.value,
-  supervisorEntries.value,
-  props.target,
-  latestReasoning.value,
-  knownSupervisorEntryIds.value,
-));
-const matchingManagedSessions = computed(() => detailSelection.value.managedSessions);
-const directMatchingSupervisorEntries = computed(() =>
-  exactSupervisorEntriesForTarget(
-    supervisorEntries.value,
-    matchingManagedSessions.value,
-    props.target?.agentSessionId,
-  )
-);
-watch(directMatchingSupervisorEntries, (entries) => {
-  if (entries?.length) {
-    knownSupervisorEntryIds.value = entries.map((entry) => entry.id);
+const matchingSupervisorEntries = computed(() => {
+  const target = props.target;
+  if (!target || target.kind !== "supervised") return [];
+  return supervisorEntries.value.filter((entry) => entry.id === target.supervisorEntryId);
+});
+const matchingManagedSessions = computed(() => {
+  const target = props.target;
+  if (!target) return [];
+  const eligible = managedSessions.value.filter((session) =>
+    isVisibleManagedAgentSession(session) || Boolean(session.supervisorEntryId)
+  );
+  if (target.kind === "supervised") {
+    return eligible.filter((session) => session.supervisorEntryId === target.supervisorEntryId);
   }
+  if (target.kind !== "external") return [];
+  const targetSessionId = target.agentSessionId?.trim() || null;
+  const targetAgentKey = target.agentKey?.trim() || null;
+  const specificAgentKey = targetAgentKey && /[/:]/.test(targetAgentKey) ? targetAgentKey : null;
+  return eligible.filter((session) =>
+    Boolean(targetSessionId && session.agentSessionId?.trim() === targetSessionId) ||
+    Boolean(specificAgentKey && session.agentKey?.trim() === specificAgentKey) ||
+    managedAgentSessionMatchesReasoning(session, latestReasoning.value)
+  );
 });
 watch(supervisorEntries, (entries) => {
   for (const entry of entries) {
@@ -604,8 +620,33 @@ watch(supervisorEntries, (entries) => {
     }
   }
 });
-const matchingSupervisorEntries = computed(() => detailSelection.value.supervisorEntries);
-const providerIdentity = computed(() => detailSelection.value.providerIdentity);
+const providerIdentity = computed(() => managedAgentProviderIdentityForEntry(matchingSupervisorEntries.value[0]));
+const showExternalFallback = computed(() =>
+  props.target?.kind === "external" && matchingManagedSessions.value.length === 0
+);
+const supervisorUnavailableTitle = computed(() => {
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "ambiguous") {
+    return "This agent's exact supervised identity is ambiguous.";
+  }
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "missing") {
+    return "This supervised agent is no longer available in this room.";
+  }
+  if (props.supervisorResource.state === "error") return "Could not load this agent's supervised state.";
+  return "Loading this agent's supervised state.";
+});
+const supervisorUnavailableDetail = computed(() => {
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "ambiguous") {
+    return "LetAgents found conflicting durable identities and withheld local controls.";
+  }
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "missing") {
+    return "Refresh the room to check whether the saved agent moved or was retired.";
+  }
+  if (props.target?.kind === "unavailable" && props.target.unavailableDetail) {
+    return props.target.unavailableDetail;
+  }
+  if (props.supervisorResource.state === "error") return props.supervisorResource.error;
+  return "LetAgents is confirming the durable agent identity before showing local controls.";
+});
 const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
 );
@@ -644,7 +685,6 @@ watch(
     clearTransientState();
     void nextTick(() => dialogElement.value?.focus());
     void loadManagedSessions();
-    startRefreshTimer();
   },
   { immediate: true },
 );
@@ -671,33 +711,6 @@ watch(
   },
 );
 
-onBeforeUnmount(() => {
-  stopRefreshTimer();
-});
-
-function startRefreshTimer(): void {
-  stopRefreshTimer();
-  refreshTimer = window.setInterval(() => {
-    // Skip while hidden (a background modal need not poll the supervisor) and
-    // skip if the previous tick has not settled — `loadManagedSessions` has no
-    // in-flight guard of its own, so a slow supervisor call would otherwise
-    // stack overlapping requests every 4s.
-    if (shouldSkipPollTick({ hidden: document.hidden, inFlight: periodicRefreshInFlight })) return;
-    periodicRefreshInFlight = true;
-    void loadManagedSessions({ quiet: true, refreshSessions: false }).finally(() => {
-      periodicRefreshInFlight = false;
-    });
-  }, 4_000);
-}
-
-function stopRefreshTimer(): void {
-  if (refreshTimer !== null) {
-    window.clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
-  periodicRefreshInFlight = false;
-}
-
 function clearTransientState(): void {
   loadingManagedSessions.value = false;
   stoppingSessionId.value = null;
@@ -721,15 +734,11 @@ function clearTransientState(): void {
   stopAgentConfirmEntryId.value = null;
   stoppingSupervisorEntryId.value = null;
   expandedSupervisorActivity.value = {};
-  knownSupervisorEntryIds.value = [];
 }
 
 function resetTransientState(): void {
   modalStateVersion += 1;
-  stopRefreshTimer();
   clearTransientState();
-  supervisorEntries.value = [];
-  supervisorStatus.value = null;
 }
 
 function isCurrentModalState(version: number): boolean {
@@ -752,17 +761,8 @@ async function loadManagedSessions(options: {
   }
   managedSessionError.value = null;
   try {
-    const [, entries, daemonStatus] = await Promise.all([
-      options.refreshSessions === false ? Promise.resolve() : managedSessionsContext.refresh(),
-      desktopIpc.supervisor.listAgents(props.roomIdentifier).catch((error) => {
-        supervisorError.value = error instanceof Error ? error.message : "Supervisor daemon unavailable.";
-        return [];
-      }),
-      desktopIpc.supervisor.getStatus().catch(() => null),
-    ]);
+    await (options.refreshSessions === false ? Promise.resolve() : managedSessionsContext.refresh());
     if (!isCurrentModalState(requestVersion)) return;
-    supervisorEntries.value = entries;
-    supervisorStatus.value = daemonStatus;
     await refreshMatchingManagedSessionDetails({
       quiet: options.quiet,
       version: requestVersion,
@@ -778,13 +778,18 @@ async function loadManagedSessions(options: {
   }
 }
 
+function refreshAgentStatus(): void {
+  emit("refresh-supervisor");
+  void loadManagedSessions();
+}
+
 async function setSupervisorDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<void> {
   if (updatingSupervisorEntryId.value) return;
   updatingSupervisorEntryId.value = id;
   supervisorError.value = null;
   try {
     const updated = await desktopIpc.supervisor.setDesiredState(id, desiredState);
-    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((entry) => entry.id !== id)];
+    emit("supervisor-entry-updated", updated);
   } catch (error) {
     supervisorError.value = error instanceof Error ? error.message : "Could not update desired state.";
   } finally {
@@ -878,6 +883,7 @@ async function runTurnControl(entry: DesktopSupervisorManifestEntry, correction:
     turnControlStages.value[entry.id] = result.stages;
     turnControlActions.delete(entry.id);
     if (normalized) turnControlDrafts.value[entry.id] = "";
+    emit("refresh-supervisor");
     await loadManagedSessions({ quiet: true, refreshChanges: false });
   } catch (error) {
     turnControlStages.value[entry.id] = [];
@@ -903,7 +909,7 @@ async function resolveTurnControl(
       actionId: control.actionId,
       resolution,
     });
-    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((candidate) => candidate.id !== entry.id)];
+    emit("supervisor-entry-updated", updated);
   } catch (error) {
     supervisorError.value = error instanceof Error ? error.message : "Could not resolve the uncertain turn control.";
   } finally {
@@ -921,7 +927,7 @@ async function confirmStopSupervisedAgent(id: string): Promise<void> {
   supervisorError.value = null;
   try {
     const updated = await desktopIpc.supervisor.setDesiredState(id, "stopped");
-    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((entry) => entry.id !== id)];
+    emit("supervisor-entry-updated", updated);
   } catch (error) {
     supervisorError.value = error instanceof Error ? error.message : "Could not stop this agent.";
   } finally {

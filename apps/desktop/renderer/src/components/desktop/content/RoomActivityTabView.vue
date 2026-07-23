@@ -118,7 +118,18 @@
         </div>
 
         <aside v-if="selectedTruthfulAgent" class="desktop-activity-detail" data-kind="room-agent">
-          <div class="desktop-activity-detail-header"><div class="desktop-activity-detail-identity"><span class="desktop-activity-dot" :data-state="truthfulTone(selectedTruthfulAgent)" aria-hidden="true"></span><div><h3>{{ truthfulLabel(selectedTruthfulAgent) }}</h3><p>{{ selectedTruthfulAgent.provider }} · supervised room agent</p></div></div></div>
+          <div class="desktop-activity-detail-header">
+            <div class="desktop-activity-detail-identity"><span class="desktop-activity-dot" :data-state="truthfulTone(selectedTruthfulAgent)" aria-hidden="true"></span><div><h3>{{ truthfulLabel(selectedTruthfulAgent) }}</h3><p>{{ selectedTruthfulAgent.provider }} · supervised room agent</p></div></div>
+            <div class="desktop-activity-detail-actions">
+              <button
+                type="button"
+                data-testid="desktop-activity-open-supervised-agent-controls"
+                @click="emit('open-agent-detail', supervisedAgentInspectorRequest(selectedTruthfulAgent, { ownerAttribution: ownerAttribution(selectedTruthfulAgent.createdBy) }))"
+              >
+                Open controls
+              </button>
+            </div>
+          </div>
           <section class="desktop-activity-inspector-list" aria-label="Room agent state">
             <article class="desktop-activity-inspector-row"><span>Connection</span><p>{{ selectedTruthfulAgent.roomAgentState!.connection.state }}{{ selectedTruthfulAgent.roomAgentState!.connection.detail ? ` — ${selectedTruthfulAgent.roomAgentState!.connection.detail}` : "" }}</p></article>
             <article class="desktop-activity-inspector-row"><span>Room observation</span><p>{{ selectedTruthfulAgent.roomAgentState?.ingress?.state || "starting" }}{{ selectedTruthfulAgent.roomAgentState?.ingress?.detail ? ` — ${selectedTruthfulAgent.roomAgentState.ingress.detail}` : "" }}</p></article>
@@ -161,7 +172,7 @@
               <button
                 type="button"
                 data-testid="desktop-activity-open-agent-controls"
-                @click="emit('open-agent-detail', activityParticipantToAgentTarget(selectedLiveParticipant))"
+                @click="emit('open-agent-detail', participantAgentInspectorRequest(activityParticipantToAgentTarget(selectedLiveParticipant)))"
               >
                 Open controls
               </button>
@@ -433,7 +444,11 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import type { ActivityParticipant } from "./room-activity/types";
-import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
+import { activityParticipantToAgentTarget, ownerAttribution } from "./room-activity/agentTarget";
+import {
+  participantAgentInspectorRequest,
+  supervisedAgentInspectorRequest,
+} from "../../../domain/agent-inspector-identity";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
 import {
   canReconnectRoomAgent,
@@ -450,7 +465,7 @@ import {
 } from "../../../domain/room-artifacts";
 import ChangeSummaryFilePanel from "./room-activity/ChangeSummaryFilePanel.vue";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
-import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { AgentInspectorRequest } from "./desktop-chat-message/types";
 
 const props = defineProps<{
   recentActivity: DesktopActivityEntry[];
@@ -472,7 +487,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "open-reasoning": [sessionId: string];
   "open-add-agent": [];
-  "open-agent-detail": [target: AgentModalTarget];
+  "open-agent-detail": [request: AgentInspectorRequest];
   "refresh-room": [];
   "reconnect-room-agent": [entryId: string];
   "recover-room-agent": [entryId: string];
