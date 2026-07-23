@@ -74,7 +74,8 @@ test("wide and compact modes have distinct, accessible spatial behavior", () => 
   assert.match(host, /surfaceComponent\.value\?\.focusInitial\(\)/);
   assert.match(host, /previous\[1\] !== isCompact/);
   assert.match(host, /\}, \{ immediate: true \}\);/);
-  assert.match(styles, /grid-template-columns: minmax\(0, 1fr\) minmax\(360px, 420px\)/);
+  assert.match(styles, /\.agent-inspector-host-wide[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*3[\s\S]*justify-self:\s*end/);
+  assert.doesNotMatch(styles, /\.desktop-room-shell\[data-agent-inspector-open="true"\][\s\S]*grid-template-columns/);
   assert.match(styles, /\.agent-inspector-surface\[data-compact="true"\] \{\s*position: fixed/);
   assert.doesNotMatch(styles, /transition:\s*all|ease-in/);
   assert.match(styles, /prefers-reduced-motion/);

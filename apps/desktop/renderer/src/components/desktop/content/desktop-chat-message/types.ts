@@ -7,6 +7,8 @@ export interface SenderIdentity {
 export interface AgentModalTarget {
   /** Exact room message whose participant affordance opened the Inspector. */
   messageId: string | null;
+  /** Exact publisher idempotency identity for the selected room message. */
+  clientMessageId: string | null;
   actorLabel: string | null;
   displayName: string;
   ownerAttribution: string | null;

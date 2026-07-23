@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.51";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.52";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -311,6 +311,8 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   } | null;
   delivery_receipts?: Array<{
     inbox_item_id: string; source_message_id: string;
+    /** Deterministic publication identity used even before a canonical id was checkpointed. */
+    reply_client_message_id: string;
     /** Exact room message created by this inbox item's final-answer publication. */
     canonical_message_id: string | null;
     state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "retryable" | "blocked" | "cancelled_by_room_move" | "queued_behind_blocked";

@@ -407,7 +407,14 @@ test("desktop local sync forwards client message idempotency key", async () => {
       options?: { source?: string; client_message_id?: string | null; account_id?: string | null },
     ) => {
       createdMessage = { sender, text, options };
-      return { id: "msg_1", sender, text, source: options?.source, timestamp: new Date().toISOString() };
+      return {
+        id: "msg_1",
+        client_message_id: options?.client_message_id ?? null,
+        sender,
+        text,
+        source: options?.source,
+        timestamp: new Date().toISOString(),
+      };
     },
     rememberRoomParticipantFromMessage: async () => undefined,
   };
@@ -445,6 +452,10 @@ test("desktop local sync forwards client message idempotency key", async () => {
   );
 
   assert.equal(res.statusCode, 201);
+  assert.equal(
+    (res.body as { client_message_id?: string | null }).client_message_id,
+    "local-chat:room_1:1",
+  );
   assert.deepEqual(createdMessage, {
     sender: "EmmyMay",
     text: "synced local message",

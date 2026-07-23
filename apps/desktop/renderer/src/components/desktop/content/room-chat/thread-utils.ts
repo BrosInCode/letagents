@@ -91,6 +91,7 @@ export function resolveThreadParent(
 
   return {
     id: replySnapshot.id,
+    clientMessageId: null,
     sender: replySnapshot.sender,
     text: replySnapshot.text,
     attachments: [],
@@ -250,6 +251,7 @@ function displayNameFromParticipantSender(value: string): string {
 function threadReplyToMessage(reply: DesktopRoomMessageReply): DesktopRoomMessage {
   return {
     id: reply.id,
+    clientMessageId: null,
     sender: reply.sender,
     text: reply.text,
     attachments: [],

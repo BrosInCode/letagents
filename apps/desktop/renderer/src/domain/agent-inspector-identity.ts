@@ -68,6 +68,7 @@ export function agentInspectorRequestResetKey(
     selection?.kind === "supervised" ? selection.supervisorEntryId : null,
     selection?.kind === "unavailable" ? selection.unavailableReason : null,
     selection?.messageId ?? null,
+    selection?.clientMessageId ?? null,
     selection?.agentSessionId ?? null,
     selection?.agentKey ?? null,
     selection?.actorLabel ?? null,
@@ -138,13 +139,15 @@ export function resolveSupervisorEntryId(
  */
 export function resolveSupervisorEntryIdForPublishedMessage(
   entries: readonly Pick<DesktopSupervisorManifestEntry, "id" | "deliveryReceipts">[],
-  messageId: string | null | undefined,
+  identity: Pick<AgentModalTarget, "messageId" | "clientMessageId">,
 ): SupervisorIdentityResolution {
-  const canonicalMessageId = exactIdentity(messageId);
-  if (!canonicalMessageId) return { state: "unmatched" };
+  const canonicalMessageId = exactIdentity(identity.messageId);
+  const clientMessageId = exactIdentity(identity.clientMessageId);
+  if (!canonicalMessageId && !clientMessageId) return { state: "unmatched" };
   const matches = entries.filter((entry) =>
     entry.deliveryReceipts?.some((receipt) =>
-      exactIdentity(receipt.canonicalMessageId) === canonicalMessageId));
+      (canonicalMessageId && exactIdentity(receipt.canonicalMessageId) === canonicalMessageId)
+      || (clientMessageId && exactIdentity(receipt.replyClientMessageId) === clientMessageId)));
   if (matches.length > 1) return { state: "ambiguous" };
   return matches.length === 1
     ? { state: "matched", entryId: matches[0]!.id }
@@ -160,6 +163,7 @@ export function supervisedAgentInspectorSelection(
     kind: "supervised",
     supervisorEntryId: entry.id,
     messageId: presentation.messageId ?? null,
+    clientMessageId: presentation.clientMessageId ?? null,
     actorLabel: presentation.actorLabel ?? null,
     displayName,
     ownerAttribution: presentation.ownerAttribution ?? null,
@@ -269,7 +273,7 @@ export function resolveAgentInspectorSelection(
 
   const publicationResolution = resolveSupervisorEntryIdForPublishedMessage(
     roomEntries,
-    target.messageId,
+    target,
   );
   const stableIdentityResolution = resolveSupervisorEntryId(roomEntries, {
     agentSessionId: target.agentSessionId,

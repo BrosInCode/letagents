@@ -48,6 +48,7 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
     delivery_receipts: [{
       inbox_item_id: "inbox_1", source_message_id: "msg_1", state: "blocked", attempt_count: 3,
       canonical_message_id: "msg_reply_1",
+      reply_client_message_id: "supervised-room:agent_1:msg_1:reply:v1",
       provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
       timeline: [{ phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
     }],
@@ -305,6 +306,7 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   assert.deepEqual(projected.deliveryReceipts, [{
     inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
     canonicalMessageId: "msg_reply_1",
+    replyClientMessageId: "supervised-room:agent_1:msg_1:reply:v1",
     providerTurnId: null, blockedByMessageId: null, error: "failed", updatedAt: "2026-01-01T00:00:00.000Z",
     timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
@@ -915,7 +917,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces the prior 2.0.50 implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the prior 2.0.51 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -934,11 +936,11 @@ test("desktop replaces the prior 2.0.50 implementation and accepts only the new 
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.50",
+    "2.0.51",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.50", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.notEqual("2.0.51", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -956,7 +958,7 @@ test("desktop replaces the prior 2.0.50 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.51");
+    assert.equal(status.implementationVersion, "2.0.52");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
