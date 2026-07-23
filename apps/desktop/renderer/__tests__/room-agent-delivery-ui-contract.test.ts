@@ -107,22 +107,20 @@ describe("durable room delivery UI contracts", () => {
     assert.deepEqual([...projection.projectedSessionIds], ["agent_session_stale", "agent_session_live"]);
 
     const activity = await source("src/components/desktop/content/RoomActivityTabView.vue");
-    assert.match(activity, /roomAgentActivityProjection\(props\.supervisorEntries, props\.roomIdentifier\)/);
+    assert.match(activity, /const inspectorTruthfulAgents = computed\(\(\) => props\.agentInspectorFoundationEnabled/);
+    assert.match(activity, /const legacyTruthfulProjection = computed\(\(\) => props\.agentInspectorFoundationEnabled/);
     assert.match(activity, /!hasLiveActivity/);
     assert.match(activity, /projectedSessionIds/);
     assert.match(activity, /legacyReachableAgents/);
     assert.match(activity, /legacyWorkingAgents/);
-    for (const group of ["listening", "responding", "attention", "disconnected"]) {
+    for (const group of ["listening", "responding", "reconnecting", "needs_attention", "starting", "paused", "disconnected"]) {
       assert.match(activity, new RegExp(`key: "${group}"`));
     }
-    assert.match(activity, /Connection<\/span>/);
-    assert.match(activity, /Inbox<\/span>/);
-    assert.match(activity, /Current turn<\/span>/);
     assert.match(activity, /Assigned work<\/span>/);
     assert.match(activity, /desktop-room-agent-reconnect/);
     assert.match(activity, /reconnect-room-agent/);
-    assert.match(activity, /canReconnectRoomAgent/);
-    assert.match(activity, /supervisedAgentDisplayLabel/);
+    assert.match(activity, /selectInspectorAgent\(agent\)/);
+    assert.match(activity, /legacyTruthfulLabel\(agent\)/);
   });
 
   it("routes loaded main and thread links directly, then requests bounded history for an unloaded target", () => {

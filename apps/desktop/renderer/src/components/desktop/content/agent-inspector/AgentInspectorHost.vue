@@ -1,0 +1,158 @@
+<template>
+  <div v-if="open && !compact" class="agent-inspector-host-wide">
+    <Transition name="agent-inspector-panel" appear>
+      <component
+        ref="surfaceComponent"
+        :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
+        v-bind="projection ? { projection, actionState, compact: false } : { ...statusPresentation, compact: false }"
+        @close="emit('close')"
+        @action="forwardAction($event, 'wide')"
+      />
+    </Transition>
+  </div>
+
+  <Teleport v-if="compact" to="body">
+    <Transition name="agent-inspector-scrim">
+      <button
+        v-if="open && compact"
+        class="agent-inspector-scrim"
+        type="button"
+        aria-label="Close agent inspector"
+        @click="emit('close')"
+      ></button>
+    </Transition>
+    <Transition name="agent-inspector-panel">
+      <component
+        ref="surfaceComponent"
+        :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
+        v-if="open"
+        v-bind="projection ? { projection, actionState, compact } : { ...statusPresentation, compact }"
+        @close="emit('close')"
+        @action="forwardAction($event, 'compact')"
+      />
+    </Transition>
+  </Teleport>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import type {
+  AgentInspectorActionIntent,
+  AgentInspectorActionState,
+  AgentInspectorProjection,
+} from "../../../../domain/agent-inspector";
+import AgentInspectorSurface from "./AgentInspectorSurface.vue";
+import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
+import type { AgentInspectorSelection } from "../desktop-chat-message/types";
+import "./agent-inspector.css";
+
+const compactBreakpoint = 920;
+const props = defineProps<{
+  open: boolean;
+  projection: AgentInspectorProjection | null;
+  selection: AgentInspectorSelection;
+  actionState: AgentInspectorActionState | null;
+}>();
+const emit = defineEmits<{
+  close: [];
+  action: [intent: AgentInspectorActionIntent];
+  "presentation-change": [compact: boolean];
+}>();
+
+const compact = ref(false);
+const surfaceComponent = ref<{ focusInitial: () => void; containsFocus: () => boolean } | null>(null);
+const surfaceKind = computed(() => props.projection ? "projection" : "status");
+watch(compact, (value) => emit("presentation-change", value), { immediate: true });
+const statusPresentation = computed(() => {
+  const title = props.selection.displayName || props.selection.sender || "Agent";
+  if (props.selection.kind === "resolving") {
+    return { title, eyebrow: "Agent", heading: "Loading agent state", detail: "Checking the desktop supervisor for this agent’s durable identity." };
+  }
+  if (props.selection.kind === "unavailable" && props.selection.unavailableReason === "load_error") {
+    return { title, eyebrow: "Agent", heading: "Agent state unavailable", detail: props.selection.unavailableDetail || "The desktop supervisor could not be reached." };
+  }
+  if (props.selection.kind === "external") {
+    return { title, eyebrow: "Room participant", heading: "Externally managed agent", detail: "This participant is visible in the room, but it is not controlled by this desktop supervisor." };
+  }
+  return { title, eyebrow: "Agent", heading: "Saved agent unavailable", detail: "The durable agent record is no longer available in this room." };
+});
+let resizeObserver: ResizeObserver | null = null;
+let restoreFocusElement: HTMLElement | null = null;
+const inertSnapshots = new Map<HTMLElement, { inert: boolean; ariaHidden: string | null }>();
+
+function syncCompact(): void {
+  const container = document.querySelector<HTMLElement>(".desktop-room-shell") ?? document.documentElement;
+  compact.value = container.getBoundingClientRect().width < compactBreakpoint;
+}
+
+function forwardAction(intent: AgentInspectorActionIntent, presentation: "wide" | "compact"): void {
+  emit("action", { ...intent, presentation });
+}
+
+function setShellContentInert(inert: boolean): void {
+  if (!inert) {
+    for (const [element, snapshot] of inertSnapshots) {
+      element.inert = snapshot.inert;
+      if (snapshot.ariaHidden === null) element.removeAttribute("aria-hidden");
+      else element.setAttribute("aria-hidden", snapshot.ariaHidden);
+    }
+    inertSnapshots.clear();
+    return;
+  }
+  if (inertSnapshots.size) return;
+  const shell = document.querySelector<HTMLElement>(".desktop-room-shell");
+  if (!shell) return;
+  for (const element of [...shell.children]) {
+    if (!(element instanceof HTMLElement) || element.classList.contains("agent-inspector-host-wide")) continue;
+    inertSnapshots.set(element, { inert: element.inert, ariaHidden: element.getAttribute("aria-hidden") });
+    element.inert = true;
+    element.setAttribute("aria-hidden", "true");
+  }
+}
+
+watch(() => [props.open, compact.value] as const, ([open, isCompact], previous) => {
+  if (open && !previous?.[0]) restoreFocusElement = document.activeElement as HTMLElement | null;
+  setShellContentInert(open && isCompact);
+  if (open && (!previous?.[0] || previous[1] !== isCompact)) {
+    void nextTick(() => surfaceComponent.value?.focusInitial());
+  }
+  if (!open && previous?.[0]) {
+    void nextTick(() => restoreFocusElement?.focus({ preventScroll: true }));
+    restoreFocusElement = null;
+  }
+}, { immediate: true });
+
+watch(surfaceKind, () => {
+  const inspectorOwnedFocus = surfaceComponent.value?.containsFocus() ?? false;
+  if (!props.open || !inspectorOwnedFocus) return;
+  void nextTick(() => surfaceComponent.value?.focusInitial());
+});
+
+function handleHostKeydown(event: KeyboardEvent): void {
+  if (!props.open || !compact.value || event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit("close");
+}
+
+onMounted(() => {
+  syncCompact();
+  if (typeof ResizeObserver !== "undefined") {
+    const container = document.querySelector<HTMLElement>(".desktop-room-shell") ?? document.documentElement;
+    resizeObserver = new ResizeObserver(syncCompact);
+    resizeObserver.observe(container);
+  } else {
+    window.addEventListener("resize", syncCompact);
+  }
+  document.addEventListener("keydown", handleHostKeydown, true);
+});
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  window.removeEventListener("resize", syncCompact);
+  document.removeEventListener("keydown", handleHostKeydown, true);
+  setShellContentInert(false);
+  restoreFocusElement?.focus({ preventScroll: true });
+});
+</script>

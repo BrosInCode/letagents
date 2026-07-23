@@ -2,6 +2,7 @@
   <section
     class="desktop-room-shell"
     :data-liquid-glass="liquidGlassEnabled"
+    :data-agent-inspector-open="Boolean(agentInspectorFoundationEnabled && selectedAgentDetailTarget && !agentInspectorCompact)"
     data-testid="desktop-room-shell"
   >
     <DesktopRoomHeader
@@ -221,6 +222,8 @@
         :messages="visibleMessages"
         :workers="workers"
         :supervisor-entries="supervisorEntries"
+        :agent-projections="agentInspectorProjections"
+        :agent-inspector-foundation-enabled="agentInspectorFoundationEnabled"
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
@@ -261,7 +264,19 @@
       @close="closeReasoningInspector"
     />
 
+    <AgentInspectorHost
+      v-if="agentInspectorFoundationEnabled && selectedAgentDetailTarget"
+      :open="true"
+      :projection="selectedAgentDetailProjection"
+      :selection="selectedAgentDetailTarget"
+      :action-state="selectedAgentInspectorActionState"
+      @close="closeAgentDetail"
+      @action="runAgentInspectorAction"
+      @presentation-change="agentInspectorCompact = $event"
+    />
+
     <DesktopAgentDetailModal
+      v-if="!agentInspectorFoundationEnabled"
       :open="Boolean(selectedAgentDetailTarget)"
       :room-identifier="room.identifier"
       :target="selectedAgentDetailTarget"
@@ -345,6 +360,7 @@ import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
+import { roomMentionCandidates } from "../../../domain/participants";
 import {
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
@@ -352,10 +368,24 @@ import {
   type AgentInspectorSupervisorEntryUpdate,
   type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
+import {
+  AGENT_INSPECTOR_FOUNDATION_ENABLED,
+  projectAgentInspectorsWhenEnabled,
+} from "../../../domain/agent-inspector-feature";
+import {
+  agentInspectorActionStateForEntry,
+  type AgentInspectorActionIntent,
+  type AgentInspectorActionState,
+} from "../../../domain/agent-inspector";
+import {
+  foldSupervisorActivityPush,
+  mergeSupervisorEntriesPoll,
+} from "../../../domain/supervisor-entries-resource";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
 import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
+import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
@@ -465,6 +495,9 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
+const agentInspectorFoundationEnabled = AGENT_INSPECTOR_FOUNDATION_ENABLED;
+const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
+const agentInspectorCompact = ref(false);
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
@@ -533,6 +566,28 @@ const selectedAgentDetailTarget = computed<AgentInspectorSelection | null>(() =>
     props.room.identifier,
   );
 });
+const agentInspectorProjections = computed(() => {
+  if (!agentInspectorFoundationEnabled) return [];
+  return projectAgentInspectorsWhenEnabled(true, supervisorEntries.value, {
+    roomId: props.room.identifier,
+    tasks: props.tasks,
+    deliveryRetryAvailable: deliveryRetryAvailable.value,
+    resourceFreshness: supervisorEntriesResource.value.state === "ready" ? "fresh" : "stale",
+    mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
+  });
+});
+const selectedAgentDetailProjection = computed(() => {
+  const target = selectedAgentDetailTarget.value;
+  if (target?.kind !== "supervised") return null;
+  return agentInspectorProjections.value.find((projection) => projection.entryId === target.supervisorEntryId) ?? null;
+});
+const selectedAgentInspectorActionState = computed(() => {
+  const target = selectedAgentDetailTarget.value;
+  return agentInspectorActionStateForEntry(
+    agentInspectorActionState.value,
+    target?.kind === "supervised" ? target.supervisorEntryId : null,
+  );
+});
 const deliveryReceiptsByMessage = computed(() => {
   const grouped: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>> = {};
   for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
@@ -559,6 +614,7 @@ let managedAgentSessionsRefreshInFlight: Promise<void> | null = null;
 let managedAgentSessionsRefreshQueued = false;
 let managedAgentSessionsRefreshOwnerActive = true;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
+let unsubscribeSupervisorActivity: (() => void) | null = null;
 let environmentRepoStatusRefreshRequestId = 0;
 let inboxReloadAfterCurrentLoad = false;
 let inboxThreadBaselinePending = false;
@@ -709,6 +765,24 @@ const roomParticipants = computed(() =>
     props.room.identifier,
   )
 );
+const agentMentionInsertTextByEntryId = computed(() => {
+  const result = new Map<string, string>();
+  for (const entry of supervisorEntries.value) {
+    const expectedAgentKey = entry.agentKey?.trim();
+    if (!expectedAgentKey) continue;
+    const participant = roomParticipants.value.find((candidate) =>
+      candidate.kind === "agent"
+      && candidate.participantKey === `desktop-supervisor-agent:${entry.id}`
+      && candidate.agentKey === expectedAgentKey);
+    const candidate = participant
+      ? roomMentionCandidates([participant], participant.displayName, 1)[0]
+      : null;
+    if (candidate?.kind === "agent" && candidate.insertText === `agent:${expectedAgentKey}`) {
+      result.set(entry.id, candidate.insertText);
+    }
+  }
+  return result;
+});
 const localAgentWork = computed(() =>
   [
     ...activeManagedAgentWorkIndicators(
@@ -761,6 +835,7 @@ watch(() => props.githubEvents, (nextPage) => {
 watch(() => props.room.identifier, () => {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
+  agentInspectorActionState.value = null;
   activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
   refreshedEnvironmentRepoStatus.value = null;
@@ -912,6 +987,8 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate?.();
   unsubscribeManagedAgentSessionUpdate = null;
+  unsubscribeSupervisorActivity?.();
+  unsubscribeSupervisorActivity = null;
 });
 
 onMounted(() => {
@@ -940,6 +1017,14 @@ onMounted(() => {
       }
     }
   }) || null;
+  if (agentInspectorFoundationEnabled) {
+    unsubscribeSupervisorActivity = desktopIpc.supervisor?.onActivity?.((push) => {
+      const next = foldSupervisorActivityPush(supervisorEntries.value, props.room.identifier, push);
+      if (next === supervisorEntries.value) return;
+      supervisorEntries.value = next;
+      supervisorEntriesUpdatedAt.value = new Date().toISOString();
+    }) || null;
+  }
 });
 
 function rememberChatScrollPosition(scrollTop: number): void {
@@ -1737,22 +1822,29 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
       managedAgentSessions.value = scoped;
     }
   }
-  if (supervisorMutationVersion === supervisorEntriesMutationVersion) {
-    if (entriesResult.ok) {
+  if (entriesResult.ok) {
+    if (supervisorMutationVersion === supervisorEntriesMutationVersion) {
       if (JSON.stringify(entriesResult.entries) !== JSON.stringify(supervisorEntries.value)) {
-        supervisorEntries.value = entriesResult.entries;
+        supervisorEntries.value = mergeSupervisorEntriesPoll(
+          supervisorEntries.value,
+          entriesResult.entries,
+          roomIdentifier,
+        );
       }
-      supervisorEntriesHaveLoaded.value = true;
-      supervisorEntriesUpdatedAt.value = new Date().toISOString();
-      supervisorEntriesState.value = "ready";
-      supervisorEntriesError.value = null;
-    } else {
-      // Keep the last successfully loaded entries. Consumers receive an error
-      // resource instead of an empty list, so supervised identity cannot be
-      // reclassified as external during a transient daemon failure.
-      supervisorEntriesState.value = "error";
-      supervisorEntriesError.value = entriesResult.error;
     }
+    // Even when a newer non-activity mutation wins over this snapshot, the
+    // latest room-scoped poll completed successfully and must release the
+    // resource from its transient refreshing state.
+    supervisorEntriesHaveLoaded.value = true;
+    supervisorEntriesUpdatedAt.value = new Date().toISOString();
+    supervisorEntriesState.value = "ready";
+    supervisorEntriesError.value = null;
+  } else {
+    // Keep the last successfully loaded entries. Consumers receive an error
+    // resource instead of an empty list, so supervised identity cannot be
+    // reclassified as external during a transient daemon failure.
+    supervisorEntriesState.value = "error";
+    supervisorEntriesError.value = entriesResult.error;
   }
 }
 
@@ -1870,11 +1962,160 @@ function openAgentDetailFromParticipant(target: AgentModalTarget): void {
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
+  agentInspectorActionState.value = null;
 }
 
 function closeAgentDetail(): void {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
+  agentInspectorActionState.value = null;
+}
+
+function currentAgentInspectorAction(
+  operationId: string,
+  intent: AgentInspectorActionIntent,
+  requestVersion: number,
+): boolean {
+  return agentInspectorFoundationEnabled
+    && props.room.identifier === intent.roomId
+    && selectedAgentDetailRequestVersion.value === requestVersion
+    && selectedAgentDetailTarget.value?.kind === "supervised"
+    && selectedAgentDetailTarget.value.supervisorEntryId === intent.entryId
+    && agentInspectorActionState.value?.operationId === operationId;
+}
+
+async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Promise<void> {
+  if (
+    !agentInspectorFoundationEnabled
+    || (agentInspectorActionState.value?.status === "running" && agentInspectorActionState.value.entryId === intent.entryId)
+  ) return;
+  if (intent.roomId !== props.room.identifier) return;
+  const projection = agentInspectorProjections.value.find((candidate) => candidate.entryId === intent.entryId);
+  if (!projection || !projection.actions.some((action) => action.kind === intent.kind && action.available)) return;
+
+  if (intent.kind === "mention") {
+    const participant = roomParticipants.value.find((candidate) =>
+      candidate.kind === "agent"
+      && candidate.participantKey === `desktop-supervisor-agent:${projection.entryId}`
+      && Boolean(projection.agentKey)
+      && candidate.agentKey === projection.agentKey);
+    const mention = participant
+      ? roomMentionCandidates([participant], participant.displayName, 1).find((candidate) => candidate.kind === "agent")
+      : null;
+    if (!mention || mention.insertText !== projection.mentionInsertText || mention.insertText !== `agent:${projection.agentKey}`) {
+      agentInspectorActionState.value = {
+        operationId: globalThis.crypto.randomUUID(),
+        entryId: intent.entryId,
+        kind: intent.kind,
+        status: "error",
+        message: "This agent is not currently available in the room mention list.",
+      };
+      return;
+    }
+    if (intent.presentation === "compact") closeAgentDetail();
+    activeTab.value = "chat";
+    await nextTick();
+    roomChatView.value?.focusComposerWithMention(mention.insertText);
+    return;
+  }
+
+  const operationId = globalThis.crypto.randomUUID();
+  const requestVersion = selectedAgentDetailRequestVersion.value;
+  agentInspectorActionState.value = {
+    operationId,
+    entryId: intent.entryId,
+    kind: intent.kind,
+    status: "running",
+    message: actionProgressMessage(intent.kind),
+  };
+  try {
+    let updated: DesktopSupervisorManifestEntry | null = null;
+    if (intent.kind === "pause") {
+      updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "paused");
+    } else if (intent.kind === "resume" || intent.kind === "recover") {
+      updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "running");
+    } else if (intent.kind === "stop_agent") {
+      updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "stopped");
+    } else if (intent.kind === "reconnect") {
+      updated = await desktopIpc.supervisor.reconnectAgent({ entryId: intent.entryId });
+    } else if (intent.kind === "stop_turn") {
+      const entry = projection.entry;
+      if (!entry.workAttemptId || !entry.executionGenerationId) throw new Error("The active turn changed. Refresh and try again.");
+      await desktopIpc.supervisor.controlTurn({
+        entryId: entry.id,
+        workAttemptId: entry.workAttemptId,
+        executionGenerationId: entry.executionGenerationId,
+        actionId: globalThis.crypto.randomUUID(),
+        correction: null,
+      });
+    } else if (intent.kind === "retry_delivery") {
+      const entry = projection.entry;
+      if (!intent.sourceMessageId || !entry.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
+        throw new Error("The delivery binding changed. Refresh and try again.");
+      }
+      await desktopIpc.supervisor.retryRoomDelivery({
+        entryId: entry.id,
+        roomId: intent.roomId,
+        sourceMessageId: intent.sourceMessageId,
+        workAttemptId: entry.workAttemptId,
+        executionGenerationId: entry.executionGenerationId,
+        agentSessionId: entry.agentSessionId,
+      });
+    }
+    if (!currentAgentInspectorAction(operationId, intent, requestVersion)) return;
+    if (updated) {
+      upsertSupervisorEntry({
+        entry: updated,
+        roomIdentifier: intent.roomId,
+        inspectorRequestVersion: requestVersion,
+      });
+    } else {
+      await refreshManagedAgentSessions();
+    }
+    if (!currentAgentInspectorAction(operationId, intent, requestVersion)) return;
+    agentInspectorActionState.value = {
+      operationId,
+      entryId: intent.entryId,
+      kind: intent.kind,
+      status: "success",
+      message: actionSuccessMessage(intent.kind),
+    };
+  } catch (error) {
+    if (!currentAgentInspectorAction(operationId, intent, requestVersion)) return;
+    agentInspectorActionState.value = {
+      operationId,
+      entryId: intent.entryId,
+      kind: intent.kind,
+      status: "error",
+      message: error instanceof Error ? error.message : "The agent action could not be completed.",
+    };
+  }
+}
+
+function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string {
+  return ({
+    mention: "Opening the room composer…",
+    pause: "Pausing this agent…",
+    resume: "Resuming this agent…",
+    reconnect: "Restoring the existing agent connection…",
+    recover: "Recovering this saved agent…",
+    stop_turn: "Stopping the current turn…",
+    retry_delivery: "Retrying this delivery…",
+    stop_agent: "Stopping this agent…",
+  } as const)[kind];
+}
+
+function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string {
+  return ({
+    mention: "Composer ready.",
+    pause: "Agent paused.",
+    resume: "Agent resumed.",
+    reconnect: "Connection handoff requested.",
+    recover: "Recovery started.",
+    stop_turn: "Current turn stopped.",
+    retry_delivery: "Delivery retry started.",
+    stop_agent: "Agent stopped.",
+  } as const)[kind];
 }
 
 function openAddAgentModalFromDetail(): void {
