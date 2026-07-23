@@ -5,12 +5,15 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
 import {
+  isCurrentAgentInspectorOperation,
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
   resolveAgentInspectorManagedSessions,
   resolveAgentInspectorSelection,
   resolveSupervisorEntryId,
   supervisedAgentInspectorRequest,
+  type AgentInspectorOperationContext,
+  type AgentInspectorOperationToken,
   type SupervisorEntriesResource,
 } from "../src/domain/agent-inspector-identity";
 import type {
@@ -274,4 +277,68 @@ test("late supervisor actions cannot update a different room or Inspector reques
     ...update,
     entry: entry({ roomId: "room_b" }),
   }, "room_a", 4), false);
+});
+
+test("an old control promise cannot mutate or unlock a newer Inspector operation", async () => {
+  const oldContext: AgentInspectorOperationContext = {
+    modalStateVersion: 1,
+    roomIdentifier: "room_a",
+    inspectorRequestVersion: 4,
+  };
+  const newContext: AgentInspectorOperationContext = {
+    modalStateVersion: 2,
+    roomIdentifier: "room_b",
+    inspectorRequestVersion: 5,
+  };
+  const oldOperation: AgentInspectorOperationToken = {
+    operationId: "old-operation",
+    entryId: "supervised_garden",
+    providerActionId: "action_shared",
+    context: oldContext,
+  };
+  const newOperation: AgentInspectorOperationToken = {
+    operationId: "new-operation",
+    entryId: "supervised_garden",
+    providerActionId: "action_shared",
+    context: newContext,
+  };
+
+  let currentOperation: AgentInspectorOperationToken | null = oldOperation;
+  let currentContext = oldContext;
+  const writes: string[] = [];
+  let resolveOld!: (value: string) => void;
+  const oldResult = new Promise<string>((resolve) => { resolveOld = resolve; });
+  const settle = async (promise: Promise<string>, operation: AgentInspectorOperationToken) => {
+    try {
+      const value = await promise;
+      if (isCurrentAgentInspectorOperation(operation, currentOperation, currentContext, true)) {
+        writes.push(value);
+      }
+    } catch {
+      if (isCurrentAgentInspectorOperation(operation, currentOperation, currentContext, true)) {
+        writes.push("error");
+      }
+    } finally {
+      if (isCurrentAgentInspectorOperation(operation, currentOperation, currentContext, true)) {
+        currentOperation = null;
+      }
+    }
+  };
+
+  const staleSuccess = settle(oldResult, oldOperation);
+  currentOperation = newOperation;
+  currentContext = newContext;
+  resolveOld("stale success");
+  await staleSuccess;
+  assert.deepEqual(writes, []);
+  assert.equal(currentOperation, newOperation);
+
+  const oldRejectedOperation = { ...oldOperation, operationId: "old-rejection" };
+  let rejectOld!: (error: Error) => void;
+  const oldRejection = new Promise<string>((_resolve, reject) => { rejectOld = reject; });
+  const staleFailure = settle(oldRejection, oldRejectedOperation);
+  rejectOld(new Error("stale failure"));
+  await staleFailure;
+  assert.deepEqual(writes, []);
+  assert.equal(currentOperation, newOperation);
 });
