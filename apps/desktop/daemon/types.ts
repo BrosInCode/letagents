@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.45";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.50";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -78,13 +78,68 @@ export type DaemonAgentRoomMembership = {
   room_id: string;
 };
 
+export type DaemonRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
+export type DaemonRoomMoveRecord = {
+  operation_id: string;
+  request_id: string;
+  agent_id: string;
+  source_room_id: string;
+  destination_room_id: string;
+  daemon_generation: number;
+  work_attempt_id: string | null;
+  execution_generation_id: string | null;
+  agent_session_id: string | null;
+  activating_inbox_item_id: string | null;
+  provider_turn_id: string | null;
+  effect_id: string | null;
+  phase: DaemonRoomMovePhase;
+  remote_room_id: string | null;
+  destination_cursor: string | null;
+  /** Electron durably acknowledged revocation of the exact source session. */
+  source_credentials_revoked: boolean;
+  /** Exact pre-move ingress authority captured by the prepare transaction. */
+  source_cursor_present: boolean;
+  source_cursor: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DaemonPurgePhase = "prepared" | "reprepare_credentials" | "revoking_credentials" | "local_commit" | "complete" | "failed";
+export type DaemonPurgeWorkerSessionAttestation = "exact" | "none" | "unknown" | "not_required";
+export type DaemonPurgeRecord = {
+  operation_id: string;
+  request_id: string;
+  agent_id: string;
+  daemon_generation: number;
+  phase: DaemonPurgePhase;
+  external_revoke_required: boolean;
+  /** Exact runtime attachment captured by the preparation transaction. */
+  attached_work_attempt_id: string | null;
+  /** Filesystem location retained after its durable attempt row is removed. */
+  preserved_workspace_path: string | null;
+  /** Durable proof of an exact session, no minted session, or missing legacy evidence. */
+  worker_session_attestation: DaemonPurgeWorkerSessionAttestation;
+  /** Exact worker session whose bearer must be ended before purge commit. */
+  agent_session_id: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 /** Provider behavior, charter, and authority selected for an agent. */
 export type DaemonAgentConfiguration = {
   agent_id: string;
   provider: string;
   model: string | null;
+  /** Provider-native reasoning setting, applied when a provider runtime starts. */
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   charter: string;
   permission_profile_id: string | null;
+  /** Monotonic editor revision. Configuration is never inferred from runtime. */
+  config_revision?: number;
+  /** Revision most recently consumed by the current provider runtime. */
+  runtime_configuration_revision?: number;
   /** Explicit inbox owner; never infer daemon delivery from native policy. */
   delivery_mode?: DaemonAgentDeliveryMode;
   /** Present only while a legacy Codex polling turn is being fenced. */
@@ -213,7 +268,10 @@ export type DaemonManifestEntry = {
   display_name: string;
   provider: string;
   model: string | null;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   charter: string;
+  config_revision?: number;
+  runtime_configuration_revision?: number;
   desired_state: DesiredState;
   observed_state: ObservedState;
   condition: PolicyCondition;

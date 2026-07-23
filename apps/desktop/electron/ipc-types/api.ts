@@ -33,6 +33,13 @@ import type {
   DesktopManagedAgentStartResult,
   DesktopManagedAgentStopInput,
   DesktopSupervisorAttemptDetail,
+  DesktopSupervisorAgentConfiguration,
+  DesktopSupervisorAgentConfigurationUpdateInput,
+  DesktopSupervisorAgentConfigurationUpdateResult,
+  DesktopSupervisorRoomMove,
+  DesktopSupervisorCurrentRoomMoveInput,
+  DesktopSupervisorRoomMoveOperationInput,
+  DesktopSupervisorRoomMovePrepareInput,
   DesktopSupervisorCreateInput,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
@@ -316,6 +323,14 @@ export interface DesktopApi {
     resolveTurnControl: (input: DesktopSupervisorTurnControlResolutionInput) => Promise<DesktopSupervisorManifestEntry>;
     readAttempt: (id: string) => Promise<DesktopSupervisorAttemptDetail>;
     getAgentInspectorDetail: (input: import("./agents.js").DesktopSupervisorAgentInspectorDetailInput) => Promise<import("./agents.js").DesktopSupervisorAgentInspectorDetail>;
+    getAgentConfiguration: (input: { entryId: string; daemonGeneration: number }) => Promise<DesktopSupervisorAgentConfiguration>;
+    updateAgentConfiguration: (input: DesktopSupervisorAgentConfigurationUpdateInput) => Promise<DesktopSupervisorAgentConfigurationUpdateResult>;
+    prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
+    commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
+    getRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
+    getCurrentRoomMove: (input: DesktopSupervisorCurrentRoomMoveInput) => Promise<DesktopSupervisorRoomMove | null>;
+    retireAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<void>;
+    purgeAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<{ outcome: "purged" | "invalid"; error?: string }>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
     /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;

@@ -60,14 +60,24 @@
     <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleTabKeydown">
       <button ref="overviewTab" id="agent-inspector-overview-tab" type="button" role="tab" :aria-selected="selectedTab === 'overview'" aria-controls="agent-inspector-overview-panel" :tabindex="selectedTab === 'overview' ? 0 : -1" @click="selectTab('overview')">Overview</button>
       <button id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
+      <button id="agent-inspector-settings-tab" type="button" role="tab" :aria-selected="selectedTab === 'settings'" aria-controls="agent-inspector-settings-panel" :tabindex="selectedTab === 'settings' ? 0 : -1" @click="selectTab('settings')">Settings</button>
     </div>
 
     <div class="agent-inspector-scroll-region">
       <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab"><AgentInspectorOverview :projection="projection" /></div>
       <AgentInspectorWork
-        v-else id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"
+        v-else-if="selectedTab === 'work'" id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"
         :resource="workResource" :selected-source-message-id="selectedWorkSourceMessageId" :tasks="projection.assignedWork" :artifacts="workArtifacts"
         @retry="emit('work-retry')" @select-source="emit('work-source-select', $event)" @reveal="emit('reveal-message', $event)"
+      />
+      <AgentInspectorSettings
+        v-else id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
+        :entry-id="projection.entryId" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
+        :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
+        :busy="actionState?.status === 'running'" :conflict="settingsConflict"
+        @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @reload="emit('settings-reload')"
+        @prepare-move="emit('room-move-prepare', $event)" @commit-move="emit('room-move-commit')"
+        @retire="emit('retire')" @purge="emit('purge')"
       />
     </div>
   </aside>
@@ -82,10 +92,13 @@ import type {
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
+import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
+import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
 import AgentInspectorWork from "./AgentInspectorWork.vue";
+import AgentInspectorSettings from "./AgentInspectorSettings.vue";
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
@@ -94,6 +107,12 @@ const props = defineProps<{
   workResource: AgentInspectorWorkResource;
   selectedWorkSourceMessageId: string | null;
   workArtifacts: readonly RoomArtifactTimelineItem[];
+  settingsResource: AgentInspectorConfigurationResource;
+  roomMoveResource: AgentInspectorRoomMoveResource;
+  roomMoveAvailable: boolean;
+  providers: readonly DesktopAgentProvider[];
+  destinations: readonly DesktopFocusRoomInfo[];
+  settingsConflict: boolean;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -102,12 +121,20 @@ const emit = defineEmits<{
   "work-retry": [];
   "work-source-select": [sourceMessageId: string];
   "reveal-message": [canonicalMessageId: string];
+  "settings-selected": [];
+  "settings-patch": [patch: Partial<import("../../../../domain/agent-inspector-settings").AgentInspectorConfigurationDraft>];
+  "settings-save": [overwrite: boolean];
+  "settings-reload": [];
+  "room-move-prepare": [destination: string];
+  "room-move-commit": [];
+  retire: [];
+  purge: [];
 }>();
 
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
-const selectedTab = ref<"overview" | "work">("overview");
+const selectedTab = ref<"overview" | "work" | "settings">("overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
 
 function focusInitial(): void {
@@ -122,18 +149,21 @@ defineExpose({ focusInitial, containsFocus });
 
 watch(() => props.projection.entryId, () => { selectedTab.value = "overview"; });
 
-function selectTab(tab: "overview" | "work"): void {
+function selectTab(tab: "overview" | "work" | "settings"): void {
   if (selectedTab.value === tab) return;
   selectedTab.value = tab;
   if (tab === "work") emit("work-selected");
+  if (tab === "settings") emit("settings-selected");
 }
 
 function handleTabKeydown(event: KeyboardEvent): void {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const next = event.key === 'Home' || event.key === 'ArrowLeft' ? 'overview' : 'work';
+  const tabs: Array<"overview" | "work" | "settings"> = ["overview", "work", "settings"];
+  const current = tabs.indexOf(selectedTab.value);
+  const next = event.key === 'Home' ? 'overview' : event.key === 'End' ? 'settings' : tabs[(current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length]!;
   selectTab(next);
-  void Promise.resolve().then(() => (next === 'overview' ? overviewTab.value : surfaceElement.value?.querySelector<HTMLButtonElement>('#agent-inspector-work-tab'))?.focus());
+  void Promise.resolve().then(() => (next === 'overview' ? overviewTab.value : surfaceElement.value?.querySelector<HTMLButtonElement>(`#agent-inspector-${next}-tab`))?.focus());
 }
 
 function handleKeydown(event: KeyboardEvent): void {

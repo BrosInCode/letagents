@@ -15,6 +15,8 @@ import {
   provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
+  revokeDesktopSupervisorGrantForEntry,
+  revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
   revokeDesktopSupervisorGrant,
 } from "../main/supervisor-grant.js";
 import { DesktopApiError } from "../main/auth.js";
@@ -96,6 +98,260 @@ test("encrypted registry retains disjoint grants for two desktop-managed agents"
     assert.doesNotMatch(file, /lashg_secret_a|lashg_secret_b/);
     assert.match(file, /entry-a/);
     assert.match(file, /entry-b/);
+  });
+});
+
+test("per-entry purge revokes only its grant and removes local recovery only after acknowledgement", async () => {
+  await withRegistry(async () => {
+    await replaceDesktopSupervisorGrantForAgent({ agentKey: "owner/agent-a", metadata: metadata("owner/agent-a", "a"), token: "lashg_a", entryId: "entry-a" }, { storage: keychain });
+    await replaceDesktopSupervisorGrantForAgent({ agentKey: "owner/agent-b", metadata: metadata("owner/agent-b", "b"), token: "lashg_b", entryId: "entry-b" }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntry("entry-a", "session-a", {
+      storage: keychain,
+      apiFetch: (async <T>(path: string) => {
+        calls.push(path);
+        return (path.endsWith("/end")
+          ? { session_id: "session-a", ended_at: "2026-01-01T00:00:00.000Z" }
+          : {}) as T;
+      }) as never,
+    });
+    assert.deepEqual(calls, [
+      "/supervisor-host-grants/grant_a/worker-sessions/session-a/end",
+      "/supervisor-host-grants/grant_a",
+    ]);
+    assert.equal(await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }), null);
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_b");
+  });
+});
+
+test("never-minted purge revokes only the parent grant and persists an idempotent no-session receipt", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-never-minted";
+    const entryId = "entry-never-minted";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "never-minted"),
+      token: "lashg_never_minted",
+      entryId,
+    }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string) => {
+        calls.push(requestPath);
+        return {} as T;
+      }) as never,
+    });
+    assert.deepEqual(calls, ["/supervisor-host-grants/grant_never-minted"]);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null);
+    const registry = JSON.parse(await readFile(path, "utf8")) as {
+      purgeRevocationReceipts: Record<string, {
+        workerSessionAttestation: string;
+        agentSessionId: string | null;
+        sessionEndedAt: string | null;
+      }>;
+    };
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.workerSessionAttestation, "none");
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.agentSessionId, null);
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.sessionEndedAt, null);
+
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
+      storage: keychain,
+      apiFetch: (async () => { throw new Error("DELETE must not repeat after the durable receipt"); }) as never,
+    });
+    assert.deepEqual(calls, ["/supervisor-host-grants/grant_never-minted"]);
+  });
+});
+
+test("per-entry purge fails closed when the local grant registry is missing", async () => {
+  await withRegistry(async () => {
+    let requests = 0;
+    await assert.rejects(
+      revokeDesktopSupervisorGrantForEntry("entry-missing", "session-missing", {
+        storage: keychain,
+        apiFetch: (async () => { requests += 1; return {}; }) as never,
+      }),
+      /local supervisor-grant registry is missing.*local agent state was preserved/,
+    );
+    assert.equal(requests, 0, "an unknown remote identity must never be treated as an acknowledged revoke");
+  });
+});
+
+test("v4 grants remain revocation-unknown and cannot attest purge after restart", async () => {
+  await withRegistry(async (path) => {
+    const entryId = "entry-legacy-purge";
+    const agentKey = "owner/agent-legacy-purge";
+    await writeFile(path, `${JSON.stringify({
+      version: 4,
+      grants: {
+        [agentKey]: {
+          ...metadata(agentKey, "legacy-purge"),
+          agentKey,
+          entryId,
+          lastInstalledDaemonGeneration: 7,
+          encryptedToken: encryptSupervisorGrantForStorage("lashg_legacy_purge", keychain),
+        },
+      },
+      entryAgentKeys: { [entryId]: agentKey },
+      purgeRevocationReceipts: {},
+    })}\n`, "utf8");
+    let requests = 0;
+    for (let restart = 0; restart < 2; restart += 1) {
+      await assert.rejects(
+        revokeDesktopSupervisorGrantForEntry(entryId, "session-legacy-purge", {
+          storage: keychain,
+          apiFetch: (async () => { requests += 1; return {}; }) as never,
+        }),
+        /predates exact session ownership tracking/,
+      );
+      assert.equal(
+        (await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.credentialLifecycle,
+        "unknown",
+      );
+    }
+    assert.equal(requests, 0);
+  });
+});
+
+test("per-entry purge fails closed when either half of the exact local mapping is missing", async () => {
+  for (const missing of ["entry-agent", "agent-grant"] as const) {
+    await withRegistry(async (path) => {
+      const agentKey = `owner/${missing}`;
+      const entryId = `entry-${missing}`;
+      await replaceDesktopSupervisorGrantForAgent({
+        agentKey,
+        metadata: metadata(agentKey, missing),
+        token: `lashg_${missing}`,
+        entryId,
+      }, { storage: keychain });
+      const registry = JSON.parse(await readFile(path, "utf8")) as {
+        grants: Record<string, unknown>;
+        entryAgentKeys: Record<string, string>;
+      };
+      if (missing === "entry-agent") {
+        delete registry.entryAgentKeys[entryId];
+        delete (registry.grants[agentKey] as { entryId?: string }).entryId;
+      } else delete registry.grants[agentKey];
+      await writeFile(path, `${JSON.stringify(registry)}\n`, "utf8");
+      const before = await readFile(path, "utf8");
+
+      let requests = 0;
+      await assert.rejects(
+        revokeDesktopSupervisorGrantForEntry(entryId, `session-${missing}`, {
+          storage: keychain,
+          apiFetch: (async () => { requests += 1; return {}; }) as never,
+        }),
+        missing === "entry-agent" ? /entry-to-agent mapping is missing/ : /exact local grant mapping is missing/,
+      );
+      assert.equal(requests, 0);
+      assert.equal(await readFile(path, "utf8"), before, "the remaining recovery evidence is not erased on an unprovable revoke");
+    });
+  }
+});
+
+test("per-entry purge preserves exact recovery state when the server does not acknowledge DELETE", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-server-failure";
+    const entryId = "entry-server-failure";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "server-failure"),
+      token: "lashg_server_failure",
+      entryId,
+    }, { storage: keychain });
+    const before = await readFile(path, "utf8");
+    await assert.rejects(
+      revokeDesktopSupervisorGrantForEntry(entryId, "session-server-failure", {
+        storage: keychain,
+        apiFetch: (async <T>(requestPath: string) => {
+          if (requestPath.endsWith("/end")) {
+            return { session_id: "session-server-failure", ended_at: "2026-01-01T00:00:00.000Z" } as T;
+          }
+          throw new DesktopApiError(503, { error: "grant service unavailable" });
+        }) as never,
+      }),
+      /grant service unavailable/,
+    );
+    assert.notEqual(await readFile(path, "utf8"), before, "the exact session-end acknowledgement is durably retained");
+    assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_server_failure");
+  });
+});
+
+test("an acknowledged already-revoked response records a durable idempotency receipt", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-idempotent";
+    const entryId = "entry-idempotent";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "idempotent"),
+      token: "lashg_idempotent",
+      entryId,
+    }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntry(entryId, "session-idempotent", {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string) => {
+        calls.push(requestPath);
+        if (requestPath.endsWith("/end")) {
+          return { session_id: "session-idempotent", ended_at: "2026-01-01T00:00:00.000Z" } as T;
+        }
+        throw new DesktopApiError(404, { error: "Active supervisor grant not found." });
+      }) as never,
+    });
+    assert.deepEqual(calls, [
+      "/supervisor-host-grants/grant_idempotent/worker-sessions/session-idempotent/end",
+      "/supervisor-host-grants/grant_idempotent",
+    ]);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null);
+    const registry = JSON.parse(await readFile(path, "utf8")) as {
+      grants: Record<string, unknown>;
+      entryAgentKeys: Record<string, string>;
+      purgeRevocationReceipts: Record<string, {
+        agentKey: string;
+        grantId: string;
+        agentSessionId: string;
+        sessionEndedAt: string;
+        acknowledgedAt: string;
+      }>;
+    };
+    assert.deepEqual(registry.grants, {});
+    assert.deepEqual(registry.entryAgentKeys, {});
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.agentKey, agentKey);
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.grantId, "grant_idempotent");
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.agentSessionId, "session-idempotent");
+    assert.ok(Number.isFinite(new Date(registry.purgeRevocationReceipts[entryId]!.acknowledgedAt).getTime()));
+  });
+});
+
+test("a restart retry consumes the durable revoke receipt without repeating DELETE", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-restart-retry";
+    const entryId = "entry-restart-retry";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "restart-retry"),
+      token: "lashg_restart_retry",
+      entryId,
+    }, { storage: keychain });
+    let requests = 0;
+    await revokeDesktopSupervisorGrantForEntry(entryId, "session-restart-retry", {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string) => {
+        requests += 1;
+        return (requestPath.endsWith("/end")
+          ? { session_id: "session-restart-retry", ended_at: "2026-01-01T00:00:00.000Z" }
+          : {}) as T;
+      }) as never,
+    });
+    assert.match(await readFile(path, "utf8"), /purgeRevocationReceipts/);
+
+    // Every call re-reads the on-disk registry, matching a fresh Electron
+    // process after DELETE succeeded but before the daemon consumed its ack.
+    await revokeDesktopSupervisorGrantForEntry(entryId, "session-restart-retry", {
+      storage: keychain,
+      apiFetch: (async () => { requests += 1; throw new Error("DELETE must not repeat after a durable acknowledgement"); }) as never,
+    });
+    assert.equal(requests, 2);
   });
 });
 
@@ -383,8 +639,8 @@ test("lost DELETE response preserves local recovery, then an explicit 404 retry 
         if (deleteAttempts === 1) throw new Error("delete response lost after server revoke");
         throw new DesktopApiError(404, { error: "Active supervisor grant not found." });
       }
-      assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null,
-        "an acknowledged 404 removes the exact stale local entry before POST");
+      assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, "lashg_cleanup_old",
+        "the old encrypted mapping remains durable until the replacement response is validated and stored");
       const body = JSON.parse(init.body) as Record<string, unknown>;
       return {
         grant_id: "grant_cleanup_new", host_id: body.host_id, installation_id: body.installation_id,
@@ -412,6 +668,134 @@ test("lost DELETE response preserves local recovery, then an explicit 404 retry 
       "POST /supervisor-host-grants",
     ]);
     assert.equal(result.token, "lashg_cleanup_new");
+  });
+});
+
+for (const scenario of [
+  { name: "destination", fromRoom: "room-source", toRoom: "room-destination", sessionId: "session-source" },
+  { name: "rollback", fromRoom: "room-destination", toRoom: "room-source", sessionId: "session-destination" },
+] as const) {
+  test(`lost successful host-grant create response recovers the exact ${scenario.name} scope without dropping old local identity`, async () => {
+    await withRegistry(async () => {
+      const agentKey = `owner/agent-${scenario.name}-lost-create`;
+      const entryId = `entry-${scenario.name}-lost-create`;
+      const installationId = desktopSupervisorGrantInstallationId("desktop_host", entryId);
+      await replaceDesktopSupervisorGrantForAgent({
+        agentKey,
+        metadata: {
+          ...metadata(agentKey, `${scenario.name}-old`),
+          hostId: "desktop_host",
+          installationId,
+          allowedRoomIds: [scenario.fromRoom],
+        },
+        token: `lashg_${scenario.name}_old`,
+        entryId,
+      }, { storage: keychain });
+      const calls: string[] = [];
+      let createAttempts = 0;
+      const apiFetch = (async <T>(requestPath: string, init?: { body?: string }) => {
+        if (requestPath.endsWith("/end")) {
+          calls.push("END");
+          return { session_id: scenario.sessionId, ended_at: "2026-01-01T00:00:00.000Z" } as T;
+        }
+        if (requestPath !== "/supervisor-host-grants") {
+          calls.push("DELETE");
+          return {} as T;
+        }
+        calls.push("POST");
+        createAttempts += 1;
+        assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, `lashg_${scenario.name}_old`,
+          "the replaced mapping remains durable through a lost create response");
+        if (createAttempts === 1) throw new Error("connection reset after grant commit");
+        const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+        return {
+          grant_id: `grant_${scenario.name}_recovered`,
+          host_id: body.host_id,
+          installation_id: body.installation_id,
+          allowed_room_ids: body.allowed_room_ids,
+          allowed_agent_keys: body.allowed_agent_keys,
+          current_generation: 1,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          supervisor_grant: `lashg_${scenario.name}_recovered`,
+        } as T;
+      }) as never;
+      const recovered = await getOrProvisionDesktopSupervisorGrantForAgent({
+        hostId: "desktop_host",
+        entryId,
+        agentKey,
+        roomScopes: [roomScope(scenario.toRoom)],
+        forceReprovision: true,
+        sourceAgentSessionId: scenario.sessionId,
+      }, { storage: keychain, apiFetch });
+      assert.deepEqual(calls, ["END", "DELETE", "POST", "POST"]);
+      assert.deepEqual(recovered.metadata.allowedRoomIds, [scenario.toRoom]);
+      assert.equal(recovered.token, `lashg_${scenario.name}_recovered`);
+      assert.equal((await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }))?.token, recovered.token);
+    });
+  });
+}
+
+test("replacement restart skips an already-acknowledged exact session end and resumes host revoke", async () => {
+  await withRegistry(async () => {
+    const agentKey = "owner/agent-replacement-restart";
+    const entryId = "entry-replacement-restart";
+    const installationId = desktopSupervisorGrantInstallationId("desktop_host", entryId);
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        ...metadata(agentKey, "replacement-restart"),
+        hostId: "desktop_host",
+        installationId,
+        allowedRoomIds: ["room-source"],
+      },
+      token: "lashg_replacement_restart_old",
+      entryId,
+    }, { storage: keychain });
+    let endCalls = 0;
+    let deleteCalls = 0;
+    const input = {
+      hostId: "desktop_host",
+      entryId,
+      agentKey,
+      roomScopes: [roomScope("room-destination")],
+      forceReprovision: true,
+      sourceAgentSessionId: "session-replacement-restart",
+    };
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent(input, {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string) => {
+        if (requestPath.endsWith("/end")) {
+          endCalls += 1;
+          return { session_id: "session-replacement-restart", ended_at: "2026-01-01T00:00:00.000Z" } as T;
+        }
+        deleteCalls += 1;
+        throw new Error("delete response lost");
+      }) as never,
+    }), /delete response lost/);
+    const recovered = await getOrProvisionDesktopSupervisorGrantForAgent(input, {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string, init?: { body?: string }) => {
+        if (requestPath.endsWith("/end")) throw new Error("durable session end must not repeat");
+        if (requestPath !== "/supervisor-host-grants") {
+          deleteCalls += 1;
+          throw new DesktopApiError(404, { error: "already revoked" });
+        }
+        const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+        return {
+          grant_id: "grant_replacement_restart_new",
+          host_id: body.host_id,
+          installation_id: body.installation_id,
+          allowed_room_ids: body.allowed_room_ids,
+          allowed_agent_keys: body.allowed_agent_keys,
+          current_generation: 1,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          supervisor_grant: "lashg_replacement_restart_new",
+        } as T;
+      }) as never,
+    });
+    assert.equal(endCalls, 1);
+    assert.equal(deleteCalls, 2);
+    assert.equal(recovered.token, "lashg_replacement_restart_new");
   });
 });
 

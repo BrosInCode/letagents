@@ -14,12 +14,13 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
+import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest } from "../types.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import type { SupervisedDeliveryHttp } from "../supervised-agent-delivery.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
@@ -29,6 +30,50 @@ import type { ProviderActionPort } from "../provider-action-port.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
+
+/**
+ * Unit ports stand in for the production router, whose successful spawn and
+ * resume responses attest the exact configuration revision applied by the
+ * native adapter. Keep that contract explicit in this daemon harness instead
+ * of weakening the production daemon's attestation check.
+ */
+function configurationAttestingTestPort(port: ProviderActionPort): ProviderActionPort {
+  return new Proxy(port, {
+    get(target, property, receiver) {
+      if (property === "spawn") {
+        return async (request: Parameters<ProviderActionPort["spawn"]>[0]) => {
+          const handle = await target.spawn(request);
+          Object.defineProperty(handle, "appliedConfigurationRevision", {
+            value: request.configurationRevision,
+            enumerable: false,
+            configurable: true,
+          });
+          return handle;
+        };
+      }
+      if (property === "resume") {
+        return async (ref: Parameters<ProviderActionPort["resume"]>[0], request: Parameters<ProviderActionPort["resume"]>[1]) => {
+          const handle = await target.resume(ref, request);
+          Object.defineProperty(handle, "appliedConfigurationRevision", {
+            value: request.configurationRevision,
+            enumerable: false,
+            configurable: true,
+          });
+          return handle;
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+}
+
+class SupervisorDaemon extends ProductionSupervisorDaemon {
+  constructor(...args: ConstructorParameters<typeof ProductionSupervisorDaemon>) {
+    const forwarded = [...args] as ConstructorParameters<typeof ProductionSupervisorDaemon>;
+    if (forwarded[2]) forwarded[2] = configurationAttestingTestPort(forwarded[2]);
+    super(...forwarded);
+  }
+}
 
 const execFileAsync = promisify(execFile);
 const TEST_PROCESS_IDENTITY = execFileSync(
@@ -1031,7 +1076,7 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
   }
 });
 
-test("daemon host-grant bind failure retains the exact spawned provider for a later credential retry", async () => {
+test("worker mint crash windows stay unknown until exact public identity precedes manifest binding", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -1045,6 +1090,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
   let spawns = 0;
   let stops = 0;
   const mintCalls: Array<{ grantGeneration: number; agentInstanceId: string }> = [];
+  let remoteLiveSessionId: string | null = null;
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async () => { spawns += 1; return handle; }, attach: async () => null, attachAction: async () => ({ state: "absent" }),
@@ -1055,6 +1101,28 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
   const grants = {
     createWorkerSession: async (input: { grantGeneration: number; agentInstanceId: string }) => {
       mintCalls.push(input);
+      const prePost = new DatabaseSync(paths.manifestPath);
+      try {
+        const mintState = prePost.prepare("SELECT phase,agent_session_id FROM supervised_worker_mint_states WHERE agent_id=?")
+          .get("host_grant_bind_retry") as { phase: string; agent_session_id: string | null };
+        assert.equal(mintState.phase, "minting_unknown", "the durable none fact becomes unknown before the remote POST starts");
+        assert.equal(mintState.agent_session_id, null);
+      } finally { prePost.close(); }
+      const evidence = new ManifestStore(paths.manifestPath);
+      try {
+        assert.deepEqual(await evidence.durablePurgeWorkerSessionAttestation("host_grant_bind_retry"), {
+          workerSessionAttestation: "unknown",
+          agentSessionId: null,
+        }, "pre-POST and lost-response windows can never authorize grant-only purge");
+      } finally { await evidence.close(); }
+      if (mintCalls.length === 1) {
+        // The server committed this stable instance tuple, but its response was
+        // lost. A retry must recover the same live session rather than minting
+        // a second identity.
+        remoteLiveSessionId = "session-host";
+        throw new Error("simulated lost response after the idempotent remote mint committed");
+      }
+      assert.equal(remoteLiveSessionId, "session-host");
       return { sessionId: "session-host", bearer: "host-bearer-secret", bearerId: "bearer-host", expiresAt: "2030-01-01T00:00:00.000Z" };
     },
   };
@@ -1069,7 +1137,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     internals.workerBindings.bind = async () => { throw new Error("simulated binding write failure"); };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "host_grant_bind_retry", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
-      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id, last_worker_binding: null,
     } });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(spawns, 0, "daemon_inbox Codex cannot spawn without the desktop grant");
@@ -1080,6 +1148,25 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "coordination_blocked", "post-spawn binding failure");
     assert.equal(spawns, 1);
     assert.equal(stops, 0, "credential failure must never stop the spawned provider");
+    const exactMintState = await internals.workerBindings.supervisedWorkerMintState("host_grant_bind_retry");
+    assert.deepEqual(exactMintState, {
+      agent_id: "host_grant_bind_retry",
+      room_id: entry.room_id,
+      agent_instance_id: "daemon:host_grant_bind_retry",
+      phase: "exact",
+      agent_session_id: "session-host",
+      updated_at: exactMintState!.updated_at,
+    });
+    assert.equal((await internals.workerBindings.supervisedWorkerSession("host_grant_bind_retry"))?.agent_session_id, "session-host");
+    const beforeManifestBinding = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(beforeManifestBinding.last_worker_binding, null, "the exact public mint precedes the manifest binding");
+    const exactEvidence = new ManifestStore(paths.manifestPath);
+    try {
+      assert.deepEqual(await exactEvidence.durablePurgeWorkerSessionAttestation("host_grant_bind_retry"), {
+        workerSessionAttestation: "exact",
+        agentSessionId: "session-host",
+      }, "exact mint/session evidence outranks the retained explicit none fact");
+    } finally { await exactEvidence.close(); }
     const beforeRetry = await daemonRequest(paths.socketPath, "attempt.read", { id: "host_grant_bind_retry" });
     assert.equal((beforeRetry.result as { execution_generations: Array<{ terminal: unknown }> }).execution_generations[0]?.terminal, null);
     internals.workerBindings.bind = originalBind;
@@ -1087,6 +1174,7 @@ test("daemon host-grant bind failure retains the exact spawned provider for a la
     assert.equal(retryInstall.ok, true, retryInstall.error);
     await eventually(async () => Boolean(await internals.workerBindings.get("host_grant_bind_retry")), "host worker binding retry");
     assert.equal(spawns, 1, "retry rebinds the exact provider rather than spawning a replacement");
+    assert.equal(remoteLiveSessionId, "session-host", "lost-response recovery retains one remote live session id");
     assert.equal(mintCalls.every((call) => call.grantGeneration === 7 && call.agentInstanceId === "daemon:host_grant_bind_retry"), true);
     const raw = await readFile(paths.manifestPath);
     assert.equal(raw.includes(Buffer.from("host-grant-secret")), false);
@@ -1551,7 +1639,10 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
         retirementConflictInjected = true;
         const admitted = await store.getEntry(id);
         assert(admitted);
-        await originalReplace(expected, { ...admitted, charter: `${admitted.charter} admitted-before-handoff` }, async (commit) => commit());
+        // Charter is Inspector-owned configuration and must survive unrelated
+        // lifecycle replacement. Use profile metadata to model the admitted
+        // concurrent mutation this handoff fallback must preserve.
+        await originalReplace(expected, { ...admitted, display_name: `${admitted.display_name} admitted-before-handoff` }, async (commit) => commit());
         throw new ManifestConflictError("injected admitted mutation advanced the manifest generation");
       }
       return originalReplace(expected, updated, fence);
@@ -1577,7 +1668,7 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
     const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: Array<{ execution_generation_id: string; terminal: unknown }> };
     assert.equal(current.provider_ref?.provider_continuation_id, returnedHandle.providerContinuationId);
-    assert.match(current.charter, /admitted-before-handoff/);
+    assert.match(current.display_name, /admitted-before-handoff/);
     assert.equal(result.execution_generations.length, 1);
     assert.equal(result.execution_generations[0]?.execution_generation_id, current.provider_ref?.execution_generation_id);
     assert.equal(result.execution_generations[0]?.terminal, null);
@@ -3101,6 +3192,56 @@ test("control socket rejects protocol mismatch explicitly", async () => {
     assert.match(response, /Protocol version mismatch/);
     await socket.stop();
   } finally { await env.cleanup(); }
+});
+
+test("lifecycle handlers advertise support and reject coercible or imprecise coordinates", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    const status = (await daemonRequest(paths.socketPath, "daemon.negotiate")).result as {
+      generation: number;
+      capabilities: { agent_lifecycle_v1: boolean };
+    };
+    assert.equal(status.capabilities.agent_lifecycle_v1, true);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id: "strict-lifecycle",
+      desired_state: "stopped",
+      observed_state: "stopped",
+    } })).ok, true);
+
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id: 123,
+      desired_state: "running",
+    })).ok, false, "numeric identities are never coerced into lifecycle coordinates");
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
+      id: "strict-lifecycle",
+      expected_desired_state: true,
+      desired_state: "running",
+    })).ok, false, "boolean states are never string-coerced");
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.retire_agent", {
+      entry_id: "strict-lifecycle",
+      daemon_generation: String(status.generation),
+    })).ok, false, "generation strings are never number-coerced");
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
+      entry_id: " strict-lifecycle",
+      daemon_generation: status.generation,
+      revoked_agent_session_id: null,
+    })).ok, false, "whitespace-altered identities are rejected at the socket boundary");
+    const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(current.id, "strict-lifecycle");
+    assert.equal(current.desired_state, "stopped");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
 });
 
 test("cross-version negotiation is allowed before a generation handoff", async () => {
@@ -5852,6 +5993,378 @@ test("generation handoff reattaches the same provider and publishes its supervis
     await first.stop().catch(() => undefined);
     if (child?.pid) { try { process.kill(child.pid, "SIGKILL"); } catch { /* already stopped */ } }
     await new Promise<void>((resolve) => nativeServer.close(() => resolve()));
+    await env.cleanup();
+  }
+});
+
+test("ambiguous destination join retries when the server commits before the response is lost", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "room-move-lost-response.lock"),
+    socketPath: join(env.root, "room-move-lost-response.sock"),
+    manifestPath: join(env.root, "room-move-lost-response.sqlite"),
+    auditPath: join(env.root, "room-move-lost-response-audit.jsonl"),
+    workerBindingsPath: join(env.root, "room-move-lost-response-bindings.json"),
+  };
+  let destinationMembership = false;
+  let joinAttempts = 0;
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    async poll() { return { messages: [] }; },
+    async latest() { return { messages: [] }; },
+    async publish(input) { return { messageId: "published", roomId: input.roomId }; },
+    async joinRoom(input) {
+      joinAttempts += 1;
+      if (input.roomId === "destination-room") {
+        destinationMembership = true;
+        if (joinAttempts === 1) throw new Error("connection reset after server commit");
+      }
+      return { roomId: input.roomId };
+    },
+  };
+  type Internals = {
+    store: ManifestStore;
+    workerBindings: WorkerBindingStore;
+    reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+  try {
+    await daemon.start();
+    const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const moving: DaemonManifestEntry = {
+      ...entry, id: "lost_response_move", room_id: "source-room", delivery_mode: "daemon_inbox",
+      work_attempt_id: "attempt_lost_response",
+      provider_ref: {
+        ...entry.provider_ref!, work_attempt_id: "attempt_lost_response",
+        execution_generation_id: "run_lost_response",
+      },
+      last_worker_binding: null,
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: moving })).ok, true);
+    const internals = daemon as unknown as Internals;
+    await internals.workerBindings.bind({
+      entry_id: moving.id, room_id: moving.room_id, work_attempt_id: moving.work_attempt_id!,
+      execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "session_source", agent_session_token: "secret_source",
+      api_url: "https://letagents.test",
+    });
+    const prepared = (await internals.store.prepareRoomMove({
+      operation_id: "move_lost_response", request_id: "move_lost_response", agent_id: moving.id,
+      source_room_id: "source-room", destination_room_id: "destination-room", daemon_generation: generation,
+      work_attempt_id: moving.work_attempt_id, execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "session_source", activating_inbox_item_id: null, provider_turn_id: null,
+      effect_id: null, phase: "prepared",
+    })).move;
+    const joining = await internals.store.advanceRoomMove({
+      operationId: prepared.operation_id, agentId: prepared.agent_id, expectedDaemonGeneration: generation,
+      expectedExecutionGenerationId: prepared.execution_generation_id, from: ["prepared"], to: "joining_destination",
+    });
+
+    let move = await internals.reconcileRoomMove(joining);
+    assert.equal(destinationMembership, true, "the simulated server committed destination membership");
+    assert.equal(move.phase, "joining_destination");
+    assert.match(move.error ?? "", /ambiguous and will retry/);
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, "source-room");
+
+    move = await internals.reconcileRoomMove(move);
+    assert.equal(joinAttempts, 2);
+    assert.equal(move.phase, "rotating_credentials");
+    assert.equal(move.source_credentials_revoked, false);
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, "destination-room");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("alias room move journals its canonical destination before local membership and resumes after that crash gap", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "room-move-alias.lock"),
+    socketPath: join(env.root, "room-move-alias.sock"),
+    manifestPath: join(env.root, "room-move-alias.sqlite"),
+    auditPath: join(env.root, "room-move-alias-audit.jsonl"),
+    workerBindingsPath: join(env.root, "room-move-alias-bindings.json"),
+  };
+  const destinationAlias = "destination-alias";
+  const canonicalDestination = "canonical-destination";
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    async poll() { return { messages: [] }; },
+    async latest() { return { messages: [] }; },
+    async publish(input) { return { messageId: "published", roomId: input.roomId }; },
+    async joinRoom(input) {
+      return { roomId: input.roomId === destinationAlias ? canonicalDestination : input.roomId };
+    },
+  };
+  type Internals = {
+    store: ManifestStore;
+    workerBindings: WorkerBindingStore;
+    hostGrants: Map<string, {
+      entryId: string; roomId: string; agentKey: string; grantId: string; supervisorGrant: string;
+      grantGeneration: number; apiUrl: string; daemonGeneration: number;
+      hostId: string; installationId: string; expiresAt: string;
+    }>;
+    updateManifestEntry: (entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry) => Promise<DaemonManifestEntry>;
+    reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+  };
+  const bind = async (daemon: SupervisorDaemon, roomId: string) => {
+    const internals = daemon as unknown as Internals;
+    await internals.workerBindings.bind({
+      entry_id: "alias_move", room_id: roomId, work_attempt_id: "attempt_alias_move",
+      execution_generation_id: "run_alias_move", agent_session_id: `session_${roomId}`,
+      agent_session_token: `secret_${roomId}`, api_url: "https://letagents.test",
+    });
+  };
+  let daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+  try {
+    await daemon.start();
+    const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const moving: DaemonManifestEntry = {
+      ...entry,
+      id: "alias_move",
+      room_id: "source-room",
+      delivery_mode: "daemon_inbox",
+      work_attempt_id: "attempt_alias_move",
+      provider_ref: {
+        ...entry.provider_ref!,
+        work_attempt_id: "attempt_alias_move",
+        execution_generation_id: "run_alias_move",
+      },
+      last_worker_binding: null,
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: moving })).ok, true);
+    await bind(daemon, "source-room");
+    let internals = daemon as unknown as Internals;
+    const prepared = (await internals.store.prepareRoomMove({
+      operation_id: "move_alias_crash", request_id: "move_alias_crash", agent_id: moving.id,
+      source_room_id: "source-room", destination_room_id: destinationAlias, daemon_generation: generation,
+      work_attempt_id: "attempt_alias_move", execution_generation_id: "run_alias_move", agent_session_id: "session_source-room",
+      activating_inbox_item_id: null, provider_turn_id: null, effect_id: null, phase: "prepared",
+    })).move;
+    const joining = await internals.store.advanceRoomMove({
+      operationId: prepared.operation_id, agentId: prepared.agent_id, expectedDaemonGeneration: generation,
+      expectedExecutionGenerationId: prepared.execution_generation_id, from: ["prepared"], to: "joining_destination",
+    });
+
+    const originalUpdate = internals.updateManifestEntry.bind(internals);
+    let injectCrash = true;
+    internals.updateManifestEntry = async (...args) => {
+      const updated = await originalUpdate(...args);
+      if (injectCrash) {
+        injectCrash = false;
+        throw new Error("injected crash after canonical membership commit");
+      }
+      return updated;
+    };
+    await assert.rejects(() => internals.reconcileRoomMove(joining), /injected crash after canonical membership commit/);
+    const crashJournal = await internals.store.getRoomMove(prepared.operation_id);
+    assert.equal(crashJournal?.phase, "joining_destination");
+    assert.equal(crashJournal?.remote_room_id, canonicalDestination, "canonical identity is durable before manifest membership");
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, canonicalDestination);
+    internals.updateManifestEntry = originalUpdate;
+    await daemon.stop();
+
+    daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+    await daemon.start();
+    internals = daemon as unknown as Internals;
+    await bind(daemon, "source-room");
+    let resumed = await internals.reconcileRoomMove((await internals.store.getRoomMove(prepared.operation_id))!);
+    assert.equal(resumed.phase, "rotating_credentials");
+    assert.equal(resumed.source_credentials_revoked, false, "missing process-memory source grant is never treated as revocation evidence");
+    assert.equal(resumed.remote_room_id, canonicalDestination);
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, canonicalDestination);
+    const discovered = await daemonRequest(paths.socketPath, "supervisor.get_current_room_move", {
+      entry_id: moving.id,
+      daemon_generation: resumed.daemon_generation,
+    });
+    assert.equal(discovered.ok, true);
+    assert.equal((discovered.result as DaemonRoomMoveRecord).operation_id, resumed.operation_id);
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.get_current_room_move", {
+      entry_id: moving.id,
+      daemon_generation: resumed.daemon_generation + 1,
+    })).ok, false, "current move discovery is fenced by the exact daemon generation");
+
+    const wrongAck = await daemonRequest(paths.socketPath, "supervisor.acknowledge_room_move_source_revocation", {
+      operation_id: resumed.operation_id, entry_id: resumed.agent_id,
+      source_agent_session_id: "session_wrong", daemon_generation: resumed.daemon_generation,
+    });
+    assert.equal(wrongAck.ok, false, "a different or absent source session can never prove revocation");
+    const exactAck = await daemonRequest(paths.socketPath, "supervisor.acknowledge_room_move_source_revocation", {
+      operation_id: resumed.operation_id, entry_id: resumed.agent_id,
+      source_agent_session_id: "session_source-room", daemon_generation: resumed.daemon_generation,
+    });
+    assert.equal(exactAck.ok, true);
+    resumed = exactAck.result as DaemonRoomMoveRecord;
+    assert.equal(resumed.source_credentials_revoked, true);
+    await bind(daemon, canonicalDestination);
+    internals.hostGrants.set(moving.id, {
+      entryId: moving.id, roomId: canonicalDestination, agentKey: "owner/alias_move",
+      grantId: "grant_destination", supervisorGrant: "secret_destination_grant", grantGeneration: 2,
+      apiUrl: "https://letagents.test", daemonGeneration: resumed.daemon_generation,
+      hostId: "host_1", installationId: "install_1", expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+    resumed = await internals.reconcileRoomMove(resumed);
+    assert.equal(resumed.phase, "active");
+    assert.equal(resumed.remote_room_id, canonicalDestination);
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, canonicalDestination);
+    const noCurrent = await daemonRequest(paths.socketPath, "supervisor.get_current_room_move", {
+      entry_id: moving.id,
+      daemon_generation: resumed.daemon_generation,
+    });
+    assert.equal(noCurrent.ok, true);
+    assert.equal(noCurrent.result, null, "terminal moves are not returned by current-move discovery");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("room-move rollback replays every external and local crash edge across daemon restart", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "room-move.lock"),
+    socketPath: join(env.root, "room-move.sock"),
+    manifestPath: join(env.root, "room-move.sqlite"),
+    auditPath: join(env.root, "room-move-audit.jsonl"),
+    workerBindingsPath: join(env.root, "room-move-bindings.json"),
+  };
+  let rejectSourceJoin = true;
+  let joinCalls = 0;
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    async poll() { return { messages: [] }; },
+    async latest() { return { messages: [] }; },
+    async publish(input) { return { messageId: "published", roomId: input.roomId }; },
+    async joinRoom(input) {
+      joinCalls += 1;
+      if (rejectSourceJoin) throw new Error("injected source join failure");
+      return { roomId: input.roomId };
+    },
+  };
+  type Internals = {
+    store: ManifestStore;
+    workerBindings: WorkerBindingStore;
+    supervisedInbox: SupervisedAgentInboxStore;
+    updateManifestEntry: (entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry) => Promise<DaemonManifestEntry>;
+    reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+  };
+  const bind = async (daemon: SupervisorDaemon, roomId: string) => {
+    const internals = daemon as unknown as Internals;
+    await internals.workerBindings.bind({
+      entry_id: "rollback_move", room_id: roomId, work_attempt_id: "attempt_move",
+      execution_generation_id: "run_move", agent_session_id: `session_${roomId}`,
+      agent_session_token: `secret_${roomId}`, api_url: "https://letagents.test",
+    });
+  };
+  let daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+  try {
+    await daemon.start();
+    const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const moving: DaemonManifestEntry = {
+      ...entry,
+      id: "rollback_move",
+      room_id: "destination-room",
+      delivery_mode: "daemon_inbox",
+      work_attempt_id: "attempt_move",
+      provider_ref: {
+        ...entry.provider_ref!,
+        work_attempt_id: "attempt_move",
+        execution_generation_id: "run_move",
+      },
+      last_worker_binding: null,
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: moving })).ok, true);
+    let internals = daemon as unknown as Internals;
+    await internals.supervisedInbox.bootstrapCursor({
+      agent_id: moving.id, room_id: "source-room", last_observed_message_id: "msg_17",
+    });
+    await bind(daemon, "destination-room");
+    const prepared = (await internals.store.prepareRoomMove({
+      operation_id: "move_rollback", request_id: "move_rollback", agent_id: moving.id,
+      source_room_id: "source-room", destination_room_id: "destination-room", daemon_generation: generation,
+      work_attempt_id: "attempt_move", execution_generation_id: "run_move", agent_session_id: "session_destination-room",
+      activating_inbox_item_id: null, provider_turn_id: null, effect_id: null, phase: "prepared",
+    })).move;
+    assert.equal(prepared.source_cursor, "msg_17");
+    let move = await internals.store.advanceRoomMove({
+      operationId: prepared.operation_id, agentId: prepared.agent_id, expectedDaemonGeneration: generation,
+      expectedExecutionGenerationId: prepared.execution_generation_id, from: ["prepared"], to: "rollback_required",
+      remoteRoomId: "destination-room", error: "injected post-join failure",
+    });
+
+    move = await internals.reconcileRoomMove(move);
+    assert.equal(move.phase, "rollback_required");
+    assert.match(move.error ?? "", /source join failure/);
+    assert.equal(joinCalls, 1);
+    await daemon.stop();
+
+    // A successor adopts only the journal generation. It cannot invent the
+    // failed external acknowledgement and waits for a freshly supplied bearer.
+    daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+    await daemon.start();
+    internals = daemon as unknown as Internals;
+    assert.equal((await internals.store.getRoomMove("move_rollback"))?.phase, "rollback_required");
+    await bind(daemon, "destination-room");
+    rejectSourceJoin = false;
+
+    // Crash after the idempotent external source rejoin but before local
+    // membership mutation: the journal remains rollback_required.
+    const originalUpdate = internals.updateManifestEntry.bind(internals);
+    let failLocalCommit = true;
+    internals.updateManifestEntry = async (...args) => {
+      if (failLocalCommit) { failLocalCommit = false; throw new Error("injected local membership crash"); }
+      return originalUpdate(...args);
+    };
+    let pendingRollback = (await internals.store.getRoomMove("move_rollback"))!;
+    await assert.rejects(() => internals.reconcileRoomMove(pendingRollback), /local membership crash/);
+    assert.equal((await internals.store.getRoomMove("move_rollback"))?.phase, "rollback_required");
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, "destination-room");
+    internals.updateManifestEntry = originalUpdate;
+
+    // Crash after local source membership but before ingress restoration.
+    const originalIngressRollback = internals.supervisedInbox.rollbackRoomMoveIngress.bind(internals.supervisedInbox);
+    let failIngressCommit = true;
+    internals.supervisedInbox.rollbackRoomMoveIngress = async (...args) => {
+      if (failIngressCommit) { failIngressCommit = false; throw new Error("injected ingress restoration crash"); }
+      return originalIngressRollback(...args);
+    };
+    pendingRollback = (await internals.store.getRoomMove("move_rollback"))!;
+    await assert.rejects(() => internals.reconcileRoomMove(pendingRollback), /ingress restoration crash/);
+    assert.equal((await internals.store.getRoomMove("move_rollback"))?.phase, "rollback_required");
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, "source-room");
+    internals.supervisedInbox.rollbackRoomMoveIngress = originalIngressRollback;
+
+    // Crash after ingress and destination-credential retirement but before the
+    // terminal journal edge. Rebinding source authority lets the replay finish.
+    const originalAdvance = internals.store.advanceRoomMove.bind(internals.store);
+    let failTerminalCommit = true;
+    internals.store.advanceRoomMove = async (...args) => {
+      if (failTerminalCommit && args[0].from.includes("rollback_required") && args[0].to === "failed") {
+        failTerminalCommit = false;
+        throw new Error("injected terminal journal crash");
+      }
+      return originalAdvance(...args);
+    };
+    pendingRollback = (await internals.store.getRoomMove("move_rollback"))!;
+    await assert.rejects(() => internals.reconcileRoomMove(pendingRollback), /terminal journal crash/);
+    assert.equal((await internals.store.getRoomMove("move_rollback"))?.phase, "rollback_required");
+    assert.equal((await internals.supervisedInbox.cursor(moving.id))?.room_id, "source-room");
+    assert.equal((await internals.supervisedInbox.cursor(moving.id))?.last_observed_message_id, "msg_17");
+    assert.equal(await internals.workerBindings.get(moving.id), null);
+    internals.store.advanceRoomMove = originalAdvance;
+    await bind(daemon, "source-room");
+
+    move = await internals.reconcileRoomMove((await internals.store.getRoomMove("move_rollback"))!);
+    assert.equal(move.phase, "failed");
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, "source-room");
+    assert.equal((await internals.supervisedInbox.cursor(moving.id))?.last_observed_message_id, "msg_17");
+    const later = await internals.store.prepareRoomMove({
+      operation_id: "move_after_rollback", request_id: "move_after_rollback", agent_id: moving.id,
+      source_room_id: "source-room", destination_room_id: "third-room", daemon_generation: move.daemon_generation,
+      work_attempt_id: "attempt_move", execution_generation_id: "run_move", agent_session_id: "session_source-room",
+      activating_inbox_item_id: null, provider_turn_id: null, effect_id: null, phase: "prepared",
+    });
+    assert.equal(later.created, true, "terminal compensation releases the unique active-move fence");
+  } finally {
+    await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });

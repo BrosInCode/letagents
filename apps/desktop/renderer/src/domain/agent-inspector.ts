@@ -60,7 +60,10 @@ export type AgentInspectorActionKind =
   | "recover"
   | "stop_turn"
   | "retry_delivery"
-  | "stop_agent";
+  | "retire_agent"
+  | "save_settings"
+  | "move_room"
+  | "purge_agent";
 
 export interface AgentInspectorActionAvailability {
   kind: AgentInspectorActionKind;
@@ -364,7 +367,7 @@ function actionAvailability(
       available: Boolean(stateDependentActionsAvailable && deliveryRetryAvailable && blockedReceipt),
       sourceMessageId: blockedReceipt?.sourceMessageId,
     },
-    { kind: "stop_agent", label: "Stop agent", available: stateDependentActionsAvailable && entry.desiredState !== "stopped", danger: true },
+    { kind: "retire_agent", label: "Retire agent", available: stateDependentActionsAvailable && entry.desiredState !== "stopped", danger: true },
   ];
 }
 

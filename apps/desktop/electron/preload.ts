@@ -249,6 +249,14 @@ const api: DesktopApi = {
     resolveTurnControl: (input) => ipcRenderer.invoke("desktop:supervisor:resolve-turn-control", input),
     readAttempt: (id) => ipcRenderer.invoke("desktop:supervisor:read-attempt", id),
     getAgentInspectorDetail: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-inspector-detail", input),
+    getAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-configuration", input),
+    updateAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:update-agent-configuration", input),
+    prepareRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:prepare-room-move", input),
+    commitRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:commit-room-move", input),
+    getRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-room-move", input),
+    getCurrentRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-current-room-move", input),
+    retireAgent: (input) => ipcRenderer.invoke("desktop:supervisor:retire-agent", input),
+    purgeAgent: (input) => ipcRenderer.invoke("desktop:supervisor:purge-agent", input),
     onActivity: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
       ipcRenderer.on("desktop:supervisor:activity", listener);

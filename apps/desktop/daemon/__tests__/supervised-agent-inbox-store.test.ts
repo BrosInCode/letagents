@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { DaemonStateSchema } from "../daemon-state-database.js";
+import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 
 async function fixture() {
@@ -118,7 +118,7 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
   } finally { await env.cleanup(); }
 });
 
-test("room move cancels only later old-room work and clears old ingress authority", async () => {
+test("room move compensation restores only its source queue and exact pre-move cursor idempotently", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
     await store.bootstrapCursor({ agent_id: "mover", room_id: "old-room", last_observed_message_id: "9" });
@@ -134,12 +134,27 @@ test("room move cancels only later old-room work and clears old ingress authorit
     await store.checkpointTurnStarted(current!.inbox_item_id, "turn-move");
     await store.transition(current!.inbox_item_id, "awaiting_result");
     await store.transition(current!.inbox_item_id, "acknowledged_no_reply");
-    const cancelled = await store.commitRoomMoveQueue({ agent_id: "mover", old_room_id: "old-room", after_fifo_sequence: current!.fifo_sequence });
+    const cancelled = await store.commitRoomMoveQueue({ operation_id: "move_1", agent_id: "mover", old_room_id: "old-room", after_fifo_sequence: current!.fifo_sequence });
     assert.equal(cancelled, 1);
     assert.equal((await store.get(later!.inbox_item_id))?.state, "cancelled_by_room_move");
     assert.equal((await store.receipts("mover"))[1]?.timeline.at(-1)?.phase, "room_move_cancelled");
     assert.equal(await store.cursor("mover"), null);
     assert.equal(await store.ingressHealth("mover"), null);
+    await store.commitRoomMoveCursor({ agent_id: "mover", source_room_id: "old-room", destination_room_id: "new-room", last_observed_message_id: "40" });
+    const restored = await store.rollbackRoomMoveIngress({
+      operation_id: "move_1", agent_id: "mover", source_room_id: "old-room", destination_room_id: "new-room",
+      source_cursor_present: true, source_cursor: "11", after_fifo_sequence: current!.fifo_sequence,
+    });
+    assert.equal(restored, 1);
+    assert.equal((await store.get(current!.inbox_item_id))?.state, "acknowledged_no_reply");
+    assert.equal((await store.get(later!.inbox_item_id))?.state, "pending");
+    assert.equal((await store.cursor("mover"))?.room_id, "old-room");
+    assert.equal((await store.cursor("mover"))?.last_observed_message_id, "11");
+    assert.equal((await store.receipts("mover"))[1]?.timeline.at(-1)?.phase, "retry_scheduled");
+    assert.equal(await store.rollbackRoomMoveIngress({
+      operation_id: "move_1", agent_id: "mover", source_room_id: "old-room", destination_room_id: "new-room",
+      source_cursor_present: true, source_cursor: "11", after_fifo_sequence: current!.fifo_sequence,
+    }), 0, "a crash replay cannot enqueue the restored message twice");
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -330,7 +345,7 @@ test("older marker with physical v7 delivery tables installs v9 before advancing
     database.close();
     const reopened = new SupervisedAgentInboxStore(env.database); await reopened.receipts("repair-v8"); await reopened.close();
     const inspection = new DatabaseSync(env.database);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.ok(inspection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='supervised_agent_pruned_sources'").get());
     inspection.close();
   } finally { await env.cleanup(); }
@@ -392,7 +407,7 @@ test("v7 repair adds a missing causal-event table without rewriting canonical in
     await first.close();
     const partialV7 = new DatabaseSync(env.database);
     partialV7.exec("DROP TABLE supervised_agent_inbox_events");
-    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
     partialV7.close();
     const repaired = new SupervisedAgentInboxStore(env.database);
     const preserved = (await repaired.receipts("repair"))[0]!;
@@ -487,7 +502,7 @@ test("a post-COMMIT v6 scrub interruption leaves a durable marker that a reopen 
     await prepareSecretBearingV5(env);
     const interrupted = new DatabaseSync(env.database);
     assert.throws(() => new DaemonStateSchema(undefined, () => { throw new Error("interrupt after v6 commit"); }).createSchema(interrupted), /interrupt after v6 commit/);
-    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
+    assert.equal((interrupted.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.equal((interrupted.prepare("SELECT checksum FROM migration_records WHERE migration_key='v6-worker-token-scrub'").get() as { checksum: string }).checksum, "pending");
     interrupted.close();
     const reopened = new DatabaseSync(env.database);

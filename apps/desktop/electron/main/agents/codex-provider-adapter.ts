@@ -14,6 +14,7 @@ import {
 } from "./codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
+import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -708,7 +709,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex spawn requires the durable agent display name from the manifest.");
     }
 
-    const policy = normalizeLaunchPolicy(req.launchPolicy);
+    const policy = normalizeLaunchPolicy(attestProviderSpawnPolicy("codex", req));
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,
@@ -808,6 +809,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
             threadId: resumeRef.providerContinuationId,
             cwd: req.cwd,
             ...policy,
+            ...(req.model ? { model: req.model } : {}),
+            ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
           });
         } catch (error) {
           if (!isMethodNotFound(error)) throw error;
@@ -820,6 +823,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
           cwd: req.cwd,
           ...policy,
+          ...(req.model ? { model: req.model } : {}),
+          ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });
       }
       const threadId = threadResult.thread?.id;

@@ -1091,6 +1091,66 @@ export function registerDesktopIpcHandlers(
       return supervisorDaemonClient.getAgentInspectorDetail(input);
     },
   );
+  targetIpcMain.handle("desktop:supervisor:get-agent-configuration", async (_event, input: { entryId: string; daemonGeneration: number }) =>
+    supervisorDaemonClient.getAgentConfiguration(input.entryId, input.daemonGeneration));
+  targetIpcMain.handle("desktop:supervisor:update-agent-configuration", async (_event, input: import("../ipc-types.js").DesktopSupervisorAgentConfigurationUpdateInput) =>
+    supervisorDaemonClient.updateAgentConfiguration(input));
+  targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) =>
+    supervisorDaemonClient.prepareRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:commit-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) => {
+    let move = await supervisorDaemonClient.commitRoomMove(input);
+    for (let step = 0; step < 4; step += 1) {
+      if (move.phase === "rotating_credentials") {
+        try {
+          await supervisorGrantCoordinator.prepareRoomMoveDestination(move);
+          move = await supervisorDaemonClient.commitRoomMove(input);
+          continue;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          move = await supervisorDaemonClient.rollbackRoomMove({ ...input, error: detail });
+          try {
+            await supervisorGrantCoordinator.prepareRoomMoveSourceRollback(move);
+            return await supervisorDaemonClient.commitRoomMove(input);
+          } catch (rollbackError) {
+            throw new Error(`Destination credential preparation failed (${detail}); source authority rollback is pending: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+          }
+        }
+      }
+      if (move.phase === "rollback_required") {
+        move = await supervisorDaemonClient.rollbackRoomMove({
+          ...input, error: move.error ?? "Resuming durable room-move rollback.",
+        });
+        await supervisorGrantCoordinator.prepareRoomMoveSourceRollback(move);
+        move = await supervisorDaemonClient.commitRoomMove(input);
+        continue;
+      }
+      return move;
+    }
+    return move;
+  });
+  targetIpcMain.handle("desktop:supervisor:get-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) =>
+    supervisorDaemonClient.getRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:get-current-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorCurrentRoomMoveInput) =>
+    supervisorDaemonClient.getCurrentRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
+    supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration));
+  targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
+    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, false);
+    if (prepared.outcome !== "revocation_required") return prepared;
+    if (prepared.revocationKind === "grant_only") {
+      await supervisorGrantCoordinator.revokeEntryForPurgeWithoutWorkerSession(input.entryId);
+      const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, true);
+      return committed.outcome === "revocation_required"
+        ? { outcome: "invalid" as const, error: "Purge grant revocation was not durably acknowledged." }
+        : committed;
+    }
+    if (prepared.revocationKind !== "worker_session" || !prepared.agentSessionId) {
+      return { outcome: "invalid" as const, error: "Purge did not identify an exact revocation mode." };
+    }
+    await supervisorGrantCoordinator.revokeEntryForPurge(input.entryId, prepared.agentSessionId);
+    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, prepared.agentSessionId, false);
+    return committed.outcome === "revocation_required" ? { outcome: "invalid" as const, error: "Purge credential revocation was not durably acknowledged." } : committed;
+  });
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;
     onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));

@@ -186,6 +186,11 @@ export interface ProviderSpawnRequest {
    * hands it to the native harness verbatim; LetAgents never reinterprets it.
    */
   launchPolicy: unknown;
+  /** Exact configuration snapshot selected before this native runtime starts. */
+  model?: string | null;
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  permissionProfileId?: string | null;
+  configurationRevision?: number;
   /** Present when this spawn continues a prior session (requires capabilities.resume). */
   resumeFrom?: ProviderContinuationRef | null;
   /** Explicit daemon bridge identity inherited by the provider's MCP child. */

@@ -121,3 +121,9 @@ test("small inspector labels use the accessible secondary text token", () => {
   const ratio = (luminance("a1a1aa") + 0.05) / (luminance("111112") + 0.05);
   assert.ok(ratio >= 4.5, `expected 4.5:1, received ${ratio.toFixed(2)}:1`);
 });
+
+test("Inspector controls keep a 44px minimum interaction target", () => {
+  assert.match(styles, /\.agent-inspector-surface button \{ min-height: 44px; \}/);
+  assert.match(styles, /\.agent-inspector-tabs button \{[^}]*min-height: 44px/);
+  assert.match(styles, /\.agent-inspector-field input, \.agent-inspector-field select, \.agent-inspector-field textarea \{[^}]*min-height: 44px/);
+});
