@@ -10,13 +10,11 @@ const PAYLOAD_PREVIEW_LIMIT = 800;
 const DEPTH_LIMIT = 4;
 const NODE_LIMIT = 48;
 const COLLECTION_LIMIT = 16;
-const SECRET_KEY = /(?:access[_-]?token|api[_-]?key|authorization|bearer|cookie|credential|password|passwd|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|token)/i;
-const SECRET_NAME_SOURCE = String.raw`(?:access[_ -]?token|api[_ -]?key|authorization|proxy[_ -]?authorization|bearer|client[_ -]?secret|cookie|credential|password|passwd|passphrase|private[_ -]?key|refresh[_ -]?token|secret|session[_ -]?token|token|(?:anthropic|azure|gemini|github|gitlab|google|groq|huggingface|letagents|openai|openrouter)[_ -]?(?:api[_ -]?key|access[_ -]?token|secret|token))`;
-const DOUBLE_QUOTED_SECRET_TEXT = new RegExp(String.raw`(["']?(?:${SECRET_NAME_SOURCE})["']?\s*[:=]\s*)"(?:\\.|[^"\\])*"`, "gi");
-const SINGLE_QUOTED_SECRET_TEXT = new RegExp(String.raw`(["']?(?:${SECRET_NAME_SOURCE})["']?\s*[:=]\s*)'(?:\\.|[^'\\])*'`, "gi");
-const MALFORMED_QUOTED_SECRET_TEXT = new RegExp(String.raw`\b(?:${SECRET_NAME_SOURCE})\b\s*[:=]\s*["'][^\r\n]*`, "gi");
-const UNQUOTED_SECRET_TEXT = new RegExp(String.raw`\b(?:${SECRET_NAME_SOURCE})\b\s*[:=]\s*(?:bearer\s+)?[^\s,;}\]]+`, "gi");
-const PRIVATE_KEY_BLOCK = /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----/gi;
+const SECRET_SUFFIX_SOURCE = String.raw`(?:token|secret(?:[_ .-]?key)?|password|passwd|passphrase|pass|private[_ .-]?key|access[_ .-]?key|api[_ .-]?key|auth(?:orization)?|credential(?:s)?|cookie|bearer)`;
+const SECRET_IDENTIFIER_SOURCE = String.raw`(?:(?:[a-z0-9]+)(?:[_\-.][a-z0-9]+)*[_\-.])?${SECRET_SUFFIX_SOURCE}`;
+const SECRET_IDENTIFIER = new RegExp(String.raw`^${SECRET_IDENTIFIER_SOURCE}$`, "i");
+const SECRET_ASSIGNMENT_START = new RegExp(String.raw`\b(${SECRET_IDENTIFIER_SOURCE})\b(?:\\?["'])?\s*[:=]\s*`, "gi");
+const PRIVATE_KEY_BLOCK = /-----BEGIN (PGP PRIVATE KEY BLOCK|PRIVATE KEY|RSA PRIVATE KEY|DSA PRIVATE KEY|EC PRIVATE KEY|OPENSSH PRIVATE KEY)-----[\s\S]*?-----END \1-----/gi;
 const COOKIE_HEADER = /\b(?:cookie|set-cookie)\s*:\s*[^\r\n]*/gi;
 const BEARER_VALUE = /\bbearer\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi;
 const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/gi;
@@ -58,6 +56,54 @@ function redactMatches(text: string, pattern: RegExp, context: SanitizeContext, 
   });
 }
 
+function lineEnd(text: string, start: number): number {
+  const carriageReturn = text.indexOf("\r", start);
+  const lineFeed = text.indexOf("\n", start);
+  if (carriageReturn < 0) return lineFeed < 0 ? text.length : lineFeed;
+  if (lineFeed < 0) return carriageReturn;
+  return Math.min(carriageReturn, lineFeed);
+}
+
+function secretValueEnd(text: string, start: number): number {
+  const escapedDelimiter = text.slice(start, start + 2);
+  if (escapedDelimiter === '\\"' || escapedDelimiter === "\\'") {
+    const closing = text.indexOf(escapedDelimiter, start + 2);
+    return closing < 0 ? lineEnd(text, start) : closing + 2;
+  }
+  const delimiter = text[start];
+  if (delimiter === '"' || delimiter === "'") {
+    for (let index = start + 1; index < text.length; index += 1) {
+      if (text[index] !== delimiter) continue;
+      let slashCount = 0;
+      for (let previous = index - 1; previous >= start && text[previous] === "\\"; previous -= 1) slashCount += 1;
+      if (slashCount % 2 === 0) return index + 1;
+    }
+    return lineEnd(text, start);
+  }
+  const authScheme = /^(?:basic|bearer)\s+/i.exec(text.slice(start));
+  let end = start + (authScheme?.[0].length ?? 0);
+  while (end < text.length && !/[\s,;}\]\r\n]/.test(text[end] ?? "")) end += 1;
+  return end;
+}
+
+function redactSecretAssignments(text: string, context: SanitizeContext): string {
+  SECRET_ASSIGNMENT_START.lastIndex = 0;
+  let cursor = 0;
+  let result = "";
+  let match: RegExpExecArray | null;
+  while ((match = SECRET_ASSIGNMENT_START.exec(text)) !== null) {
+    const valueStart = SECRET_ASSIGNMENT_START.lastIndex;
+    const valueEnd = secretValueEnd(text, valueStart);
+    if (valueEnd <= valueStart) continue;
+    result += `${text.slice(cursor, valueStart)}[REDACTED]`;
+    cursor = valueEnd;
+    SECRET_ASSIGNMENT_START.lastIndex = valueEnd;
+    context.redacted = true;
+  }
+  SECRET_ASSIGNMENT_START.lastIndex = 0;
+  return cursor === 0 ? text : `${result}${text.slice(cursor)}`;
+}
+
 function sanitizeEncodedJson(text: string, context: SanitizeContext): string {
   const trimmed = text.trim();
   const isCandidate = (trimmed.startsWith("{") && trimmed.endsWith("}"))
@@ -78,10 +124,7 @@ function safeText(value: unknown, context: SanitizeContext): string {
   text = sanitizeEncodedJson(text, context);
   text = redactMatches(text, PRIVATE_KEY_BLOCK, context);
   text = redactMatches(text, COOKIE_HEADER, context);
-  text = redactMatches(text, DOUBLE_QUOTED_SECRET_TEXT, context, (_match, prefix) => `${prefix}"[REDACTED]"`);
-  text = redactMatches(text, SINGLE_QUOTED_SECRET_TEXT, context, (_match, prefix) => `${prefix}'[REDACTED]'`);
-  text = redactMatches(text, MALFORMED_QUOTED_SECRET_TEXT, context);
-  text = redactMatches(text, UNQUOTED_SECRET_TEXT, context);
+  text = redactSecretAssignments(text, context);
   text = redactMatches(text, BEARER_VALUE, context);
   text = redactMatches(text, URL_USERINFO, context, (_match, protocol) => `${protocol}[REDACTED]@`);
   text = redactMatches(text, PROVIDER_TOKEN, context);
@@ -112,7 +155,7 @@ export function sanitizeAgentInspectorDiagnosticsValue(value: unknown, context =
   const result: Record<string, AgentInspectorDiagnosticsValue> = {};
   const keys = Object.keys(value as Record<string, unknown>).sort();
   for (const key of keys.slice(0, COLLECTION_LIMIT)) {
-    if (SECRET_KEY.test(key) || /durablepayloadref|lastterminal/i.test(key)) { context.redacted = true; result[key] = "[REDACTED]"; continue; }
+    if (SECRET_IDENTIFIER.test(key.trim()) || /durablepayloadref|lastterminal/i.test(key)) { context.redacted = true; result[key] = "[REDACTED]"; continue; }
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     result[key] = descriptor?.get ? "[ACCESSOR_OMITTED]" : sanitizeAgentInspectorDiagnosticsValue(descriptor?.value, context, depth + 1).value;
   }

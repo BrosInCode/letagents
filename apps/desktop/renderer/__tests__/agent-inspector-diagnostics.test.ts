@@ -45,16 +45,48 @@ test("diagnostics redacts secrets embedded in arbitrary string leaves", () => {
     `authorization: "Bearer ${CANARY}"`,
     `password='${CANARY}'`,
     `OPENAI_API_KEY="${CANARY}"`,
+    `AWS_SECRET_ACCESS_KEY=${CANARY}`,
+    `NPM_TOKEN='${CANARY}'`,
+    `SLACK_BOT_TOKEN: "${CANARY}"`,
+    `export SENTRY_AUTH_TOKEN=${CANARY}`,
+    `{"CLOUDFLARE_API_TOKEN":"${CANARY}"}`,
+    `"{\\"GITHUB_APP_PRIVATE_KEY\\":\\"${CANARY}\\"}"`,
+    `STRIPE_SECRET_KEY=\\"${CANARY}\\"`,
     `Cookie: session=${CANARY}; theme=dark`,
     `https://user:${CANARY}@example.com/private`,
     `Bearer ${CANARY}`,
     `-----BEGIN PRIVATE KEY-----\n${CANARY}\n-----END PRIVATE KEY-----`,
+    `-----BEGIN RSA PRIVATE KEY-----\n${CANARY}\n-----END RSA PRIVATE KEY-----`,
+    `-----BEGIN OPENSSH PRIVATE KEY-----\n${CANARY}\n-----END OPENSSH PRIVATE KEY-----`,
+    `-----BEGIN EC PRIVATE KEY-----\n${CANARY}\n-----END EC PRIVATE KEY-----`,
+    `-----BEGIN PGP PRIVATE KEY BLOCK-----\n${CANARY}\n-----END PGP PRIVATE KEY BLOCK-----`,
   ];
   for (const hostile of cases) {
     const result = sanitizeAgentInspectorDiagnosticsValue(hostile);
     assert.doesNotMatch(JSON.stringify(result.value), new RegExp(CANARY), hostile);
     assert.equal(result.redacted, true, hostile);
   }
+});
+
+test("diagnostics preserves benign identifier near-misses", () => {
+  const benign = {
+    TOKEN_COUNT: CANARY,
+    AUTH_STATUS: CANARY,
+    COOKIE_POLICY: CANARY,
+    ACCESS_KEY_ID: CANARY,
+    PUBLIC_KEY: CANARY,
+    SSH_PUBLIC_KEY: CANARY,
+    CLIENT_ID: CANARY,
+    COMPASS: CANARY,
+    SECRETARY: CANARY,
+    KEYBOARD_LAYOUT: CANARY,
+  };
+  const structured = sanitizeAgentInspectorDiagnosticsValue(benign);
+  assert.equal(structured.redacted, false);
+  assert.equal(JSON.stringify(structured.value).match(new RegExp(CANARY, "g"))?.length, Object.keys(benign).length);
+  const text = sanitizeAgentInspectorDiagnosticsValue("TOKEN_COUNT=7 AUTH_STATUS=ready COMPASS=north PUBLIC_KEY=visible");
+  assert.equal(text.redacted, false);
+  assert.equal(text.value, "TOKEN_COUNT=7 AUTH_STATUS=ready COMPASS=north PUBLIC_KEY=visible");
 });
 
 test("diagnostics keeps only newest bounded activity and never exposes raw terminal or durable references", () => {
@@ -72,11 +104,11 @@ test("diagnostics keeps only newest bounded activity and never exposes raw termi
 test("projected summaries, last errors, and copied reports cannot leak string-encoded credentials", () => {
   const source = projection([
     {
-      ...event(1, `{"authorization":"Bearer ${CANARY}"}`),
-      summary: `authorization: "Bearer ${CANARY}"`,
+      ...event(1, `{"SLACK_BOT_TOKEN":"${CANARY}"}`),
+      summary: `NPM_TOKEN="${CANARY}"`,
     },
   ]);
-  source.entry.lastError = `"{\\"OPENAI_API_KEY\\":\\"${CANARY}\\"}"`;
+  source.entry.lastError = `"{\\"AWS_SECRET_ACCESS_KEY\\":\\"${CANARY}\\"}"`;
   const result = projectAgentInspectorDiagnostics(source);
   assert.doesNotMatch(result.recovery.lastError ?? "", new RegExp(CANARY));
   assert.doesNotMatch(result.activity[0]?.summary ?? "", new RegExp(CANARY));
