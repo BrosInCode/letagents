@@ -39,7 +39,7 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
   const surface = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)), "utf8");
   const work = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorWork.vue", import.meta.url)), "utf8");
-  assert.match(shell, /if \(!agentInspectorFoundationEnabled\) return;/);
+  assert.doesNotMatch(shell, /agentInspectorFoundationEnabled/);
   assert.match(shell, /capabilities\.agentInspectorDetail/);
   assert.match(shell, /agentInspectorWorkRequestStillCurrent/);
   assert.match(shell, /agentInspectorWorkResource\.value = \{ status: "loading", detail: null, error: null, sourceMessageId \}/);

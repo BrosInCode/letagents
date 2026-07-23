@@ -92,6 +92,9 @@ type WireEntry = {
     action_id: string;
     work_attempt_id: string;
     execution_generation_id: string;
+    // Older daemons can still report a turn-control journal while a desktop
+    // handoff is in progress. Treat the extra display hint as additive.
+    has_correction?: boolean;
     status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
     capability: "native_interrupt" | "restart_resume" | "unsupported";
     interrupted: boolean | null;
@@ -1122,6 +1125,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
       actionId: entry.turn_control.action_id,
       workAttemptId: entry.turn_control.work_attempt_id,
       executionGenerationId: entry.turn_control.execution_generation_id,
+      hasCorrection: Boolean(entry.turn_control.has_correction),
       status: entry.turn_control.status,
       capability: entry.turn_control.capability,
       interrupted: entry.turn_control.interrupted,

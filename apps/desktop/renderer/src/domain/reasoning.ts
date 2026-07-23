@@ -25,6 +25,32 @@ export function latestReasoningSessionForTarget(
     )[0] || null;
 }
 
+/**
+ * Inspector parity without presentation-label identity joins. When both
+ * durable identifiers are present, the same reasoning stream must satisfy
+ * both of them.
+ */
+export function latestReasoningSessionForExactIdentity(
+  identity: Pick<ReasoningAgentTarget, "agentSessionId" | "agentKey">,
+  sessions: readonly DesktopReasoningSession[],
+): DesktopReasoningSession | null {
+  const sessionId = normalizeAgentKey(identity.agentSessionId);
+  const agentKey = specificAgentKey(identity.agentKey);
+  if (!sessionId && !agentKey) return null;
+  return sessions
+    .filter((session) => {
+      const sessionIdMatches = !sessionId
+        || normalizeAgentKey(session.agentSessionId) === sessionId;
+      const keyMatches = !agentKey
+        || specificAgentKey(session.agentKey) === agentKey;
+      return sessionIdMatches && keyMatches;
+    })
+    .sort((left, right) =>
+      timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt)
+      || String(right.id).localeCompare(String(left.id))
+    )[0] || null;
+}
+
 export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[] {
   return [
     target.actorLabel,

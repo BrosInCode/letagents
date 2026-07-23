@@ -1,6 +1,14 @@
 <template>
   <div class="agent-inspector-overview">
     <AgentInspectorNow :now="projection.now" />
+    <AgentInspectorTurnControl
+      :entry-id="projection.entryId"
+      :control="projection.turnControl"
+      :busy="busy"
+      @stop="emit('stop-turn')"
+      @correct="emit('correct-turn', $event)"
+      @resolve="emit('resolve-turn-control', $event)"
+    />
     <AgentInspectorReadinessRail :facts="projection.readiness" />
 
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-charter-title">
@@ -36,6 +44,12 @@
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
 import AgentInspectorNow from "./AgentInspectorNow.vue";
 import AgentInspectorReadinessRail from "./AgentInspectorReadinessRail.vue";
+import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 
-defineProps<{ projection: AgentInspectorProjection }>();
+defineProps<{ projection: AgentInspectorProjection; busy: boolean }>();
+const emit = defineEmits<{
+  "stop-turn": [];
+  "correct-turn": [correction: string];
+  "resolve-turn-control": [resolution: "not_applied" | "applied"];
+}>();
 </script>

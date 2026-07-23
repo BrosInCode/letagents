@@ -11,8 +11,8 @@ const shell = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/DesktopRoomShell.vue",
   import.meta.url,
 )), "utf8");
-const detailModal = readFileSync(fileURLToPath(new URL(
-  "../src/components/desktop/content/DesktopAgentDetailModal.vue",
+const participantSurface = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue",
   import.meta.url,
 )), "utf8");
 const providerRail = readFileSync(fileURLToPath(new URL(
@@ -100,8 +100,10 @@ test("the room shell owns managed-session polling and provides the live context"
   assert.match(shell, /mutationVersion === managedAgentSessionsMutationVersion/);
   assert.match(shell, /managedAgentSessionsRefreshInFlight/);
   assert.match(shell, /managedAgentSessionsRefreshQueued/);
-  assert.match(detailModal, /useManagedAgentSessionsContext/);
-  assert.doesNotMatch(detailModal, /listManagedAgentSessions/);
+  assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
+  assert.match(shell, /:managed-sessions="roomManagedAgentSessions"/);
+  assert.match(shell, /@session-updated="applyAgentInspectorParticipantSessionUpdate"/);
+  assert.doesNotMatch(participantSurface, /listManagedAgentSessions/);
 });
 
 test("setup owns provider, preflight, authentication, and worktree lifecycles", () => {
