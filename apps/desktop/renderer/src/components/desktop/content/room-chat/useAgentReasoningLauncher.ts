@@ -19,12 +19,15 @@ interface AgentReasoningLauncherOptions {
 
 export function useAgentReasoningLauncher(options: AgentReasoningLauncherOptions) {
   function openAgentModal(target: AgentModalTarget): void {
-    const resolvedTarget = agentTargetWithPresenceSession(target, options.presence());
     if (options.openAgentDetail) {
-      options.openAgentDetail(resolvedTarget);
+      // Inspector supervision is resolved later from the message's own stable
+      // session/key identity plus the daemon manifest. Presence actor labels
+      // are presentation data and must not grant supervised controls.
+      options.openAgentDetail(target);
       return;
     }
 
+    const resolvedTarget = agentTargetWithPresenceSession(target, options.presence());
     const session = latestReasoningForAgent(resolvedTarget, options.reasoningSessions());
     if (session) {
       options.openReasoning(session.id);

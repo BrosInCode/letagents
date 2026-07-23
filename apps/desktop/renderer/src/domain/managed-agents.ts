@@ -283,6 +283,24 @@ export interface ManagedAgentProviderIdentity {
   bindingState: DesktopSupervisorManifestEntry["agentSessionBindingState"];
 }
 
+export function managedAgentProviderIdentityForEntry(
+  entry: DesktopSupervisorManifestEntry | null | undefined,
+): ManagedAgentProviderIdentity | null {
+  if (!entry) return null;
+  const providerId = entry.provider.trim();
+  if (!providerId) return null;
+  const label = managedAgentProviderLabel(providerId);
+  const model = entry.model?.trim() || null;
+  return {
+    supervisorEntryId: entry.id,
+    providerId,
+    label,
+    model,
+    accessibleLabel: model ? `${label} · ${model}` : label,
+    bindingState: entry.agentSessionBindingState,
+  };
+}
+
 /**
  * Resolve provider presentation only after an exact daemon/session binding is
  * available. The Inspector must not infer a provider from a display name: two
@@ -304,18 +322,7 @@ export function managedAgentProviderIdentityForTarget(
   if (!exactEntries || exactEntries.length !== 1) return null;
 
   const entry = exactEntries[0]!;
-  const providerId = entry.provider.trim();
-  if (!providerId) return null;
-  const label = managedAgentProviderLabel(providerId);
-  const model = entry.model?.trim() || null;
-  return {
-    supervisorEntryId: entry.id,
-    providerId,
-    label,
-    model,
-    accessibleLabel: model ? `${label} · ${model}` : label,
-    bindingState: entry.agentSessionBindingState,
-  };
+  return managedAgentProviderIdentityForEntry(entry);
 }
 
 export function managedAgentProviderLabel(providerId: string): string {

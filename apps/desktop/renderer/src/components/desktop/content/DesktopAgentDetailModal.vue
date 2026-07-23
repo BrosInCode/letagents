@@ -50,7 +50,7 @@
                   :disabled="loadingManagedSessions"
                   :title="loadingManagedSessions ? 'Refreshing agent status' : 'Refresh agent status'"
                   aria-label="Refresh agent status"
-                  @click="() => loadManagedSessions()"
+                  @click="refreshAgentStatus"
                 >
                   <RefreshCw :size="16" aria-hidden="true" />
                 </button>
@@ -227,7 +227,17 @@
               <p>Its durable lifecycle and exact room binding are available in Supervision below.</p>
             </div>
 
-            <div v-else-if="detailSelection.showExternalFallback" class="desktop-agent-detail-empty">
+            <div
+              v-else-if="target.kind === 'resolving' || target.kind === 'unavailable' || (target.kind === 'supervised' && !matchingSupervisorEntries.length)"
+              class="desktop-agent-detail-empty"
+              data-testid="desktop-agent-detail-supervisor-unavailable"
+            >
+              <strong>{{ supervisorUnavailableTitle }}</strong>
+              <p>{{ supervisorUnavailableDetail }}</p>
+              <button type="button" @click="emit('refresh-supervisor')">Try again</button>
+            </div>
+
+            <div v-else-if="target.kind === 'external' && showExternalFallback" class="desktop-agent-detail-empty">
               <strong>No local agent session matched this agent.</strong>
               <p>External agents still appear here through their published room activity.</p>
               <button type="button" @click="emit('open-add-agent')">Add agent</button>
@@ -447,7 +457,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, ref, shallowRef, watch } from "vue";
 import { Ban, Power, RefreshCw, ShieldCheck, Square, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentChangeSummary,
@@ -472,8 +482,8 @@ import {
 } from "../../../domain/reasoning";
 import {
   canStopManagedAgentTurn,
-  exactSupervisorEntriesForTarget,
-  managedAgentDetailSelection,
+  isVisibleManagedAgentSession,
+  managedAgentProviderIdentityForEntry,
   managedAgentSessionDisplayName,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSummary,
@@ -481,9 +491,17 @@ import {
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
+import {
+  agentInspectorRequestResetKey,
+  isCurrentAgentInspectorOperation,
+  resolveAgentInspectorManagedSessions,
+  type AgentInspectorOperationContext,
+  type AgentInspectorOperationToken,
+  type AgentInspectorSupervisorEntryUpdate,
+  type SupervisorEntriesResource,
+} from "../../../domain/agent-inspector-identity";
 import { formatShortDateTime } from "../../../domain/time";
-import { shouldSkipPollTick } from "../../../domain/visibility-polling";
-import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { AgentInspectorSelection } from "./desktop-chat-message/types";
 import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
 import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -503,25 +521,33 @@ import { useManagedAgentSessionsContext } from "./add-agent/managed-agent-sessio
 const props = defineProps<{
   open: boolean;
   roomIdentifier: string;
-  target: AgentModalTarget | null;
+  target: AgentInspectorSelection | null;
+  requestVersion: number;
   reasoningSessions: DesktopReasoningSession[];
+  supervisorResource: SupervisorEntriesResource;
+  supervisorStatus: DesktopSupervisorDaemonStatus | null;
 }>();
 
 const emit = defineEmits<{
   close: [];
   "open-add-agent": [];
   "open-reasoning": [sessionId: string];
+  "refresh-supervisor": [];
+  "supervisor-entry-updated": [update: AgentInspectorSupervisorEntryUpdate];
 }>();
 
 const dialogElement = ref<HTMLElement | null>(null);
 const managedSessionsContext = useManagedAgentSessionsContext();
 const managedSessions = computed(() => managedSessionsContext.sessions.value);
-const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
-const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
+const supervisorEntries = computed(() => props.supervisorResource.data);
+const supervisorStatus = computed(() => props.supervisorStatus);
 const supervisorError = ref<string | null>(null);
-const updatingSupervisorEntryId = ref<string | null>(null);
-const controllingSupervisorEntryId = ref<string | null>(null);
-const resolvingTurnControlEntryId = ref<string | null>(null);
+const updatingSupervisorOperation = shallowRef<AgentInspectorOperationToken | null>(null);
+const controllingSupervisorOperation = shallowRef<AgentInspectorOperationToken | null>(null);
+const resolvingTurnControlOperation = shallowRef<AgentInspectorOperationToken | null>(null);
+const updatingSupervisorEntryId = computed(() => updatingSupervisorOperation.value?.entryId ?? null);
+const controllingSupervisorEntryId = computed(() => controllingSupervisorOperation.value?.entryId ?? null);
+const resolvingTurnControlEntryId = computed(() => resolvingTurnControlOperation.value?.entryId ?? null);
 const turnControlDrafts = ref<Record<string, string>>({});
 const turnControlStages = ref<Record<string, DesktopSupervisorTurnControlResult["stages"]>>({});
 const turnControlActions = new Map<string, {
@@ -531,9 +557,9 @@ const turnControlActions = new Map<string, {
   executionGenerationId: string;
 }>();
 const stopAgentConfirmEntryId = ref<string | null>(null);
-const stoppingSupervisorEntryId = ref<string | null>(null);
+const stoppingSupervisorOperation = shallowRef<AgentInspectorOperationToken | null>(null);
+const stoppingSupervisorEntryId = computed(() => stoppingSupervisorOperation.value?.entryId ?? null);
 const expandedSupervisorActivity = ref<Record<string, boolean>>({});
-const knownSupervisorEntryIds = ref<string[]>([]);
 const loadingManagedSessions = ref(false);
 const stoppingSessionId = ref<string | null>(null);
 const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
@@ -546,8 +572,6 @@ const managedChangeSummaries = ref<Record<string, DesktopManagedAgentChangeSumma
 const loadingChangeSummaryIds = ref<Record<string, boolean>>({});
 const expandedChangeSummaryIds = ref<Record<string, boolean>>({});
 const resolvingPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
-let refreshTimer: number | null = null;
-let periodicRefreshInFlight = false;
 let modalStateVersion = 0;
 let previousFocusElement: HTMLElement | null = null;
 
@@ -573,25 +597,16 @@ const reasoningRows = computed(() =>
   latestReasoning.value ? reasoningFieldRows(latestReasoning.value) : []
 );
 
-const detailSelection = computed(() => managedAgentDetailSelection(
-  managedSessions.value,
-  supervisorEntries.value,
-  props.target,
-  latestReasoning.value,
-  knownSupervisorEntryIds.value,
-));
-const matchingManagedSessions = computed(() => detailSelection.value.managedSessions);
-const directMatchingSupervisorEntries = computed(() =>
-  exactSupervisorEntriesForTarget(
-    supervisorEntries.value,
-    matchingManagedSessions.value,
-    props.target?.agentSessionId,
-  )
-);
-watch(directMatchingSupervisorEntries, (entries) => {
-  if (entries?.length) {
-    knownSupervisorEntryIds.value = entries.map((entry) => entry.id);
-  }
+const matchingSupervisorEntries = computed(() => {
+  const target = props.target;
+  if (!target || target.kind !== "supervised") return [];
+  return supervisorEntries.value.filter((entry) => entry.id === target.supervisorEntryId);
+});
+const matchingManagedSessions = computed(() => {
+  const eligible = managedSessions.value.filter((session) =>
+    isVisibleManagedAgentSession(session) || Boolean(session.supervisorEntryId)
+  );
+  return resolveAgentInspectorManagedSessions(eligible, props.target);
 });
 watch(supervisorEntries, (entries) => {
   for (const entry of entries) {
@@ -604,8 +619,33 @@ watch(supervisorEntries, (entries) => {
     }
   }
 });
-const matchingSupervisorEntries = computed(() => detailSelection.value.supervisorEntries);
-const providerIdentity = computed(() => detailSelection.value.providerIdentity);
+const providerIdentity = computed(() => managedAgentProviderIdentityForEntry(matchingSupervisorEntries.value[0]));
+const showExternalFallback = computed(() =>
+  props.target?.kind === "external" && matchingManagedSessions.value.length === 0
+);
+const supervisorUnavailableTitle = computed(() => {
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "ambiguous") {
+    return "This agent's exact supervised identity is ambiguous.";
+  }
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "missing") {
+    return "This supervised agent is no longer available in this room.";
+  }
+  if (props.supervisorResource.state === "error") return "Could not load this agent's supervised state.";
+  return "Loading this agent's supervised state.";
+});
+const supervisorUnavailableDetail = computed(() => {
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "ambiguous") {
+    return "LetAgents found conflicting durable identities and withheld local controls.";
+  }
+  if (props.target?.kind === "unavailable" && props.target.unavailableReason === "missing") {
+    return "Refresh the room to check whether the saved agent moved or was retired.";
+  }
+  if (props.target?.kind === "unavailable" && props.target.unavailableDetail) {
+    return props.target.unavailableDetail;
+  }
+  if (props.supervisorResource.state === "error") return props.supervisorResource.error;
+  return "LetAgents is confirming the durable agent identity before showing local controls.";
+});
 const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
 );
@@ -622,13 +662,9 @@ const stopTurnTitle = computed(() => {
   }
   return isStoppingPrimarySession("turn") ? "Checking turn" : "Stop active turn";
 });
-const targetInspectionKey = computed(() => [
-  props.target?.agentSessionId,
-  props.target?.agentKey,
-  props.target?.actorLabel,
-  props.target?.displayName,
-  props.target?.sender,
-].filter(Boolean).join("|"));
+const targetInspectionKey = computed(() =>
+  agentInspectorRequestResetKey(props.target, props.requestVersion)
+);
 
 watch(
   () => props.open,
@@ -644,7 +680,6 @@ watch(
     clearTransientState();
     void nextTick(() => dialogElement.value?.focus());
     void loadManagedSessions();
-    startRefreshTimer();
   },
   { immediate: true },
 );
@@ -671,33 +706,6 @@ watch(
   },
 );
 
-onBeforeUnmount(() => {
-  stopRefreshTimer();
-});
-
-function startRefreshTimer(): void {
-  stopRefreshTimer();
-  refreshTimer = window.setInterval(() => {
-    // Skip while hidden (a background modal need not poll the supervisor) and
-    // skip if the previous tick has not settled — `loadManagedSessions` has no
-    // in-flight guard of its own, so a slow supervisor call would otherwise
-    // stack overlapping requests every 4s.
-    if (shouldSkipPollTick({ hidden: document.hidden, inFlight: periodicRefreshInFlight })) return;
-    periodicRefreshInFlight = true;
-    void loadManagedSessions({ quiet: true, refreshSessions: false }).finally(() => {
-      periodicRefreshInFlight = false;
-    });
-  }, 4_000);
-}
-
-function stopRefreshTimer(): void {
-  if (refreshTimer !== null) {
-    window.clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
-  periodicRefreshInFlight = false;
-}
-
 function clearTransientState(): void {
   loadingManagedSessions.value = false;
   stoppingSessionId.value = null;
@@ -712,28 +720,74 @@ function clearTransientState(): void {
   loadingChangeSummaryIds.value = {};
   expandedChangeSummaryIds.value = {};
   resolvingPermissionIds.value = {};
-  updatingSupervisorEntryId.value = null;
-  controllingSupervisorEntryId.value = null;
-  resolvingTurnControlEntryId.value = null;
+  updatingSupervisorOperation.value = null;
+  controllingSupervisorOperation.value = null;
+  resolvingTurnControlOperation.value = null;
   turnControlDrafts.value = {};
   turnControlStages.value = {};
   turnControlActions.clear();
   stopAgentConfirmEntryId.value = null;
-  stoppingSupervisorEntryId.value = null;
+  stoppingSupervisorOperation.value = null;
   expandedSupervisorActivity.value = {};
-  knownSupervisorEntryIds.value = [];
 }
 
 function resetTransientState(): void {
   modalStateVersion += 1;
-  stopRefreshTimer();
   clearTransientState();
-  supervisorEntries.value = [];
-  supervisorStatus.value = null;
 }
 
 function isCurrentModalState(version: number): boolean {
   return props.open && version === modalStateVersion;
+}
+
+function currentSupervisorActionContext(): AgentInspectorOperationContext {
+  return {
+    modalStateVersion,
+    roomIdentifier: props.roomIdentifier,
+    inspectorRequestVersion: props.requestVersion,
+  };
+}
+
+function createSupervisorOperationToken(
+  entryId: string,
+  providerActionId: string | null = null,
+): AgentInspectorOperationToken {
+  return {
+    operationId: globalThis.crypto.randomUUID(),
+    entryId,
+    providerActionId,
+    context: currentSupervisorActionContext(),
+  };
+}
+
+function isCurrentSupervisorOperation(
+  token: AgentInspectorOperationToken,
+  current: AgentInspectorOperationToken | null,
+): boolean {
+  return isCurrentAgentInspectorOperation(
+    token,
+    current,
+    currentSupervisorActionContext(),
+    props.open,
+  );
+}
+
+function isCurrentSupervisorActionContext(context: AgentInspectorOperationContext): boolean {
+  return isCurrentModalState(context.modalStateVersion)
+    && props.roomIdentifier === context.roomIdentifier
+    && props.requestVersion === context.inspectorRequestVersion;
+}
+
+function emitSupervisorEntryUpdated(
+  entry: DesktopSupervisorManifestEntry,
+  context: AgentInspectorOperationContext,
+): void {
+  if (!isCurrentSupervisorActionContext(context)) return;
+  emit("supervisor-entry-updated", {
+    entry,
+    roomIdentifier: context.roomIdentifier,
+    inspectorRequestVersion: context.inspectorRequestVersion,
+  });
 }
 
 function handleDialogTab(event: KeyboardEvent): void {
@@ -743,7 +797,6 @@ function handleDialogTab(event: KeyboardEvent): void {
 async function loadManagedSessions(options: {
   quiet?: boolean;
   refreshChanges?: boolean;
-  refreshSessions?: boolean;
 } = {}): Promise<void> {
   if (!props.open) return;
   const requestVersion = modalStateVersion;
@@ -752,17 +805,6 @@ async function loadManagedSessions(options: {
   }
   managedSessionError.value = null;
   try {
-    const [, entries, daemonStatus] = await Promise.all([
-      options.refreshSessions === false ? Promise.resolve() : managedSessionsContext.refresh(),
-      desktopIpc.supervisor.listAgents(props.roomIdentifier).catch((error) => {
-        supervisorError.value = error instanceof Error ? error.message : "Supervisor daemon unavailable.";
-        return [];
-      }),
-      desktopIpc.supervisor.getStatus().catch(() => null),
-    ]);
-    if (!isCurrentModalState(requestVersion)) return;
-    supervisorEntries.value = entries;
-    supervisorStatus.value = daemonStatus;
     await refreshMatchingManagedSessionDetails({
       quiet: options.quiet,
       version: requestVersion,
@@ -778,17 +820,29 @@ async function loadManagedSessions(options: {
   }
 }
 
+function refreshAgentStatus(): void {
+  emit("refresh-supervisor");
+  void loadManagedSessions();
+}
+
 async function setSupervisorDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<void> {
-  if (updatingSupervisorEntryId.value) return;
-  updatingSupervisorEntryId.value = id;
+  if (updatingSupervisorOperation.value) return;
+  const operation = createSupervisorOperationToken(id);
+  updatingSupervisorOperation.value = operation;
   supervisorError.value = null;
   try {
     const updated = await desktopIpc.supervisor.setDesiredState(id, desiredState);
-    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((entry) => entry.id !== id)];
+    if (isCurrentSupervisorOperation(operation, updatingSupervisorOperation.value)) {
+      emitSupervisorEntryUpdated(updated, operation.context);
+    }
   } catch (error) {
-    supervisorError.value = error instanceof Error ? error.message : "Could not update desired state.";
+    if (isCurrentSupervisorOperation(operation, updatingSupervisorOperation.value)) {
+      supervisorError.value = error instanceof Error ? error.message : "Could not update desired state.";
+    }
   } finally {
-    updatingSupervisorEntryId.value = null;
+    if (isCurrentSupervisorOperation(operation, updatingSupervisorOperation.value)) {
+      updatingSupervisorOperation.value = null;
+    }
   }
 }
 
@@ -850,7 +904,7 @@ function turnControlStageLabel(stage: DesktopSupervisorTurnControlResult["stages
 }
 
 async function runTurnControl(entry: DesktopSupervisorManifestEntry, correction: string | null | undefined): Promise<void> {
-  if (controllingSupervisorEntryId.value || !entry.workAttemptId || !entry.executionGenerationId) return;
+  if (controllingSupervisorOperation.value || !entry.workAttemptId || !entry.executionGenerationId) return;
   const normalized = correction?.trim() || null;
   const prior = turnControlActions.get(entry.id);
   const action = prior?.correction === normalized
@@ -864,7 +918,8 @@ async function runTurnControl(entry: DesktopSupervisorManifestEntry, correction:
       executionGenerationId: entry.executionGenerationId,
     };
   turnControlActions.set(entry.id, action);
-  controllingSupervisorEntryId.value = entry.id;
+  const operation = createSupervisorOperationToken(entry.id, action.id);
+  controllingSupervisorOperation.value = operation;
   supervisorError.value = null;
   turnControlStages.value[entry.id] = [];
   try {
@@ -875,15 +930,21 @@ async function runTurnControl(entry: DesktopSupervisorManifestEntry, correction:
       actionId: action.id,
       correction: normalized,
     });
+    if (!isCurrentSupervisorOperation(operation, controllingSupervisorOperation.value)) return;
     turnControlStages.value[entry.id] = result.stages;
     turnControlActions.delete(entry.id);
     if (normalized) turnControlDrafts.value[entry.id] = "";
+    emit("refresh-supervisor");
     await loadManagedSessions({ quiet: true, refreshChanges: false });
   } catch (error) {
-    turnControlStages.value[entry.id] = [];
-    supervisorError.value = error instanceof Error ? error.message : "Could not control the active turn.";
+    if (isCurrentSupervisorOperation(operation, controllingSupervisorOperation.value)) {
+      turnControlStages.value[entry.id] = [];
+      supervisorError.value = error instanceof Error ? error.message : "Could not control the active turn.";
+    }
   } finally {
-    controllingSupervisorEntryId.value = null;
+    if (isCurrentSupervisorOperation(operation, controllingSupervisorOperation.value)) {
+      controllingSupervisorOperation.value = null;
+    }
   }
 }
 
@@ -892,8 +953,9 @@ async function resolveTurnControl(
   resolution: "not_applied" | "applied",
 ): Promise<void> {
   const control = entry.turnControl;
-  if (!control || control.status !== "uncertain" || resolvingTurnControlEntryId.value) return;
-  resolvingTurnControlEntryId.value = entry.id;
+  if (!control || control.status !== "uncertain" || resolvingTurnControlOperation.value) return;
+  const operation = createSupervisorOperationToken(entry.id, control.actionId);
+  resolvingTurnControlOperation.value = operation;
   supervisorError.value = null;
   try {
     const updated = await desktopIpc.supervisor.resolveTurnControl({
@@ -903,11 +965,17 @@ async function resolveTurnControl(
       actionId: control.actionId,
       resolution,
     });
-    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((candidate) => candidate.id !== entry.id)];
+    if (isCurrentSupervisorOperation(operation, resolvingTurnControlOperation.value)) {
+      emitSupervisorEntryUpdated(updated, operation.context);
+    }
   } catch (error) {
-    supervisorError.value = error instanceof Error ? error.message : "Could not resolve the uncertain turn control.";
+    if (isCurrentSupervisorOperation(operation, resolvingTurnControlOperation.value)) {
+      supervisorError.value = error instanceof Error ? error.message : "Could not resolve the uncertain turn control.";
+    }
   } finally {
-    resolvingTurnControlEntryId.value = null;
+    if (isCurrentSupervisorOperation(operation, resolvingTurnControlOperation.value)) {
+      resolvingTurnControlOperation.value = null;
+    }
   }
 }
 
@@ -915,17 +983,24 @@ async function resolveTurnControl(
 // (desired_state=stopped). Fenced to the exact entry id from the row so a
 // same-label peer is never affected; idempotent while a stop is in flight.
 async function confirmStopSupervisedAgent(id: string): Promise<void> {
-  if (stoppingSupervisorEntryId.value) return;
-  stoppingSupervisorEntryId.value = id;
+  if (stoppingSupervisorOperation.value) return;
+  const operation = createSupervisorOperationToken(id);
+  stoppingSupervisorOperation.value = operation;
   stopAgentConfirmEntryId.value = null;
   supervisorError.value = null;
   try {
     const updated = await desktopIpc.supervisor.setDesiredState(id, "stopped");
-    supervisorEntries.value = [updated, ...supervisorEntries.value.filter((entry) => entry.id !== id)];
+    if (isCurrentSupervisorOperation(operation, stoppingSupervisorOperation.value)) {
+      emitSupervisorEntryUpdated(updated, operation.context);
+    }
   } catch (error) {
-    supervisorError.value = error instanceof Error ? error.message : "Could not stop this agent.";
+    if (isCurrentSupervisorOperation(operation, stoppingSupervisorOperation.value)) {
+      supervisorError.value = error instanceof Error ? error.message : "Could not stop this agent.";
+    }
   } finally {
-    stoppingSupervisorEntryId.value = null;
+    if (isCurrentSupervisorOperation(operation, stoppingSupervisorOperation.value)) {
+      stoppingSupervisorOperation.value = null;
+    }
   }
 }
 
