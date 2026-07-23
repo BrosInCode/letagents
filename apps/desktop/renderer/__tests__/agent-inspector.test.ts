@@ -6,10 +6,12 @@ import {
   agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
+  clearAgentInspectorActionStateIfMatching,
   agentInspectorOverallState,
   projectAgentInspector,
   projectAgentInspectorTurnControl,
 } from "../src/domain/agent-inspector";
+import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import {
   foldSupervisorActivityPush,
@@ -357,6 +359,13 @@ test("a supervisor push advancing the turn while the action digest yields preven
       turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
     },
   });
+  let actionState: AgentInspectorActionState | null = {
+    operationId: "operation_1",
+    entryId: "supervised_1",
+    kind: "stop_turn" as const,
+    status: "running" as const,
+    message: "Stopping the current turn…",
+  };
   const submitted: string[] = [];
   const pendingActionId = agentInspectorTurnControlActionIdIfCurrent(
     deferredDigest,
@@ -378,7 +387,10 @@ test("a supervisor push advancing the turn while the action digest yields preven
   resolveDigest("inspector-turn:deferred");
 
   assert.equal(await pendingActionId, null);
+  actionState = clearAgentInspectorActionStateIfMatching(actionState, "operation_1");
   assert.deepEqual(submitted, [], "the stale action must not reach controlTurn IPC");
+  assert.equal(actionState, null, "the rejected operation must not strand the Inspector in a running state");
+  assert.equal(agentInspectorActionStateForEntry(actionState, "supervised_1")?.status === "running", false, "turn controls are re-enabled once the stale action is discarded");
 });
 
 test("Activity suppresses only exact supervised identity, including a sessionless entry", () => {

@@ -153,6 +153,17 @@ export function agentInspectorActionStateForEntry(
   return state && entryId && state.entryId === entryId ? state : null;
 }
 
+/**
+ * Discard only the action that started this async path. A newer Inspector
+ * operation may have replaced it while an earlier action was yielding.
+ */
+export function clearAgentInspectorActionStateIfMatching(
+  state: AgentInspectorActionState | null,
+  operationId: string,
+): AgentInspectorActionState | null {
+  return state?.operationId === operationId ? null : state;
+}
+
 export interface AgentInspectorProjection {
   entryId: string;
   roomId: string;
