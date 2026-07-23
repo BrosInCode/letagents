@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -17,21 +17,17 @@ const participantSurface = source("../src/components/desktop/content/agent-inspe
 const composer = source("../src/components/desktop/content/room-chat/RoomComposer.vue");
 const chat = source("../src/components/desktop/content/RoomChatView.vue");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
-const flag = source("../src/domain/agent-inspector-feature.ts");
-
-test("the foundation stays dark and owns no runtime work while disabled", () => {
-  assert.match(flag, /AGENT_INSPECTOR_FOUNDATION_ENABLED = false/);
-  assert.match(shell, /if \(agentInspectorFoundationEnabled\) \{\s*unsubscribeSupervisorActivity/);
-  assert.match(shell, /v-if="agentInspectorFoundationEnabled && selectedAgentDetailTarget"/);
-  assert.match(shell, /v-if="!agentInspectorFoundationEnabled"/);
-  assert.match(shell, /agentInspectorProjections = computed\(\(\) => \{\s*if \(!agentInspectorFoundationEnabled\) return \[\]/);
-  assert.match(shell, /projectAgentInspectorsWhenEnabled\(true/);
-  assert.match(activity, /<template v-if="agentInspectorFoundationEnabled">/);
-  assert.match(activity, /<template v-else>\s*<section\s*v-for="group in legacyTruthfulGroups"/);
+test("the Inspector is the single selected-agent detail owner after cutover", () => {
+  assert.match(shell, /<AgentInspectorHost\s*[\s\S]*v-if="selectedAgentDetailTarget"/);
+  assert.doesNotMatch(shell, /agentInspectorFoundationEnabled|DesktopAgentDetailModal|projectAgentInspectorsWhenEnabled/);
+  assert.doesNotMatch(activity, /agentInspectorFoundationEnabled|legacyTruthful/);
+  assert.equal(existsSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopAgentDetailModal.vue", import.meta.url))), false);
+  assert.equal(existsSync(fileURLToPath(new URL("../src/domain/agent-inspector-feature.ts", import.meta.url))), false);
+  assert.match(shell, /projectAgentInspectors\(/);
   assert.match(activity, /roomAgentActivityProjection\(props\.supervisorEntries/);
 });
 
-test("flag ON has one exclusive inspector for durable, external, loading, and error selections", () => {
+test("the Inspector has one exclusive surface for durable, external, loading, error, and ambiguous selections", () => {
   assert.match(host, /AgentInspectorParticipantSurface/);
   assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
   assert.match(host, /surfaceComponentType/);
@@ -43,16 +39,14 @@ test("flag ON has one exclusive inspector for durable, external, loading, and er
   assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
   assert.doesNotMatch(participantSurface, /aria-live/);
   assert.doesNotMatch(activity, /v-if="selectedTruthfulAgent" class="desktop-activity-detail"/);
-  assert.match(activity, /v-if="!agentInspectorFoundationEnabled && selectedLegacyTruthfulAgent"/);
-  assert.match(activity, /v-else-if="!agentInspectorFoundationEnabled && selectedLiveParticipant"/);
+  assert.doesNotMatch(activity, /selectedLegacyTruthfulAgent|desktop-activity-detail/);
 });
 
 test("Activity opens the exact shared projection only after an explicit click", () => {
   assert.match(activity, /@click="selectInspectorAgent\(agent\)"/);
   assert.match(activity, /supervisedAgentInspectorRequest\(agent\.entry/);
-  assert.match(activity, /autoSelectLive: !props\.agentInspectorFoundationEnabled/);
+  assert.match(activity, /autoSelectLive: false/);
   assert.match(activity, /watch\(inspectorTruthfulAgents[\s\S]{0,300}selectedTruthfulId\.value = null/);
-  assert.match(activity, /!props\.agentInspectorFoundationEnabled[\s\S]{0,220}selectedTruthfulId\.value = agents\[0\]/);
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
 });
 
