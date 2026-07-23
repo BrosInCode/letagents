@@ -492,6 +492,7 @@ import {
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
 import {
+  agentInspectorRequestResetKey,
   isCurrentAgentInspectorOperation,
   resolveAgentInspectorManagedSessions,
   type AgentInspectorOperationContext,
@@ -661,13 +662,9 @@ const stopTurnTitle = computed(() => {
   }
   return isStoppingPrimarySession("turn") ? "Checking turn" : "Stop active turn";
 });
-const targetInspectionKey = computed(() => [
-  props.target?.agentSessionId,
-  props.target?.agentKey,
-  props.target?.actorLabel,
-  props.target?.displayName,
-  props.target?.sender,
-].filter(Boolean).join("|"));
+const targetInspectionKey = computed(() =>
+  agentInspectorRequestResetKey(props.target, props.requestVersion)
+);
 
 watch(
   () => props.open,

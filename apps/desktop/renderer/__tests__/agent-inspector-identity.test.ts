@@ -5,6 +5,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
 import {
+  agentInspectorRequestResetKey,
   isCurrentAgentInspectorOperation,
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
@@ -341,4 +342,62 @@ test("an old control promise cannot mutate or unlock a newer Inspector operation
   await staleFailure;
   assert.deepEqual(writes, []);
   assert.equal(currentOperation, newOperation);
+});
+
+test("a new exact request resets operations even when its presentation is unchanged", async () => {
+  const samePresentation = {
+    ...target(),
+    kind: "supervised" as const,
+    supervisorEntryId: "supervised_garden",
+  };
+  assert.notEqual(
+    agentInspectorRequestResetKey(samePresentation, 10),
+    agentInspectorRequestResetKey(samePresentation, 11),
+  );
+
+  const oldContext: AgentInspectorOperationContext = {
+    modalStateVersion: 10,
+    roomIdentifier: "room_a",
+    inspectorRequestVersion: 10,
+  };
+  const newContext: AgentInspectorOperationContext = {
+    modalStateVersion: 11,
+    roomIdentifier: "room_a",
+    inspectorRequestVersion: 11,
+  };
+  const oldOperation: AgentInspectorOperationToken = {
+    operationId: "old",
+    entryId: "supervised_garden",
+    providerActionId: "action_old",
+    context: oldContext,
+  };
+  const newOperation: AgentInspectorOperationToken = {
+    operationId: "new",
+    entryId: "supervised_garden",
+    providerActionId: "action_new",
+    context: newContext,
+  };
+
+  let activeOperation: AgentInspectorOperationToken | null = oldOperation;
+  // The authoritative request-key watcher resets the stale lock, allowing the
+  // same visible agent to begin a control under the new request.
+  activeOperation = null;
+  assert.equal(activeOperation, null);
+  activeOperation = newOperation;
+
+  let resolveOld!: () => void;
+  const oldPromise = new Promise<void>((resolve) => { resolveOld = resolve; });
+  let staleWrites = 0;
+  const settleOld = (async () => {
+    await oldPromise;
+    if (isCurrentAgentInspectorOperation(oldOperation, activeOperation, newContext, true)) {
+      staleWrites += 1;
+      activeOperation = null;
+    }
+  })();
+  resolveOld();
+  await settleOld;
+
+  assert.equal(staleWrites, 0);
+  assert.equal(activeOperation, newOperation);
 });

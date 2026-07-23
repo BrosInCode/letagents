@@ -53,6 +53,28 @@ export function isCurrentAgentInspectorOperation(
     && context.inspectorRequestVersion === expected.context.inspectorRequestVersion;
 }
 
+/**
+ * The shell request version is authoritative. Two requests may intentionally
+ * have identical presentation/session fields, so those fields alone cannot
+ * decide whether modal-local operations should survive.
+ */
+export function agentInspectorRequestResetKey(
+  selection: AgentInspectorSelection | null,
+  inspectorRequestVersion: number,
+): string {
+  return JSON.stringify([
+    inspectorRequestVersion,
+    selection?.kind ?? null,
+    selection?.kind === "supervised" ? selection.supervisorEntryId : null,
+    selection?.kind === "unavailable" ? selection.unavailableReason : null,
+    selection?.agentSessionId ?? null,
+    selection?.agentKey ?? null,
+    selection?.actorLabel ?? null,
+    selection?.displayName ?? null,
+    selection?.sender ?? null,
+  ]);
+}
+
 export function isCurrentAgentInspectorSupervisorUpdate(
   update: AgentInspectorSupervisorEntryUpdate,
   currentRoomIdentifier: string,
