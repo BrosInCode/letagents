@@ -61,6 +61,7 @@
       <button ref="overviewTab" id="agent-inspector-overview-tab" type="button" role="tab" :aria-selected="selectedTab === 'overview'" aria-controls="agent-inspector-overview-panel" :tabindex="selectedTab === 'overview' ? 0 : -1" @click="selectTab('overview')">Overview</button>
       <button id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
       <button id="agent-inspector-settings-tab" type="button" role="tab" :aria-selected="selectedTab === 'settings'" aria-controls="agent-inspector-settings-panel" :tabindex="selectedTab === 'settings' ? 0 : -1" @click="selectTab('settings')">Settings</button>
+      <button id="agent-inspector-diagnostics-tab" type="button" role="tab" :aria-selected="selectedTab === 'diagnostics'" aria-controls="agent-inspector-diagnostics-panel" :tabindex="selectedTab === 'diagnostics' ? 0 : -1" @click="selectTab('diagnostics')">Diagnostics</button>
     </div>
 
     <div class="agent-inspector-scroll-region">
@@ -71,7 +72,7 @@
         @retry="emit('work-retry')" @select-source="emit('work-source-select', $event)" @reveal="emit('reveal-message', $event)"
       />
       <AgentInspectorSettings
-        v-else id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
+        v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
         :entry-id="projection.entryId" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
         :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
         :busy="actionState?.status === 'running'" :conflict="settingsConflict"
@@ -79,12 +80,16 @@
         @prepare-move="emit('room-move-prepare', $event)" @commit-move="emit('room-move-commit')"
         @retire="emit('retire')" @purge="emit('purge')"
       />
+      <AgentInspectorDiagnostics
+        v-else id="agent-inspector-diagnostics-panel" role="tabpanel" aria-labelledby="agent-inspector-diagnostics-tab"
+        :projection="projection"
+      />
     </div>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, defineAsyncComponent, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,
   AgentInspectorActionState,
@@ -99,6 +104,8 @@ import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
 import AgentInspectorWork from "./AgentInspectorWork.vue";
 import AgentInspectorSettings from "./AgentInspectorSettings.vue";
+/** Diagnostics stays out of the normal inspector path until a human opens it. */
+const AgentInspectorDiagnostics = defineAsyncComponent(() => import("./AgentInspectorDiagnostics.vue"));
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
@@ -134,7 +141,7 @@ const emit = defineEmits<{
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
-const selectedTab = ref<"overview" | "work" | "settings">("overview");
+const selectedTab = ref<"overview" | "work" | "settings" | "diagnostics">("overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
 
 function focusInitial(): void {
@@ -149,7 +156,7 @@ defineExpose({ focusInitial, containsFocus });
 
 watch(() => props.projection.entryId, () => { selectedTab.value = "overview"; });
 
-function selectTab(tab: "overview" | "work" | "settings"): void {
+function selectTab(tab: "overview" | "work" | "settings" | "diagnostics"): void {
   if (selectedTab.value === tab) return;
   selectedTab.value = tab;
   if (tab === "work") emit("work-selected");
@@ -159,9 +166,9 @@ function selectTab(tab: "overview" | "work" | "settings"): void {
 function handleTabKeydown(event: KeyboardEvent): void {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const tabs: Array<"overview" | "work" | "settings"> = ["overview", "work", "settings"];
+  const tabs: Array<"overview" | "work" | "settings" | "diagnostics"> = ["overview", "work", "settings", "diagnostics"];
   const current = tabs.indexOf(selectedTab.value);
-  const next = event.key === 'Home' ? 'overview' : event.key === 'End' ? 'settings' : tabs[(current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length]!;
+  const next = event.key === 'Home' ? 'overview' : event.key === 'End' ? 'diagnostics' : tabs[(current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length]!;
   selectTab(next);
   void Promise.resolve().then(() => (next === 'overview' ? overviewTab.value : surfaceElement.value?.querySelector<HTMLButtonElement>(`#agent-inspector-${next}-tab`))?.focus());
 }
