@@ -24,7 +24,7 @@ test("the Inspector is the single selected-agent detail owner after cutover", ()
   assert.equal(existsSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopAgentDetailModal.vue", import.meta.url))), false);
   assert.equal(existsSync(fileURLToPath(new URL("../src/domain/agent-inspector-feature.ts", import.meta.url))), false);
   assert.match(shell, /projectAgentInspectors\(/);
-  assert.match(activity, /roomAgentActivityProjection\(props\.supervisorEntries/);
+  assert.match(activity, /agentProjections: AgentInspectorProjection\[\]/);
 });
 
 test("the Inspector has one exclusive surface for durable, external, loading, error, and ambiguous selections", () => {
@@ -39,7 +39,7 @@ test("the Inspector has one exclusive surface for durable, external, loading, er
   assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
   assert.doesNotMatch(participantSurface, /aria-live/);
   assert.doesNotMatch(activity, /v-if="selectedTruthfulAgent" class="desktop-activity-detail"/);
-  assert.doesNotMatch(activity, /selectedLegacyTruthfulAgent|desktop-activity-detail/);
+  assert.doesNotMatch(activity, /selectedLegacyTruthfulAgent|selectedTruthfulAgent/);
 });
 
 test("Activity opens the exact shared projection only after an explicit click", () => {

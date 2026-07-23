@@ -100,7 +100,9 @@ test("the room shell owns managed-session polling and provides the live context"
   assert.match(shell, /mutationVersion === managedAgentSessionsMutationVersion/);
   assert.match(shell, /managedAgentSessionsRefreshInFlight/);
   assert.match(shell, /managedAgentSessionsRefreshQueued/);
-  assert.match(participantSurface, /useManagedAgentSessionsContext/);
+  assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
+  assert.match(shell, /:managed-sessions="roomManagedAgentSessions"/);
+  assert.match(shell, /@session-updated="applyAgentInspectorParticipantSessionUpdate"/);
   assert.doesNotMatch(participantSurface, /listManagedAgentSessions/);
 });
 
