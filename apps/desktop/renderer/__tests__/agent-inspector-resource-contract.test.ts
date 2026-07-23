@@ -41,6 +41,24 @@ test("room changes close the inspector instead of carrying its request across ro
   assert.match(roomWatch, /selectedAgentDetailRequest\.value = null/);
 });
 
+test("every authoritative Inspector request resets modal-local operation locks", () => {
+  assert.match(modal, /agentInspectorRequestResetKey\(props\.target, props\.requestVersion\)/);
+  const targetWatch = modal.slice(
+    modal.indexOf("watch(\n  targetInspectionKey"),
+    modal.indexOf("function clearTransientState"),
+  );
+  assert.match(targetWatch, /modalStateVersion \+= 1/);
+  assert.match(targetWatch, /clearTransientState\(\)/);
+  const clear = modal.slice(
+    modal.indexOf("function clearTransientState"),
+    modal.indexOf("function resetTransientState"),
+  );
+  assert.match(clear, /updatingSupervisorOperation\.value = null/);
+  assert.match(clear, /controllingSupervisorOperation\.value = null/);
+  assert.match(clear, /resolvingTurnControlOperation\.value = null/);
+  assert.match(clear, /stoppingSupervisorOperation\.value = null/);
+});
+
 test("the modal consumes shared supervisor data and owns no supervisor poll", () => {
   assert.match(modal, /supervisorResource: SupervisorEntriesResource/);
   assert.match(modal, /const supervisorEntries = computed\(\(\) => props\.supervisorResource\.data\)/);
