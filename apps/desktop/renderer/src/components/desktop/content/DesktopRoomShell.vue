@@ -384,6 +384,7 @@ import {
 } from "../../../domain/agent-inspector-participant";
 import {
   agentInspectorActionStateForEntry,
+  clearAgentInspectorActionStateIfMatching,
   agentInspectorTurnControlActionId,
   agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorTurnControlFenceMatches,
@@ -2767,7 +2768,14 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
               && agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntryAfterDigest, supervisorStatus.value?.generation ?? null);
           },
         );
-        if (!actionId) return;
+        if (!actionId) {
+          // The post-digest fence rejected this operation. Clear only this
+          // matching action so controls recover, never a newer user action.
+          if (currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) {
+            agentInspectorActionState.value = clearAgentInspectorActionStateIfMatching(agentInspectorActionState.value, operationId);
+          }
+          return;
+        }
         await desktopIpc.supervisor.controlTurn({
           entryId: entry.id,
           workAttemptId: entry.workAttemptId,
