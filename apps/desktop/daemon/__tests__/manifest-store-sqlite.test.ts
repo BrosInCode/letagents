@@ -217,7 +217,7 @@ test("purge rejection leaves generation, identity, and journal unchanged", async
   } finally { await store.close(); await env.cleanup(); }
 });
 
-test("v9 canonical validation rejects a malformed durable-operation index", async () => {
+test("v10 canonical validation rejects a malformed durable-operation index", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try { await store.write(0, [entry]); } finally { await store.close(); }
@@ -513,13 +513,13 @@ test("a post-commit backup failure retries idempotently without reimporting", as
 test("future SQLite schema versions are rejected without being downgraded", async () => {
   const env = await fixture();
   const database = new DatabaseSync(env.databasePath);
-  database.exec("PRAGMA user_version = 10");
+  database.exec("PRAGMA user_version = 11");
   database.close();
   const store = new ManifestStore(env.databasePath);
   try {
-    await assert.rejects(() => store.load(), /schema version 10/);
+    await assert.rejects(() => store.load(), /schema version 11/);
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
     inspection.close();
   } finally {
     await store.close();
@@ -534,10 +534,10 @@ test("manifest metadata schema disagreement is rejected on reopen", async () => 
     await initialized.load();
     await initialized.close();
     const database = new DatabaseSync(env.databasePath);
-    database.prepare("UPDATE manifest_metadata SET schema_version = 10 WHERE singleton = 1").run();
+    database.prepare("UPDATE manifest_metadata SET schema_version = 11 WHERE singleton = 1").run();
     database.close();
     const reopened = new ManifestStore(env.databasePath);
-    await assert.rejects(() => reopened.load(), /metadata schema version 10/);
+    await assert.rejects(() => reopened.load(), /metadata schema version 11/);
     await reopened.close();
   } finally {
     await initialized.close();
@@ -549,7 +549,7 @@ test("contradictory SQLite and metadata version pairs reject before migration", 
   for (const pair of [
     { userVersion: 1, metadataVersion: 2, pattern: /version pair is inconsistent/ },
     { userVersion: 2, metadataVersion: 1, pattern: /version pair is inconsistent/ },
-    { userVersion: 1, metadataVersion: 10, pattern: /metadata schema version 10/ },
+    { userVersion: 1, metadataVersion: 11, pattern: /metadata schema version 11/ },
   ]) {
     const env = await fixture();
     const initialized = new ManifestStore(env.databasePath);
@@ -576,7 +576,7 @@ test("contradictory SQLite and metadata version pairs reject before migration", 
   }
 });
 
-test("physical v1-v4 databases with no delivery tables advance to the complete v9 shape before stamping markers", async () => {
+test("physical v1-v4 databases with no delivery tables advance to the complete v10 shape before stamping markers", async () => {
   for (const version of [1, 2, 3, 4]) {
     const env = await fixture();
     const initial = new ManifestStore(env.databasePath);
@@ -671,8 +671,8 @@ test("v1 daemon state migrates transactionally to v2 and normalizes exit timesta
     await migrated.close();
 
     const inspection = new DatabaseSync(env.databasePath);
-    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
-    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 10);
     assert.equal((inspection.prepare("SELECT provider_launch_policy_undefined FROM agent_configurations WHERE agent_id = ?").get(entry.id) as { provider_launch_policy_undefined: number }).provider_launch_policy_undefined, 0);
     assert.equal((inspection.prepare("SELECT provider_process_identity_present FROM runtime_deployments WHERE agent_id = ?").get(entry.id) as { provider_process_identity_present: number }).provider_process_identity_present, 0);
     const preservedRuntime = inspection.prepare("SELECT deployment_id, run_id FROM runtime_deployments WHERE agent_id = ?").get(invalid.id) as { deployment_id: string; run_id: string };
@@ -752,8 +752,8 @@ test("partially migrated v2 state is repaired transactionally before reads", asy
     partial.exec("ALTER TABLE reconciliation_records ADD COLUMN exit_timestamps_json TEXT");
     partial.prepare("UPDATE reconciliation_records SET exit_timestamps_json = ? WHERE agent_id = ?").run("[404,505]", entry.id);
     partial.prepare("DELETE FROM reconciliation_exit_timestamps WHERE agent_id = ?").run(entry.id);
-    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 9);
-    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 9);
+    assert.equal((partial.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((partial.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton = 1").get() as { schema_version: number }).schema_version, 10);
     partial.close();
 
     const repaired = new ManifestStore(env.databasePath);
