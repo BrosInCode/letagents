@@ -30,6 +30,13 @@ test("Inspector configuration revisions are optimistic, durable, and do not alte
       charter: "ignored", permissionProfileId: null, providerLaunchPolicy: {},
     });
     assert.equal(conflict.outcome, "conflict");
+    assert.equal((await store.load()).generation, 2, "a revision conflict must not advance manifest generation");
+    await store.replaceEntry(2, { ...entry, observed_state: "idle" });
+    const afterLifecycleReplacement = await store.getAgentConfiguration(entry.id);
+    assert.equal(afterLifecycleReplacement?.model, "gpt-next");
+    assert.equal(afterLifecycleReplacement?.charter, "Use the new charter on future turns.");
+    assert.equal(afterLifecycleReplacement?.config_revision, 2);
+    assert.equal(afterLifecycleReplacement?.runtime_configuration_revision, 1);
     const manifest = await store.load();
     assert.equal(manifest.entries[0]?.model, "gpt-next");
     assert.equal(Object.hasOwn(manifest.entries[0]!, "config_revision"), false, "legacy manifest projection never leaks Inspector bookkeeping");
@@ -37,6 +44,92 @@ test("Inspector configuration revisions are optimistic, durable, and do not alte
     await store.close();
     await env.cleanup();
   }
+});
+
+test("room-move journal is request-idempotent and exact-generation phase fenced", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    const coordinates = {
+      operation_id: "move_1", request_id: "request_1", agent_id: entry.id, source_room_id: entry.room_id,
+      destination_room_id: "room_2", daemon_generation: 7, work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      agent_session_id: "session_1", activating_inbox_item_id: null, provider_turn_id: null, effect_id: null, phase: "prepared" as const,
+    };
+    const prepared = await store.prepareRoomMove(coordinates);
+    assert.equal(prepared.created, true);
+    assert.equal((await store.prepareRoomMove(coordinates)).created, false);
+    await assert.rejects(() => store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 8, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" }), ManifestConflictError);
+    const waiting = await store.advanceRoomMove({ operationId: "move_1", agentId: entry.id, expectedDaemonGeneration: 7, expectedExecutionGenerationId: "run_1", from: ["prepared"], to: "waiting_for_current_turn" });
+    assert.equal(waiting.phase, "waiting_for_current_turn");
+    await store.close();
+    const reopened = new ManifestStore(env.databasePath);
+    assert.equal((await reopened.pendingRoomMoves(entry.id))[0]?.operation_id, "move_1");
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("purge proves preconditions and deletes local agent rows atomically without touching its worktree", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const worktreeMarker = join(env.root, "preserved-worktree.txt");
+  await writeFile(worktreeMarker, "keep");
+  const stopped: DaemonManifestEntry = {
+    ...entry, id: "agent_purge", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: worktreeMarker, work_attempt_id: null, provider_ref: null, activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [stopped]);
+    const prepared = await store.preparePurge(1, { operationId: "purge_1", requestId: "purge_1", agentId: stopped.id, daemonGeneration: 3, externalRevokeRequired: false });
+    assert.equal(prepared.purge.phase, "local_commit");
+    await store.close(); // crash boundary after durable preparation
+    const reopened = new ManifestStore(env.databasePath);
+    const committed = await reopened.commitPurge(1, { operationId: "purge_1", agentId: stopped.id, daemonGeneration: 3 });
+    assert.equal(committed.generation, 2);
+    assert.equal(committed.purge.phase, "complete");
+    assert.equal(await reopened.getEntry(stopped.id), undefined);
+    assert.equal(await readFile(worktreeMarker, "utf8"), "keep");
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      for (const [table, column] of [["agent_identities", "agent_id"], ["worker_session_bindings", "entry_id"], ["supervised_agent_inbox", "agent_id"]] as const) {
+        assert.equal(Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column}=?`).get(stopped.id) as { count: number }).count), 0);
+      }
+      assert.equal((database.prepare("SELECT phase FROM agent_purge_operations WHERE operation_id='purge_1'").get() as { phase: string }).phase, "complete");
+    } finally { database.close(); }
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("purge rejection leaves generation, identity, and journal unchanged", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    await assert.rejects(() => store.preparePurge(1, { operationId: "purge_blocked", requestId: "purge_blocked", agentId: entry.id, daemonGeneration: 1, externalRevokeRequired: true }), /fully stopped/);
+    assert.equal((await store.load()).generation, 1);
+    assert.ok(await store.getEntry(entry.id));
+    assert.equal(await store.getPurge("purge_blocked"), null);
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("v9 canonical validation rejects a malformed durable-operation index", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try { await store.write(0, [entry]); } finally { await store.close(); }
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    database.exec("DROP INDEX one_active_agent_room_move; CREATE UNIQUE INDEX one_active_agent_room_move ON agent_room_moves(agent_id,updated_at) WHERE phase NOT IN ('active','failed')");
+  } finally { database.close(); }
+  const reopened = new ManifestStore(env.databasePath);
+  try { await assert.rejects(() => reopened.load(), /index one_active_agent_room_move is invalid/); }
+  finally { await reopened.close(); await env.cleanup(); }
 });
 
 const terminal = {

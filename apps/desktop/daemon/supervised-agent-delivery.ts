@@ -46,6 +46,8 @@ export interface SupervisedDeliveryHttp {
    * means "from the beginning", which must never become a new agent's inbox.
    */
   latest?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ messages?: Array<Record<string, unknown>> }>;
+  /** Idempotent remote membership join used by the durable room-move journal. */
+  joinRoom?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ roomId: string }>;
   publish(input: { roomId: string; apiUrl: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<{ messageId: string; roomId: string }>;
 }
 

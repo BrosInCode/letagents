@@ -477,6 +477,30 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
   return result;
 }
 
+/** Owner-authenticated, per-entry purge fence. Local recovery data is removed only after DELETE is acknowledged. */
+export async function revokeDesktopSupervisorGrantForEntry(entryId: string, options: GrantStorageOptions = {}): Promise<void> {
+  const normalizedEntryId = entryId.trim();
+  if (!normalizedEntryId) throw new Error("A durable supervised entry identity is required for grant revocation.");
+  const request = options.apiFetch ?? apiFetch;
+  await withRegistryMutation(async () => {
+    const registry = await readRegistry();
+    if (!registry) return;
+    const agentKey = registry.entryAgentKeys[normalizedEntryId];
+    const stored = agentKey ? registry.grants[agentKey] : undefined;
+    if (stored) {
+      try { await request(`/supervisor-host-grants/${encodeURIComponent(stored.grantId)}`, { method: "DELETE" }); }
+      catch (error) { if (!(error instanceof DesktopApiError && error.status === 404)) throw error; }
+    }
+    const current = await readRegistry();
+    if (!current) return;
+    const currentKey = current.entryAgentKeys[normalizedEntryId];
+    if (stored && currentKey === agentKey && current.grants[agentKey!]?.grantId === stored.grantId) delete current.grants[agentKey!];
+    if (currentKey === agentKey) delete current.entryAgentKeys[normalizedEntryId];
+    if (Object.keys(current.grants).length === 0 && Object.keys(current.entryAgentKeys).length === 0) await rm(storePath(), { force: true });
+    else await writeRegistry(current);
+  });
+}
+
 /**
  * Resolve (or create once) the server-owned identity used by a daemon-inbox
  * Codex entry.  The stable name is derived from the immutable entry id, while

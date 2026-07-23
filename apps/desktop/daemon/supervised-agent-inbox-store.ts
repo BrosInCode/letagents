@@ -91,6 +91,19 @@ export class SupervisedAgentInboxStore {
     }));
   }
 
+  /** Atomically retire source ingress and install the response-first destination tail boundary. */
+  async commitRoomMoveCursor(input: { agent_id: string; source_room_id: string; destination_room_id: string; last_observed_message_id: string | null }): Promise<void> {
+    this.require(input.agent_id, "agent_id"); this.require(input.source_room_id, "source_room_id"); this.require(input.destination_room_id, "destination_room_id");
+    if (input.source_room_id === input.destination_room_id) throw new Error("Room-move cursor requires distinct rooms.");
+    if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
+    await this.exclusive(async (database) => this.transaction(database, () => {
+      const existing = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?").get(input.agent_id, input.destination_room_id) as Row | undefined;
+      if (existing && (existing.last_observed_message_id === null ? null : String(existing.last_observed_message_id)) !== input.last_observed_message_id) throw new Error("Destination ingress cursor already has a different room-move boundary.");
+      run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.source_room_id);
+      if (!existing) run(database.prepare("INSERT OR REPLACE INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)"), input.agent_id, input.destination_room_id, input.last_observed_message_id, this.now());
+    }));
+  }
+
   /** One transaction: idempotently insert activated messages and persist the poll cursor. */
   async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; expected_cursor?: string | null; messages: readonly IngressMessage[]; observed_messages?: readonly ObservedIngressMessage[] }): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");

@@ -15,6 +15,7 @@ import {
   provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
+  revokeDesktopSupervisorGrantForEntry,
   revokeDesktopSupervisorGrant,
 } from "../main/supervisor-grant.js";
 import { DesktopApiError } from "../main/auth.js";
@@ -96,6 +97,18 @@ test("encrypted registry retains disjoint grants for two desktop-managed agents"
     assert.doesNotMatch(file, /lashg_secret_a|lashg_secret_b/);
     assert.match(file, /entry-a/);
     assert.match(file, /entry-b/);
+  });
+});
+
+test("per-entry purge revokes only its grant and removes local recovery only after acknowledgement", async () => {
+  await withRegistry(async () => {
+    await replaceDesktopSupervisorGrantForAgent({ agentKey: "owner/agent-a", metadata: metadata("owner/agent-a", "a"), token: "lashg_a", entryId: "entry-a" }, { storage: keychain });
+    await replaceDesktopSupervisorGrantForAgent({ agentKey: "owner/agent-b", metadata: metadata("owner/agent-b", "b"), token: "lashg_b", entryId: "entry-b" }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntry("entry-a", { storage: keychain, apiFetch: (async <T>(path: string) => { calls.push(path); return {} as T; }) as never });
+    assert.deepEqual(calls, ["/supervisor-host-grants/grant_a"]);
+    assert.equal(await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }), null);
+    assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_b");
   });
 });
 

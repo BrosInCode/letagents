@@ -94,7 +94,7 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
@@ -131,6 +131,10 @@ async function startWireDaemon(
         };
       } else if (request.method === "supervisor.get_agent_inspector_detail") {
         result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
+      } else if (request.method === "supervisor.get_agent_configuration") {
+        result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
+      } else if (request.method === "supervisor.prepare_room_move" || request.method === "supervisor.commit_room_move" || request.method === "supervisor.get_room_move") {
+        result = { operation_id: request.params!.operation_id ?? `inspector-room-move:${request.params!.entry_id}:${request.params!.request_id}`, request_id: request.params!.request_id ? `inspector:${request.params!.request_id}` : "inspector:request_1", agent_id: request.params!.entry_id, source_room_id: "room_1", destination_room_id: "room_2", daemon_generation: request.params!.daemon_generation, work_attempt_id: "attempt_1", execution_generation_id: "execution_1", agent_session_id: "session_1", phase: request.method === "supervisor.prepare_room_move" ? "prepared" : "bootstrapping_destination_tail", remote_room_id: request.method === "supervisor.prepare_room_move" ? null : "room_2", destination_cursor: null, error: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:01.000Z" };
       } else if (request.method === "lane.reserve_legacy") {
         const owner = {
           reservation_id: request.params!.reservation_id,
@@ -355,6 +359,23 @@ test("agent inspector detail is capability-negotiated and preserves its optional
     assert.equal(detail.availability, "not_loaded");
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.get_agent_inspector_detail")?.params, { entry_id: "agent_1", room_id: "room_1", source_message_id: null });
     await assert.rejects(() => client.getAgentInspectorDetail({ entryId: "", roomId: "room_1" }), /exact non-empty/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("Inspector settings and room-move RPCs preserve strict typed coordinates", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const configuration = await client.getAgentConfiguration("agent_1", 39);
+    assert.equal(configuration.configRevision, 1);
+    const prepared = await client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: "request_1", daemonGeneration: 39 });
+    assert.equal(prepared.phase, "prepared");
+    const committed = await client.commitRoomMove({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39 });
+    assert.equal(committed.phase, "bootstrapping_destination_tail");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.prepare_room_move")?.params, { entry_id: "agent_1", destination_room_id: "room_2", request_id: "request_1", daemon_generation: 39 });
+    await assert.rejects(() => client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: undefined as unknown as string, daemonGeneration: 39 }), /exact typed/);
+    await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 

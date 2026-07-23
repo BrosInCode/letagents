@@ -1095,10 +1095,21 @@ export function registerDesktopIpcHandlers(
     supervisorDaemonClient.getAgentConfiguration(input.entryId, input.daemonGeneration));
   targetIpcMain.handle("desktop:supervisor:update-agent-configuration", async (_event, input: import("../ipc-types.js").DesktopSupervisorAgentConfigurationUpdateInput) =>
     supervisorDaemonClient.updateAgentConfiguration(input));
+  targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) =>
+    supervisorDaemonClient.prepareRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:commit-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) =>
+    supervisorDaemonClient.commitRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:get-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) =>
+    supervisorDaemonClient.getRoomMove(input));
   targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
     supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration));
-  targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
-    supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration));
+  targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
+    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, false);
+    if (prepared.outcome !== "revocation_required") return prepared;
+    await supervisorGrantCoordinator.revokeEntryForPurge(input.entryId);
+    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, true);
+    return committed.outcome === "revocation_required" ? { outcome: "invalid" as const, error: "Purge credential revocation was not durably acknowledged." } : committed;
+  });
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;
     onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));

@@ -808,6 +808,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
             threadId: resumeRef.providerContinuationId,
             cwd: req.cwd,
             ...policy,
+            ...(req.model ? { model: req.model } : {}),
+            ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
           });
         } catch (error) {
           if (!isMethodNotFound(error)) throw error;
@@ -820,6 +822,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
           cwd: req.cwd,
           ...policy,
+          ...(req.model ? { model: req.model } : {}),
+          ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });
       }
       const threadId = threadResult.thread?.id;

@@ -480,6 +480,7 @@ export class SupervisorDaemonClient {
   }
 
   async getAgentConfiguration(entryId: string, daemonGeneration: number): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Agent configuration requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
     const value = await this.request<Record<string, unknown>>("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration });
@@ -487,26 +488,58 @@ export class SupervisorDaemonClient {
   }
 
   async updateAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateResult> {
+    if (!input || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1 || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
+      || !input.configuration || typeof input.configuration !== "object"
+      || !Object.hasOwn(input.configuration, "model") || !Object.hasOwn(input.configuration, "reasoningEffort") || !Object.hasOwn(input.configuration, "charter") || !Object.hasOwn(input.configuration, "permissionProfileId") || !Object.hasOwn(input.configuration, "providerLaunchPolicy")) throw new Error("Agent configuration update requires exact typed coordinates and fields.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
     const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
       model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
       permission_profile_id: input.configuration.permissionProfileId, provider_launch_policy: input.configuration.providerLaunchPolicy,
     } });
-    if (result.outcome === "invalid") return { outcome: "invalid", error: String(result.error ?? "Invalid agent configuration.") };
+    if (result.outcome === "invalid") {
+      if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
+      return { outcome: "invalid", error: result.error };
+    }
     if (result.outcome !== "updated" && result.outcome !== "conflict") throw new Error("Supervisor returned an invalid configuration update result.");
     return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, input.entryId, input.daemonGeneration) };
   }
 
+  async prepareRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMovePrepareInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.entryId) || !nonEmptyString(input.destinationRoomId) || !nonEmptyString(input.requestId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move preparation requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.prepare_room_move", { entry_id: input.entryId, destination_room_id: input.destinationRoomId, request_id: input.requestId, daemon_generation: input.daemonGeneration }), input.entryId);
+  }
+
+  async commitRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move commit requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.commit_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 15_000), input.entryId, input.operationId);
+  }
+
+  async getRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move status requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.get_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }), input.entryId, input.operationId);
+  }
+
   async retireAgent(entryId: string, daemonGeneration: number): Promise<void> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Retire requires exact typed coordinates.");
     await this.ensureRunning();
     await this.request("supervisor.retire_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
   }
 
-  async purgeAgent(entryId: string, daemonGeneration: number): Promise<{ outcome: "purged" | "invalid"; error?: string }> {
+  async purgeAgent(entryId: string, daemonGeneration: number, credentialsRevoked = false): Promise<{ outcome: "purged" | "invalid" | "revocation_required"; operationId?: string; error?: string }> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1 || typeof credentialsRevoked !== "boolean") throw new Error("Purge requires exact typed coordinates.");
     await this.ensureRunning();
-    const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
-    return result.outcome === "purged" ? { outcome: "purged" } : { outcome: "invalid", error: String(result.error ?? "Purge preconditions are not met.") };
+    const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", { entry_id: entryId, daemon_generation: daemonGeneration, credentials_revoked: credentialsRevoked });
+    if (result.outcome === "purged") return { outcome: "purged" };
+    if (result.outcome === "revocation_required" && typeof result.operation_id === "string" && result.operation_id.trim()) return { outcome: "revocation_required", operationId: result.operation_id };
+    if (result.outcome === "invalid" && typeof result.error === "string" && result.error.trim()) return { outcome: "invalid", error: result.error };
+    throw new Error("Supervisor returned an invalid purge result.");
   }
 
   async appendActivity(id: string, event: DesktopSupervisorActivityEvent): Promise<DesktopSupervisorManifestEntry> {
@@ -875,7 +908,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
     implementationVersion: String(value.implementation_version ?? "unknown"),
-    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"), agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1"), agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1") },
+    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"), agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1"), agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1"), agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1") },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
@@ -883,14 +916,32 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
 }
 
 function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, daemonGeneration: number): import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration {
-  if (value.entry_id !== entryId || Number(value.daemon_generation) !== daemonGeneration || typeof value.provider !== "string" || typeof value.charter !== "string"
-    || !Number.isSafeInteger(value.config_revision) || !Number.isSafeInteger(value.runtime_configuration_revision)) throw new Error("Supervisor returned an invalid agent configuration response.");
+  if (value.entry_id !== entryId || value.daemon_generation !== daemonGeneration || typeof value.provider !== "string" || !value.provider.trim() || typeof value.charter !== "string" || !value.charter.trim()
+    || !Object.hasOwn(value, "model") || (value.model !== null && typeof value.model !== "string")
+    || !Object.hasOwn(value, "permission_profile_id") || (value.permission_profile_id !== null && typeof value.permission_profile_id !== "string")
+    || !Object.hasOwn(value, "provider_launch_policy") || value.provider_launch_policy === null || typeof value.provider_launch_policy !== "object" || Array.isArray(value.provider_launch_policy)
+    || !Number.isSafeInteger(value.config_revision) || (value.config_revision as number) < 1
+    || !Number.isSafeInteger(value.runtime_configuration_revision) || (value.runtime_configuration_revision as number) < 1
+    || (value.runtime_configuration_revision as number) > (value.config_revision as number)) throw new Error("Supervisor returned an invalid agent configuration response.");
   const effort = value.reasoning_effort;
-  if (effort !== null && !["low", "medium", "high", "xhigh", "max"].includes(String(effort))) throw new Error("Supervisor returned an invalid reasoning effort.");
-  return { entryId, daemonGeneration, provider: value.provider, model: typeof value.model === "string" ? value.model : null,
+  if (effort !== null && (typeof effort !== "string" || !["low", "medium", "high", "xhigh", "max"].includes(effort))) throw new Error("Supervisor returned an invalid reasoning effort.");
+  return { entryId, daemonGeneration, provider: value.provider, model: value.model as string | null,
     reasoningEffort: effort as import("../ipc-types/agents.js").DesktopManagedAgentEffort | null, charter: value.charter,
-    permissionProfileId: typeof value.permission_profile_id === "string" ? value.permission_profile_id : null,
-    providerLaunchPolicy: value.provider_launch_policy ?? null, configRevision: Number(value.config_revision), runtimeConfigurationRevision: Number(value.runtime_configuration_revision) };
+    permissionProfileId: value.permission_profile_id as string | null,
+    providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number };
+}
+
+function mapRoomMove(value: Record<string, unknown>, entryId: string, operationId?: string): import("../ipc-types/agents.js").DesktopSupervisorRoomMove {
+  const fail = (): never => { throw new Error("Supervisor returned an invalid or unfenced room-move response."); };
+  const nonEmpty = (key: string): string => typeof value[key] === "string" && (value[key] as string).trim() ? value[key] as string : fail();
+  const nullable = (key: string): string | null => value[key] === null ? null : typeof value[key] === "string" && (value[key] as string).trim() ? value[key] as string : fail();
+  const phase = enumValue(value.phase, ["prepared", "waiting_for_current_turn", "joining_destination", "membership_committed", "rotating_credentials", "bootstrapping_destination_tail", "active", "failed", "rollback_required"] as const) ?? fail();
+  const mappedOperation = nonEmpty("operation_id");
+  const daemonGeneration = typeof value.daemon_generation === "number" && Number.isSafeInteger(value.daemon_generation) && value.daemon_generation > 0 ? value.daemon_generation : fail();
+  if (nonEmpty("agent_id") !== entryId || (operationId !== undefined && mappedOperation !== operationId)) fail();
+  return { operationId: mappedOperation, requestId: nonEmpty("request_id"), entryId, sourceRoomId: nonEmpty("source_room_id"), destinationRoomId: nonEmpty("destination_room_id"), daemonGeneration,
+    workAttemptId: nullable("work_attempt_id"), executionGenerationId: nullable("execution_generation_id"), agentSessionId: nullable("agent_session_id"), phase,
+    remoteRoomId: nullable("remote_room_id"), destinationCursor: nullable("destination_cursor"), error: nullable("error"), createdAt: nonEmpty("created_at"), updatedAt: nonEmpty("updated_at") };
 }
 
 function booleanField(value: unknown, key: string): boolean {

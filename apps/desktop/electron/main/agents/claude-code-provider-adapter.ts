@@ -644,6 +644,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       "--strict-mcp-config",
       "--mcp-config", managedMcpConfig.path,
       ...policyArgs,
+      ...(req.model ? ["--model", req.model] : []),
       ...(resumeRef ? ["--resume", resumeRef.providerContinuationId] : ["--session-id", expectedSessionId]),
     ];
     const supervisorEnv = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
@@ -652,6 +653,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
         LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
         LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+        ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
+        ...(req.reasoningEffort ? { LETAGENTS_REASONING_EFFORT: req.reasoningEffort } : {}),
       }
       : undefined;
     let child: ClaudeCliChild;
