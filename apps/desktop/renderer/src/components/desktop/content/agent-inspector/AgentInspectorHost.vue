@@ -4,9 +4,10 @@
       <component
         ref="surfaceComponent"
         :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
-        v-bind="projection ? { projection, actionState, compact: false } : { ...statusPresentation, compact: false }"
+        v-bind="projection ? { projection, actionState, compact: false, workResource, selectedWorkSourceMessageId, workArtifacts } : { ...statusPresentation, compact: false }"
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
+        @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
       />
     </Transition>
   </div>
@@ -26,9 +27,10 @@
         ref="surfaceComponent"
         :is="projection ? AgentInspectorSurface : AgentInspectorStatusSurface"
         v-if="open"
-        v-bind="projection ? { projection, actionState, compact } : { ...statusPresentation, compact }"
+        v-bind="projection ? { projection, actionState, compact, workResource, selectedWorkSourceMessageId, workArtifacts } : { ...statusPresentation, compact }"
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
+        @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
       />
     </Transition>
   </Teleport>
@@ -41,6 +43,8 @@ import type {
   AgentInspectorActionState,
   AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
+import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
+import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
 import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
 import type { AgentInspectorSelection } from "../desktop-chat-message/types";
@@ -52,11 +56,18 @@ const props = defineProps<{
   projection: AgentInspectorProjection | null;
   selection: AgentInspectorSelection;
   actionState: AgentInspectorActionState | null;
+  workResource: AgentInspectorWorkResource;
+  selectedWorkSourceMessageId: string | null;
+  workArtifacts: readonly RoomArtifactTimelineItem[];
 }>();
 const emit = defineEmits<{
   close: [];
   action: [intent: AgentInspectorActionIntent];
   "presentation-change": [compact: boolean];
+  "work-selected": [];
+  "work-retry": [];
+  "work-source-select": [sourceMessageId: string];
+  "reveal-message": [canonicalMessageId: string];
 }>();
 
 const compact = ref(false);

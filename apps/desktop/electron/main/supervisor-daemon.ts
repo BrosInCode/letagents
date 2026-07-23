@@ -25,7 +25,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.43";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.45";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -468,6 +468,13 @@ export class SupervisorDaemonClient {
       activity: Array.isArray(detail.activity) ? detail.activity.map((event) => mapActivity(event as WireActivityEvent)) : [],
     };
   }
+  async getAgentInspectorDetail(input: import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail> {
+    if (!nonEmptyString(input.entryId) || !nonEmptyString(input.roomId) || (input.sourceMessageId !== undefined && input.sourceMessageId !== null && !nonEmptyString(input.sourceMessageId))) throw new Error("Agent inspector detail requires exact non-empty entry, room, and optional source identities.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorDetail) throw new Error("This supervisor does not support agent inspector detail history.");
+    const detail = await this.request<Record<string, unknown>>("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null });
+    return mapAgentInspectorDetail(detail, input);
+  }
 
   async appendActivity(id: string, event: DesktopSupervisorActivityEvent): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
@@ -835,7 +842,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
     implementationVersion: String(value.implementation_version ?? "unknown"),
-    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry") },
+    capabilities: { roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"), agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1") },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
@@ -844,6 +851,36 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
 
 function booleanField(value: unknown, key: string): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Reflect.get(value, key) === true;
+}
+export function mapAgentInspectorDetail(value: Record<string, unknown>, input: import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail {
+  type Detail = import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail;
+  const fail = (): never => { throw new Error("Supervisor returned an invalid or unfenced agent inspector detail response."); };
+  const availability = enumValue(value.availability, ["available", "pruned", "not_loaded"] as const) ?? fail();
+  const inboxItemId = nullableNonEmptyString(value.inbox_item_id);
+  const requestedSourceMessageId = nullableNonEmptyString(value.requested_source_message_id);
+  if (value.entry_id !== input.entryId || value.room_id !== input.roomId || inboxItemId === undefined || requestedSourceMessageId === undefined || requestedSourceMessageId !== (input.sourceMessageId ?? null)) fail();
+  const mapOutcome = (candidate: unknown): Detail["receipt"] extends { outcome: infer T } ? T : never => {
+    if (candidate === null) return null as never;
+    const outcome = record(candidate) ?? fail();
+    if (outcome.kind !== undefined && !nonEmptyString(outcome.kind)) fail();
+    if (outcome.text !== undefined && nullableString(outcome.text) === undefined) fail();
+    if (outcome.evidence !== undefined && !nonEmptyString(outcome.evidence)) fail();
+    return { ...(outcome.kind === undefined ? {} : { kind: String(outcome.kind) }), ...(outcome.text === undefined ? {} : { text: outcome.text as string | null }), ...(outcome.evidence === undefined ? {} : { evidence: String(outcome.evidence) }) } as never;
+  };
+  const source = value.source_message === null ? null : (() => { const row = record(value.source_message) ?? fail(); const id = nonEmptyString(row.id) ?? fail(); const roomId = nonEmptyString(row.room_id); const sender = nullableString(row.sender); const text = nullableString(row.text); const createdAt = nullableNonEmptyString(row.created_at); const replyTo = nullableNonEmptyString(row.reply_to); const threadRoot = nullableNonEmptyString(row.thread_root_id); const activation = row.activation === null ? null : record(row.activation); if (roomId !== input.roomId || sender === undefined || text === undefined || createdAt === undefined || replyTo === undefined || threadRoot === undefined || (row.activation !== null && !activation)) fail(); return { id, room_id: roomId!, sender, text, created_at: createdAt, reply_to: replyTo, thread_root_id: threadRoot, activation }; })();
+  const receipt = value.receipt === null ? null : (() => { const row = record(value.receipt) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"] as const) ?? fail(); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const blocked = nullableNonEmptyString(row.blocked_by_inbox_item_id); const next = row.next_attempt_at_ms; if (providerTurn === undefined || error === undefined || blocked === undefined || !(next === null || (typeof next === "number" && Number.isSafeInteger(next) && next >= 0)) || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { state, attempt_count: row.attempt_count, provider_turn_id: providerTurn, outcome: mapOutcome(row.outcome), last_error: error, blocked_by_inbox_item_id: blocked, next_attempt_at_ms: next as number | null }; })();
+  const terminal = value.terminal === null ? null : (() => { const row = record(value.terminal) ?? fail(); const outcome = nonEmptyString(row.outcome) ?? fail(); const text = nullableString(row.normalized_text); const evidence = nonEmptyString(row.evidence_source) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); if (text === undefined) fail(); return { outcome, normalized_text: text, evidence_source: evidence, observed_at: at }; })();
+  const publication = value.publication === null ? null : (() => { const row = record(value.publication) ?? fail(); const client = nonEmptyString(row.client_message_id) ?? fail(); const canonical = nullableNonEmptyString(row.canonical_message_id); const roomId = nullableNonEmptyString(row.room_id); if (canonical === undefined || roomId === undefined || (roomId !== null && roomId !== input.roomId)) fail(); return { client_message_id: client, canonical_message_id: canonical, room_id: roomId }; })();
+  if (!Array.isArray(value.timeline) || value.timeline.length > 100 || !Array.isArray(value.items) || value.items.length > 50) fail();
+  const timelineRows = value.timeline as unknown[]; const itemRows = value.items as unknown[];
+  const timeline = timelineRows.map((candidate) => { const row = record(candidate) ?? fail(); const phase = enumValue(row.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled"] as const) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); const detail = nullableString(row.detail); if (detail === undefined) fail(); return { phase, observedAt: at, detail }; });
+  const items = itemRows.map((candidate) => { const row = record(candidate) ?? fail(); const sourceId = nonEmptyString(row.source_message_id) ?? fail(); const itemId = nonEmptyString(row.inbox_item_id) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"] as const) ?? fail(); const updatedAt = nonEmptyString(row.updated_at) ?? fail(); const sender = nullableString(row.sender); const preview = nullableString(row.text_preview); const createdAt = nullableNonEmptyString(row.created_at); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const canonical = nullableNonEmptyString(row.canonical_message_id); if (sender === undefined || preview === undefined || createdAt === undefined || providerTurn === undefined || error === undefined || canonical === undefined || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { source_message_id: sourceId, inbox_item_id: itemId, state, attempt_count: row.attempt_count, updated_at: updatedAt, sender, text_preview: preview, created_at: createdAt, outcome: mapOutcome(row.outcome), provider_turn_id: providerTurn, last_error: error, canonical_message_id: canonical }; });
+  const boundary = value.history_boundary === null ? null : (() => { const row = record(value.history_boundary) ?? fail(); const observed = nullableNonEmptyString(row.earliest_retained_observed_message_id); const inbox = nullableNonEmptyString(row.earliest_retained_inbox_message_id); const sequence = row.earliest_retained_receipt_sequence; const pruned = nullableNonEmptyString(row.pruned_before_message_id); const at = nullableNonEmptyString(row.pruned_at); if (observed === undefined || inbox === undefined || !(sequence === null || (typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0)) || pruned === undefined || at === undefined) fail(); return { earliest_retained_observed_message_id: observed, earliest_retained_inbox_message_id: inbox, earliest_retained_receipt_sequence: sequence as number | null, pruned_before_message_id: pruned, pruned_at: at }; })();
+  const requestedSourceId = input.sourceMessageId ?? null;
+  if (availability === "available" && (!requestedSourceId || !inboxItemId || !source || source.id !== requestedSourceId || !receipt)) fail();
+  if (availability !== "available" && (inboxItemId || source || receipt || terminal || publication || timeline.length)) fail();
+  if (requestedSourceId === null && availability !== "not_loaded") fail();
+  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, timeline, items, history_boundary: boundary } as Detail;
 }
 
 /**
