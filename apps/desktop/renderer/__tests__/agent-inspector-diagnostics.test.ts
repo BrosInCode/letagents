@@ -38,6 +38,25 @@ test("diagnostics recursively redacts secret values and caps cyclic/deep/large p
   assert.equal(value.truncated, true);
 });
 
+test("diagnostics redacts secrets embedded in arbitrary string leaves", () => {
+  const cases = [
+    `{"authorization":"Bearer ${CANARY}"}`,
+    `"{\\"authorization\\":\\"Bearer ${CANARY}\\"}"`,
+    `authorization: "Bearer ${CANARY}"`,
+    `password='${CANARY}'`,
+    `OPENAI_API_KEY="${CANARY}"`,
+    `Cookie: session=${CANARY}; theme=dark`,
+    `https://user:${CANARY}@example.com/private`,
+    `Bearer ${CANARY}`,
+    `-----BEGIN PRIVATE KEY-----\n${CANARY}\n-----END PRIVATE KEY-----`,
+  ];
+  for (const hostile of cases) {
+    const result = sanitizeAgentInspectorDiagnosticsValue(hostile);
+    assert.doesNotMatch(JSON.stringify(result.value), new RegExp(CANARY), hostile);
+    assert.equal(result.redacted, true, hostile);
+  }
+});
+
 test("diagnostics keeps only newest bounded activity and never exposes raw terminal or durable references", () => {
   const events = Array.from({ length: AGENT_INSPECTOR_DIAGNOSTICS_EVENT_LIMIT + 5 }, (_, index) => event(index + 1, { authorization: `Bearer ${CANARY}`, durablePayloadRef: `ref:${CANARY}` }));
   const result = projectAgentInspectorDiagnostics(projection(events));
@@ -48,6 +67,21 @@ test("diagnostics keeps only newest bounded activity and never exposes raw termi
   assert.doesNotMatch(text, new RegExp(CANARY));
   assert.doesNotMatch(text, /durable:\/\//);
   assert.equal(result.activity[0]?.redacted, true);
+});
+
+test("projected summaries, last errors, and copied reports cannot leak string-encoded credentials", () => {
+  const source = projection([
+    {
+      ...event(1, `{"authorization":"Bearer ${CANARY}"}`),
+      summary: `authorization: "Bearer ${CANARY}"`,
+    },
+  ]);
+  source.entry.lastError = `"{\\"OPENAI_API_KEY\\":\\"${CANARY}\\"}"`;
+  const result = projectAgentInspectorDiagnostics(source);
+  assert.doesNotMatch(result.recovery.lastError ?? "", new RegExp(CANARY));
+  assert.doesNotMatch(result.activity[0]?.summary ?? "", new RegExp(CANARY));
+  assert.doesNotMatch(result.activity[0]?.payloadPreview ?? "", new RegExp(CANARY));
+  assert.doesNotMatch(agentInspectorDiagnosticsReport(result), new RegExp(CANARY));
 });
 
 test("copy report is allowlisted and bounded even when every event is hostile", () => {
@@ -66,4 +100,10 @@ test("the fourth diagnostics tab is lazy and participates in roving Home/End tab
   assert.match(source, /<button id="agent-inspector-diagnostics-tab"/);
   assert.match(source, /\["overview", "work", "settings", "diagnostics"\]/);
   assert.match(source, /event\.key === 'End' \? 'diagnostics'/);
+});
+
+test("the high-frequency diagnostics copy action has no transform motion", () => {
+  const styles = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/agent-inspector.css", import.meta.url)), "utf8");
+  assert.doesNotMatch(styles, /\.agent-inspector-diagnostics-copy[^{}]*\{[^}]*transition:[^;}]*transform/s);
+  assert.doesNotMatch(styles, /\.agent-inspector-diagnostics-copy:active\s*\{[^}]*transform/s);
 });
