@@ -112,7 +112,8 @@ test("every async supervisor control fences success, failure, and unlock with an
 });
 
 test("truthful Activity opens the exact durable entry", () => {
-  assert.match(activity, /supervisedAgentInspectorRequest\(selectedTruthfulAgent/);
+  assert.match(activity, /supervisedAgentInspectorRequest\(agent\.entry/);
+  assert.match(activity, /supervisedAgentInspectorRequest\(selectedLegacyTruthfulAgent/);
   assert.match(activity, /data-testid="desktop-activity-open-supervised-agent-controls"/);
 });
 
