@@ -18,6 +18,7 @@ import {
   SupervisorDaemonClient,
   onSupervisorActivity,
   publishSupervisorActivity,
+  supervisorStateWatchRetryDelay,
   supervisorDaemonSpawnEnvironment,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
@@ -47,6 +48,8 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
     },
     delivery_receipts: [{
       inbox_item_id: "inbox_1", source_message_id: "msg_1", state: "blocked", attempt_count: 3,
+      canonical_message_id: "msg_reply_1",
+      reply_client_message_id: "supervised-room:agent_1:msg_1:reply:v1",
       provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
       timeline: [{ phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
     }],
@@ -75,6 +78,85 @@ function fakeDaemonProcessIdentity(
   };
 }
 
+test("daemon client maps an ordered full-state subscription snapshot", async () => {
+  const env = await fixture();
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    19,
+  );
+  wire.entries.push(wireEntryWithCausalProjection());
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+    });
+    const snapshot = await client.watchState({
+      afterDaemonGeneration: 19,
+      afterSequence: 6,
+      waitMs: 10,
+    });
+    assert.equal(snapshot.daemonGeneration, 19);
+    assert.equal(snapshot.sequence, 7);
+    assert.equal(snapshot.entries[0]?.id, "agent_1");
+    assert.equal(snapshot.entries[0]?.roomAgentState?.ingress.state, "observing");
+    assert.deepEqual(wire.requests.at(-1), {
+      method: "manifest.watch_state",
+      params: {
+        after_daemon_generation: 19,
+        after_sequence: 6,
+        wait_ms: 10,
+      },
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    await env.cleanup();
+  }
+});
+
+test("state subscriptions observe an existing daemon without spawning one", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let spawnCount = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath,
+    daemonScriptPath,
+    spawnDaemon: () => {
+      spawnCount += 1;
+      return fakeChild();
+    },
+  });
+  try {
+    assert.equal(await client.connectIfRunning(), null);
+    assert.equal(spawnCount, 0, "a state observer must not become the daemon lifecycle owner");
+
+    const wire = await startWireDaemon(
+      env.socketPath,
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      23,
+    );
+    try {
+      assert.equal((await client.connectIfRunning())?.generation, 23);
+      assert.equal(spawnCount, 0);
+    } finally {
+      await closeServer(wire.server, env.socketPath);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("state-watch retry delay backs off exponentially and remains bounded", () => {
+  assert.equal(supervisorStateWatchRetryDelay(1), 1_000);
+  assert.equal(supervisorStateWatchRetryDelay(2), 2_000);
+  assert.equal(supervisorStateWatchRetryDelay(5), 16_000);
+  assert.equal(supervisorStateWatchRetryDelay(6), 30_000);
+  assert.equal(supervisorStateWatchRetryDelay(100), 30_000);
+});
+
 async function startWireDaemon(
   socketPath: string,
   version: number,
@@ -101,13 +183,15 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
         setTimeout(() => onPrepare?.(), 5);
       } else if (request.method === "manifest.list") {
         result = entries;
+      } else if (request.method === "manifest.watch_state") {
+        result = { daemon_generation: generation, sequence: 7, entries };
       } else if (request.method === "manifest.put") {
         const next = { ...request.params!.entry, workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null }, activity: [] };
         const existing = entries.find((candidate) => candidate.id === next.id);
@@ -303,6 +387,8 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   assert.equal(projected.roomAgentState?.inbox.pendingCount, 2);
   assert.deepEqual(projected.deliveryReceipts, [{
     inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
+    canonicalMessageId: "msg_reply_1",
+    replyClientMessageId: "supervised-room:agent_1:msg_1:reply:v1",
     providerTurnId: null, blockedByMessageId: null, error: "failed", updatedAt: "2026-01-01T00:00:00.000Z",
     timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
@@ -331,9 +417,10 @@ test("causal manifest projection drops malformed nested state and malformed rece
     task: { state: "none", task_id: null, title: null },
   };
   malformed.delivery_receipts = [
-    { inbox_item_id: "", source_message_id: "msg_1", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
-    { inbox_item_id: "inbox_2", source_message_id: "msg_2", state: "blocked", attempt_count: Number.NaN, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
-    { inbox_item_id: "inbox_3", source_message_id: "msg_3", state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [{ phase: "invented", observed_at: "now", detail: null }] },
+    { inbox_item_id: "", source_message_id: "msg_1", canonical_message_id: null, state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_2", source_message_id: "msg_2", canonical_message_id: null, state: "blocked", attempt_count: Number.NaN, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
+    { inbox_item_id: "inbox_3", source_message_id: "msg_3", canonical_message_id: null, state: "blocked", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [{ phase: "invented", observed_at: "now", detail: null }] },
+    { inbox_item_id: "inbox_4", source_message_id: "msg_4", canonical_message_id: "", state: "acknowledged", attempt_count: 1, provider_turn_id: null, blocked_by_message_id: null, error: null, updated_at: "now", timeline: [] },
     null,
   ];
   const projected = mapEntry(malformed as unknown as Parameters<typeof mapEntry>[0]);
@@ -912,7 +999,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces the prior 2.0.49 implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the prior 2.0.52 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -931,11 +1018,11 @@ test("desktop replaces the prior 2.0.49 implementation and accepts only the new 
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.49",
+    "2.0.52",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.49", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.notEqual("2.0.52", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -953,7 +1040,7 @@ test("desktop replaces the prior 2.0.49 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.50");
+    assert.equal(status.implementationVersion, "2.0.53");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

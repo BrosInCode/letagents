@@ -1,5 +1,6 @@
 import type {
   DesktopLocalChatSyncResult,
+  DesktopRoomMessage,
   DesktopTaskSummary,
   DesktopRoomLatestMessage,
   DesktopRoomMessagesPage,
@@ -19,6 +20,7 @@ import {
   claimUnsyncedLocalChatMessages,
   getLatestLocalChatMessages,
   getLocalChatMessagesBefore,
+  getLocalChatMessagesAround,
   getLocalMessageThread,
   getLocalMessageThreads,
   getSyncedCloudMessageId,
@@ -422,6 +424,40 @@ export async function getDesktopRoomMessagesBefore(
       .map(mapRoomMessagePayload),
     hasOlder: Boolean(page.has_older ?? page.has_more),
   };
+}
+
+export async function getDesktopRoomMessage(
+  roomIdentifier: string,
+  messageId: string,
+): Promise<DesktopRoomMessage | null> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedMessageId = messageId.trim();
+  if (!trimmedRoomIdentifier || !/^msg_\d+$/.test(trimmedMessageId)) return null;
+  if (isDesktopSmokeCheck()) return null;
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const page = await getLocalChatMessagesAround(
+      localRoomIdentifier,
+      trimmedMessageId,
+      { before: 0, after: 0 },
+    );
+    const message = page.messages.find((candidate) => candidate.id === trimmedMessageId);
+    return message ? mapRoomMessagePayload(message) : null;
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
+  const response = await apiFetch<{ message?: RoomMessagePayload | null }>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}`,
+  );
+  return response.message ? mapRoomMessagePayload(response.message) : null;
 }
 
 export async function getDesktopRoomLatestMessages(

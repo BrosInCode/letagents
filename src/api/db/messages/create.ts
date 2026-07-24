@@ -41,6 +41,8 @@ export interface AddMessageOptions {
   thread_root_message_id?: string | null;
   attachments?: NormalizedMessageAttachmentReference[];
   client_message_id?: string | null;
+  publisher_agent_key?: string | null;
+  publisher_agent_session_id?: string | null;
   account_id?: string | null;
   /**
    * Runs inside the message-insert transaction after the row is created, so
@@ -155,6 +157,8 @@ export async function addMessageWithCreateStatus(
       agent_prompt_kind: promptKind,
       source: options?.source ?? null,
       client_message_id: clientMessageId,
+      publisher_agent_key: options?.publisher_agent_key?.trim() || null,
+      publisher_agent_session_id: options?.publisher_agent_session_id?.trim() || null,
       timestamp: new Date().toISOString(),
     };
 

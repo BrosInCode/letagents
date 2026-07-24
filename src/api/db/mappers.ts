@@ -215,6 +215,13 @@ export function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): Mess
 export function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id ?? null,
+        }
+      : null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
@@ -246,6 +253,13 @@ export function toMessageWithReply(
 ): Message {
   return {
     id: formatMessageId(row.number),
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id ?? null,
+        }
+      : null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),

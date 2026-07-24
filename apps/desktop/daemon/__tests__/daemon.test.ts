@@ -140,6 +140,52 @@ test("ready_reached_at survives a manifest round-trip, defaults absent, and a st
   }
 });
 
+test("manifest state subscription returns an initial snapshot and wakes on a committed mutation", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    const initial = (await daemonRequest(paths.socketPath, "manifest.watch_state", {
+      after_daemon_generation: 0,
+      after_sequence: 0,
+      wait_ms: 1_000,
+    })).result as { daemon_generation: number; sequence: number; entries: DaemonManifestEntryView[] };
+    assert.ok(initial.daemon_generation > 0);
+    assert.ok(initial.sequence > 0);
+    assert.deepEqual(initial.entries, []);
+
+    const changed = daemonRequest(paths.socketPath, "manifest.watch_state", {
+      after_daemon_generation: initial.daemon_generation,
+      after_sequence: initial.sequence,
+      wait_ms: 1_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...entry, id: "state_subscription_agent" },
+    });
+    const snapshot = (await changed).result as {
+      daemon_generation: number;
+      sequence: number;
+      entries: DaemonManifestEntryView[];
+    };
+    assert.equal(snapshot.daemon_generation, initial.daemon_generation);
+    assert.ok(snapshot.sequence > initial.sequence);
+    assert.equal(snapshot.entries[0]?.id, "state_subscription_agent");
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("desired-state compare-and-set cannot resurrect a concurrently stopped launch", async () => {
   const env = await fixture();
   const paths = {

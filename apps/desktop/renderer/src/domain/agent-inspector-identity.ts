@@ -67,6 +67,9 @@ export function agentInspectorRequestResetKey(
     selection?.kind ?? null,
     selection?.kind === "supervised" ? selection.supervisorEntryId : null,
     selection?.kind === "unavailable" ? selection.unavailableReason : null,
+    selection?.messageId ?? null,
+    selection?.clientMessageId ?? null,
+    selection?.messageSource ?? null,
     selection?.agentSessionId ?? null,
     selection?.agentKey ?? null,
     selection?.actorLabel ?? null,
@@ -130,6 +133,28 @@ export function resolveSupervisorEntryId(
   return { state: "unmatched" };
 }
 
+/**
+ * A daemon-owned final-answer publication is the strongest Chat identity
+ * available: it binds one canonical room message directly to one durable
+ * supervisor entry without consulting mutable labels or provider metadata.
+ */
+export function resolveSupervisorEntryIdForPublishedMessage(
+  entries: readonly Pick<DesktopSupervisorManifestEntry, "id" | "deliveryReceipts">[],
+  identity: Pick<AgentModalTarget, "messageId" | "clientMessageId">,
+): SupervisorIdentityResolution {
+  const canonicalMessageId = exactIdentity(identity.messageId);
+  const clientMessageId = exactIdentity(identity.clientMessageId);
+  if (!canonicalMessageId && !clientMessageId) return { state: "unmatched" };
+  const matches = entries.filter((entry) =>
+    entry.deliveryReceipts?.some((receipt) =>
+      (canonicalMessageId && exactIdentity(receipt.canonicalMessageId) === canonicalMessageId)
+      || (clientMessageId && exactIdentity(receipt.replyClientMessageId) === clientMessageId)));
+  if (matches.length > 1) return { state: "ambiguous" };
+  return matches.length === 1
+    ? { state: "matched", entryId: matches[0]!.id }
+    : { state: "unmatched" };
+}
+
 export function supervisedAgentInspectorSelection(
   entry: Pick<DesktopSupervisorManifestEntry, "id" | "displayName" | "agentKey" | "agentSessionId" | "provider">,
   presentation: Partial<AgentModalTarget> = {},
@@ -138,6 +163,9 @@ export function supervisedAgentInspectorSelection(
   return {
     kind: "supervised",
     supervisorEntryId: entry.id,
+    messageId: presentation.messageId ?? null,
+    clientMessageId: presentation.clientMessageId ?? null,
+    messageSource: presentation.messageSource ?? null,
     actorLabel: presentation.actorLabel ?? null,
     displayName,
     ownerAttribution: presentation.ownerAttribution ?? null,
@@ -159,6 +187,10 @@ export function supervisedAgentInspectorRequest(
 
 export function participantAgentInspectorRequest(target: AgentModalTarget): AgentInspectorRequest {
   return { kind: "participant", target };
+}
+
+export function resolvingAgentInspectorRequest(target: AgentModalTarget): AgentInspectorRequest {
+  return { kind: "resolving", target };
 }
 
 /**
@@ -232,6 +264,7 @@ export function resolveAgentInspectorSelection(
 ): AgentInspectorSelection {
   const target = request.target;
   if (resource.roomIdentifier !== roomId) return { ...target, kind: "resolving" };
+  if (request.kind === "resolving") return { ...target, kind: "resolving" };
   const roomEntries = resource.data.filter((entry) => entry.roomId === roomId);
   if (request.kind === "supervised") {
     const entry = roomEntries.find((candidate) => candidate.id === request.supervisorEntryId);
@@ -245,15 +278,33 @@ export function resolveAgentInspectorSelection(
     return { ...target, kind: "resolving" };
   }
 
-  const resolution = resolveSupervisorEntryId(roomEntries, {
+  const publicationResolution = resolveSupervisorEntryIdForPublishedMessage(
+    roomEntries,
+    target,
+  );
+  const stableIdentityResolution = resolveSupervisorEntryId(roomEntries, {
     agentSessionId: target.agentSessionId,
     agentKey: target.agentKey,
   });
-  if (resolution.state === "matched") {
-    return { ...target, kind: "supervised", supervisorEntryId: resolution.entryId };
-  }
-  if (resolution.state === "ambiguous") {
+  const resolutions = [
+    publicationResolution,
+    stableIdentityResolution,
+  ];
+  if (resolutions.some((resolution) => resolution.state === "ambiguous")) {
     return { ...target, kind: "unavailable", unavailableReason: "ambiguous" };
+  }
+  const resolvedEntryIds = new Set(
+    resolutions
+      .filter((resolution): resolution is Extract<SupervisorIdentityResolution, { state: "matched" }> =>
+        resolution.state === "matched")
+      .map((resolution) => resolution.entryId),
+  );
+  if (resolvedEntryIds.size > 1) {
+    return { ...target, kind: "unavailable", unavailableReason: "ambiguous" };
+  }
+  const resolvedEntryId = [...resolvedEntryIds][0];
+  if (resolvedEntryId) {
+    return { ...target, kind: "supervised", supervisorEntryId: resolvedEntryId };
   }
 
   // Only a completed list operation can authoritatively classify the target

@@ -369,7 +369,15 @@ export interface DesktopSupervisorDaemonStatus {
     agentInspectorSettings: boolean;
     agentRoomMove: boolean;
     agentLifecycle: boolean;
+    agentStateSubscription: boolean;
   };
+}
+
+/** Coalesced authoritative daemon state, ordered within one singleton generation. */
+export interface DesktopSupervisorStateSnapshot {
+  daemonGeneration: number;
+  sequence: number;
+  entries: DesktopSupervisorManifestEntry[];
 }
 
 /** Revisioned, daemon-owned Inspector configuration. Provider never changes after creation. */
@@ -470,6 +478,10 @@ export interface DesktopRoomAgentCausalEvent {
 export interface DesktopRoomAgentDeliveryReceipt {
   inboxItemId: string;
   sourceMessageId: string;
+  /** Deterministic daemon publication identity for this exact reply. */
+  replyClientMessageId: string;
+  /** Exact room message created by this supervised reply, when one exists. */
+  canonicalMessageId: string | null;
   state: DesktopRoomAgentReceiptState;
   attemptCount: number;
   providerTurnId: string | null;

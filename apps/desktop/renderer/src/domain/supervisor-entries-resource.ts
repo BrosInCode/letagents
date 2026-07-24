@@ -4,6 +4,33 @@ import type {
 } from "../../../electron/ipc-types";
 
 export const SUPERVISOR_ACTIVITY_CAP = 200;
+export const SUPERVISOR_STATE_SUBSCRIPTION_STALE_MS = 60_000;
+
+/**
+ * Event delivery is an optimization, not the only repair path. Registration
+ * proves that preload exposed a callback; only a recent snapshot proves that
+ * the Electron-to-renderer subscription is still carrying state.
+ */
+export function supervisorStateSubscriptionNeedsRepair(input: {
+  active: boolean;
+  lastSnapshotAtMs: number | null;
+  nowMs: number;
+  staleAfterMs?: number;
+}): boolean {
+  if (!input.active || input.lastSnapshotAtMs === null) return true;
+  const staleAfterMs = Math.max(1, input.staleAfterMs ?? SUPERVISOR_STATE_SUBSCRIPTION_STALE_MS);
+  return input.nowMs - input.lastSnapshotAtMs >= staleAfterMs;
+}
+
+/**
+ * Refreshing with retained data is not a loss of authority. First-load and
+ * transport-error states still fail closed because they have no current proof.
+ */
+export function supervisorEntriesResourceFreshness(
+  state: "loading" | "refreshing" | "ready" | "error",
+): "fresh" | "stale" {
+  return state === "refreshing" || state === "ready" ? "fresh" : "stale";
+}
 
 export interface SupervisorActivityPush {
   entryId: string;

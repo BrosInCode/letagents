@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomMessageRoutes } = await import("../routes/rooms/messages/index.js");
+
+test("account-hydrated room stream messages do not disclose publisher idempotency identity", () => {
+  const streamSource = readFileSync(
+    fileURLToPath(new URL("../routes/rooms/messages/stream.ts", import.meta.url)),
+    "utf8",
+  );
+  assert.match(streamSource, /client_message_id:\s*null/);
+  assert.doesNotMatch(streamSource, /client_message_id:\s*message\.client_message_id/);
+});
 
 function createDeps() {
   const unused = async () => {
@@ -239,6 +250,95 @@ test("owner-token message writes require a registered worker session", async () 
     error: "Registered worker session is required for agent write actions.",
   });
   assert.equal(messageCreated, false);
+});
+
+test("worker message writes persist server-authenticated publisher identity", async () => {
+  let createdOptions: {
+    publisher_agent_key?: string | null;
+    publisher_agent_session_id?: string | null;
+  } | null = null;
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get() {},
+    post(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    put() {},
+    delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    emitProjectMessage: async (
+      _projectId: string,
+      sender: string,
+      text: string,
+      options?: {
+        source?: string;
+        publisher_agent_key?: string | null;
+        publisher_agent_session_id?: string | null;
+      },
+    ) => {
+      createdOptions = options ?? null;
+      return {
+        id: "msg_1",
+        client_message_id: null,
+        agent_identity: {
+          actor_label: sender,
+          agent_key: options?.publisher_agent_key || "",
+          agent_session_id: options?.publisher_agent_session_id || null,
+        },
+        sender,
+        text,
+        source: options?.source,
+        timestamp: new Date().toISOString(),
+      };
+    },
+    rememberRoomParticipantFromMessage: async () => undefined,
+  };
+
+  registerRoomMessageRoutes(app as never, deps as never);
+  const res = responseRecorder();
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages$/");
+  assert.ok(handler);
+  await handler({
+    params: { 0: "room_1" },
+    body: { sender: "forged", text: "hello" },
+    authKind: "agent_session",
+    agentSession: {
+      bearer_id: "bearer_1",
+      bearer_generation: 1,
+      capabilities: [],
+      room_id: "room_1",
+      agent_session_id: "agent_session_497",
+      actor_label: "MapleRidge | EmmyMay's agent | Supervisor Worker",
+      agent_key: "owner/maple-ridge",
+      agent_instance_id: null,
+      session_kind: "worker",
+      runtime: "codex",
+      display_name: "MapleRidge",
+      owner_label: "EmmyMay",
+      ide_label: "Supervisor Worker",
+      repo_branch: null,
+      expires_at: "2026-07-23T20:00:00.000Z",
+    },
+    sessionAccount: null,
+  }, res);
+
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(createdOptions && {
+    publisher_agent_key: createdOptions.publisher_agent_key,
+    publisher_agent_session_id: createdOptions.publisher_agent_session_id,
+  }, {
+    publisher_agent_key: "owner/maple-ridge",
+    publisher_agent_session_id: "agent_session_497",
+  });
+  assert.equal(
+    (res.body as { sender?: string }).sender,
+    "MapleRidge | EmmyMay's agent | Supervisor Worker",
+  );
 });
 
 test("desktop owner-token human messages can post as browser activity", async () => {

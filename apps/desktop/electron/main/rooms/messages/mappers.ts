@@ -14,6 +14,7 @@ export type RoomMessageReplyPayload = {
 
 export type RoomMessagePayload = {
   id: string;
+  client_message_id?: string | null;
   sender: string;
   text: string;
   attachments?: RoomMessageAttachmentPayload[] | null;
@@ -56,6 +57,7 @@ export function mapRoomMessagePayload(
 ): DesktopRoomMessage {
   return {
     id: message.id,
+    clientMessageId: message.client_message_id?.trim() || null,
     sender: message.sender,
     text: message.text,
     attachments: (message.attachments || []).map(

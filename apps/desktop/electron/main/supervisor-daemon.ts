@@ -14,6 +14,7 @@ import type {
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorRoomDeliveryRetryInput,
+  DesktopSupervisorStateSnapshot,
   DesktopSupervisorTurnControlInput,
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
@@ -25,7 +26,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.50";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.53";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -33,8 +34,13 @@ const NATURAL_EXIT_TIMEOUT_MS = 2_000;
 const TERMINATE_EXIT_TIMEOUT_MS = 2_000;
 const KILL_EXIT_TIMEOUT_MS = 1_000;
 const PROCESS_POLL_INTERVAL_MS = 25;
+const STATE_WATCH_RETRY_BASE_MS = 1_000;
+const STATE_WATCH_RETRY_MAX_MS = 30_000;
 const activityEmitter = new EventEmitter();
+const stateEmitter = new EventEmitter();
 const activitySequences = new Map<string, number>();
+let stateWatchOperation: Promise<void> | null = null;
+let stateWatchUnsupportedGeneration: number | null = null;
 
 /** Main-process lifecycle signal. Renderer IPC never receives this hook. */
 export function onSupervisorDaemonGeneration(
@@ -113,7 +119,7 @@ type WireEntry = {
     task: { state: string; task_id: string | null; title: string | null };
   } | null;
   delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string; state: string; attempt_count: number;
+    inbox_item_id: string; source_message_id: string; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
     provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; updated_at: string;
     timeline?: Array<{ phase: string; observed_at: string; detail: string | null }>;
   }>;
@@ -296,17 +302,33 @@ export class SupervisorDaemonClient {
       return Promise.reject(new Error("Supervised agents currently require macOS."));
     }
     if (!this.ensureOperation) {
-      this.ensureOperation = this.ensureRunningOnce().then((status) => {
-        if (this.lastReadyGeneration !== status.generation) {
-          this.lastReadyGeneration = status.generation;
-          queueMicrotask(() => {
-            for (const listener of this.generationListeners) listener(status);
-          });
-        }
-        return status;
-      }).finally(() => { this.ensureOperation = null; });
+      this.ensureOperation = this.ensureRunningOnce()
+        .then((status) => this.rememberReadyStatus(status))
+        .finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
+  }
+
+  /**
+   * Observe an existing daemon without becoming its lifecycle owner.
+   * Subscriptions use this path so merely registering an IPC listener can
+   * never spawn or resurrect the supervisor process.
+   */
+  async connectIfRunning(): Promise<DesktopSupervisorDaemonStatus | null> {
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return null;
+    }
+    try {
+      const negotiated = await this.request<Record<string, unknown>>(
+        "daemon.negotiate",
+        undefined,
+        SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      );
+      return this.rememberReadyStatus(mapStatus(negotiated));
+    } catch (error) {
+      if (isConnectionUnavailable(error)) return null;
+      throw error;
+    }
   }
 
   onGeneration(listener: (status: DesktopSupervisorDaemonStatus) => void): () => void {
@@ -314,10 +336,51 @@ export class SupervisorDaemonClient {
     return () => this.generationListeners.delete(listener);
   }
 
+  private rememberReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
+    if (this.lastReadyGeneration !== status.generation) {
+      this.lastReadyGeneration = status.generation;
+      queueMicrotask(() => {
+        for (const listener of this.generationListeners) listener(status);
+      });
+    }
+    return status;
+  }
+
   async list(roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> {
     await this.ensureRunning();
     const entries = await this.request<WireEntry[]>("manifest.list");
     return entries.map(mapEntry).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
+  }
+
+  async watchState(input: {
+    afterDaemonGeneration: number;
+    afterSequence: number;
+    waitMs?: number;
+  }): Promise<DesktopSupervisorStateSnapshot> {
+    const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
+    const value = await this.request<{
+      daemon_generation: number;
+      sequence: number;
+      entries: WireEntry[];
+    }>("manifest.watch_state", {
+      after_daemon_generation: input.afterDaemonGeneration,
+      after_sequence: input.afterSequence,
+      wait_ms: waitMs,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true);
+    if (
+      !Number.isSafeInteger(value.daemon_generation)
+      || value.daemon_generation < 1
+      || !Number.isSafeInteger(value.sequence)
+      || value.sequence < 1
+      || !Array.isArray(value.entries)
+    ) {
+      throw new Error("Supervisor daemon returned an invalid state snapshot.");
+    }
+    return {
+      daemonGeneration: value.daemon_generation,
+      sequence: value.sequence,
+      entries: value.entries.map(mapEntry),
+    };
   }
 
   async create(input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> {
@@ -939,10 +1002,12 @@ export class SupervisorDaemonClient {
     params?: unknown,
     version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
     timeoutMs = this.requestTimeoutMs,
+    unrefSocket = false,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);
+      if (unrefSocket) socket.unref();
       let buffer = "";
       let settled = false;
       const finish = (error?: Error, value?: T) => {
@@ -988,6 +1053,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
       agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1"),
       agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1"),
       agentLifecycle: booleanField(value.capabilities, "agent_lifecycle_v1"),
+      agentStateSubscription: booleanField(value.capabilities, "agent_state_subscription_v1"),
     },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
@@ -1212,12 +1278,16 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
     if (!receipt) return [];
     const inboxItemId = nonEmptyString(receipt.inbox_item_id);
     const sourceMessageId = nonEmptyString(receipt.source_message_id);
+    const replyClientMessageId = nonEmptyString(receipt.reply_client_message_id);
+    const canonicalMessageId = receipt.canonical_message_id === undefined
+      ? null
+      : nullableNonEmptyString(receipt.canonical_message_id);
     const state = enumValue(receipt.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "acknowledged", "acknowledged_no_reply", "retryable", "blocked", "cancelled_by_room_move", "queued_behind_blocked"] as const);
     const providerTurnId = nullableNonEmptyString(receipt.provider_turn_id);
     const blockedByMessageId = nullableNonEmptyString(receipt.blocked_by_message_id);
     const error = nullableString(receipt.error);
     const updatedAt = nonEmptyString(receipt.updated_at);
-    if (!inboxItemId || !sourceMessageId || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || !updatedAt
+    if (!inboxItemId || !sourceMessageId || !replyClientMessageId || canonicalMessageId === undefined || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || !updatedAt
       || typeof receipt.attempt_count !== "number" || !Number.isFinite(receipt.attempt_count) || !Number.isInteger(receipt.attempt_count) || receipt.attempt_count < 0
       || !Array.isArray(receipt.timeline)) return [];
     const timeline: NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"] = [];
@@ -1230,7 +1300,7 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       if (!phase || !observedAt || detail === undefined) return [];
       timeline.push({ phase, observedAt, detail });
     }
-    return [{ inboxItemId, sourceMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, updatedAt, timeline }];
+    return [{ inboxItemId, sourceMessageId, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, updatedAt, timeline }];
   });
 }
 
@@ -1310,12 +1380,84 @@ function isConnectionUnavailable(error: unknown): boolean {
 }
 
 export const supervisorDaemonClient = new SupervisorDaemonClient();
+supervisorDaemonClient.onGeneration((status) => {
+  if (stateWatchUnsupportedGeneration !== status.generation) {
+    stateWatchUnsupportedGeneration = null;
+  }
+  if (stateEmitter.listenerCount("state") > 0) ensureSupervisorStateWatch();
+});
 
 export function onSupervisorActivity(
   listener: (payload: { entryId: string; event: DesktopSupervisorActivityEvent }) => void,
 ): () => void {
   activityEmitter.on("activity", listener);
   return () => activityEmitter.off("activity", listener);
+}
+
+export function onSupervisorState(
+  listener: (snapshot: DesktopSupervisorStateSnapshot) => void,
+): () => void {
+  stateEmitter.on("state", listener);
+  ensureSupervisorStateWatch();
+  return () => stateEmitter.off("state", listener);
+}
+
+function ensureSupervisorStateWatch(): void {
+  if (stateWatchOperation || stateEmitter.listenerCount("state") === 0) return;
+  stateWatchOperation = runSupervisorStateWatch().finally(() => {
+    stateWatchOperation = null;
+  });
+}
+
+export function supervisorStateWatchRetryDelay(failureCount: number): number {
+  const boundedFailureCount = Math.max(1, Math.min(31, Math.trunc(failureCount)));
+  return Math.min(
+    STATE_WATCH_RETRY_MAX_MS,
+    STATE_WATCH_RETRY_BASE_MS * (2 ** (boundedFailureCount - 1)),
+  );
+}
+
+async function runSupervisorStateWatch(): Promise<void> {
+  let afterDaemonGeneration = 0;
+  let afterSequence = 0;
+  let consecutiveFailures = 0;
+  while (stateEmitter.listenerCount("state") > 0) {
+    try {
+      const status = await supervisorDaemonClient.connectIfRunning();
+      if (!status) return;
+      if (stateWatchUnsupportedGeneration === status.generation) return;
+      if (!status.capabilities.agentStateSubscription) {
+        stateWatchUnsupportedGeneration = status.generation;
+        return;
+      }
+      if (afterDaemonGeneration !== status.generation) {
+        afterDaemonGeneration = 0;
+        afterSequence = 0;
+      }
+      const snapshot = await supervisorDaemonClient.watchState({
+        afterDaemonGeneration,
+        afterSequence,
+      });
+      afterDaemonGeneration = snapshot.daemonGeneration;
+      afterSequence = snapshot.sequence;
+      consecutiveFailures = 0;
+      stateEmitter.emit("state", snapshot);
+    } catch {
+      // The renderer keeps its last authoritative snapshot. Reconnection is a
+      // transport concern and must not transiently dismantle its live controls.
+      // A capped exponential delay avoids turning a persistent failure into a
+      // tight background loop.
+      consecutiveFailures += 1;
+      await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));
+    }
+  }
+}
+
+function unrefDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
 }
 
 export async function publishSupervisorActivity(input: {
