@@ -216,6 +216,13 @@ export function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
     client_message_id: row.client_message_id ?? null,
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id ?? null,
+        }
+      : null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
@@ -248,6 +255,13 @@ export function toMessageWithReply(
   return {
     id: formatMessageId(row.number),
     client_message_id: row.client_message_id ?? null,
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id ?? null,
+        }
+      : null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),

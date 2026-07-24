@@ -72,6 +72,10 @@ test("wide and compact modes have distinct, accessible spatial behavior", () => 
   assert.doesNotMatch(host, /getElementById\("app"\)/);
   assert.match(host, /restoreFocusElement = document\.activeElement/);
   assert.match(host, /document\.addEventListener\("keydown", handleHostKeydown, true\)/);
+  assert.match(host, /document\.addEventListener\("pointerdown", handleDocumentPointerDown, true\)/);
+  assert.match(host, /!props\.open \|\| compact\.value \|\| event\.button !== 0/);
+  assert.match(host, /host\.contains\(event\.target as Node\)/);
+  assert.match(host, /document\.removeEventListener\("pointerdown", handleDocumentPointerDown, true\)/);
   assert.match(host, /surfaceComponent\.value\?\.focusInitial\(\)/);
   assert.match(host, /previous\[1\] !== isCompact/);
   assert.match(host, /\}, \{ immediate: true \}\);/);

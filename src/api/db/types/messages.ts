@@ -8,6 +8,7 @@ export interface Message {
    * back to the operation that created it.
    */
   client_message_id: string | null;
+  agent_identity: MessageAgentIdentity | null;
   sender: string;
   text: string;
   agent_prompt_kind: AgentPromptKind | null;
@@ -18,6 +19,12 @@ export interface Message {
   thread: MessageThreadSummary | null;
   reply_to: MessageReplyReference | null;
   attachments: MessageAttachment[];
+}
+
+export interface MessageAgentIdentity {
+  actor_label: string;
+  agent_key: string;
+  agent_session_id: string | null;
 }
 
 export interface MessageReplyReference {
@@ -88,6 +95,8 @@ export interface MessageRow {
   agent_prompt_kind: string | null;
   source: string | null;
   client_message_id: string | null;
+  publisher_agent_key: string | null;
+  publisher_agent_session_id: string | null;
   timestamp: string;
 }
 

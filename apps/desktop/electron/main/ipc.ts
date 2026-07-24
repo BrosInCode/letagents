@@ -152,6 +152,7 @@ import {
 } from "./agents/codex-supervisor.js";
 import {
   onSupervisorActivity,
+  onSupervisorState,
   supervisorDaemonClient,
 } from "./supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
@@ -182,6 +183,7 @@ import {
   getDesktopRoomArtifacts,
   getDesktopGitHubIntegrationStatus,
   getDesktopRoomLatestMessages,
+  getDesktopRoomMessage,
   getDesktopRoomStorage,
   getDesktopRoomThread,
   getDesktopRoomThreads,
@@ -251,6 +253,7 @@ import {
 
 const { ipcMain } = electron as typeof import("electron");
 let supervisorActivityBridgeRegistered = false;
+let supervisorStateBridgeRegistered = false;
 let supervisorLaunchBridgeRegistered = false;
 
 /** A launch id shared by the durable entry (`supervised_<id>`) and every launch
@@ -401,6 +404,15 @@ export function registerDesktopIpcHandlers(
       roomIdentifiers: string[],
     ): Promise<DesktopRoomLatestMessage[]> =>
       getDesktopRoomLatestMessages(Array.isArray(roomIdentifiers) ? roomIdentifiers : []),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-message",
+    async (
+      _event,
+      roomIdentifier: string,
+      messageId: string,
+    ): Promise<DesktopRoomMessage | null> =>
+      getDesktopRoomMessage(roomIdentifier, messageId),
   );
   targetIpcMain.handle(
     "desktop:room:get-messages-before",
@@ -1154,6 +1166,10 @@ export function registerDesktopIpcHandlers(
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;
     onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));
+  }
+  if (!supervisorStateBridgeRegistered) {
+    supervisorStateBridgeRegistered = true;
+    onSupervisorState((snapshot) => emitToMainWindow("desktop:supervisor:state", snapshot));
   }
   if (!supervisorLaunchBridgeRegistered) {
     supervisorLaunchBridgeRegistered = true;

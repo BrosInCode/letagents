@@ -76,6 +76,10 @@ export function registerCreateMessageRoute(
         thread_root_id: threadRootMessageId,
         attachments,
         ...(body.client_message_id ? { client_message_id: body.client_message_id } : {}),
+        ...(workerIdentity ? {
+          publisher_agent_key: workerIdentity.agent_key,
+          publisher_agent_session_id: workerIdentity.agent_session_id,
+        } : {}),
         account_id: req.sessionAccount?.account_id ?? null,
       });
       await deps.rememberRoomParticipantFromMessage({

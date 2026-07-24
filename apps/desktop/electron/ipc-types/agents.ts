@@ -369,7 +369,15 @@ export interface DesktopSupervisorDaemonStatus {
     agentInspectorSettings: boolean;
     agentRoomMove: boolean;
     agentLifecycle: boolean;
+    agentStateSubscription: boolean;
   };
+}
+
+/** Coalesced authoritative daemon state, ordered within one singleton generation. */
+export interface DesktopSupervisorStateSnapshot {
+  daemonGeneration: number;
+  sequence: number;
+  entries: DesktopSupervisorManifestEntry[];
 }
 
 /** Revisioned, daemon-owned Inspector configuration. Provider never changes after creation. */

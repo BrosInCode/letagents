@@ -654,6 +654,9 @@ export class SupervisorDaemon {
   private readonly clearRecoveryTimeout: typeof clearTimeout;
   private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
+  /** Ordered within one singleton generation; snapshots coalesce lower-level writes. */
+  private stateSequence = 1;
+  private readonly stateWaiters = new Set<() => void>();
   private handoffScheduled = false;
   private handoffTeardownScheduled = false;
   /** Resolves only once this daemon has relinquished every authority surface. */
@@ -696,7 +699,11 @@ export class SupervisorDaemon {
     // Inbox state belongs to the canonical daemon database. The worker-binding
     // path is a legacy JSON import source and must never become a second SQLite
     // authority for delivery receipts.
-    this.supervisedInbox = new SupervisedAgentInboxStore(paths.manifestPath);
+    this.supervisedInbox = new SupervisedAgentInboxStore(
+      paths.manifestPath,
+      undefined,
+      () => this.notifyStateChanged(),
+    );
     this.supervisedDelivery = providerPort
       ? new SupervisedAgentDelivery(
         this.supervisedInbox,
@@ -724,7 +731,8 @@ export class SupervisorDaemon {
       await this.singleton.assertCurrent();
       const isLifecycleRequest = request.method === "daemon.negotiate"
         || request.method === "daemon.status"
-        || request.method === "daemon.prepare_handoff";
+        || request.method === "daemon.prepare_handoff"
+        || request.method === "manifest.watch_state";
       if (this.handoffScheduled && !isLifecycleRequest) {
         throw new Error("Supervisor handoff has fenced new daemon mutations.");
       }
@@ -742,6 +750,14 @@ export class SupervisorDaemon {
         return { accepted: true, generation: this.singleton.currentGeneration };
       }
       if (request.method === "manifest.list") return this.entriesWithDerivedLiveness((await this.store.load()).entries);
+      if (request.method === "manifest.watch_state") {
+        const params = this.paramsRecord(request.params);
+        return this.watchState({
+          afterDaemonGeneration: Number(params.after_daemon_generation ?? 0),
+          afterSequence: Number(params.after_sequence ?? 0),
+          waitMs: Number(params.wait_ms ?? 25_000),
+        });
+      }
       if (request.method === "supervisor.retry_room_delivery") {
         const params = this.paramsRecord(request.params);
         await this.retryRoomDelivery({
@@ -1090,6 +1106,7 @@ export class SupervisorDaemon {
     // continuations before awaiting any drain so they cannot retain a socket
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
+    this.notifyStateChanged();
     this.hostGrants.clear();
     this.cachedWorkerAuthorizations.clear();
     await this.fenceAndDrainDeliveryCutovers();
@@ -2093,6 +2110,7 @@ export class SupervisorDaemon {
         agent_inspector_settings_v1: true,
         agent_room_move_v1: true,
         agent_lifecycle_v1: true,
+        agent_state_subscription_v1: true,
       },
       generation: this.singleton.currentGeneration,
       pid: process.pid,
@@ -2103,6 +2121,7 @@ export class SupervisorDaemon {
   private async prepareHandoff(): Promise<void> {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
+    this.notifyStateChanged();
     // A bootstrap that already read tail N must commit N before lock/socket
     // release. Otherwise a successor could establish a later tail and skip a
     // message that raced this handoff. New bootstrap requests are rejected by
@@ -3055,6 +3074,52 @@ export class SupervisorDaemon {
   private async entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): Promise<DaemonManifestEntryView[]> {
     const bindings = new Map((await this.workerBindings.list()).map((binding) => [binding.entry_id, binding]));
     return Promise.all(entries.map((entry) => this.entryWithDerivedLiveness(entry, bindings.get(entry.id) ?? null)));
+  }
+
+  private notifyStateChanged(): void {
+    this.stateSequence += 1;
+    for (const resolve of this.stateWaiters) resolve();
+    this.stateWaiters.clear();
+  }
+
+  private async watchState(input: {
+    afterDaemonGeneration: number;
+    afterSequence: number;
+    waitMs: number;
+  }): Promise<{
+    daemon_generation: number;
+    sequence: number;
+    entries: DaemonManifestEntryView[];
+  }> {
+    const generation = this.singleton.currentGeneration;
+    const waitMs = Number.isFinite(input.waitMs)
+      ? Math.max(0, Math.min(30_000, Math.floor(input.waitMs)))
+      : 25_000;
+    if (
+      !this.handoffScheduled
+      && input.afterDaemonGeneration === generation
+      && input.afterSequence >= this.stateSequence
+      && waitMs > 0
+    ) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.stateWaiters.delete(finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, waitMs);
+        this.stateWaiters.add(finish);
+      });
+    }
+    await this.singleton.assertCurrent();
+    return {
+      daemon_generation: this.singleton.currentGeneration,
+      sequence: this.stateSequence,
+      entries: await this.entriesWithDerivedLiveness((await this.store.load()).entries),
+    };
   }
 
   private async entryWithDerivedLiveness(
@@ -5549,6 +5614,7 @@ export class SupervisorDaemon {
       if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.");
       await this.singleton.assertCurrent();
       await commit();
+      this.notifyStateChanged();
     });
   }
 
