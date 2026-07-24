@@ -45,6 +45,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-live-metadata", roomIdentifier),
     getLatestMessages: (roomIdentifiers: string[]) =>
       ipcRenderer.invoke("desktop:room:get-latest-messages", roomIdentifiers),
+    getMessage: (roomIdentifier: string, messageId: string) =>
+      ipcRenderer.invoke("desktop:room:get-message", roomIdentifier, messageId),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
     getThreads: (roomIdentifier: string, filter = "all", beforeMessageId?: string | null, limit?: number) =>
@@ -261,6 +263,11 @@ const api: DesktopApi = {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
       ipcRenderer.on("desktop:supervisor:activity", listener);
       return () => ipcRenderer.off("desktop:supervisor:activity", listener);
+    },
+    onState: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:supervisor:state", listener);
+      return () => ipcRenderer.off("desktop:supervisor:state", listener);
     },
     onLaunchEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

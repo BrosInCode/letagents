@@ -512,6 +512,77 @@ test("overflow Escape stops propagation, closes, and returns focus; outside and 
   mounted.app.unmount();
 });
 
+test("wide Host closes on a primary pointer press outside and stays open for inside interaction", async () => {
+  const originalBounds = testDocument.documentElement.getBoundingClientRect;
+  testDocument.documentElement.getBoundingClientRect = () => ({ width: 1280 });
+  const opener = hostNode("button");
+  testDocument.activeElement = opener;
+  let closeCount = 0;
+  const mounted = mount(AgentInspectorHost, {
+    open: true,
+    projection: null,
+    selection: {
+      kind: "external",
+      displayName: "External agent",
+      sender: "External agent",
+    },
+    actionState: null,
+    workResource: { status: "idle", detail: null, error: null, sourceMessageId: null },
+    selectedWorkSourceMessageId: null,
+    workArtifacts: [],
+    settingsResource: { status: "idle", configuration: null, draft: null, error: null },
+    roomMoveResource: noMove,
+    roomMoveAvailable: false,
+    providers: [],
+    destinations: [],
+    settingsConflict: false,
+    roomIdentifier: "room_a",
+    requestVersion: 1,
+    managedSessions: [],
+    reasoningSessions: [],
+    onClose: () => { closeCount += 1; },
+  });
+  await nextTick();
+
+  const wideHost = descendants(mounted.root).find((node) =>
+    String(node.props.class).includes("agent-inspector-host-wide")
+  );
+  assert.ok(wideHost);
+  const inside = wideHost.children[0] ?? wideHost;
+  for (const listener of documentListeners.get("pointerdown") ?? []) {
+    listener({
+      button: 0,
+      target: inside,
+    } as unknown as Event);
+  }
+  assert.equal(closeCount, 0, "interacting inside the Inspector must not dismiss it");
+
+  const outside = hostNode("button");
+  for (const listener of documentListeners.get("pointerdown") ?? []) {
+    listener({
+      button: 2,
+      target: outside,
+    } as unknown as Event);
+  }
+  assert.equal(closeCount, 0, "secondary pointer actions must not dismiss the Inspector");
+
+  for (const listener of documentListeners.get("pointerdown") ?? []) {
+    listener({
+      button: 0,
+      target: outside,
+    } as unknown as Event);
+  }
+  assert.equal(closeCount, 1);
+
+  // Model the browser moving focus to the clicked target after pointerdown.
+  // Unmount must not yank focus back to the element that opened the Inspector.
+  testDocument.activeElement = outside;
+  mounted.app.unmount();
+  assert.equal(opener.focusCount, 0);
+  assert.equal(testDocument.activeElement, outside);
+  testDocument.documentElement.getBoundingClientRect = originalBounds;
+});
+
 test("compact Host gives the overflow menu first Escape ownership before closing the Inspector", async () => {
   const unsavedCharter = "Keep this unsaved inspector draft.";
   let closeCount = 0;

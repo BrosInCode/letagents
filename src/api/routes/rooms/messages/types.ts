@@ -74,6 +74,8 @@ export interface RoomMessageRouteDeps {
       thread_root_id?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
       client_message_id?: string | null;
+      publisher_agent_key?: string | null;
+      publisher_agent_session_id?: string | null;
       account_id?: string | null;
     }
   ): Promise<Message>;

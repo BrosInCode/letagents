@@ -72,6 +72,7 @@ import type {
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
+  DesktopRoomMessage,
   DesktopRoomMessagesPage,
   DesktopRoomThreadInboxFilter,
   DesktopRoomThreadInboxPage,
@@ -140,6 +141,7 @@ export interface DesktopApi {
      */
     getLiveMetadata?: (roomIdentifier: string) => Promise<DesktopRoomLiveMetadata>;
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
+    getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
     getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;
@@ -332,6 +334,7 @@ export interface DesktopApi {
     retireAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<void>;
     purgeAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<{ outcome: "purged" | "invalid"; error?: string }>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
+    onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void) => () => void;
     /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;
     /** Replay a launch's facts after `afterSequence` (for modal reopen/restore). */

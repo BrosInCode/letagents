@@ -208,6 +208,8 @@ async function hydrateStreamMessage(
     agent_prompt_kind: message.agent_prompt_kind,
     source: message.source,
     client_message_id: null,
+    publisher_agent_key: message.agent_identity?.agent_key ?? null,
+    publisher_agent_session_id: message.agent_identity?.agent_session_id ?? null,
     timestamp: message.timestamp,
   }], { accountId });
   return hydrated ?? message;

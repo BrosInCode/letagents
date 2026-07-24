@@ -339,6 +339,7 @@ import type {
   DesktopSupervisorManifestEntry,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorRoomMove,
+  DesktopSupervisorStateSnapshot,
   DesktopTaskSummary,
   RepoStatus,
   WorkerSnapshot,
@@ -374,6 +375,7 @@ import { roomMentionCandidates } from "../../../domain/participants";
 import {
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
+  resolvingAgentInspectorRequest,
   resolveAgentInspectorSelection,
   type AgentInspectorSupervisorEntryUpdate,
   type SupervisorEntriesResource,
@@ -417,6 +419,8 @@ import {
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
+  supervisorEntriesResourceFreshness,
+  supervisorStateSubscriptionNeedsRepair,
 } from "../../../domain/supervisor-entries-resource";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
@@ -541,6 +545,7 @@ const agentInspectorProviders = ref<DesktopAgentProvider[]>([]);
 const agentInspectorSettingsConflict = ref(false);
 let agentInspectorSettingsRequestToken = 0;
 let agentInspectorSettingsDraftVersion = 0;
+let agentInspectorMessageIdentityRequestToken = 0;
 let agentInspectorRoomMoveRequestToken = 0;
 let agentInspectorRoomMoveRecoveryTimer: number | null = null;
 let agentInspectorWorkRequestToken = 0;
@@ -621,7 +626,7 @@ const agentInspectorProjections = computed(() => {
     roomId: props.room.identifier,
     tasks: props.tasks,
     deliveryRetryAvailable: deliveryRetryAvailable.value,
-    resourceFreshness: supervisorEntriesResource.value.state === "ready" ? "fresh" : "stale",
+    resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesResource.value.state),
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
   });
 });
@@ -668,6 +673,13 @@ let managedAgentSessionsRefreshQueued = false;
 let managedAgentSessionsRefreshOwnerActive = true;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 let unsubscribeSupervisorActivity: (() => void) | null = null;
+let unsubscribeSupervisorState: (() => void) | null = null;
+let supervisorStateSubscriptionActive = false;
+let supervisorStateLastSnapshotAtMs: number | null = null;
+let supervisorStateDaemonGeneration = 0;
+let supervisorStateSequence = 0;
+let pendingSupervisorStateSnapshot: DesktopSupervisorStateSnapshot | null = null;
+let supervisorStateFrame: number | null = null;
 let environmentRepoStatusRefreshRequestId = 0;
 let inboxReloadAfterCurrentLoad = false;
 let inboxThreadBaselinePending = false;
@@ -1052,6 +1064,15 @@ onBeforeUnmount(() => {
   unsubscribeManagedAgentSessionUpdate = null;
   unsubscribeSupervisorActivity?.();
   unsubscribeSupervisorActivity = null;
+  unsubscribeSupervisorState?.();
+  unsubscribeSupervisorState = null;
+  supervisorStateSubscriptionActive = false;
+  supervisorStateLastSnapshotAtMs = null;
+  pendingSupervisorStateSnapshot = null;
+  if (supervisorStateFrame !== null) {
+    window.cancelAnimationFrame(supervisorStateFrame);
+    supervisorStateFrame = null;
+  }
 });
 
 onMounted(() => {
@@ -1080,7 +1101,59 @@ onMounted(() => {
     supervisorEntries.value = next;
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
   }) || null;
+  unsubscribeSupervisorState = desktopIpc.supervisor?.onState?.((snapshot) => {
+    supervisorStateLastSnapshotAtMs = Date.now();
+    queueSupervisorStateSnapshot(snapshot);
+  }) || null;
+  supervisorStateSubscriptionActive = Boolean(unsubscribeSupervisorState);
 });
+
+function queueSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot): void {
+  const pending = pendingSupervisorStateSnapshot;
+  if (
+    pending
+    && (
+      snapshot.daemonGeneration < pending.daemonGeneration
+      || (
+        snapshot.daemonGeneration === pending.daemonGeneration
+        && snapshot.sequence < pending.sequence
+      )
+    )
+  ) return;
+  pendingSupervisorStateSnapshot = snapshot;
+  if (supervisorStateFrame !== null) return;
+  supervisorStateFrame = window.requestAnimationFrame(() => {
+    supervisorStateFrame = null;
+    const next = pendingSupervisorStateSnapshot;
+    pendingSupervisorStateSnapshot = null;
+    if (next) acceptSupervisorStateSnapshot(next);
+  });
+}
+
+function acceptSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot): void {
+  if (
+    snapshot.daemonGeneration < supervisorStateDaemonGeneration
+    || (
+      snapshot.daemonGeneration === supervisorStateDaemonGeneration
+      && snapshot.sequence < supervisorStateSequence
+    )
+  ) return;
+  supervisorStateDaemonGeneration = snapshot.daemonGeneration;
+  supervisorStateSequence = snapshot.sequence;
+  supervisorEntriesMutationVersion += 1;
+  const roomEntries = snapshot.entries.filter((entry) => entry.roomId === props.room.identifier);
+  if (JSON.stringify(roomEntries) !== JSON.stringify(supervisorEntries.value)) {
+    supervisorEntries.value = mergeSupervisorEntriesPoll(
+      supervisorEntries.value,
+      roomEntries,
+      props.room.identifier,
+    );
+  }
+  supervisorEntriesHaveLoaded.value = true;
+  supervisorEntriesUpdatedAt.value = new Date().toISOString();
+  supervisorEntriesState.value = "ready";
+  supervisorEntriesError.value = null;
+}
 
 function rememberChatScrollPosition(scrollTop: number): void {
   emit("chat-scroll-position", props.room.identifier, scrollTop);
@@ -1896,20 +1969,27 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
   const requestId = ++managedAgentSessionsRefreshRequestId;
   const mutationVersion = managedAgentSessionsMutationVersion;
   const supervisorMutationVersion = supervisorEntriesMutationVersion;
-  supervisorEntriesState.value = supervisorEntriesHaveLoaded.value ? "refreshing" : "loading";
-  supervisorEntriesError.value = null;
+  if (!supervisorEntriesHaveLoaded.value) {
+    supervisorEntriesState.value = "loading";
+    supervisorEntriesError.value = null;
+  }
+  const pollSupervisor = !supervisorEntriesHaveLoaded.value || supervisorStateSubscriptionNeedsRepair({
+    active: supervisorStateSubscriptionActive,
+    lastSnapshotAtMs: supervisorStateLastSnapshotAtMs,
+    nowMs: Date.now(),
+  });
   const [sessions, entriesResult] = await Promise.all([
     desktopIpc.workers?.listManagedAgentSessions
       ? desktopIpc.workers.listManagedAgentSessions(roomIdentifier).catch(() => null)
       : Promise.resolve(null),
-    desktopIpc.supervisor?.listAgents
+    pollSupervisor && desktopIpc.supervisor?.listAgents
       ? desktopIpc.supervisor.listAgents(roomIdentifier)
         .then((entries) => ({ ok: true as const, entries }))
         .catch((error: unknown) => ({
           ok: false as const,
           error: error instanceof Error ? error.message : "Supervisor daemon unavailable.",
         }))
-      : Promise.resolve({ ok: true as const, entries: [] as DesktopSupervisorManifestEntry[] }),
+      : Promise.resolve({ ok: true as const, entries: supervisorEntries.value }),
     refreshSupervisorStatus(),
   ]);
   if (
@@ -1948,7 +2028,7 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
     supervisorEntriesState.value = "ready";
     supervisorEntriesError.value = null;
-  } else {
+  } else if (!supervisorStateSubscriptionActive || !supervisorEntriesHaveLoaded.value) {
     // Keep the last successfully loaded entries. Consumers receive an error
     // resource instead of an empty list, so supervised identity cannot be
     // reclassified as external during a transient daemon failure.
@@ -2042,6 +2122,9 @@ function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval):
 function agentTargetForManagedSession(session: DesktopManagedAgentSession): AgentModalTarget {
   const displayName = managedAgentSessionDisplayName(session);
   return {
+    messageId: null,
+    clientMessageId: null,
+    messageSource: null,
     actorLabel: session.actorLabel,
     displayName,
     ownerAttribution: ownerAttributionLabel(session.ownerLabel),
@@ -2076,8 +2159,47 @@ function stopManagedAgentSessionsRefreshTimer(): void {
   }
 }
 
-function openAgentDetailFromParticipant(target: AgentModalTarget): void {
-  openAgentDetailRequest(participantAgentInspectorRequest(target));
+async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise<void> {
+  const hasExactPublishedIdentity = Boolean(target.clientMessageId?.trim());
+  const hasExactRuntimeIdentity = Boolean(
+    target.agentSessionId?.trim()
+    || (target.agentKey?.trim() && /[/:]/.test(target.agentKey)),
+  );
+  if (hasExactPublishedIdentity || hasExactRuntimeIdentity || !target.messageId?.trim()) {
+    openAgentDetailRequest(participantAgentInspectorRequest(target));
+    return;
+  }
+
+  const roomIdentifier = props.room.identifier;
+  const requestToken = ++agentInspectorMessageIdentityRequestToken;
+  openAgentDetailRequest(resolvingAgentInspectorRequest(target));
+  const requestVersion = selectedAgentDetailRequestVersion.value;
+  try {
+    const message = await desktopIpc.room.getMessage(roomIdentifier, target.messageId);
+    if (
+      requestToken !== agentInspectorMessageIdentityRequestToken
+      || requestVersion !== selectedAgentDetailRequestVersion.value
+      || roomIdentifier !== props.room.identifier
+    ) return;
+    openAgentDetailRequest(participantAgentInspectorRequest(message
+      ? {
+          ...target,
+          messageId: message.id,
+          clientMessageId: message.clientMessageId ?? null,
+          messageSource: message.source ?? target.messageSource,
+          actorLabel: message.actorLabel || message.agentIdentity?.actorLabel || target.actorLabel,
+          agentKey: message.agentIdentity?.agentKey || target.agentKey,
+          agentSessionId: message.agentIdentity?.agentSessionId || target.agentSessionId,
+        }
+      : target));
+  } catch {
+    if (
+      requestToken !== agentInspectorMessageIdentityRequestToken
+      || requestVersion !== selectedAgentDetailRequestVersion.value
+      || roomIdentifier !== props.room.identifier
+    ) return;
+    openAgentDetailRequest(participantAgentInspectorRequest(target));
+  }
 }
 
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
@@ -2091,6 +2213,7 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
 }
 
 function closeAgentDetail(): void {
+  agentInspectorMessageIdentityRequestToken += 1;
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
   agentInspectorActionState.value = null;

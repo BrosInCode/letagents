@@ -16,6 +16,8 @@ import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-ins
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
+  supervisorEntriesResourceFreshness,
+  supervisorStateSubscriptionNeedsRepair,
   SUPERVISOR_ACTIVITY_CAP,
 } from "../src/domain/supervisor-entries-resource";
 import {
@@ -527,6 +529,38 @@ test("an activity push arriving during a poll survives the authoritative poll sn
   );
   assert.equal(afterPoll[0]?.providerPid, 456, "poll remains authoritative for non-activity fields");
   assert.deepEqual(afterPoll[0]?.activity.map((event) => event.sequence), [10, 11, 12]);
+});
+
+test("retained supervisor data stays fresh during reconciliation", () => {
+  assert.equal(supervisorEntriesResourceFreshness("loading"), "stale");
+  assert.equal(supervisorEntriesResourceFreshness("refreshing"), "fresh");
+  assert.equal(supervisorEntriesResourceFreshness("ready"), "fresh");
+  assert.equal(supervisorEntriesResourceFreshness("error"), "stale");
+});
+
+test("a registered state subscription still falls back to repair polling when snapshots stop", () => {
+  assert.equal(supervisorStateSubscriptionNeedsRepair({
+    active: false,
+    lastSnapshotAtMs: null,
+    nowMs: 100_000,
+  }), true);
+  assert.equal(supervisorStateSubscriptionNeedsRepair({
+    active: true,
+    lastSnapshotAtMs: null,
+    nowMs: 100_000,
+  }), true, "registration alone is not proof that state is flowing");
+  assert.equal(supervisorStateSubscriptionNeedsRepair({
+    active: true,
+    lastSnapshotAtMs: 50_000,
+    nowMs: 100_000,
+    staleAfterMs: 60_000,
+  }), false);
+  assert.equal(supervisorStateSubscriptionNeedsRepair({
+    active: true,
+    lastSnapshotAtMs: 40_000,
+    nowMs: 100_000,
+    staleAfterMs: 60_000,
+  }), true);
 });
 
 test("switching agents hides the previous action and fences its late completion", () => {

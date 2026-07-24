@@ -9,6 +9,7 @@ function source(relative: string): string {
 
 const shell = source("../src/components/desktop/content/DesktopRoomShell.vue");
 const activity = source("../src/components/desktop/content/RoomActivityTabView.vue");
+const chatMessage = source("../src/components/desktop/content/DesktopChatMessage.vue");
 const host = source("../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
 const participantSurface = source("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue");
 const identity = source("../src/domain/agent-inspector-identity.ts");
@@ -29,6 +30,18 @@ test("Activity opens the exact shared Inspector for supervised and generic parti
   assert.match(activity, /participantAgentInspectorRequest\(activityParticipantToAgentTarget\(agent\)\)/);
   assert.match(activity, /useRoomActivityViewModel\(props, \{ autoSelectLive: false \}\)/);
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
+});
+
+test("Chat carries the clicked canonical message into exact supervised identity resolution", () => {
+  assert.match(chatMessage, /messageId:\s*props\.message\.id/);
+  assert.match(chatMessage, /clientMessageId:\s*props\.message\.clientMessageId/);
+  assert.match(shell, /desktopIpc\.room\.getMessage\(roomIdentifier,\s*target\.messageId\)/);
+  assert.match(shell, /resolvingAgentInspectorRequest\(target\)/);
+  assert.match(shell, /message\.clientMessageId/);
+  assert.match(identity, /resolveSupervisorEntryIdForPublishedMessage\(\s*roomEntries,\s*target/);
+  assert.match(identity, /receipt\.canonicalMessageId/);
+  assert.match(identity, /receipt\.replyClientMessageId/);
+  assert.doesNotMatch(identity, /displayName.*resolveSupervisorEntryIdForPublishedMessage|actorLabel.*resolveSupervisorEntryIdForPublishedMessage/);
 });
 
 test("the shared Inspector keeps external and exact local-managed participants distinct", () => {

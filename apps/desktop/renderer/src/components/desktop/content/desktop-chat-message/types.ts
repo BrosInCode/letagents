@@ -5,6 +5,12 @@ export interface SenderIdentity {
 }
 
 export interface AgentModalTarget {
+  /** Exact room message whose participant affordance opened the Inspector. */
+  messageId: string | null;
+  /** Exact publisher idempotency identity for the selected room message. */
+  clientMessageId: string | null;
+  /** Server-stamped message source. Legacy identity recovery is agent-only. */
+  messageSource: string | null;
   actorLabel: string | null;
   displayName: string;
   ownerAttribution: string | null;
@@ -22,6 +28,15 @@ export type AgentInspectorRequest =
     }
   | {
       kind: "participant";
+      target: AgentModalTarget;
+    }
+  | {
+      /**
+       * Chat may need one exact message read to recover publication identity
+       * stripped by an older live-stream frame. This state opens the Inspector
+       * honestly without prematurely classifying the participant as external.
+       */
+      kind: "resolving";
       target: AgentModalTarget;
     };
 

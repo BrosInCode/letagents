@@ -276,6 +276,8 @@ test("inspector detail checkpoints canonical publication and records a monotonic
     assert.equal(detail.requested_source_message_id, "1");
     assert.equal(detail.receipt?.provider_turn_id, "turn-detail");
     assert.equal(detail.publication?.canonical_message_id, "msg_99");
+    assert.equal((await reopened.receipts("detail"))[0]?.canonical_message_id, "msg_99",
+      "the lightweight manifest receipt retains exact reply-message identity");
     assert.equal(detail.source_message?.text, "ship it");
     assert.deepEqual(detail.timeline.map((event) => event.phase).slice(-2), ["publish_started", "published"]);
     assert.equal(detail.items[0]?.sender, "Ada");

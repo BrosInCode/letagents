@@ -9,9 +9,11 @@ import {
   isCurrentAgentInspectorOperation,
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
+  resolvingAgentInspectorRequest,
   resolveAgentInspectorManagedSessions,
   resolveAgentInspectorSelection,
   resolveSupervisorEntryId,
+  resolveSupervisorEntryIdForPublishedMessage,
   supervisedAgentInspectorRequest,
   type AgentInspectorOperationContext,
   type AgentInspectorOperationToken,
@@ -58,6 +60,9 @@ function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): Desktop
 
 function target(overrides: Partial<AgentModalTarget> = {}): AgentModalTarget {
   return {
+    messageId: null,
+    clientMessageId: null,
+    messageSource: null,
     actorLabel: "GardenSignal",
     displayName: "GardenSignal",
     ownerAttribution: "EmmyMay's agent",
@@ -141,6 +146,167 @@ test("display names and actor labels never resolve supervised identity", () => {
     "room_a",
   );
   assert.equal(selection.kind, "external");
+});
+
+test("historical actor labels never grant local controls, including a foreign owner's same-name agent", () => {
+  const selection = resolveAgentInspectorSelection(
+    resource("ready", [entry({ createdBy: "desktop" })]),
+    participantAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: null,
+      messageSource: "agent",
+      actorLabel: "GardenSignal | OtherOwner's agent | Supervisor Worker",
+      sender: "GardenSignal | OtherOwner's agent | Supervisor Worker",
+      agentKey: null,
+      agentSessionId: null,
+    })),
+    "room_a",
+  );
+  assert.equal(selection.kind, "external");
+
+  const sameOwnerLabel = resolveAgentInspectorSelection(
+    resource("ready", [entry({ createdBy: "desktop" })]),
+    participantAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: null,
+      messageSource: "agent",
+      actorLabel: "GardenSignal | EmmyMay's agent | Supervisor Worker",
+      sender: "GardenSignal | EmmyMay's agent | Supervisor Worker",
+      agentKey: null,
+      agentSessionId: null,
+    })),
+    "room_a",
+  );
+  assert.equal(sameOwnerLabel.kind, "external");
+});
+
+test("an exact-message lookup keeps the Inspector resolving instead of flashing external", () => {
+  const selection = resolveAgentInspectorSelection(
+    resource("ready", [entry()]),
+    resolvingAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: null,
+      agentKey: null,
+      agentSessionId: null,
+    })),
+    "room_a",
+  );
+  assert.equal(selection.kind, "resolving");
+});
+
+test("a Chat reply with no embedded agent identity resolves through its exact durable publication", () => {
+  const garden = entry({
+    agentKey: "owner/garden-signal",
+    agentSessionId: "session_current",
+    deliveryReceipts: [{
+      inboxItemId: "inbox_1",
+      sourceMessageId: "msg_human",
+      canonicalMessageId: "msg_agent_reply",
+      replyClientMessageId: "supervised-room:supervised_garden:msg_human:reply:v1",
+      state: "acknowledged",
+      attemptCount: 1,
+      providerTurnId: "turn_1",
+      blockedByMessageId: null,
+      error: null,
+      updatedAt: "2026-07-22T10:01:00.000Z",
+      timeline: [],
+    }],
+  });
+  const selection = resolveAgentInspectorSelection(
+    resource("ready", [garden]),
+    participantAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: null,
+      agentKey: null,
+      agentSessionId: null,
+    })),
+    "room_a",
+  );
+  assert.equal(selection.kind, "supervised");
+  assert.equal(selection.kind === "supervised" ? selection.supervisorEntryId : null, garden.id);
+});
+
+test("publication identity is exact, collision-safe, and must agree with embedded identity", () => {
+  const receipt = {
+    inboxItemId: "inbox_1",
+    sourceMessageId: "msg_human",
+    canonicalMessageId: "msg_agent_reply",
+    replyClientMessageId: "supervised-room:garden:msg_human:reply:v1",
+    state: "acknowledged" as const,
+    attemptCount: 1,
+    providerTurnId: "turn_1",
+    blockedByMessageId: null,
+    error: null,
+    updatedAt: "2026-07-22T10:01:00.000Z",
+    timeline: [],
+  };
+  const garden = entry({ id: "garden", agentKey: "owner/garden", agentSessionId: "session_garden", deliveryReceipts: [receipt] });
+  const sameName = entry({ id: "same_name", agentKey: "owner/other", agentSessionId: "session_other", deliveryReceipts: [] });
+  assert.deepEqual(
+    resolveSupervisorEntryIdForPublishedMessage([garden, sameName], {
+      messageId: "msg_agent_reply",
+      clientMessageId: null,
+    }),
+    { state: "matched", entryId: "garden" },
+  );
+
+  const disagreement = resolveAgentInspectorSelection(
+    resource("ready", [garden, sameName]),
+    participantAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: "supervised-room:garden:msg_human:reply:v1",
+      agentKey: "owner/other",
+      agentSessionId: "session_other",
+    })),
+    "room_a",
+  );
+  assert.equal(disagreement.kind, "unavailable");
+  assert.equal(disagreement.kind === "unavailable" ? disagreement.unavailableReason : null, "ambiguous");
+
+  assert.deepEqual(
+    resolveSupervisorEntryIdForPublishedMessage([
+      garden,
+      entry({ id: "duplicate", deliveryReceipts: [receipt] }),
+    ], {
+      messageId: "msg_agent_reply",
+      clientMessageId: "supervised-room:garden:msg_human:reply:v1",
+    }),
+    { state: "ambiguous" },
+  );
+});
+
+test("a rotated historical session resolves from its durable reply client message id", () => {
+  const historicalReplyClientMessageId = "supervised-room:supervised_garden:msg_human:reply:v1";
+  const garden = entry({
+    agentSessionId: "session_rotated",
+    deliveryReceipts: [{
+      inboxItemId: "inbox_1",
+      sourceMessageId: "msg_human",
+      canonicalMessageId: null,
+      replyClientMessageId: historicalReplyClientMessageId,
+      state: "acknowledged",
+      attemptCount: 1,
+      providerTurnId: "turn_1",
+      blockedByMessageId: null,
+      error: null,
+      updatedAt: "2026-07-22T10:01:00.000Z",
+      timeline: [],
+    }],
+  });
+
+  const selection = resolveAgentInspectorSelection(
+    resource("ready", [garden]),
+    participantAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: historicalReplyClientMessageId,
+      agentKey: null,
+      agentSessionId: "session_historical",
+    })),
+    "room_a",
+  );
+
+  assert.equal(selection.kind, "supervised");
+  assert.equal(selection.kind === "supervised" ? selection.supervisorEntryId : null, garden.id);
 });
 
 test("same-label peers cannot cross-bind and generic provider keys are ignored", () => {

@@ -21,7 +21,10 @@ export type SupervisedInboxEvent = {
   observed_at: string;
   detail: string | null;
 };
-export type SupervisedInboxReceiptWithTimeline = SupervisedInboxReceipt & { timeline: SupervisedInboxEvent[] };
+export type SupervisedInboxReceiptWithTimeline = SupervisedInboxReceipt & {
+  timeline: SupervisedInboxEvent[];
+  canonical_message_id: string | null;
+};
 export type SupervisedEffectRecord = {
   effect_id: string; agent_id: string; room_id: string; execution_generation_id: string; provider_turn_id: string;
   mcp_request_id: string; tool_name: string; request: unknown; state: "prepared" | "executing" | "completed" | "failed";
@@ -58,7 +61,11 @@ export class SupervisedAgentInboxStore {
   private writes: Promise<void> = Promise.resolve();
   private closed = false;
 
-  constructor(private readonly databasePath: string, private readonly now: () => string = () => new Date().toISOString()) {}
+  constructor(
+    private readonly databasePath: string,
+    private readonly now: () => string = () => new Date().toISOString(),
+    private readonly onMutation: () => void = () => undefined,
+  ) {}
 
   async close(): Promise<void> {
     this.closed = true;
@@ -605,15 +612,17 @@ export class SupervisedAgentInboxStore {
   async receipts(agentId: string, terminalLimit = RETAINED_TERMINAL_RECEIPTS_PER_AGENT): Promise<SupervisedInboxReceiptWithTimeline[]> {
     return this.read(async (database) => {
       const limit = Math.max(0, Math.min(Math.trunc(terminalLimit), RETAINED_TERMINAL_RECEIPTS_PER_AGENT));
-      const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
-        WHERE agent_id=? AND (
-          state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
-          OR inbox_item_id IN (
+      const rows = database.prepare(`SELECT i.*,p.canonical_message_id
+        FROM supervised_agent_inbox i
+        LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
+        WHERE i.agent_id=? AND (
+          i.state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+          OR i.inbox_item_id IN (
             SELECT inbox_item_id FROM supervised_agent_inbox
             WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
             ORDER BY fifo_sequence DESC LIMIT ?
           )
-        ) ORDER BY fifo_sequence`).all(agentId, agentId, limit) as Row[];
+        ) ORDER BY i.fifo_sequence`).all(agentId, agentId, limit) as Row[];
       const selected = new Set(rows.map((row) => String(row.inbox_item_id)));
       const timelines = new Map<string, SupervisedInboxEvent[]>();
       for (const event of database.prepare(`SELECT e.inbox_item_id,e.phase,e.observed_at,e.detail
@@ -635,10 +644,24 @@ export class SupervisedAgentInboxStore {
       return rows.map((row) => {
         const item = rowToItem(row);
         const timeline = timelines.get(item.inbox_item_id) ?? [];
+        const canonicalMessageId = row.canonical_message_id === null
+          ? null
+          : String(row.canonical_message_id);
         if (firstBlocked && item.fifo_sequence > Number(firstBlocked.fifo_sequence) && !finalStates.has(item.state)) {
-          return { ...item, timeline, receipt_state: "queued_behind_blocked" as const, blocked_by_inbox_item_id: String(firstBlocked.inbox_item_id) };
+          return {
+            ...item,
+            timeline,
+            canonical_message_id: canonicalMessageId,
+            receipt_state: "queued_behind_blocked" as const,
+            blocked_by_inbox_item_id: String(firstBlocked.inbox_item_id),
+          };
         }
-        return { ...item, timeline, receipt_state: item.state };
+        return {
+          ...item,
+          timeline,
+          canonical_message_id: canonicalMessageId,
+          receipt_state: item.state,
+        };
       });
     });
   }
@@ -664,7 +687,16 @@ export class SupervisedAgentInboxStore {
   private async read<T>(operation: (database: DatabaseSync) => Promise<T> | T): Promise<T> { return operation(await this.getDatabase()); }
   private async exclusive<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> {
     let release!: () => void; const prior = this.writes; this.writes = new Promise<void>((resolve) => { release = resolve; });
-    await prior; try { return await operation(await this.getDatabase()); } finally { release(); }
+    await prior;
+    let committed = false;
+    try {
+      const result = await operation(await this.getDatabase());
+      committed = true;
+      return result;
+    } finally {
+      release();
+      if (committed) this.onMutation();
+    }
   }
   private transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
   private async getDatabase(): Promise<DatabaseSync> {

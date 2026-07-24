@@ -17,6 +17,7 @@ const participantSurface = source("../src/components/desktop/content/agent-inspe
 const composer = source("../src/components/desktop/content/room-chat/RoomComposer.vue");
 const chat = source("../src/components/desktop/content/RoomChatView.vue");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
+const shellLayout = source("../src/styles/room-shell/shell-layout.css");
 test("the Inspector is the single selected-agent detail owner after cutover", () => {
   assert.match(shell, /<AgentInspectorHost\s*[\s\S]*v-if="selectedAgentDetailTarget"/);
   assert.doesNotMatch(shell, /agentInspectorFoundationEnabled|DesktopAgentDetailModal|projectAgentInspectorsWhenEnabled/);
@@ -71,10 +72,17 @@ test("wide and compact modes have distinct, accessible spatial behavior", () => 
   assert.doesNotMatch(host, /getElementById\("app"\)/);
   assert.match(host, /restoreFocusElement = document\.activeElement/);
   assert.match(host, /document\.addEventListener\("keydown", handleHostKeydown, true\)/);
+  assert.match(host, /document\.addEventListener\("pointerdown", handleDocumentPointerDown, true\)/);
+  assert.match(host, /!props\.open \|\| compact\.value \|\| event\.button !== 0/);
+  assert.match(host, /host\.contains\(event\.target as Node\)/);
+  assert.match(host, /document\.removeEventListener\("pointerdown", handleDocumentPointerDown, true\)/);
   assert.match(host, /surfaceComponent\.value\?\.focusInitial\(\)/);
   assert.match(host, /previous\[1\] !== isCompact/);
   assert.match(host, /\}, \{ immediate: true \}\);/);
-  assert.match(styles, /grid-template-columns: minmax\(0, 1fr\) minmax\(360px, 420px\)/);
+  assert.match(styles, /\.agent-inspector-host-wide[\s\S]*position:\s*absolute[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*3/);
+  assert.doesNotMatch(styles, /\.agent-inspector-host-wide[\s\S]*justify-self:\s*end/);
+  assert.match(shellLayout, /\.desktop-room-shell > \.room-tab-page \{[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*3/);
+  assert.doesNotMatch(styles, /\.desktop-room-shell\[data-agent-inspector-open="true"\][\s\S]*grid-template-columns/);
   assert.match(styles, /\.agent-inspector-surface\[data-compact="true"\] \{\s*position: fixed/);
   assert.doesNotMatch(styles, /transition:\s*all|ease-in/);
   assert.match(styles, /prefers-reduced-motion/);
