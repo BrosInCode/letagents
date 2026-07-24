@@ -18,6 +18,7 @@ import {
   SupervisorDaemonClient,
   onSupervisorActivity,
   publishSupervisorActivity,
+  supervisorStateWatchRetryDelay,
   supervisorDaemonSpawnEnvironment,
   supervisorDaemonClient,
 } from "../main/supervisor-daemon.js";
@@ -111,6 +112,49 @@ test("daemon client maps an ordered full-state subscription snapshot", async () 
     await closeServer(wire.server, env.socketPath);
     await env.cleanup();
   }
+});
+
+test("state subscriptions observe an existing daemon without spawning one", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let spawnCount = 0;
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath,
+    daemonScriptPath,
+    spawnDaemon: () => {
+      spawnCount += 1;
+      return fakeChild();
+    },
+  });
+  try {
+    assert.equal(await client.connectIfRunning(), null);
+    assert.equal(spawnCount, 0, "a state observer must not become the daemon lifecycle owner");
+
+    const wire = await startWireDaemon(
+      env.socketPath,
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      23,
+    );
+    try {
+      assert.equal((await client.connectIfRunning())?.generation, 23);
+      assert.equal(spawnCount, 0);
+    } finally {
+      await closeServer(wire.server, env.socketPath);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("state-watch retry delay backs off exponentially and remains bounded", () => {
+  assert.equal(supervisorStateWatchRetryDelay(1), 1_000);
+  assert.equal(supervisorStateWatchRetryDelay(2), 2_000);
+  assert.equal(supervisorStateWatchRetryDelay(5), 16_000);
+  assert.equal(supervisorStateWatchRetryDelay(6), 30_000);
+  assert.equal(supervisorStateWatchRetryDelay(100), 30_000);
 });
 
 async function startWireDaemon(

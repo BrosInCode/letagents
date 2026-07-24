@@ -9,13 +9,10 @@ import {
   isCurrentAgentInspectorOperation,
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
-  parseSupervisedReplyPublicationIdentity,
   resolvingAgentInspectorRequest,
   resolveAgentInspectorManagedSessions,
   resolveAgentInspectorSelection,
   resolveSupervisorEntryId,
-  resolveSupervisorEntryIdFromLegacyAuthenticatedActor,
-  resolveSupervisorEntryIdFromPublicationIdentity,
   resolveSupervisorEntryIdForPublishedMessage,
   supervisedAgentInspectorRequest,
   type AgentInspectorOperationContext,
@@ -151,63 +148,36 @@ test("display names and actor labels never resolve supervised identity", () => {
   assert.equal(selection.kind, "external");
 });
 
-test("a historical server-authenticated supervised actor resolves to one exact local manifest entry", () => {
-  const desktopCreatedEntry = entry({ createdBy: "desktop" });
-  const historicalTarget = target({
-    messageId: "msg_agent_reply",
-    clientMessageId: null,
-    messageSource: "agent",
-    actorLabel: "GardenSignal | EmmyMay's agent | Supervisor Worker",
-    sender: "GardenSignal | EmmyMay's agent | Supervisor Worker",
-    agentKey: null,
-    agentSessionId: null,
-  });
-  assert.deepEqual(
-    resolveSupervisorEntryIdFromLegacyAuthenticatedActor([desktopCreatedEntry], historicalTarget, "room_a"),
-    { state: "matched", entryId: "supervised_garden" },
-  );
+test("historical actor labels never grant local controls, including a foreign owner's same-name agent", () => {
   const selection = resolveAgentInspectorSelection(
-    resource("ready", [desktopCreatedEntry]),
-    participantAgentInspectorRequest(historicalTarget),
+    resource("ready", [entry({ createdBy: "desktop" })]),
+    participantAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: null,
+      messageSource: "agent",
+      actorLabel: "GardenSignal | OtherOwner's agent | Supervisor Worker",
+      sender: "GardenSignal | OtherOwner's agent | Supervisor Worker",
+      agentKey: null,
+      agentSessionId: null,
+    })),
     "room_a",
   );
-  assert.equal(selection.kind, "supervised");
-  assert.equal(selection.kind === "supervised" ? selection.supervisorEntryId : null, "supervised_garden");
-});
+  assert.equal(selection.kind, "external");
 
-test("legacy actor recovery rejects non-agent sources, generic labels, foreign rooms, and collisions", () => {
-  const exactActor = target({
-    messageSource: "agent",
-    actorLabel: "GardenSignal | EmmyMay's agent | Supervisor Worker",
-    sender: "GardenSignal | EmmyMay's agent | Supervisor Worker",
-    agentKey: null,
-    agentSessionId: null,
-  });
-  assert.deepEqual(
-    resolveSupervisorEntryIdFromLegacyAuthenticatedActor([entry()], {
-      ...exactActor,
-      messageSource: "system",
-    }, "room_a"),
-    { state: "unmatched" },
+  const sameOwnerLabel = resolveAgentInspectorSelection(
+    resource("ready", [entry({ createdBy: "desktop" })]),
+    participantAgentInspectorRequest(target({
+      messageId: "msg_agent_reply",
+      clientMessageId: null,
+      messageSource: "agent",
+      actorLabel: "GardenSignal | EmmyMay's agent | Supervisor Worker",
+      sender: "GardenSignal | EmmyMay's agent | Supervisor Worker",
+      agentKey: null,
+      agentSessionId: null,
+    })),
+    "room_a",
   );
-  assert.deepEqual(
-    resolveSupervisorEntryIdFromLegacyAuthenticatedActor([entry()], {
-      ...exactActor,
-      actorLabel: "GardenSignal",
-    }, "room_a"),
-    { state: "unmatched" },
-  );
-  assert.deepEqual(
-    resolveSupervisorEntryIdFromLegacyAuthenticatedActor([entry()], exactActor, "room_b"),
-    { state: "unmatched" },
-  );
-  assert.deepEqual(
-    resolveSupervisorEntryIdFromLegacyAuthenticatedActor([
-      entry({ id: "one" }),
-      entry({ id: "two" }),
-    ], exactActor, "room_a"),
-    { state: "ambiguous" },
-  );
+  assert.equal(sameOwnerLabel.kind, "external");
 });
 
 test("an exact-message lookup keeps the Inspector resolving instead of flashing external", () => {
@@ -246,7 +216,7 @@ test("a Chat reply with no embedded agent identity resolves through its exact du
     resource("ready", [garden]),
     participantAgentInspectorRequest(target({
       messageId: "msg_agent_reply",
-      clientMessageId: "supervised-room:supervised_garden:msg_human:reply:v1",
+      clientMessageId: null,
       agentKey: null,
       agentSessionId: null,
     })),
@@ -254,61 +224,6 @@ test("a Chat reply with no embedded agent identity resolves through its exact du
   );
   assert.equal(selection.kind, "supervised");
   assert.equal(selection.kind === "supervised" ? selection.supervisorEntryId : null, garden.id);
-});
-
-test("a pruned historical reply resolves from the validated daemon publication identity", () => {
-  const garden = entry({
-    deliveryReceipts: [],
-  });
-  const historicalTarget = target({
-    messageId: "msg_agent_reply",
-    clientMessageId: "supervised-room:supervised_garden:room_a:msg_human:reply:v1",
-    actorLabel: "GardenSignal | EmmyMay's agent | Supervisor Worker",
-    sender: "GardenSignal | EmmyMay's agent | Supervisor Worker",
-    agentKey: null,
-    agentSessionId: null,
-  });
-
-  assert.deepEqual(
-    resolveSupervisorEntryIdFromPublicationIdentity([garden], historicalTarget, "room_a"),
-    { state: "matched", entryId: garden.id },
-  );
-  const selection = resolveAgentInspectorSelection(
-    resource("ready", [garden]),
-    participantAgentInspectorRequest(historicalTarget),
-    "room_a",
-  );
-  assert.equal(selection.kind, "supervised");
-  assert.equal(selection.kind === "supervised" ? selection.supervisorEntryId : null, garden.id);
-});
-
-test("historical publication recovery rejects forged, foreign-room, and mismatched actor roles or names", () => {
-  const garden = entry({ deliveryReceipts: [] });
-  assert.equal(parseSupervisedReplyPublicationIdentity("some-client-id"), null);
-  assert.equal(
-    parseSupervisedReplyPublicationIdentity("supervised-room:supervised_garden:room_a:not-a-message:reply:v1"),
-    null,
-  );
-
-  for (const historicalTarget of [
-    target({
-      clientMessageId: "supervised-room:supervised_garden:room_b:msg_human:reply:v1",
-      actorLabel: "GardenSignal | EmmyMay's agent | Supervisor Worker",
-    }),
-    target({
-      clientMessageId: "supervised-room:supervised_garden:room_a:msg_human:reply:v1",
-      actorLabel: "OtherAgent | EmmyMay's agent | Supervisor Worker",
-    }),
-    target({
-      clientMessageId: "supervised-room:supervised_garden:room_a:msg_human:reply:v1",
-      actorLabel: "GardenSignal | EmmyMay's agent | Codex",
-    }),
-  ]) {
-    assert.deepEqual(
-      resolveSupervisorEntryIdFromPublicationIdentity([garden], historicalTarget, "room_a"),
-      { state: "unmatched" },
-    );
-  }
 });
 
 test("publication identity is exact, collision-safe, and must agree with embedded identity", () => {
