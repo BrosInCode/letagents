@@ -8,6 +8,7 @@ export function activityParticipantToAgentTarget(
   return {
     messageId: null,
     clientMessageId: null,
+    messageSource: null,
     actorLabel: participant.actorLabel,
     displayName,
     ownerAttribution: ownerAttribution(participant.ownerLabel),

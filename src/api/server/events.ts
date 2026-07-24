@@ -31,6 +31,8 @@ export async function emitProjectMessage(
     thread_root_id?: string | null;
     attachments?: NormalizedMessageAttachmentReference[];
     client_message_id?: string | null;
+    publisher_agent_key?: string | null;
+    publisher_agent_session_id?: string | null;
     account_id?: string | null;
     with_created_message_in_transaction?: (tx: MessageCreateTransaction) => Promise<void>;
   }
@@ -42,6 +44,8 @@ export async function emitProjectMessage(
     thread_root_message_id: options?.thread_root_id ?? null,
     attachments: options?.attachments,
     client_message_id: options?.client_message_id ?? null,
+    publisher_agent_key: options?.publisher_agent_key ?? null,
+    publisher_agent_session_id: options?.publisher_agent_session_id ?? null,
     account_id: options?.account_id ?? null,
     with_created_message_in_transaction: options?.with_created_message_in_transaction,
   });
@@ -68,6 +72,8 @@ async function hydrateMessageForSharedEvent(projectId: string, message: Message)
     agent_prompt_kind: message.agent_prompt_kind,
     source: message.source,
     client_message_id: message.client_message_id,
+    publisher_agent_key: message.agent_identity?.agent_key ?? null,
+    publisher_agent_session_id: message.agent_identity?.agent_session_id ?? null,
     timestamp: message.timestamp,
   }], { accountId: null });
   return hydrated ?? message;

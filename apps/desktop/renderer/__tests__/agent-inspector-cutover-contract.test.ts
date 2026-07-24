@@ -35,6 +35,9 @@ test("Activity opens the exact shared Inspector for supervised and generic parti
 test("Chat carries the clicked canonical message into exact supervised identity resolution", () => {
   assert.match(chatMessage, /messageId:\s*props\.message\.id/);
   assert.match(chatMessage, /clientMessageId:\s*props\.message\.clientMessageId/);
+  assert.match(shell, /desktopIpc\.room\.getMessage\(roomIdentifier,\s*target\.messageId\)/);
+  assert.match(shell, /resolvingAgentInspectorRequest\(target\)/);
+  assert.match(shell, /message\.clientMessageId/);
   assert.match(identity, /resolveSupervisorEntryIdForPublishedMessage\(\s*roomEntries,\s*target/);
   assert.match(identity, /receipt\.canonicalMessageId/);
   assert.match(identity, /receipt\.replyClientMessageId/);

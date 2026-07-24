@@ -61,7 +61,11 @@ export class SupervisedAgentInboxStore {
   private writes: Promise<void> = Promise.resolve();
   private closed = false;
 
-  constructor(private readonly databasePath: string, private readonly now: () => string = () => new Date().toISOString()) {}
+  constructor(
+    private readonly databasePath: string,
+    private readonly now: () => string = () => new Date().toISOString(),
+    private readonly onMutation: () => void = () => undefined,
+  ) {}
 
   async close(): Promise<void> {
     this.closed = true;
@@ -683,7 +687,16 @@ export class SupervisedAgentInboxStore {
   private async read<T>(operation: (database: DatabaseSync) => Promise<T> | T): Promise<T> { return operation(await this.getDatabase()); }
   private async exclusive<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> {
     let release!: () => void; const prior = this.writes; this.writes = new Promise<void>((resolve) => { release = resolve; });
-    await prior; try { return await operation(await this.getDatabase()); } finally { release(); }
+    await prior;
+    let committed = false;
+    try {
+      const result = await operation(await this.getDatabase());
+      committed = true;
+      return result;
+    } finally {
+      release();
+      if (committed) this.onMutation();
+    }
   }
   private transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
   private async getDatabase(): Promise<DatabaseSync> {

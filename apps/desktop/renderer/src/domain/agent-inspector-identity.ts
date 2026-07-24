@@ -7,6 +7,11 @@ import type {
   AgentInspectorRequest,
   AgentModalTarget,
 } from "../components/desktop/content/desktop-chat-message/types";
+import {
+  displayNameFromActor,
+  ideFromActor,
+  ownerFromActor,
+} from "./agents";
 
 export type SupervisorEntriesResource =
   | { state: "loading"; roomIdentifier: string; updatedAt: string | null; data: readonly DesktopSupervisorManifestEntry[]; error: null }
@@ -69,6 +74,7 @@ export function agentInspectorRequestResetKey(
     selection?.kind === "unavailable" ? selection.unavailableReason : null,
     selection?.messageId ?? null,
     selection?.clientMessageId ?? null,
+    selection?.messageSource ?? null,
     selection?.agentSessionId ?? null,
     selection?.agentKey ?? null,
     selection?.actorLabel ?? null,
@@ -154,6 +160,111 @@ export function resolveSupervisorEntryIdForPublishedMessage(
     : { state: "unmatched" };
 }
 
+interface SupervisedReplyPublicationIdentity {
+  supervisorEntryId: string;
+  roomId: string | null;
+  sourceMessageId: string;
+}
+
+/**
+ * Supervised final answers use a daemon-owned idempotency namespace:
+ *
+ *   supervised-room:<entry>:<source-message>:reply:v1
+ *   supervised-room:<entry>:<room>:<source-message>:reply:v1
+ *
+ * This is intentionally narrow. Arbitrary client ids must never be treated as
+ * local control authority.
+ */
+export function parseSupervisedReplyPublicationIdentity(
+  value: string | null | undefined,
+): SupervisedReplyPublicationIdentity | null {
+  const parts = exactIdentity(value)?.split(":") ?? [];
+  if (parts[0] !== "supervised-room" || parts.at(-2) !== "reply" || parts.at(-1) !== "v1") {
+    return null;
+  }
+  const body = parts.slice(1, -2);
+  if (body.length !== 2 && body.length !== 3) return null;
+  const [supervisorEntryId, maybeRoomId, maybeSourceMessageId] = body;
+  const roomId = body.length === 3 ? maybeRoomId : null;
+  const sourceMessageId = body.length === 3 ? maybeSourceMessageId : maybeRoomId;
+  if (!supervisorEntryId?.startsWith("supervised_")
+    || !sourceMessageId?.startsWith("msg_")
+    || (roomId !== null && !roomId.trim())) {
+    return null;
+  }
+  return {
+    supervisorEntryId,
+    roomId,
+    sourceMessageId,
+  };
+}
+
+/**
+ * Historical supervised replies predate server-stamped publisher identity.
+ * Recover their durable entry only when every independently persisted fact
+ * agrees: daemon publication namespace, room, entry id, display name, and the
+ * supervised worker actor role. `createdBy` is intentionally excluded: it is
+ * launch provenance ("desktop"), not the account-owner label in room chat.
+ */
+export function resolveSupervisorEntryIdFromPublicationIdentity(
+  entries: readonly Pick<DesktopSupervisorManifestEntry, "id" | "roomId" | "displayName">[],
+  identity: Pick<AgentModalTarget, "clientMessageId" | "actorLabel" | "sender">,
+  roomId: string,
+): SupervisorIdentityResolution {
+  const publication = parseSupervisedReplyPublicationIdentity(identity.clientMessageId);
+  if (!publication || (publication.roomId && publication.roomId !== roomId)) {
+    return { state: "unmatched" };
+  }
+  const entry = entries.find((candidate) =>
+    candidate.id === publication.supervisorEntryId
+    && candidate.roomId === roomId);
+  if (!entry) return { state: "unmatched" };
+
+  const actorLabel = exactIdentity(identity.actorLabel) || exactIdentity(identity.sender);
+  if (!actorLabel
+    || displayNameFromActor(actorLabel) !== entry.displayName
+    || !ownerFromActor(actorLabel)
+    || ideFromActor(actorLabel)?.toLowerCase() !== "supervisor worker") {
+    return { state: "unmatched" };
+  }
+  return { state: "matched", entryId: entry.id };
+}
+
+/**
+ * Messages created before durable publisher identity was persisted can still
+ * be recognized without treating a display name as authority. The API owns
+ * `source`, and the authenticated worker session owns the complete actor
+ * label. Resolve only the supervised worker shape, in the current room, when
+ * it agrees with exactly one daemon manifest entry. Any collision fails
+ * closed.
+ *
+ * This is a historical bridge. New messages resolve through agent_identity.
+ */
+export function resolveSupervisorEntryIdFromLegacyAuthenticatedActor(
+  entries: readonly Pick<DesktopSupervisorManifestEntry, "id" | "roomId" | "displayName">[],
+  identity: Pick<AgentModalTarget, "messageSource" | "actorLabel" | "sender">,
+  roomId: string,
+): SupervisorIdentityResolution {
+  if (exactIdentity(identity.messageSource)?.toLowerCase() !== "agent") {
+    return { state: "unmatched" };
+  }
+  const actorLabel = exactIdentity(identity.actorLabel) || exactIdentity(identity.sender);
+  if (!actorLabel || ideFromActor(actorLabel)?.toLowerCase() !== "supervisor worker") {
+    return { state: "unmatched" };
+  }
+  const displayName = displayNameFromActor(actorLabel);
+  const owner = ownerFromActor(actorLabel);
+  if (!displayName || !owner) return { state: "unmatched" };
+
+  const matches = entries.filter((entry) =>
+    entry.roomId === roomId
+    && entry.displayName === displayName);
+  if (matches.length > 1) return { state: "ambiguous" };
+  return matches.length === 1
+    ? { state: "matched", entryId: matches[0]!.id }
+    : { state: "unmatched" };
+}
+
 export function supervisedAgentInspectorSelection(
   entry: Pick<DesktopSupervisorManifestEntry, "id" | "displayName" | "agentKey" | "agentSessionId" | "provider">,
   presentation: Partial<AgentModalTarget> = {},
@@ -164,6 +275,7 @@ export function supervisedAgentInspectorSelection(
     supervisorEntryId: entry.id,
     messageId: presentation.messageId ?? null,
     clientMessageId: presentation.clientMessageId ?? null,
+    messageSource: presentation.messageSource ?? null,
     actorLabel: presentation.actorLabel ?? null,
     displayName,
     ownerAttribution: presentation.ownerAttribution ?? null,
@@ -185,6 +297,10 @@ export function supervisedAgentInspectorRequest(
 
 export function participantAgentInspectorRequest(target: AgentModalTarget): AgentInspectorRequest {
   return { kind: "participant", target };
+}
+
+export function resolvingAgentInspectorRequest(target: AgentModalTarget): AgentInspectorRequest {
+  return { kind: "resolving", target };
 }
 
 /**
@@ -258,6 +374,7 @@ export function resolveAgentInspectorSelection(
 ): AgentInspectorSelection {
   const target = request.target;
   if (resource.roomIdentifier !== roomId) return { ...target, kind: "resolving" };
+  if (request.kind === "resolving") return { ...target, kind: "resolving" };
   const roomEntries = resource.data.filter((entry) => entry.roomId === roomId);
   if (request.kind === "supervised") {
     const entry = roomEntries.find((candidate) => candidate.id === request.supervisorEntryId);
@@ -279,19 +396,37 @@ export function resolveAgentInspectorSelection(
     agentSessionId: target.agentSessionId,
     agentKey: target.agentKey,
   });
-  if (publicationResolution.state === "ambiguous" || stableIdentityResolution.state === "ambiguous") {
+  const historicalPublicationResolution = resolveSupervisorEntryIdFromPublicationIdentity(
+    roomEntries,
+    target,
+    roomId,
+  );
+  const legacyAuthenticatedActorResolution = resolveSupervisorEntryIdFromLegacyAuthenticatedActor(
+    roomEntries,
+    target,
+    roomId,
+  );
+  const resolutions = [
+    publicationResolution,
+    stableIdentityResolution,
+    historicalPublicationResolution,
+    legacyAuthenticatedActorResolution,
+  ];
+  if (resolutions.some((resolution) => resolution.state === "ambiguous")) {
     return { ...target, kind: "unavailable", unavailableReason: "ambiguous" };
   }
-  if (publicationResolution.state === "matched"
-    && stableIdentityResolution.state === "matched"
-    && publicationResolution.entryId !== stableIdentityResolution.entryId) {
+  const resolvedEntryIds = new Set(
+    resolutions
+      .filter((resolution): resolution is Extract<SupervisorIdentityResolution, { state: "matched" }> =>
+        resolution.state === "matched")
+      .map((resolution) => resolution.entryId),
+  );
+  if (resolvedEntryIds.size > 1) {
     return { ...target, kind: "unavailable", unavailableReason: "ambiguous" };
   }
-  const resolution = publicationResolution.state === "matched"
-    ? publicationResolution
-    : stableIdentityResolution;
-  if (resolution.state === "matched") {
-    return { ...target, kind: "supervised", supervisorEntryId: resolution.entryId };
+  const resolvedEntryId = [...resolvedEntryIds][0];
+  if (resolvedEntryId) {
+    return { ...target, kind: "supervised", supervisorEntryId: resolvedEntryId };
   }
 
   // Only a completed list operation can authoritatively classify the target

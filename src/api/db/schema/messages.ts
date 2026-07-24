@@ -18,6 +18,10 @@ export const messages = pgTable(
     agent_prompt_kind: text("agent_prompt_kind"),
     source: text("source"),
     client_message_id: text("client_message_id"),
+    // Authenticated publisher identity is stamped by the server for worker
+    // writes. It is never accepted from the caller's message body.
+    publisher_agent_key: text("publisher_agent_key"),
+    publisher_agent_session_id: text("publisher_agent_session_id"),
     // Rental Room Projection: visibility controls which participants see this message
     visibility: rentalVisibilityEnum("visibility"),
     // Links message to a rental session when sent by/for a rental participant

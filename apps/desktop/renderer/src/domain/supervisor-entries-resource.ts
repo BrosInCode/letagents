@@ -5,6 +5,16 @@ import type {
 
 export const SUPERVISOR_ACTIVITY_CAP = 200;
 
+/**
+ * Refreshing with retained data is not a loss of authority. First-load and
+ * transport-error states still fail closed because they have no current proof.
+ */
+export function supervisorEntriesResourceFreshness(
+  state: "loading" | "refreshing" | "ready" | "error",
+): "fresh" | "stale" {
+  return state === "refreshing" || state === "ready" ? "fresh" : "stale";
+}
+
 export interface SupervisorActivityPush {
   entryId: string;
   event: DesktopSupervisorActivityEvent;

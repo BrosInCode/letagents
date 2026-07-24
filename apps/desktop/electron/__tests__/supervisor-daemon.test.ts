@@ -77,6 +77,42 @@ function fakeDaemonProcessIdentity(
   };
 }
 
+test("daemon client maps an ordered full-state subscription snapshot", async () => {
+  const env = await fixture();
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    19,
+  );
+  wire.entries.push(wireEntryWithCausalProjection());
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+    });
+    const snapshot = await client.watchState({
+      afterDaemonGeneration: 19,
+      afterSequence: 6,
+      waitMs: 10,
+    });
+    assert.equal(snapshot.daemonGeneration, 19);
+    assert.equal(snapshot.sequence, 7);
+    assert.equal(snapshot.entries[0]?.id, "agent_1");
+    assert.equal(snapshot.entries[0]?.roomAgentState?.ingress.state, "observing");
+    assert.deepEqual(wire.requests.at(-1), {
+      method: "manifest.watch_state",
+      params: {
+        after_daemon_generation: 19,
+        after_sequence: 6,
+        wait_ms: 10,
+      },
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    await env.cleanup();
+  }
+});
+
 async function startWireDaemon(
   socketPath: string,
   version: number,
@@ -103,13 +139,15 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
         setTimeout(() => onPrepare?.(), 5);
       } else if (request.method === "manifest.list") {
         result = entries;
+      } else if (request.method === "manifest.watch_state") {
+        result = { daemon_generation: generation, sequence: 7, entries };
       } else if (request.method === "manifest.put") {
         const next = { ...request.params!.entry, workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null }, activity: [] };
         const existing = entries.find((candidate) => candidate.id === next.id);
@@ -917,7 +955,7 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
-test("desktop replaces the prior 2.0.51 implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the prior 2.0.52 implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -936,11 +974,11 @@ test("desktop replaces the prior 2.0.51 implementation and accepts only the new 
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.51",
+    "2.0.52",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.51", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.notEqual("2.0.52", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
       daemonScriptPath,
@@ -958,7 +996,7 @@ test("desktop replaces the prior 2.0.51 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.52");
+    assert.equal(status.implementationVersion, "2.0.53");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

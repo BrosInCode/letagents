@@ -437,6 +437,7 @@ const threadMarkerAriaLabel = computed(() => {
 const agentModalTarget = computed<AgentModalTarget>(() => ({
   messageId: props.message.id,
   clientMessageId: props.message.clientMessageId ?? null,
+  messageSource: props.message.source ?? null,
   actorLabel: props.message.actorLabel || props.message.agentIdentity?.actorLabel || props.message.sender,
   displayName: displayName.value,
   ownerAttribution: ownerAttribution.value,

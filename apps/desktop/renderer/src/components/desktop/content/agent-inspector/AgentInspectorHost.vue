@@ -1,5 +1,9 @@
 <template>
-  <div v-if="open && !compact" class="agent-inspector-host-wide">
+  <div
+    v-if="open && !compact"
+    ref="wideHostElement"
+    class="agent-inspector-host-wide"
+  >
     <Transition name="agent-inspector-panel" appear>
       <component
         ref="surfaceComponent"
@@ -116,6 +120,7 @@ const emit = defineEmits<{
 }>();
 
 const compact = ref(false);
+const wideHostElement = ref<HTMLElement | null>(null);
 const surfaceComponent = ref<{ focusInitial: () => void; containsFocus: () => boolean } | null>(null);
 const participantAnnouncement = ref<string | null>(null);
 const participantProjection = computed(() =>
@@ -274,6 +279,13 @@ function handleHostKeydown(event: KeyboardEvent): void {
   emit("close");
 }
 
+function handleDocumentPointerDown(event: PointerEvent): void {
+  if (!props.open || compact.value || event.button !== 0) return;
+  const host = wideHostElement.value;
+  if (!host || (event.target && host.contains(event.target as Node))) return;
+  emit("close");
+}
+
 onMounted(() => {
   syncCompact();
   if (typeof ResizeObserver !== "undefined") {
@@ -284,6 +296,7 @@ onMounted(() => {
     window.addEventListener("resize", syncCompact);
   }
   document.addEventListener("keydown", handleHostKeydown, true);
+  document.addEventListener("pointerdown", handleDocumentPointerDown, true);
 });
 
 onBeforeUnmount(() => {
@@ -291,6 +304,7 @@ onBeforeUnmount(() => {
   resizeObserver = null;
   window.removeEventListener("resize", syncCompact);
   document.removeEventListener("keydown", handleHostKeydown, true);
+  document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   setShellContentInert(false);
   restoreFocusElement?.focus({ preventScroll: true });
 });
