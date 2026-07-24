@@ -215,7 +215,6 @@ export function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): Mess
 export function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
-    client_message_id: row.client_message_id ?? null,
     agent_identity: row.publisher_agent_key
       ? {
           actor_label: row.sender,
@@ -254,7 +253,6 @@ export function toMessageWithReply(
 ): Message {
   return {
     id: formatMessageId(row.number),
-    client_message_id: row.client_message_id ?? null,
     agent_identity: row.publisher_agent_key
       ? {
           actor_label: row.sender,

@@ -515,6 +515,8 @@ test("overflow Escape stops propagation, closes, and returns focus; outside and 
 test("wide Host closes on a primary pointer press outside and stays open for inside interaction", async () => {
   const originalBounds = testDocument.documentElement.getBoundingClientRect;
   testDocument.documentElement.getBoundingClientRect = () => ({ width: 1280 });
+  const opener = hostNode("button");
+  testDocument.activeElement = opener;
   let closeCount = 0;
   const mounted = mount(AgentInspectorHost, {
     open: true,
@@ -572,7 +574,12 @@ test("wide Host closes on a primary pointer press outside and stays open for ins
   }
   assert.equal(closeCount, 1);
 
+  // Model the browser moving focus to the clicked target after pointerdown.
+  // Unmount must not yank focus back to the element that opened the Inspector.
+  testDocument.activeElement = outside;
   mounted.app.unmount();
+  assert.equal(opener.focusCount, 0);
+  assert.equal(testDocument.activeElement, outside);
   testDocument.documentElement.getBoundingClientRect = originalBounds;
 });
 

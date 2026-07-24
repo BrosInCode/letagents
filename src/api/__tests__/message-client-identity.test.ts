@@ -18,11 +18,9 @@ const row: MessageRow = {
   timestamp: "2026-07-22T10:00:00.000Z",
 };
 
-test("message projections preserve the caller-owned durable publication identity", async () => {
+test("message projections expose only server-authenticated agent identity", async () => {
   process.env.DB_URL ||= "postgresql://postgres:postgres@localhost:5432/letagents";
   const { toMessage, toMessageWithReply } = await import("../db/mappers.js");
-  assert.equal(toMessage(row).client_message_id, row.client_message_id);
-  assert.equal(toMessageWithReply(row, null).client_message_id, row.client_message_id);
   assert.deepEqual(toMessage(row).agent_identity, {
     actor_label: row.sender,
     agent_key: row.publisher_agent_key,

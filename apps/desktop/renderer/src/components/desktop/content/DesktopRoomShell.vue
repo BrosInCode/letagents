@@ -420,6 +420,7 @@ import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
   supervisorEntriesResourceFreshness,
+  supervisorStateSubscriptionNeedsRepair,
 } from "../../../domain/supervisor-entries-resource";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
@@ -674,6 +675,7 @@ let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 let unsubscribeSupervisorActivity: (() => void) | null = null;
 let unsubscribeSupervisorState: (() => void) | null = null;
 let supervisorStateSubscriptionActive = false;
+let supervisorStateLastSnapshotAtMs: number | null = null;
 let supervisorStateDaemonGeneration = 0;
 let supervisorStateSequence = 0;
 let pendingSupervisorStateSnapshot: DesktopSupervisorStateSnapshot | null = null;
@@ -1065,6 +1067,7 @@ onBeforeUnmount(() => {
   unsubscribeSupervisorState?.();
   unsubscribeSupervisorState = null;
   supervisorStateSubscriptionActive = false;
+  supervisorStateLastSnapshotAtMs = null;
   pendingSupervisorStateSnapshot = null;
   if (supervisorStateFrame !== null) {
     window.cancelAnimationFrame(supervisorStateFrame);
@@ -1099,6 +1102,7 @@ onMounted(() => {
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
   }) || null;
   unsubscribeSupervisorState = desktopIpc.supervisor?.onState?.((snapshot) => {
+    supervisorStateLastSnapshotAtMs = Date.now();
     queueSupervisorStateSnapshot(snapshot);
   }) || null;
   supervisorStateSubscriptionActive = Boolean(unsubscribeSupervisorState);
@@ -1969,7 +1973,11 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
     supervisorEntriesState.value = "loading";
     supervisorEntriesError.value = null;
   }
-  const pollSupervisor = !supervisorStateSubscriptionActive || !supervisorEntriesHaveLoaded.value;
+  const pollSupervisor = !supervisorEntriesHaveLoaded.value || supervisorStateSubscriptionNeedsRepair({
+    active: supervisorStateSubscriptionActive,
+    lastSnapshotAtMs: supervisorStateLastSnapshotAtMs,
+    nowMs: Date.now(),
+  });
   const [sessions, entriesResult] = await Promise.all([
     desktopIpc.workers?.listManagedAgentSessions
       ? desktopIpc.workers.listManagedAgentSessions(roomIdentifier).catch(() => null)

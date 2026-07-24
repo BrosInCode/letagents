@@ -220,6 +220,7 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
 }
 let resizeObserver: ResizeObserver | null = null;
 let restoreFocusElement: HTMLElement | null = null;
+let restoreFocusOnClose = true;
 const inertSnapshots = new Map<HTMLElement, { inert: boolean; ariaHidden: string | null }>();
 
 function syncCompact(): void {
@@ -253,14 +254,19 @@ function setShellContentInert(inert: boolean): void {
 }
 
 watch(() => [props.open, compact.value] as const, ([open, isCompact], previous) => {
-  if (open && !previous?.[0]) restoreFocusElement = document.activeElement as HTMLElement | null;
+  if (open && !previous?.[0]) {
+    restoreFocusElement = document.activeElement as HTMLElement | null;
+    restoreFocusOnClose = true;
+  }
   setShellContentInert(open && isCompact);
   if (open && (!previous?.[0] || previous[1] !== isCompact)) {
     void nextTick(() => surfaceComponent.value?.focusInitial());
   }
   if (!open && previous?.[0]) {
-    void nextTick(() => restoreFocusElement?.focus({ preventScroll: true }));
+    const focusTarget = restoreFocusOnClose ? restoreFocusElement : null;
     restoreFocusElement = null;
+    restoreFocusOnClose = true;
+    if (focusTarget) void nextTick(() => focusTarget.focus({ preventScroll: true }));
   }
 }, { immediate: true });
 
@@ -283,6 +289,10 @@ function handleDocumentPointerDown(event: PointerEvent): void {
   if (!props.open || compact.value || event.button !== 0) return;
   const host = wideHostElement.value;
   if (!host || (event.target && host.contains(event.target as Node))) return;
+  // The pointer target is the user's new focus destination. Escape and the
+  // explicit Close button restore invocation focus; an outside click must not
+  // steal focus back after the browser completes that click.
+  restoreFocusOnClose = false;
   emit("close");
 }
 
@@ -306,6 +316,6 @@ onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleHostKeydown, true);
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   setShellContentInert(false);
-  restoreFocusElement?.focus({ preventScroll: true });
+  if (restoreFocusOnClose) restoreFocusElement?.focus({ preventScroll: true });
 });
 </script>
