@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getPollTimeoutCapMs } from "../../../../shared/poll-timeout-cap.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import {
+  agentSessionCredentials,
   appendIncludePromptOnly,
   buildAgentDeliveryHeaders,
   bindSupervisedWorkerSession,
@@ -565,6 +566,35 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       if (targetRoomId) {
         const observedCursor = routing.last_observed_message_id ?? getLastMessageId(output);
         touchRoomSession(targetRoomId, observedCursor);
+
+        if (allMessages.length > 0 && agentSession) {
+          const firstMsg = allMessages[0] as { id?: string };
+          const lastMsg = allMessages[allMessages.length - 1] as { id?: string };
+          if (typeof firstMsg?.id === "string" && typeof lastMsg?.id === "string") {
+            try {
+              await roomScopedApiCall({
+                room_id: targetRoomId,
+                project_id: targetProjectId,
+                room_path: (r) => `/rooms/${encodeRoomIdPath(r)}/agents/self/observation`,
+                project_path: (p) => `/projects/${encodeURIComponent(p)}/agents/self/observation`,
+                options: {
+                  method: "PUT",
+                  body: JSON.stringify({
+                    first_message_id: firstMsg.id,
+                    last_message_id: lastMsg.id,
+                    ...agentSessionCredentials(agentSession),
+                  }),
+                },
+              });
+            } catch {
+              // Non-blocking telemetry
+            }
+          }
+        }
+        // Delivery alone is observation evidence (the span above), never a
+        // "responding" receipt: an agent that ignores an activation must not
+        // present as responding. Receipts advance only on real transitions —
+        // send-tool marks "replied" when the agent actually publishes a reply.
       }
       await syncRoomPresence(
         targetRoomId ?? currentRoom?.room_id ?? null,

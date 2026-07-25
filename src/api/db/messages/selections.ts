@@ -12,6 +12,8 @@ export const messageRowSelection = {
   client_message_id: messages.client_message_id,
   publisher_agent_key: messages.publisher_agent_key,
   publisher_agent_session_id: messages.publisher_agent_session_id,
+  publisher_account_id: messages.publisher_account_id,
+  routing_snapshot_version: messages.routing_snapshot_version,
   timestamp: messages.timestamp,
 };
 

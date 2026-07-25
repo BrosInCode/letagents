@@ -176,6 +176,10 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     agentSession
   );
 
+  // The `replied` receipt transition is server-owned: message creation marks
+  // the publisher's receipt on the reply target atomically with the reply
+  // itself, for MCP workers and supervised daemon publications alike.
+
   return jsonToolResponse({
     ...message,
     agent_identity: toPublicAgentIdentity(identity),

@@ -1,5 +1,4 @@
-import type { Express } from "express";
-
+import type { Express, Response } from "express";
 import {
   createSseWriter,
   startSseStream,
@@ -11,12 +10,12 @@ import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
-import { attachAgentMessageActivation } from "../../../../shared/activation-routing.js";
+import { messageInfoEvents, type MessageInfoUpdatedEvent } from "../../../server/message-info-events.js";
+import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
 import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
 import {
   isPromptOnlyAgentMessage,
 } from "../../../../shared/room-agent-prompts.js";
-import { resolveMessageActivationContext } from "./activation-context.js";
 import {
   rentalActivityEvents,
   type RentalActivityCreatedEvent,
@@ -85,18 +84,18 @@ export function registerMessageStreamRoute(
       }
       try {
         const streamMessage = await hydrateStreamMessage(project.id, message, req.sessionAccount?.account_id ?? null);
-        const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
+        if (streamClosed) return;
+        const [attached] = await attachReceiptAuthorityActivations(project.id, activationIdentity, [streamMessage]);
         if (streamClosed) return;
         writeEvent(`data: ${JSON.stringify({
-          ...(activationIdentity ? attachAgentMessageActivation(streamMessage, activationIdentity, activationContext) : streamMessage),
+          ...(attached ?? streamMessage),
           room_id: project.id,
         })}\n\n`);
       } catch (error) {
         console.error(`[room messages stream] failed to hydrate message for ${project.id}`, error);
-        const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
         if (streamClosed) return;
         writeEvent(`data: ${JSON.stringify({
-          ...(activationIdentity ? attachAgentMessageActivation(message, activationIdentity, activationContext) : message),
+          ...message,
           room_id: project.id,
         })}\n\n`);
       }
@@ -147,6 +146,16 @@ export function registerMessageStreamRoute(
       })}\n\n`);
     };
 
+    // Invalidation-only: carries ids (or null for room-level), never state.
+    // Open Message info cards repair through the authoritative GET endpoint.
+    const onMessageInfoUpdated = (event: MessageInfoUpdatedEvent) => {
+      if (event.projectId !== projectId) return;
+      writeEvent(`event: message_info_updated\ndata: ${JSON.stringify({
+        room_id: project.id,
+        message_ids: event.messageIds,
+      })}\n\n`);
+    };
+
     const rentalEvents = deps.rentalActivityEvents ?? rentalActivityEvents;
     const onRentalActivityCreated = (event: RentalActivityCreatedEvent) => {
       const activity = event.activity;
@@ -166,6 +175,7 @@ export function registerMessageStreamRoute(
     deps.reasoningEvents.on("reasoning:removed", onReasoningRemoved);
     deps.artifactEvents?.on("artifact:updated", onArtifactUpdated);
     rentalEvents.on("activity:created", onRentalActivityCreated);
+    messageInfoEvents.on("message_info:updated", onMessageInfoUpdated);
 
     req.on("close", () => {
       streamClosed = true;
@@ -174,6 +184,7 @@ export function registerMessageStreamRoute(
       deps.githubRoomEvents?.off("github_event:updated", onGitHubEventUpdated);
       deps.artifactEvents?.off("artifact:updated", onArtifactUpdated);
       rentalEvents.off("activity:created", onRentalActivityCreated);
+      messageInfoEvents.off("message_info:updated", onMessageInfoUpdated);
       if (endDelivery) {
         void endDelivery().catch((error: unknown) => {
           console.error(`[room messages stream] failed to end agent delivery for ${project.id}`, error);
@@ -210,6 +221,8 @@ async function hydrateStreamMessage(
     client_message_id: null,
     publisher_agent_key: message.agent_identity?.agent_key ?? null,
     publisher_agent_session_id: message.agent_identity?.agent_session_id ?? null,
+    publisher_account_id: null,
+    routing_snapshot_version: null,
     timestamp: message.timestamp,
   }], { accountId });
   return hydrated ?? message;

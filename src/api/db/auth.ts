@@ -2,7 +2,8 @@ import crypto from "crypto";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_delivery_sessions, room_agent_presence, room_agent_session_bearers, room_agent_sessions, supervisor_host_grants } from "./schema.js";
+import { randomUUID } from "node:crypto";
+import { accounts, agents, auth_sessions, auth_states, message_agent_receipt_events, message_agent_receipts, owner_tokens, project_admins, room_agent_delivery_sessions, room_agent_presence, room_agent_session_bearers, room_agent_sessions, supervisor_host_grants } from "./schema.js";
 import { AUTH_STATE_TTL_MS, hashToken, nextPrefixedId } from "./utils.js";
 import { toRoomAgentSession } from "./mappers.js";
 import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionBearer, RoomAgentSessionRow, Session, SessionAccount, SupervisorHostGrant } from "./types.js";
@@ -1141,7 +1142,9 @@ export async function endRoomAgentSession(input: {
   supervisor_grant_id?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<RoomAgentSession | null> {
-  return db.transaction(async (tx) => {
+  const unavailableReceiptTargets: number[] = [];
+  let unavailableReceiptRoom: string | null = null;
+  const ended = await db.transaction(async (tx) => {
   if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
     throw new SupervisorGrantFenceStaleError();
   }
@@ -1191,10 +1194,78 @@ export async function endRoomAgentSession(input: {
         eq(room_agent_session_bearers.session_id, row.session_id),
         isNull(room_agent_session_bearers.revoked_at),
       ));
+    unavailableReceiptTargets.push(
+      ...await markUnresolvedReceiptsUnavailableTx(tx, row as RoomAgentSessionRow, now),
+    );
+    unavailableReceiptRoom = (row as RoomAgentSessionRow).room_id;
   }
 
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
   });
+  if (unavailableReceiptRoom && unavailableReceiptTargets.length > 0) {
+    // Dynamic import: the server event module transitively imports this file.
+    // Room-level so the shared stream never enumerates ids that may be
+    // concealed from some participants.
+    const { queueMessageInfoInvalidation } = await import("../server/message-info-events.js");
+    queueMessageInfoInvalidation(unavailableReceiptRoom, null);
+  }
+  return ended;
+}
+
+/**
+ * Server-owned terminal receipt transition. Supersession and duplicate
+ * cleanup deliberately never reach this: they leave (or create) a live
+ * successor for the same durable agent, and receipts match on agent_key, so
+ * that successor implicitly keeps them. Only an end with no live successor
+ * is durable evidence that unresolved routed work has become unavailable.
+ */
+async function markUnresolvedReceiptsUnavailableTx(
+  tx: any,
+  endedSession: RoomAgentSessionRow,
+  now: string,
+): Promise<number[]> {
+  const [successor] = await tx
+    .select({ session_id: room_agent_sessions.session_id })
+    .from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.room_id, endedSession.room_id),
+      eq(room_agent_sessions.agent_key, endedSession.agent_key),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      isNull(room_agent_sessions.ended_at),
+    ))
+    .limit(1);
+  if (successor) return [];
+
+  const unresolved: Array<{ id: string; message_number: number; receipt_state: string }> = await tx
+    .select({
+      id: message_agent_receipts.id,
+      message_number: message_agent_receipts.message_number,
+      receipt_state: message_agent_receipts.receipt_state,
+    })
+    .from(message_agent_receipts)
+    .where(and(
+      eq(message_agent_receipts.message_room_id, endedSession.room_id),
+      eq(message_agent_receipts.agent_key, endedSession.agent_key),
+      inArray(message_agent_receipts.receipt_state, ["queued", "responding", "retrying", "blocked"]),
+    ));
+  if (unresolved.length === 0) return [];
+
+  await tx
+    .update(message_agent_receipts)
+    .set({ receipt_state: "unavailable", updated_at: now })
+    .where(inArray(message_agent_receipts.id, unresolved.map((receipt) => receipt.id)));
+  await tx.insert(message_agent_receipt_events).values(unresolved.map((receipt) => ({
+    id: `rcpt_evt_${randomUUID().replace(/-/g, "")}`,
+    receipt_id: receipt.id,
+    message_room_id: endedSession.room_id,
+    message_number: receipt.message_number,
+    from_state: receipt.receipt_state,
+    to_state: "unavailable",
+    // Server-authored: no session actor. A dead session cannot self-report.
+    actor_session_id: null,
+    timestamp: now,
+  })));
+  return unresolved.map((receipt) => receipt.message_number);
 }
 
 export async function assignProjectAdmin(projectId: string, accountId: string): Promise<void> {

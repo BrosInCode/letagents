@@ -526,6 +526,13 @@
       "when": 1784764800000,
       "tag": "0074_message_publisher_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1784851200000,
+      "tag": "0075_message_info_and_read_receipts",
+      "breakpoints": true
     }
   ]
 }

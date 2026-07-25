@@ -91,7 +91,58 @@ export interface MessageRow {
   client_message_id: string | null;
   publisher_agent_key: string | null;
   publisher_agent_session_id: string | null;
+  publisher_account_id: string | null;
+  routing_snapshot_version: number | null;
   timestamp: string;
+}
+
+export interface MessageAgentReceiptRow {
+  id: string;
+  message_room_id: string;
+  message_number: number;
+  room_id: string;
+  agent_session_id: string;
+  agent_key: string;
+  actor_label: string;
+  activation_reason: string;
+  receipt_state: string;
+  reply_message_number: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageAgentReceiptEventRow {
+  id: string;
+  receipt_id: string;
+  message_room_id: string;
+  message_number: number;
+  from_state: string | null;
+  to_state: string;
+  actor_session_id: string | null;
+  timestamp: string;
+}
+
+export interface RoomAgentObservationSpanRow {
+  id: string;
+  room_id: string;
+  agent_session_id: string;
+  agent_key: string;
+  first_message_sequence: number;
+  last_message_sequence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageHumanReadRangeRow {
+  id: string;
+  room_id: string;
+  account_id: string;
+  scope_kind: string;
+  thread_root_number: number | null;
+  first_message_sequence: number;
+  last_message_sequence: number;
+  client_batch_id: string;
+  created_at: string;
 }
 
 export interface MessageThreadReadRow {

@@ -6,7 +6,9 @@ import { normalizeRoomId } from "../../../rooms/routing.js";
 import type { RoomMessageRouteDeps } from "./types.js";
 
 export function routeParam(req: AuthenticatedRequest, index: number): string {
-  return decodeURIComponent((req.params as Record<string, string>)[index] ?? "");
+  const params = req.params as Record<string, string>;
+  const val = params[index] ?? (index === 0 ? params.room : index === 1 ? params.message : undefined) ?? "";
+  return decodeURIComponent(val);
 }
 
 export async function resolveParticipantRoom(
