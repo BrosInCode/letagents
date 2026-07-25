@@ -22,12 +22,11 @@ import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
-import { attachAgentMessageActivations } from "../../../../shared/activation-routing.js";
-import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
-import { resolveMessageActivationContext } from "./activation-context.js";
 import { resolveMessageActivationIdentity } from "./activation-identity.js";
 import { isDesktopHumanClient } from "./request-identity.js";
+import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
 import { resolveParticipantRoom } from "./helpers.js";
+import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
 import type {
   MessageCreatedEvent,
   RoomMessageRouteDeps,
@@ -38,40 +37,47 @@ export function registerMessageHistoryRoutes(
   deps: RoomMessageRouteDeps
 ): void {
   app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
-    const project = await resolveParticipantRoom(req, res, deps);
-    if (!project) return;
+    try {
+      const project = await resolveParticipantRoom(req, res, deps);
+      if (!project) return;
 
-    const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-    const after = typeof req.query.after === "string" ? req.query.after : undefined;
-    const before = typeof req.query.before === "string" ? req.query.before : undefined;
-    if ((after && !isMessageId(after)) || (before && before !== "latest" && !isMessageId(before))) {
-      res.status(400).json({ error: "message cursor must be a valid message id" });
-      return;
+      const after = typeof req.query.after === "string" ? req.query.after : undefined;
+      const before = typeof req.query.before === "string" ? req.query.before : undefined;
+      const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+
+      if (after && before) {
+        res.status(400).json({ error: "Cannot specify both 'after' and 'before' query parameters." });
+        return;
+      }
+      if ((after && !isMessageId(after)) || (before && before !== "latest" && !isMessageId(before))) {
+        res.status(400).json({ error: "message cursor must be a valid message id" });
+        return;
+      }
+      const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+      const accountId = req.sessionAccount?.account_id ?? null;
+      const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
+      const result = before === "latest"
+        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
+        : before
+          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
+          : await getMessages(project.id, {
+            limit,
+            after,
+            include_prompt_only: includePromptOnly,
+            account_id: accountId,
+          });
+
+      res.json({
+        room_id: project.id,
+        messages: await attachReceiptAuthorityActivations(project.id, activationIdentity, result.messages, {
+          includeTaskOwnerLeases: false,
+        }),
+        has_more: result.has_more,
+        has_older: before ? result.has_more : undefined,
+      });
+    } catch (error) {
+      respondWithInternalError(res, "GET /rooms/:room_id/messages", error, "Messages could not be fetched.");
     }
-    const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
-    const accountId = req.sessionAccount?.account_id ?? null;
-    const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
-    const result = before === "latest"
-      ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
-      : before
-        ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
-        : await getMessages(project.id, {
-          limit,
-          after,
-          include_prompt_only: includePromptOnly,
-          account_id: accountId,
-        });
-
-    const activationContext = await resolveMessageActivationContext(project.id, activationIdentity, {
-      includeTaskOwnerLeases: false,
-    });
-
-    res.json({
-      room_id: project.id,
-      messages: attachAgentMessageActivations(result.messages, activationIdentity, activationContext),
-      has_more: result.has_more,
-      has_older: before ? result.has_more : undefined,
-    });
   });
 
   app.get(/^\/rooms\/(.+)\/messages\/(msg_\d+)$/, async (req: AuthenticatedRequest, res) => {
@@ -92,10 +98,9 @@ export function registerMessageHistoryRoutes(
         res.status(404).json({ error: "message does not exist in this room" });
         return;
       }
-      const activationContext = await resolveMessageActivationContext(project.id, activationIdentity, {
+      const [attached] = await attachReceiptAuthorityActivations(project.id, activationIdentity, [message], {
         includeTaskOwnerLeases: false,
       });
-      const [attached] = attachAgentMessageActivations([message], activationIdentity, activationContext);
       res.json({
         room_id: project.id,
         message: attached ?? message,
@@ -176,12 +181,19 @@ export function registerMessageHistoryRoutes(
       if (settled) return;
       settled = true;
       cleanup();
-      const activationContext = await resolveMessageActivationContext(projectId, activationIdentity, options);
-      res.json({
-        room_id: projectId,
-        messages: attachAgentMessageActivations(msgs, activationIdentity, activationContext),
-        has_more: hasMore,
-      });
+      try {
+        const attached = await attachReceiptAuthorityActivations(projectId, activationIdentity, msgs, options);
+        res.json({
+          room_id: projectId,
+          messages: attached,
+          has_more: hasMore,
+        });
+      } catch (error) {
+        console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Messages could not be fetched." });
+        }
+      }
     }
 
     async function onMessageCreated({ projectId: eventProjectId }: MessageCreatedEvent) {
@@ -217,7 +229,10 @@ export function registerMessageHistoryRoutes(
         account_id: accountId,
       });
       if (!settled && existing.messages.length > 0) {
-        resolveRequest(existing.messages, existing.has_more, { includeTaskOwnerLeases: false });
+        // The initial/backlog response is awaited so the route handler does
+        // not return before the response body is written; only the timeout
+        // and message-created event callbacks stay fire-and-forget.
+        await resolveRequestAsync(existing.messages, existing.has_more, { includeTaskOwnerLeases: false });
       }
     } catch (error) {
       if (!settled) {

@@ -74,6 +74,8 @@ async function hydrateMessageForSharedEvent(projectId: string, message: Message)
     client_message_id: null,
     publisher_agent_key: message.agent_identity?.agent_key ?? null,
     publisher_agent_session_id: message.agent_identity?.agent_session_id ?? null,
+    publisher_account_id: null,
+    routing_snapshot_version: null,
     timestamp: message.timestamp,
   }], { accountId: null });
   return hydrated ?? message;

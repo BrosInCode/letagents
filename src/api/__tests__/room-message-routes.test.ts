@@ -87,6 +87,10 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/thread$/" },
     { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/thread\\/read$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/stream$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/info$/" },
+    { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/read$/" },
+    { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/agent-receipts\\/self$/" },
+    { method: "put", path: "/^\\/rooms\\/(.+)\\/agents\\/self\\/observation$/" },
   ]);
 });
 

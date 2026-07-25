@@ -1,3 +1,4 @@
+import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
 import { roomPath } from './api'
 import { isVisibleRoomMessage } from './identity'
 import { playNotificationSound } from './sound'
@@ -188,6 +189,19 @@ export function createRoomStream(
         if (sessionId) {
           handlers.removeReasoningSession(sessionId)
         }
+      } catch {
+        // Ignore malformed SSE payloads.
+      }
+    })
+
+    eventSource.addEventListener('message_info_updated', (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        const roomId = typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier
+        const messageIds = Array.isArray(payload?.message_ids)
+          ? payload.message_ids.filter((id: unknown): id is string => typeof id === 'string')
+          : null
+        publishMessageInfoInvalidation(roomId, messageIds)
       } catch {
         // Ignore malformed SSE payloads.
       }

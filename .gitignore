@@ -27,3 +27,4 @@ headless_antigravity_test.txt
 headless_cascade_test.mjs
 headless_opus_test.mjs
 headless_via_debugger.mjs
+node_modules

@@ -23,6 +23,7 @@
           :searchQuery="searchQuery"
           :taskReferenceIds="taskReferenceIds"
           @reply="emit('reply', $event)"
+          @info="handleOpenMessageInfo($event)"
           @openImageViewer="emit('openImageViewer', $event)"
           @scrollToReply="scrollToMessage"
           @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
@@ -44,6 +45,13 @@
         <p>Create a room for your agents, copy the join code, and watch messages appear in real time.</p>
       </div>
     </div>
+    <MessageInfoSurface
+      :open="infoSurfaceOpen"
+      :room-id="roomIdentifier || ''"
+      :message-id="activeInfoMessage?.id || ''"
+      @close="infoSurfaceOpen = false"
+      @view-reply="scrollToMessage"
+    />
   </div>
 </template>
 
@@ -51,8 +59,18 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import MessageInfoSurface from './MessageInfoSurface.vue'
 import { getAppendedMessageIds, mergeMessageArrivalIds } from './messageArrival'
 import { buildMessageThreadSummaries } from './messageThreading'
+import { createReadEvidenceReporter } from './readEvidence'
+
+const activeInfoMessage = ref<RoomMessage | null>(null)
+const infoSurfaceOpen = ref(false)
+
+function handleOpenMessageInfo(msg: RoomMessage) {
+  activeInfoMessage.value = msg
+  infoSurfaceOpen.value = true
+}
 
 const props = defineProps<{
   messages: readonly RoomMessage[]
@@ -167,8 +185,15 @@ watch(() => props.searchQuery, async () => {
   }
 })
 
-watch(() => props.roomIdentifier, () => {
+watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
   arrivingMessageIds.value = new Set()
+  // Retire the old room's reporter: cancel its 600ms qualification timers
+  // (rows are no longer visible), flush its gathered evidence against the
+  // room it was captured in, and start Room B with clean per-room state.
+  clearVisibleMessageTimers()
+  const retiring = readReporter
+  readReporter = createReadEvidenceReporter({ roomIdentifier: nextRoomIdentifier || '' })
+  void retiring.dispose()
 })
 
 watch(() => props.messages, async (newMessages, oldMessages) => {
@@ -204,17 +229,116 @@ watch(() => props.messages, async (newMessages, oldMessages) => {
     } else {
       unreadCount.value += newLen - oldLen
     }
+    nextTick(() => setupReadObserver())
   }
 })
 
+// Viewport-based read evidence reporting. Each row must individually stay
+// qualified for 600 ms before it becomes evidence; qualified numbers are
+// flushed as contiguous ranges so a gap of unseen rows is never claimed read.
+const visibleMessageTimers = new Map<string, number>()
+
+/**
+ * Scope lookup for read evidence: thread replies must report against their
+ * thread scope or the server (correctly) refuses them as timeline evidence.
+ */
+function threadRootSeqForMessage(seq: number): number | null {
+  const message = props.messages.find((candidate) => candidate.id === `msg_${seq}`)
+  const rootSeq = message?.thread_root_id ? parseMsgNumber(message.thread_root_id) : null
+  return rootSeq !== null && rootSeq !== seq ? rootSeq : null
+}
+let readObserver: IntersectionObserver | null = null
+// Read evidence is room-scoped: the reporter captures its room at creation,
+// so pending evidence can never be submitted against a different room.
+let readReporter = createReadEvidenceReporter({ roomIdentifier: props.roomIdentifier || '' })
+
+function parseMsgNumber(msgId: string): number | null {
+  const match = /^msg_(\d+)$/.exec(msgId)
+  return match ? parseInt(match[1], 10) : null
+}
+
+function readEvidenceAllowed(): boolean {
+  // Visibility evidence requires the document visible and the window focused;
+  // a background tab or unfocused window proves nothing about reading.
+  return document.visibilityState === 'visible' && document.hasFocus()
+}
+
+function clearVisibleMessageTimers() {
+  visibleMessageTimers.forEach((timer) => clearTimeout(timer))
+  visibleMessageTimers.clear()
+}
+
+function handleDocumentVisibilityChange() {
+  if (!readEvidenceAllowed()) clearVisibleMessageTimers()
+}
+
+function setupReadObserver() {
+  if (readObserver) readObserver.disconnect()
+  clearVisibleMessageTimers()
+
+  if (typeof IntersectionObserver === 'undefined' || !messagesEl.value) return
+
+  readObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        const target = entry.target as HTMLElement
+        const msgId = target.getAttribute('data-msg-id')
+        if (!msgId) return
+
+        // A row counts as visible at 50% of its height, or 96px for rows too
+        // tall to ever reach 50% inside the scroller.
+        const qualifies = entry.isIntersecting
+          && (entry.intersectionRatio >= 0.5 || entry.intersectionRect.height >= 96)
+
+        if (qualifies && readEvidenceAllowed()) {
+          if (!visibleMessageTimers.has(msgId)) {
+            // The timer marks only this exact row as read: rows that scroll
+            // away before their own 600 ms elapse contribute no evidence.
+            const timer = window.setTimeout(() => {
+              visibleMessageTimers.delete(msgId)
+              if (!readEvidenceAllowed()) return
+              const seq = parseMsgNumber(msgId)
+              if (seq === null) return
+              // Scope resolved at qualification time, while the row still
+              // belongs to the reporter's room.
+              readReporter.qualify(seq, threadRootSeqForMessage(seq))
+            }, 600)
+            visibleMessageTimers.set(msgId, timer)
+          }
+        } else {
+          const timer = visibleMessageTimers.get(msgId)
+          if (timer) {
+            clearTimeout(timer)
+            visibleMessageTimers.delete(msgId)
+          }
+        }
+      })
+    },
+    { root: messagesEl.value, threshold: [0, 0.25, 0.5] }
+  )
+
+  const elements = messagesEl.value.querySelectorAll('.message[data-msg-id]')
+  elements.forEach((el) => readObserver?.observe(el))
+}
+
 onMounted(() => {
   messagesEl.value?.addEventListener('scroll', checkScroll)
+  document.addEventListener('visibilitychange', handleDocumentVisibilityChange)
+  window.addEventListener('blur', handleDocumentVisibilityChange)
   /* Use 'instant' so re-entering the chat tab doesn't visibly scroll from top */
-  nextTick(() => scrollToBottom('instant'))
+  nextTick(() => {
+    scrollToBottom('instant')
+    setupReadObserver()
+  })
 })
 
 onUnmounted(() => {
   messagesEl.value?.removeEventListener('scroll', checkScroll)
+  document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
+  window.removeEventListener('blur', handleDocumentVisibilityChange)
+  if (readObserver) readObserver.disconnect()
+  clearVisibleMessageTimers()
+  void readReporter.dispose()
 })
 
 defineExpose({ matchCount: computed(() => matchedIds.value.size) })

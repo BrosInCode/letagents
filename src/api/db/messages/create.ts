@@ -1,4 +1,5 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 
 import {
   assertAttachmentTotalByteSize,
@@ -9,9 +10,10 @@ import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../../../shared/room-agent-prompts.js";
+import { decideAgentMessageActivation } from "../../../shared/activation-routing.js";
 import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
-import { message_attachment_uploads, message_attachments, messages } from "../schema.js";
+import { message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events, task_leases } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
@@ -74,6 +76,7 @@ export async function addMessageWithCreateStatus(
   const promptKind = options?.agent_prompt_kind ?? null;
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
+  const repliedReceiptTargets = new Set<number>();
   const result = await db.transaction(async (tx): Promise<AddMessageTransactionResult> => {
     const replyToNumber =
       options?.reply_to_message_id
@@ -159,6 +162,8 @@ export async function addMessageWithCreateStatus(
       client_message_id: clientMessageId,
       publisher_agent_key: options?.publisher_agent_key?.trim() || null,
       publisher_agent_session_id: options?.publisher_agent_session_id?.trim() || null,
+      publisher_account_id: options?.account_id?.trim() || null,
+      routing_snapshot_version: 1,
       timestamp: new Date().toISOString(),
     };
 
@@ -250,11 +255,198 @@ export async function addMessageWithCreateStatus(
       await options.with_created_message_in_transaction(tx);
     }
 
+    // Send-time routing snapshot: resolve active worker sessions in this room and insert queued receipts
+    const routingStartedAtMs = Date.now();
+    const activeSessions = await tx
+      .select()
+      .from(room_agent_sessions)
+      .where(
+        and(
+          eq(room_agent_sessions.room_id, roomId),
+          eq(room_agent_sessions.session_kind, "worker"),
+          sql`${room_agent_sessions.ended_at} IS NULL`
+        )
+      )
+      // Deterministic representative when several sessions share an agent_key.
+      .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id));
+
+    if (activeSessions.length > 0) {
+      const leases = await tx
+        .select()
+        .from(task_leases)
+        .where(
+          and(
+            eq(task_leases.room_id, roomId),
+            eq(task_leases.status, "active")
+          )
+        );
+
+      let replyToMessage: { sender: string; source?: string } | null = null;
+      if (replyToNumber) {
+        const [foundReply] = await tx
+          .select({ sender: messages.sender, source: messages.source })
+          .from(messages)
+          .where(and(eq(messages.room_id, roomId), eq(messages.number, replyToNumber)))
+          .limit(1);
+        if (foundReply) replyToMessage = { sender: foundReply.sender, source: foundReply.source ?? undefined };
+      }
+
+      // A top-level message is its own (still-empty) thread: the only
+      // participant is its sender, so the participant query is skipped.
+      const threadRootNumber = createdMessage.thread_root_number || createdMessage.number;
+      const threadParticipants = createdMessage.thread_root_number
+        ? (await tx
+          .select({ sender: messages.sender })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.room_id, roomId),
+              sql`(${messages.thread_root_number} = ${threadRootNumber} OR ${messages.number} = ${threadRootNumber})`
+            )
+          )).map((m) => ({ sender: m.sender }))
+        : [{ sender: createdMessage.sender }];
+
+      const messageForRouting = {
+        id: `msg_${createdMessage.number}`,
+        sender: createdMessage.sender,
+        text: createdMessage.text,
+        source: createdMessage.source,
+        reply_to: replyToMessage,
+        thread_root_id: `msg_${threadRootNumber}`,
+        thread: {
+          root_message_id: `msg_${threadRootNumber}`,
+          participants: threadParticipants,
+        },
+      };
+
+      const routingContext = { activeTaskLeases: leases };
+      // Receipts are keyed by durable agent identity: several live sessions
+      // (duplicates, mid-rotation overlap) may share one agent_key, but the
+      // agent was asked once. The earliest session represents it; the unique
+      // (message, agent_key) index makes this a database invariant.
+      const receiptsByAgentKey = new Map<string, {
+        id: string; message_room_id: string; message_number: number; room_id: string;
+        agent_session_id: string; agent_key: string; actor_label: string;
+        activation_reason: string; receipt_state: string; created_at: string; updated_at: string;
+      }>();
+
+      for (const session of activeSessions) {
+        if (receiptsByAgentKey.has(session.agent_key)) continue;
+        const activation = decideAgentMessageActivation(
+          messageForRouting,
+          {
+            actor_label: session.actor_label,
+            agent_key: session.agent_key,
+            agent_instance_id: session.agent_instance_id,
+            agent_session_id: session.session_id,
+            display_name: session.display_name,
+            session_kind: session.session_kind,
+          },
+          routingContext
+        );
+
+        if (activation.decision === "activate") {
+          const receiptId = `rcpt_${randomUUID().replace(/-/g, "")}`;
+          receiptsByAgentKey.set(session.agent_key, {
+            id: receiptId,
+            message_room_id: roomId,
+            message_number: createdMessage.number,
+            room_id: roomId,
+            agent_session_id: session.session_id,
+            agent_key: session.agent_key,
+            actor_label: session.actor_label,
+            activation_reason: activation.reason,
+            receipt_state: "queued",
+            created_at: createdMessage.timestamp,
+            updated_at: createdMessage.timestamp,
+          });
+        }
+      }
+
+      const receiptRowsToInsert = [...receiptsByAgentKey.values()];
+      if (receiptRowsToInsert.length > 0) {
+        await tx.insert(message_agent_receipts).values(receiptRowsToInsert).onConflictDoNothing();
+      }
+
+      // Routing stays synchronous and atomic with the message. Watch its cost
+      // by room shape before considering any structural change.
+      const routingDurationMs = Date.now() - routingStartedAtMs;
+      if (routingDurationMs > 250) {
+        console.warn(
+          `[message routing snapshot] slow send-time routing for ${roomId}: ${routingDurationMs}ms`
+          + ` (${activeSessions.length} active sessions, ${receiptRowsToInsert.length} receipts)`,
+        );
+      }
+    }
+
+    // The canonical reply transition is server-owned and atomic with the
+    // reply's creation: any worker publication that answers an earlier message
+    // — an explicit reply_to, or a supervised daemon publication carrying its
+    // reply-namespace idempotency id — marks that agent's receipt replied.
+    // Supervised turns never call self-report endpoints, so this is the only
+    // path that can move their receipts.
+    const publisherAgentKey = createdMessage.publisher_agent_key;
+    if (publisherAgentKey) {
+      const replyTargetNumbers = new Set<number>();
+      if (createdMessage.reply_to_number) replyTargetNumbers.add(createdMessage.reply_to_number);
+      const supervisedTarget = parseSupervisedReplySourceNumber(clientMessageId);
+      if (supervisedTarget) replyTargetNumbers.add(supervisedTarget);
+      for (const targetNumber of replyTargetNumbers) {
+        const unresolved = await tx
+          .select({ id: message_agent_receipts.id, receipt_state: message_agent_receipts.receipt_state })
+          .from(message_agent_receipts)
+          .where(and(
+            eq(message_agent_receipts.message_room_id, roomId),
+            eq(message_agent_receipts.message_number, targetNumber),
+            eq(message_agent_receipts.agent_key, publisherAgentKey),
+            inArray(message_agent_receipts.receipt_state, ["queued", "responding", "retrying", "blocked", "no_reply", "unavailable"]),
+          ));
+        for (const receipt of unresolved) {
+          // Compare-and-set: if a concurrent transition won between the read
+          // and this write, record nothing — an event may only describe a
+          // state change that actually happened.
+          const applied = await tx
+            .update(message_agent_receipts)
+            .set({
+              receipt_state: "replied",
+              // The committed reply IS the canonical answer: stamp its number
+              // so Message info can link "View reply" even for supervised
+              // publications, which never set reply_to.
+              reply_message_number: createdMessage.number,
+              updated_at: createdMessage.timestamp,
+            })
+            .where(and(
+              eq(message_agent_receipts.id, receipt.id),
+              eq(message_agent_receipts.receipt_state, receipt.receipt_state),
+            ))
+            .returning({ id: message_agent_receipts.id });
+          if (applied.length === 0) continue;
+          await tx.insert(message_agent_receipt_events).values({
+            id: `rcpt_evt_${randomUUID().replace(/-/g, "")}`,
+            receipt_id: receipt.id,
+            message_room_id: roomId,
+            message_number: targetNumber,
+            from_state: receipt.receipt_state,
+            to_state: "replied",
+            actor_session_id: createdMessage.publisher_agent_session_id,
+            timestamp: createdMessage.timestamp,
+          });
+          repliedReceiptTargets.add(targetNumber);
+        }
+      }
+    }
+
     return {
       messageRow: createdMessage,
       created: true,
     };
   });
+  if (repliedReceiptTargets.size > 0) {
+    // Dynamic import avoids a module cycle; room-level so the shared stream
+    // never enumerates ids that may be concealed from some participants.
+    const { queueMessageInfoInvalidation } = await import("../../server/message-info-events.js");
+    queueMessageInfoInvalidation(roomId, null);
+  }
   const [message] = await hydrateMessageReplies(roomId, [result.messageRow], {
     accountId: options?.account_id ?? null,
   });
@@ -272,4 +464,23 @@ export async function addMessage(
 ): Promise<Message> {
   const result = await addMessageWithCreateStatus(roomId, sender, text, options);
   return result.message;
+}
+
+/**
+ * Supervised daemon publications carry a reply-namespace idempotency id:
+ *   supervised-room:<entry>:<source-message>:reply:v1
+ *   supervised-room:<entry>:<room>:<source-message>:reply:v1
+ * Only this exact shape identifies a reply target; arbitrary client ids never
+ * influence receipt state.
+ */
+export function parseSupervisedReplySourceNumber(clientMessageId: string | null): number | null {
+  if (!clientMessageId) return null;
+  const parts = clientMessageId.split(":");
+  if (parts[0] !== "supervised-room" || parts.at(-2) !== "reply" || parts.at(-1) !== "v1") return null;
+  const body = parts.slice(1, -2);
+  if (body.length !== 2 && body.length !== 3) return null;
+  const source = body.at(-1);
+  if (!source || !/^msg_\d+$/.test(source)) return null;
+  const parsed = Number(source.slice(4));
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }

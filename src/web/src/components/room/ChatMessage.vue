@@ -20,6 +20,7 @@
         :inline-prompt-injection="inlinePromptInjection"
         :formatted-time="formattedTime"
         @reply="emit('reply', message)"
+        @info="emit('info', message)"
       />
       <div
         class="message-bubble"
@@ -136,6 +137,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
+  info: [message: RoomMessage]
   scrollToReply: [messageId: string]
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
