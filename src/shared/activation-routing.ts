@@ -98,6 +98,61 @@ export function attachAgentMessageActivation<T extends MessageLike>(
   };
 }
 
+/**
+ * Send-time receipts are the activation authority. For a snapshot-bearing
+ * message, a receipt activates and the absence of one is the durable
+ * send-time "silent" — never re-promoted by re-running the router against
+ * later task/thread/session state, which would create a second authority.
+ * Only messages that predate routing snapshots keep the lazy per-reader
+ * decision, so legacy backlog mentions still activate rotated sessions.
+ */
+export function attachAgentMessageActivationsFromReceipts<T extends MessageLike>(
+  messages: readonly T[],
+  identity: ActivationIdentity | null,
+  receiptsMap: ReadonlyMap<number | string, { activation_reason: string }>,
+  snapshotNumbers: ReadonlySet<number>,
+  context: AgentMessageActivationContext = {},
+): T[] | Array<T & { activation: AgentMessageActivation }> {
+  if (!identity || identity.session_kind !== "worker") {
+    return [...messages];
+  }
+
+  return messages.map((message) => {
+    const msgIdStr = String(message.id ?? "");
+    const msgNum = parseInt(msgIdStr.replace(/^msg_/, ""), 10);
+    const receipt = !isNaN(msgNum) ? receiptsMap.get(msgNum) || receiptsMap.get(msgIdStr) : null;
+
+    if (receipt) {
+      const reason = receipt.activation_reason as AgentMessageActivationReason;
+      return {
+        ...message,
+        activation: {
+          for_current_agent: {
+            decision: "activate" as const,
+            reason: reason || "explicit_mention",
+            addressed: true,
+          },
+        },
+      };
+    }
+
+    if (!isNaN(msgNum) && snapshotNumbers.has(msgNum)) {
+      return {
+        ...message,
+        activation: {
+          for_current_agent: {
+            decision: "silent" as const,
+            reason: "unaddressed" as const,
+            addressed: false,
+          },
+        },
+      };
+    }
+
+    return attachAgentMessageActivation(message, identity, context);
+  });
+}
+
 export function attachAgentMessageActivations<T extends MessageLike>(
   messages: readonly T[],
   identity: ActivationIdentity | null,
