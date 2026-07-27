@@ -236,6 +236,10 @@
           <button type="button" role="menuitem" @click="copyLinkFromContext">
             <span>Copy link</span>
           </button>
+          <div class="room-message-context-menu-separator" role="separator" />
+          <button type="button" role="menuitem" @click="messageInfoFromContext">
+            <span>Message info</span>
+          </button>
         </template>
         <template v-else>
           <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
@@ -246,6 +250,10 @@
           </button>
           <button type="button" role="menuitem" @click="tertiaryActionFromContext">
             <span>{{ tertiaryActionLabel }}</span>
+          </button>
+          <div class="room-message-context-menu-separator" role="separator" />
+          <button type="button" role="menuitem" @click="messageInfoFromContext">
+            <span>Message info</span>
           </button>
         </template>
       </div>
@@ -351,6 +359,7 @@ const emit = defineEmits<{
   "retry-delivery": [agentId: string, sourceMessageId: string];
   "restore-conversation": [agentId: string, sourceMessageId: string];
   "skip-delivery": [agentId: string, sourceMessageId: string];
+  "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
 }>();
 
 const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
@@ -515,7 +524,10 @@ function openContextMenu(event: MouseEvent): void {
   contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
   closeSelectionPopover();
   const menuWidth = 180;
-  const menuHeight = 122;
+  // Link variant: 3 rows + separator; message variant: 4 rows + separator.
+  // The estimate must cover the tallest variant or the last row ("Message
+  // info") clips below the viewport near the bottom edge.
+  const menuHeight = linkHref ? 140 : 176;
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -577,6 +589,11 @@ function handleTertiaryAction(): void {
     return;
   }
   emit("jump-to-thread-root", props.message.id);
+}
+
+function messageInfoFromContext(): void {
+  closeContextMenu("action");
+  emit("message-info", props.message.id, props.context);
 }
 
 async function copyFromContext(): Promise<void> {

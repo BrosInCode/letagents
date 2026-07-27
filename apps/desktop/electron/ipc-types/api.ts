@@ -72,6 +72,7 @@ import type {
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
+  DesktopMessageInfo,
   DesktopRoomMessage,
   DesktopRoomMessagesPage,
   DesktopRoomThreadInboxFilter,
@@ -142,6 +143,7 @@ export interface DesktopApi {
     getLiveMetadata?: (roomIdentifier: string) => Promise<DesktopRoomLiveMetadata>;
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
+    getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
     getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;

@@ -42,6 +42,7 @@
           :room-delivery-skip-keys="roomDeliverySkipKeys"
           :provider-label="resolveMessageProviderLabel(entry.message, participants, presence, supervisorEntries)"
           @quote-reply="$emit('quote-reply', $event)"
+          @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
           @scroll-to-message="revealOrScrollToMessage"
@@ -216,6 +217,7 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "quote-reply": [messageId: string];
+  "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   "retry-delivery": [agentId: string, sourceMessageId: string];
   "restore-conversation": [agentId: string, sourceMessageId: string];
   "skip-delivery": [agentId: string, sourceMessageId: string];

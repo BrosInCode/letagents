@@ -55,6 +55,7 @@
           @open-image="openImageViewer"
           @open-thread="openThread"
           @quote-reply="quoteReply"
+          @message-info="openMessageInfo"
           @quote-selection="quoteSelectedText"
           @open-github-event="emit('open-github-event', $event)"
           @open-task="emit('open-task', $event)"
@@ -151,6 +152,7 @@
 
       <RoomThreadPanel
         v-if="activeThreadPanelParent"
+        @message-info="openMessageInfo"
         :parent="activeThreadPanelParent"
         :initial-thread-summary="activeThreadInitialSummary"
         :replies="activeThreadReplies"
@@ -193,6 +195,15 @@
         @send-thread-message="sendThreadMessage"
       />
     </div>
+
+    <RoomMessageInfoSurface
+      :open="messageInfoTargetId !== null"
+      :room-identifier="roomIdentifier ?? ''"
+      :message-id="messageInfoTargetId ?? ''"
+      :invoker-context="messageInfoInvokerContext"
+      @close="messageInfoTargetId = null"
+      @scroll-to-message="revealMessageFromInfo"
+    />
   </section>
 </template>
 
@@ -222,6 +233,7 @@ import {
 } from "./desktop-chat-message/github-event";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
+import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
 import {
@@ -747,6 +759,27 @@ function jumpToMessage(messageId: string): void {
 }
 
 function requestMessageReveal(messageId: string): void {
+  emit("reveal-message", messageId);
+}
+
+const messageInfoTargetId = ref<string | null>(null);
+const messageInfoInvokerContext = ref<"timeline" | "thread-root" | "thread-reply" | null>(null);
+
+// Message info is scoped to the full message-identity namespace, not just
+// the room id: a namespace change re-keys message ids even within one room,
+// so the open card (or an in-flight fetch target) must never outlive either.
+watch(() => [props.roomIdentifier, props.messageNamespace] as const, () => {
+  messageInfoTargetId.value = null;
+});
+
+function openMessageInfo(messageId: string, context: "timeline" | "thread-root" | "thread-reply"): void {
+  messageInfoTargetId.value = messageId;
+  messageInfoInvokerContext.value = context;
+}
+
+function revealMessageFromInfo(messageId: string): void {
+  messageInfoTargetId.value = null;
+  jumpToMessage(messageId);
   emit("reveal-message", messageId);
 }
 

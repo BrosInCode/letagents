@@ -47,6 +47,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-latest-messages", roomIdentifiers),
     getMessage: (roomIdentifier: string, messageId: string) =>
       ipcRenderer.invoke("desktop:room:get-message", roomIdentifier, messageId),
+    getMessageInfo: (roomIdentifier: string, messageId: string) =>
+      ipcRenderer.invoke("desktop:room:get-message-info", roomIdentifier, messageId),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
     getThreads: (roomIdentifier: string, filter = "all", beforeMessageId?: string | null, limit?: number) =>

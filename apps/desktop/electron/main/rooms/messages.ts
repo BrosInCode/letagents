@@ -1,5 +1,6 @@
 import type {
   DesktopLocalChatSyncResult,
+  DesktopMessageInfo,
   DesktopRoomMessage,
   DesktopTaskSummary,
   DesktopRoomLatestMessage,
@@ -854,4 +855,83 @@ async function syncLocalRoomTasks(input: {
   }
 
   return { syncedTaskCount, skippedTaskCount };
+}
+
+type MessageInfoPayload = {
+  message?: {
+    id?: string; sender?: string; text_preview?: string; timestamp?: string;
+    thread_root_id?: string; reply_to_id?: string | null;
+  };
+  seen_by_people?: Array<{ name?: string; avatar_url?: string | null; seen_at?: string }>;
+  agents_asked?: Array<{
+    receipt_id?: string; agent_key?: string; actor_label?: string;
+    activation_reason_label?: string; receipt_state?: string; observed?: boolean;
+    reply_message_id?: string | null;
+  }>;
+  also_observed?: Array<{ agent_key?: string; display_name?: string }>;
+  summary_counts?: { seen_count?: number; asked_count?: number; reply_count?: number; observed_count?: number };
+};
+
+export function mapDesktopMessageInfoPayload(payload: MessageInfoPayload): DesktopMessageInfo | null {
+  const message = payload.message;
+  if (!message?.id || !message.sender || !message.timestamp) return null;
+  return {
+    message: {
+      id: message.id,
+      sender: message.sender,
+      textPreview: message.text_preview ?? "",
+      timestamp: message.timestamp,
+      threadRootId: message.thread_root_id ?? message.id,
+      replyToId: message.reply_to_id ?? null,
+    },
+    seenByPeople: (payload.seen_by_people ?? []).flatMap((person) =>
+      person.name && person.seen_at
+        ? [{ name: person.name, avatarUrl: person.avatar_url ?? null, seenAt: person.seen_at }]
+        : []),
+    agentsAsked: (payload.agents_asked ?? []).flatMap((agent) =>
+      agent.receipt_id && agent.agent_key && agent.receipt_state
+        ? [{
+          receiptId: agent.receipt_id,
+          agentKey: agent.agent_key,
+          actorLabel: agent.actor_label || agent.agent_key,
+          activationReasonLabel: agent.activation_reason_label || "",
+          receiptState: agent.receipt_state,
+          observed: agent.observed === true,
+          replyMessageId: agent.reply_message_id ?? null,
+        }]
+        : []),
+    alsoObserved: (payload.also_observed ?? []).flatMap((agent) =>
+      agent.agent_key
+        ? [{ agentKey: agent.agent_key, displayName: agent.display_name || agent.agent_key }]
+        : []),
+    summaryCounts: {
+      seenCount: payload.summary_counts?.seen_count ?? 0,
+      askedCount: payload.summary_counts?.asked_count ?? 0,
+      replyCount: payload.summary_counts?.reply_count ?? 0,
+      observedCount: payload.summary_counts?.observed_count ?? 0,
+    },
+  };
+}
+
+/**
+ * Message info is cloud truth. Local-only rooms return null and the surface
+ * shows its local-room copy instead of fabricating receipts.
+ */
+export async function getDesktopRoomMessageInfo(
+  roomIdentifier: string,
+  messageId: string,
+): Promise<DesktopMessageInfo | null> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedMessageId = messageId.trim();
+  if (!trimmedRoomIdentifier || !/^msg_\d+$/.test(trimmedMessageId)) return null;
+  if (isDesktopSmokeCheck()) return null;
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") return null;
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
+  const payload = await apiFetch<MessageInfoPayload>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}/info`,
+  );
+  return mapDesktopMessageInfoPayload(payload);
 }
