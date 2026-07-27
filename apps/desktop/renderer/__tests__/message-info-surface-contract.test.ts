@@ -58,6 +58,20 @@ test("the overlay never displaces the room and respects reduced motion", () => {
   assert.match(styles, /@media \(max-width: 719px\)/);
 });
 
+test("the quiet state only claims no activity when every evidence lane is empty", () => {
+  assert.match(
+    surface,
+    /info\.agentsAsked\.length === 0 && info\.seenByPeople\.length === 0 && info\.alsoObserved\.length === 0/,
+  );
+});
+
+test("press feedback is neutralized under reduced motion while color feedback stays", () => {
+  assert.match(
+    styles,
+    /prefers-reduced-motion[\s\S]*?\.room-message-info-view-reply,\s*\.room-message-info-close \{ transition-property: background-color, color; \}[\s\S]*?:active \{ transform: none; \}/,
+  );
+});
+
 test("a room or message-namespace change closes the surface instead of showing stale evidence", () => {
   assert.match(chatView, /watch\(\(\) => \[props\.roomIdentifier, props\.messageNamespace\] as const, \(\) => \{\s*messageInfoTargetId\.value = null;\s*\}\)/);
 });
