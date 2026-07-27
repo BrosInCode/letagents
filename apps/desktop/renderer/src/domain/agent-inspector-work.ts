@@ -49,6 +49,8 @@ export function humanizeAgentInspectorReceiptState(state: string): string {
     acknowledged: "Reply published", acknowledged_no_reply: "No reply needed",
     retryable: "Ready to retry", blocked: "Needs attention",
     cancelled_by_room_move: "Cancelled after room move",
+    cancelled_by_user: "Skipped by you",
+    restoring_conversation: "Restoring conversation",
   };
   return labels[state] || "Recorded work";
 }
@@ -60,6 +62,9 @@ export function humanizeAgentInspectorTimeline(event: DesktopRoomAgentCausalEven
     publish_started: "Reply publication started", published: "Reply published",
     no_reply: "No reply was needed", retry_scheduled: "Retry scheduled",
     blocked: "Work needs attention", room_move_cancelled: "Cancelled after room move",
+    conversation_restoring: "Conversation restoration started",
+    conversation_restored: "Conversation restored",
+    user_cancelled: "Message skipped by you",
   };
   return labels[event.phase];
 }

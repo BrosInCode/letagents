@@ -51,6 +51,8 @@ export interface ProviderAdapterCapabilities {
   survivesRestart: boolean;
   /** How this provider can stop one turn without ending the supervised attempt. */
   turnControl?: "native_interrupt" | "restart_resume" | "unsupported";
+  /** Replace a missing continuation without replacing its verified provider process. */
+  continuationRepair?: "same_process" | "unsupported";
 }
 
 export interface ProviderTurnControlResult {
@@ -304,6 +306,33 @@ export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none" };
 export interface ProviderRoomTurnRecoveryRequest { inboxItemId: string; providerTurnId: string; }
+export interface ProviderContinuationRepairRequest {
+  workAttemptId: string;
+  expectedProviderContinuationId: string;
+  /** A thread/start result already checkpointed by an interrupted repair. */
+  checkpointedReplacementProviderContinuationId?: string | null;
+  cwd: string;
+  launchPolicy: unknown;
+  model?: string | null;
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+}
+export interface ProviderContinuationRepairResult {
+  handle: ProviderHandle;
+  outcome: "rematerialized" | "replaced";
+  previousProviderContinuationId: string;
+  replacementProviderContinuationId: string;
+}
+
+export class ProviderContinuationMissingError extends Error {
+  readonly providerFailureCode = "provider_continuation_missing" as const;
+  readonly providerContinuationId: string;
+
+  constructor(providerContinuationId: string) {
+    super("The saved provider conversation is unavailable.");
+    this.name = "ProviderContinuationMissingError";
+    this.providerContinuationId = providerContinuationId;
+  }
+}
 
 export interface ProviderRoomTurnOptions {
   /** Persist dispatch intent before the first native turn/start side effect. */
@@ -363,6 +392,10 @@ export interface ProviderAdapter {
     detachSignal?: AbortSignal;
     checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
   }): Promise<ProviderRoomTurnResult>;
+  repairContinuation?(handle: ProviderHandle, request: ProviderContinuationRepairRequest, options: {
+    checkpointReplacement: (providerContinuationId: string) => Promise<void>;
+    detachSignal?: AbortSignal;
+  }): Promise<ProviderContinuationRepairResult>;
 
   /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
   stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;

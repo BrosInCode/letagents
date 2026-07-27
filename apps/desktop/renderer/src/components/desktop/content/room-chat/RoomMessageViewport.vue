@@ -35,7 +35,11 @@
           :animate-arrival="arrivingMessageIds.has(entry.message.id)"
           :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
+          :continuation-repair-available="continuationRepairAvailable"
+          :room-delivery-skip-available="roomDeliverySkipAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
+          :continuation-repair-keys="continuationRepairKeys"
+          :room-delivery-skip-keys="roomDeliverySkipKeys"
           :provider-label="resolveMessageProviderLabel(entry.message, participants, presence, supervisorEntries)"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
@@ -46,6 +50,8 @@
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
           @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
+          @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
+          @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
       </template>
 
@@ -188,9 +194,13 @@ const props = defineProps<{
   participants?: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
-  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; attemptCount: number; providerTurnId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;
+  continuationRepairKeys?: ReadonlySet<string>;
+  roomDeliverySkipKeys?: ReadonlySet<string>;
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubActivityAvailable: boolean;
@@ -207,6 +217,8 @@ const emit = defineEmits<{
   "open-thread": [messageId: string];
   "quote-reply": [messageId: string];
   "retry-delivery": [agentId: string, sourceMessageId: string];
+  "restore-conversation": [agentId: string, sourceMessageId: string];
+  "skip-delivery": [agentId: string, sourceMessageId: string];
   "reveal-message": [messageId: string];
   "quote-selection": [messageId: string, text: string];
   "scroll-position": [scrollTop: number];

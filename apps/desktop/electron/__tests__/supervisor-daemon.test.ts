@@ -389,7 +389,7 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
     inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
     canonicalMessageId: "msg_reply_1",
     replyClientMessageId: "supervised-room:agent_1:msg_1:reply:v1",
-    providerTurnId: null, blockedByMessageId: null, error: "failed", updatedAt: "2026-01-01T00:00:00.000Z",
+    providerTurnId: null, blockedByMessageId: null, error: "failed", failureCode: null, updatedAt: "2026-01-01T00:00:00.000Z",
     timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
 });
@@ -1040,7 +1040,7 @@ test("desktop replaces the prior 2.0.52 implementation and accepts only the new 
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.53");
+    assert.equal(status.implementationVersion, "2.0.54");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

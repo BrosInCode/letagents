@@ -27,6 +27,7 @@ import type {
   ProviderStreamEvent,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
+import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
 
 type RecordedRequest = { method: string; params: unknown };
 
@@ -38,9 +39,12 @@ function assertProviderHandle(
 
 class FakeRpc implements CodexAdapterRpc {
   readonly requests: RecordedRequest[] = [];
+  readonly threadReadCounts = new Map<string, number>();
   connected = false;
   closed = false;
   turnStatus = "completed";
+  private threadStartCount = 0;
+  private readonly missingThreadReads = new Map<string, number>();
   private readonly disconnectListeners = new Set<() => void>();
 
   constructor(
@@ -72,7 +76,14 @@ class FakeRpc implements CodexAdapterRpc {
       } as T;
     }
     if (method === "thread/start") {
-      return { thread: { id: this.threadId } } as T;
+      this.threadStartCount += 1;
+      return {
+        thread: {
+          id: this.threadStartCount === 1
+            ? this.threadId
+            : `${this.threadId}-replacement-${this.threadStartCount - 1}`,
+        },
+      } as T;
     }
     if (method === "thread/resume") {
       const threadId = (params as { threadId: string }).threadId;
@@ -86,17 +97,25 @@ class FakeRpc implements CodexAdapterRpc {
       return { thread: { id: threadId } } as T;
     }
     if (method === "turn/start") {
-      return { turn: { id: `turn-${this.threadId}` } } as T;
+      const threadId = (params as { threadId?: string } | undefined)?.threadId ?? this.threadId;
+      return { turn: { id: `turn-${threadId}` } } as T;
     }
     if (method === "turn/interrupt") {
       this.turnStatus = "interrupted";
       return {} as T;
     }
     if (method === "thread/read") {
+      const requestedThreadId = (params as { threadId?: string } | undefined)?.threadId ?? this.threadId;
+      this.threadReadCounts.set(requestedThreadId, (this.threadReadCounts.get(requestedThreadId) ?? 0) + 1);
       if (this.options.threadReadTimesOut) {
         throw new Error("Codex app-server request timed out: thread/read");
       }
       if (this.options.threadReadFails) throw new Error("thread endpoint unavailable");
+      const missingReads = this.missingThreadReads.get(requestedThreadId) ?? 0;
+      if (missingReads > 0) {
+        if (Number.isFinite(missingReads)) this.missingThreadReads.set(requestedThreadId, missingReads - 1);
+        throw new Error(`thread not found: ${requestedThreadId}`);
+      }
       if (
         this.options.threadReadUnmaterialized
         && (params as { includeTurns?: boolean } | undefined)?.includeTurns !== false
@@ -105,13 +124,12 @@ class FakeRpc implements CodexAdapterRpc {
           `thread ${this.threadId} is not materialized yet; includeTurns is unavailable before first user message`,
         );
       }
-      const requestedThreadId = (params as { threadId?: string } | undefined)?.threadId;
       return {
         thread: {
-          id: requestedThreadId ?? this.threadId,
+          id: requestedThreadId,
           status: { type: "idle" },
           turns: [{
-            id: `turn-${this.threadId}`,
+            id: `turn-${requestedThreadId}`,
             status: this.turnStatus,
             items: [{ type: "agentMessage", text: "Transcript checkpoint persisted." }],
           }],
@@ -137,6 +155,10 @@ class FakeRpc implements CodexAdapterRpc {
 
   emit(notification: RpcNotification): void {
     this.notify(notification);
+  }
+
+  markThreadMissing(threadId: string, readCount = Number.POSITIVE_INFINITY): void {
+    this.missingThreadReads.set(threadId, readCount);
   }
 }
 
@@ -169,6 +191,7 @@ function createHarness(options: {
     cwd: string;
     context: Parameters<CodexProviderAdapterDependencies["writeSupervisorBridgeContext"]>[1];
   }> = [];
+  const sleeps: number[] = [];
   let nextPid = 4100;
   let nextThread = 1;
   let clock = 0;
@@ -228,6 +251,7 @@ function createHarness(options: {
     writeSupervisorBridgeContext: async (cwd, context) => {
       supervisorBridgeContexts.push({ cwd, context });
     },
+    sleep: async (delayMs) => { sleeps.push(delayMs); },
     now: () => `2026-07-15T00:00:${String(clock++).padStart(2, "0")}.000Z`,
   };
 
@@ -238,6 +262,7 @@ function createHarness(options: {
     signals,
     launchOptions,
     supervisorBridgeContexts,
+    sleeps,
     setIdentityObservable: (observable: boolean) => { identityObservable = observable; },
   };
 }
@@ -331,6 +356,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     permissionPromptBridging: false,
     survivesRestart: true,
     turnControl: "native_interrupt",
+    continuationRepair: "same_process",
   });
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
 });
@@ -607,6 +633,137 @@ test("Codex bounded room turn does not treat a sentinel with extra text as no-re
   const pending = adapter.runRoomTurn!(handle, { inboxItemId: "inbox-sentinel-extra", actionId: "action-sentinel-extra", sourceMessage: {}, activation: {} }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
   await flush(); client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-sentinel-extra" } });
   assert.deepEqual(await pending, { turnId: "turn-sentinel-extra", outcome: "reply", text: "LETAGENTS_NO_ROOM_REPLY\nextra", evidence: "transcript" });
+});
+
+test("Codex reports an exact missing conversation as a typed pre-turn failure", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      throw new Error(`thread not found: ${handle.providerContinuationId}`);
+    }
+    return originalRequest<T>(method, params);
+  };
+  let checkpointedTurn = false;
+
+  await assert.rejects(
+    adapter.runRoomTurn!(handle, {
+      inboxItemId: "inbox-missing-thread",
+      actionId: "action-missing-thread",
+      sourceMessage: {},
+      activation: {},
+    }, {
+      beforeNativeDispatch: async () => {},
+      checkpointTurnStarted: async () => { checkpointedTurn = true; },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderContinuationMissingError);
+      assert.equal(error.providerFailureCode, "provider_continuation_missing");
+      assert.equal(error.providerContinuationId, "thread-1");
+      return true;
+    },
+  );
+  assert.equal(checkpointedTurn, false, "a missing thread never creates durable evidence that a model turn began");
+  assert.equal(handle.providerContinuationId, "thread-1");
+  assert.equal(handle.pid, 4100);
+});
+
+test("Codex repairs a confirmed missing conversation on the same app-server process", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const readsBefore = client.threadReadCounts.get("thread-1") ?? 0;
+  client.markThreadMissing("thread-1");
+  const checkpointed: string[] = [];
+
+  const result = await adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "thread-1",
+    cwd: "/tmp/letagents-work-attempt",
+    launchPolicy: spawnRequest().launchPolicy,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+  }, {
+    checkpointReplacement: async (continuation) => {
+      assert.equal(handle.providerContinuationId, "thread-1", "the live handle cannot move before the durable checkpoint");
+      checkpointed.push(continuation);
+    },
+  });
+
+  assert.equal(result.handle, handle, "repair retains the sole process/stream owner");
+  assert.deepEqual(result, {
+    handle,
+    outcome: "replaced",
+    previousProviderContinuationId: "thread-1",
+    replacementProviderContinuationId: "thread-1-replacement-1",
+  });
+  assert.deepEqual(checkpointed, ["thread-1-replacement-1"]);
+  assert.deepEqual(harness.sleeps, [1_000, 2_000, 4_000], "probes occur at absolute 0s, 1s, 3s, and 7s");
+  assert.equal((client.threadReadCounts.get("thread-1") ?? 0) - readsBefore, 4);
+  assert.equal(client.requests.filter((request) => request.method === "thread/start").length, 2);
+  assert.equal(harness.launches.length, 1, "repair must not launch another app-server");
+  assert.equal(handle.pid, 4100);
+  assert.deepEqual(handle.providerConnection, {
+    kind: "codex_app_server",
+    url: "ws://127.0.0.1:4700",
+    pid: 4100,
+    processIdentity: "fake-process-4100-birth-1",
+  });
+  assert.equal(handle.workAttemptId, spawnRequest().workAttemptId);
+  assert.equal(handle.providerContinuationId, "thread-1-replacement-1");
+});
+
+test("Codex reuses a conversation that materializes during the grace window", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  client.markThreadMissing("thread-1", 2);
+  let checkpoints = 0;
+
+  const result = await adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "thread-1",
+    cwd: "/tmp/letagents-work-attempt",
+    launchPolicy: spawnRequest().launchPolicy,
+  }, {
+    checkpointReplacement: async () => { checkpoints += 1; },
+  });
+
+  assert.equal(result.outcome, "rematerialized");
+  assert.equal(result.replacementProviderContinuationId, "thread-1");
+  assert.equal(handle.providerContinuationId, "thread-1");
+  assert.deepEqual(harness.sleeps, [1_000, 2_000]);
+  assert.equal(checkpoints, 0);
+  assert.equal(client.requests.filter((request) => request.method === "thread/start").length, 1);
+});
+
+test("Codex resumes a checkpointed replacement after a repair crash without creating another thread", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const checkpointed: string[] = [];
+
+  const result = await adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "thread-1",
+    checkpointedReplacementProviderContinuationId: "thread-checkpointed-replacement",
+    cwd: "/tmp/letagents-work-attempt",
+    launchPolicy: spawnRequest().launchPolicy,
+  }, {
+    checkpointReplacement: async (continuation) => { checkpointed.push(continuation); },
+  });
+
+  assert.equal(result.outcome, "replaced");
+  assert.equal(result.replacementProviderContinuationId, "thread-checkpointed-replacement");
+  assert.equal(handle.providerContinuationId, "thread-checkpointed-replacement");
+  assert.deepEqual(checkpointed, ["thread-checkpointed-replacement"]);
+  assert.deepEqual(harness.sleeps, []);
+  assert.equal(harness.clients[0]!.requests.filter((request) => request.method === "thread/start").length, 1);
 });
 
 test("Codex room-turn recovery reattaches only the persisted exact active turn and never starts another", async () => {

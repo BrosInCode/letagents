@@ -43,7 +43,9 @@
               <strong>{{ detail.receipt ? humanizeAgentInspectorReceiptState(detail.receipt.state) : 'No receipt retained' }}</strong>
               <p v-if="detail.terminal?.normalized_text">{{ detail.terminal.normalized_text }}</p>
               <p v-else-if="detail.receipt?.outcome?.text">{{ detail.receipt.outcome.text }}</p>
-              <p v-else>{{ detail.receipt?.last_error || 'No terminal outcome is retained.' }}</p>
+              <p v-else>{{ detail.receipt?.failure_code === 'provider_continuation_missing'
+                ? 'The saved Codex conversation is unavailable. No model turn was started.'
+                : detail.receipt?.last_error || 'No terminal outcome is retained.' }}</p>
             </section>
             <section v-if="detail.publication" class="agent-inspector-work-section">
               <p class="agent-inspector-work-eyebrow">Published reply</p>

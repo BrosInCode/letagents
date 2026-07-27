@@ -152,7 +152,26 @@
           >
             View earlier message
           </button>
-          <template v-if="receipt.state === 'blocked'">
+          <template
+            v-if="receipt.state === 'blocked'
+              && receipt.failureCode === 'provider_continuation_missing'
+              && receipt.attemptCount === 0
+              && !receipt.providerTurnId"
+          >
+            <button
+              type="button"
+              :disabled="!continuationRepairAvailable || restoringReceipt(receipt.agentId)"
+              :aria-label="continuationRepairAvailable ? `Restore conversation for ${receipt.agentName}` : `Conversation restoration for ${receipt.agentName} is unavailable`"
+              @click="continuationRepairAvailable && !restoringReceipt(receipt.agentId) && $emit('restore-conversation', receipt.agentId, message.id)"
+            >{{ restoringReceipt(receipt.agentId) ? "Restoring…" : "Restore and retry" }}</button>
+            <button
+              type="button"
+              :disabled="!roomDeliverySkipAvailable || skippingReceipt(receipt.agentId)"
+              :aria-label="roomDeliverySkipAvailable ? `Skip blocked message for ${receipt.agentName}` : `Skip message for ${receipt.agentName} is unavailable`"
+              @click="roomDeliverySkipAvailable && !skippingReceipt(receipt.agentId) && $emit('skip-delivery', receipt.agentId, message.id)"
+            >{{ skippingReceipt(receipt.agentId) ? "Skipping…" : "Skip message" }}</button>
+          </template>
+          <template v-else-if="receipt.state === 'blocked'">
             <button
               type="button"
               :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId)"
@@ -291,18 +310,32 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; attemptCount: number; providerTurnId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;
+  continuationRepairKeys?: ReadonlySet<string>;
+  roomDeliverySkipKeys?: ReadonlySet<string>;
   providerLabel?: string | null;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
   deliveryRecoveryAvailable: false,
+  continuationRepairAvailable: false,
+  roomDeliverySkipAvailable: false,
 });
 
 function retryingReceipt(agentId: string): boolean {
   return props.deliveryRetryKeys?.has(`${agentId}:${props.message.id}`) === true;
+}
+
+function restoringReceipt(agentId: string): boolean {
+  return props.continuationRepairKeys?.has(`${agentId}:${props.message.id}`) === true;
+}
+
+function skippingReceipt(agentId: string): boolean {
+  return props.roomDeliverySkipKeys?.has(`${agentId}:${props.message.id}`) === true;
 }
 
 const emit = defineEmits<{
@@ -316,6 +349,8 @@ const emit = defineEmits<{
   "quote-selection": [messageId: string, text: string];
   "jump-to-thread-root": [messageId: string];
   "retry-delivery": [agentId: string, sourceMessageId: string];
+  "restore-conversation": [agentId: string, sourceMessageId: string];
+  "skip-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
 const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
@@ -324,11 +359,13 @@ const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((re
   "blocked",
   "acknowledged_no_reply",
   "cancelled_by_room_move",
+  "cancelled_by_user",
+  "restoring_conversation",
   "queued_behind_blocked",
 ].includes(receipt.state)));
 
 function receiptIsAnimated(state: string): boolean {
-  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery"].includes(state);
+  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation"].includes(state);
 }
 
 function receiptNeedsAttention(state: string): boolean {
@@ -338,10 +375,12 @@ function receiptNeedsAttention(state: string): boolean {
 function receiptStateLabel(state: string): string {
   if (state === "retryable") return "Retrying";
   if (state === "result_recovery") return "Recovering reply";
+  if (state === "restoring_conversation") return "Restoring conversation";
   if (state === "blocked") return "Needs attention";
   if (state === "queued_behind_blocked") return "Queued behind an issue";
   if (state === "acknowledged_no_reply") return "Read · no reply";
   if (state === "cancelled_by_room_move") return "Moved rooms";
+  if (state === "cancelled_by_user") return "Skipped";
   return "";
 }
 
@@ -353,8 +392,10 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
   if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
   if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
+  if (receipt.state === "restoring_conversation") return `${receipt.agentName} is restoring its private conversation`;
   if (receipt.state === "blocked") return `${receipt.agentName} needs attention`;
   if (receipt.state === "cancelled_by_room_move") return `${receipt.agentName} moved to another room before handling this`;
+  if (receipt.state === "cancelled_by_user") return `You skipped this message for ${receipt.agentName}`;
   if (receipt.state === "queued_behind_blocked") return `Waiting — ${receipt.agentName} needs attention on ${receipt.blockedByMessageId || "an earlier message"}`;
   return `Waiting for ${receipt.agentName}`;
 }

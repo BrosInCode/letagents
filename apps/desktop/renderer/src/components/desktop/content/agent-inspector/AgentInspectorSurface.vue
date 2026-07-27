@@ -68,6 +68,8 @@
           @stop-turn="emitTurnControl('stop_turn')"
           @correct-turn="emitTurnControl('steer_turn', $event)"
           @resolve-turn-control="emitTurnControl('resolve_turn_control', undefined, $event)"
+          @restore-conversation="emitRecoveryControl('restore_conversation', $event)"
+          @skip-message="emitRecoveryControl('skip_message', $event)"
         />
       </div>
       <AgentInspectorWork
@@ -87,6 +89,7 @@
       <AgentInspectorDiagnostics
         v-else id="agent-inspector-diagnostics-panel" role="tabpanel" aria-labelledby="agent-inspector-diagnostics-tab"
         :projection="projection"
+        :work-resource="workResource"
       />
     </div>
   </aside>
@@ -178,6 +181,18 @@ function emitTurnControl(
     kind,
     ...(correction ? { correction } : {}),
     ...(turnControlResolution ? { turnControlResolution } : {}),
+  });
+}
+
+function emitRecoveryControl(
+  kind: Extract<AgentInspectorActionIntent["kind"], "restore_conversation" | "skip_message">,
+  sourceMessageId: string,
+): void {
+  emit("action", {
+    entryId: props.projection.entryId,
+    roomId: props.projection.roomId,
+    kind,
+    sourceMessageId,
   });
 }
 
