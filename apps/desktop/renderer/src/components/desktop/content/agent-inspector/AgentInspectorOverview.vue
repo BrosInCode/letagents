@@ -1,5 +1,12 @@
 <template>
   <div class="agent-inspector-overview">
+    <AgentInspectorContinuationRecovery
+      :entry-id="projection.entryId"
+      :recovery="projection.continuationRecovery"
+      :busy="busy"
+      @restore="emit('restore-conversation', $event)"
+      @skip="emit('skip-message', $event)"
+    />
     <AgentInspectorNow :now="projection.now" />
     <AgentInspectorTurnControl
       :entry-id="projection.entryId"
@@ -43,6 +50,7 @@
 <script setup lang="ts">
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
 import AgentInspectorNow from "./AgentInspectorNow.vue";
+import AgentInspectorContinuationRecovery from "./AgentInspectorContinuationRecovery.vue";
 import AgentInspectorReadinessRail from "./AgentInspectorReadinessRail.vue";
 import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 
@@ -51,5 +59,7 @@ const emit = defineEmits<{
   "stop-turn": [];
   "correct-turn": [correction: string];
   "resolve-turn-control": [resolution: "not_applied" | "applied"];
+  "restore-conversation": [sourceMessageId: string];
+  "skip-message": [sourceMessageId: string];
 }>();
 </script>

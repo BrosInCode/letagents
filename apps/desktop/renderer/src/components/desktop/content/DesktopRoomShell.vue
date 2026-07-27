@@ -108,7 +108,11 @@
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
       :delivery-recovery-available="deliveryRetryAvailable"
+      :continuation-repair-available="continuationRepairAvailable"
+      :room-delivery-skip-available="roomDeliverySkipAvailable"
       :delivery-retry-keys="deliveryRetryingKeys"
+      :continuation-repair-keys="continuationRepairingKeys"
+      :room-delivery-skip-keys="roomDeliverySkippingKeys"
       :revealed-message-id="revealedMessageId"
       :permission-approvals="pendingPermissionApprovals"
       :permission-error="composerPermissionError"
@@ -128,6 +132,8 @@
       @open-agent-detail="openAgentDetailFromParticipant"
       @open-add-agent="openAddAgentModal"
       @open-permission-detail="openComposerPermissionDetail"
+      @restore-conversation="restoreAgentConversation"
+      @skip-delivery="skipRoomDelivery"
       @retry-delivery="retryRoomAgentDelivery"
       @reveal-message="revealRoomMessage"
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
@@ -554,6 +560,10 @@ const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicat
 const inboxFilter = ref<DesktopInboxFilter>("actionable");
 const deliveryRetryCoordinator = createRoomDeliveryRetryCoordinator();
 const deliveryRetryingKeys = deliveryRetryCoordinator.retryingKeys;
+const continuationRepairCoordinator = createRoomDeliveryRetryCoordinator();
+const continuationRepairingKeys = continuationRepairCoordinator.retryingKeys;
+const roomDeliverySkipCoordinator = createRoomDeliveryRetryCoordinator();
+const roomDeliverySkippingKeys = roomDeliverySkipCoordinator.retryingKeys;
 const deliveryRetryNegotiated = ref(false);
 const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
 const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
@@ -594,6 +604,12 @@ let supervisorStatusRequestToken = 0;
 let supervisorStatusRefreshInFlight: Promise<DesktopSupervisorDaemonStatus | null> | null = null;
 const agentInspectorRoomMoveAvailable = computed(() =>
   Boolean(supervisorStatus.value?.capabilities.agentRoomMove));
+const continuationRepairAvailable = computed(() =>
+  Boolean(supervisorStatus.value?.capabilities.providerContinuationRepair
+    && typeof desktopIpc.supervisor?.restoreAgentConversation === "function"));
+const roomDeliverySkipAvailable = computed(() =>
+  Boolean(supervisorStatus.value?.capabilities.roomDeliverySkip
+    && typeof desktopIpc.supervisor?.skipRoomDelivery === "function"));
 const supervisorEntriesResource = computed<SupervisorEntriesResource>(() => {
   if (supervisorEntriesState.value === "error") {
     return {
@@ -626,6 +642,8 @@ const agentInspectorProjections = computed(() => {
     roomId: props.room.identifier,
     tasks: props.tasks,
     deliveryRetryAvailable: deliveryRetryAvailable.value,
+    continuationRepairAvailable: continuationRepairAvailable.value,
+    roomDeliverySkipAvailable: roomDeliverySkipAvailable.value,
     resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesResource.value.state),
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
   });
@@ -647,9 +665,25 @@ const selectedAgentInspectorWorkArtifacts = computed(() => {
   return projection ? agentInspectorWorkArtifacts(projection.assignedWork, props.roomArtifacts) : [];
 });
 const deliveryReceiptsByMessage = computed(() => {
-  const grouped: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }>> = {};
+  const grouped: Record<string, Array<{
+    agentId: string;
+    agentName: string;
+    state: string;
+    blockedByMessageId: string | null;
+    failureCode: string | null;
+    attemptCount: number;
+    providerTurnId: string | null;
+  }>> = {};
   for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
-    (grouped[receipt.sourceMessageId] ??= []).push({ agentId: entry.id, agentName: supervisedAgentDisplayLabel(entry.displayName, entry.id), state: receipt.state, blockedByMessageId: receipt.blockedByMessageId });
+    (grouped[receipt.sourceMessageId] ??= []).push({
+      agentId: entry.id,
+      agentName: supervisedAgentDisplayLabel(entry.displayName, entry.id),
+      state: receipt.state,
+      blockedByMessageId: receipt.blockedByMessageId,
+      failureCode: receipt.failureCode,
+      attemptCount: receipt.attemptCount,
+      providerTurnId: receipt.providerTurnId,
+    });
   }
   return grouped;
 });
@@ -1849,6 +1883,62 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
   );
 }
 
+function exactRoomDeliveryControlInput(agentId: string, sourceMessageId: string): {
+  entryId: string;
+  roomId: string;
+  sourceMessageId: string;
+  workAttemptId: string;
+  executionGenerationId: string;
+  agentSessionId: string;
+} | null {
+  const entry = supervisorEntries.value.find((candidate) => candidate.id === agentId);
+  if (!entry?.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) return null;
+  return {
+    entryId: entry.id,
+    roomId: props.room.identifier,
+    sourceMessageId,
+    workAttemptId: entry.workAttemptId,
+    executionGenerationId: entry.executionGenerationId,
+    agentSessionId: entry.agentSessionId,
+  };
+}
+
+async function restoreAgentConversation(agentId: string, sourceMessageId: string): Promise<void> {
+  if (!continuationRepairAvailable.value) return;
+  const input = exactRoomDeliveryControlInput(agentId, sourceMessageId);
+  if (!input) {
+    pushActionToast("This agent binding changed. Refresh the room before restoring its conversation.", "error", 7_000);
+    return;
+  }
+  const result = await continuationRepairCoordinator.run({ agentId, sourceMessageId }, async () => {
+    await desktopIpc.supervisor.restoreAgentConversation(input);
+  });
+  if (!result.started) return;
+  if (!result.ok) {
+    pushActionToast(result.error instanceof Error ? result.error.message : "Could not restore this agent’s conversation.", "error", 7_000);
+    return;
+  }
+  pushActionToast("Conversation restoration started. The provider will stay running.", "success", 5_000);
+}
+
+async function skipRoomDelivery(agentId: string, sourceMessageId: string): Promise<void> {
+  if (!roomDeliverySkipAvailable.value) return;
+  const input = exactRoomDeliveryControlInput(agentId, sourceMessageId);
+  if (!input) {
+    pushActionToast("This agent binding changed. Refresh the room before skipping the message.", "error", 7_000);
+    return;
+  }
+  const result = await roomDeliverySkipCoordinator.run({ agentId, sourceMessageId }, async () => {
+    await desktopIpc.supervisor.skipRoomDelivery(input);
+  });
+  if (!result.started) return;
+  if (!result.ok) {
+    pushActionToast(result.error instanceof Error ? result.error.message : "Could not safely skip this message.", "error", 7_000);
+    return;
+  }
+  pushActionToast("Message skipped. Later room work can continue.", "success", 5_000);
+}
+
 async function revealRoomMessage(messageId: string): Promise<void> {
   const revealed = await revealMessage(messageId);
   if (!revealed) {
@@ -2920,6 +3010,26 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         executionGenerationId: entry.executionGenerationId,
         agentSessionId: entry.agentSessionId,
       });
+    } else if (intent.kind === "restore_conversation" || intent.kind === "skip_message") {
+      const entry = projection.entry;
+      if (!intent.sourceMessageId || !entry.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
+        throw new Error("The delivery binding changed. Refresh and try again.");
+      }
+      const input = {
+        entryId: entry.id,
+        roomId: intent.roomId,
+        sourceMessageId: intent.sourceMessageId,
+        workAttemptId: entry.workAttemptId,
+        executionGenerationId: entry.executionGenerationId,
+        agentSessionId: entry.agentSessionId,
+      };
+      if (intent.kind === "restore_conversation") {
+        if (!continuationRepairAvailable.value) throw new Error("Conversation restoration is not available.");
+        await desktopIpc.supervisor.restoreAgentConversation(input);
+      } else {
+        if (!roomDeliverySkipAvailable.value) throw new Error("Safe message skipping is not available.");
+        await desktopIpc.supervisor.skipRoomDelivery(input);
+      }
     }
     if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
     const currentEntry = agentInspectorProjections.value.find((candidate) => candidate.entryId === intent.entryId)?.entry ?? null;
@@ -2977,6 +3087,8 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
     steer_turn: "Applying correction to this session…",
     resolve_turn_control: "Recording the verified turn outcome…",
     retry_delivery: "Retrying this delivery…",
+    restore_conversation: "Restoring this agent’s conversation…",
+    skip_message: "Skipping this blocked message…",
     retire_agent: "Retiring this saved agent…",
     save_settings: "Saving configuration…",
     move_room: "Moving room…",
@@ -2995,6 +3107,8 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     steer_turn: "Correction applied to the same agent session.",
     resolve_turn_control: "Turn-control outcome recorded.",
     retry_delivery: "Delivery retry started.",
+    restore_conversation: "Conversation restoration started.",
+    skip_message: "Message skipped. Later room work can continue.",
     retire_agent: "Agent retired. Its worktree is retained.",
     save_settings: "Configuration saved.",
     move_room: "Room move started.",

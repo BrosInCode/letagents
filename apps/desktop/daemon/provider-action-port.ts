@@ -10,6 +10,7 @@ export type ProviderActionCapabilities = {
   permissionPromptBridging: boolean;
   survivesRestart: boolean;
   turnControl?: "native_interrupt" | "restart_resume" | "unsupported";
+  continuationRepair?: "same_process" | "unsupported";
 };
 export type ProviderTurnControlResult = {
   capability: NonNullable<ProviderActionCapabilities["turnControl"]>;
@@ -82,6 +83,35 @@ export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none" };
 export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
+export type ProviderContinuationRepairRequest = {
+  workAttemptId: string;
+  expectedProviderContinuationId: string;
+  /** A thread/start result already checkpointed by an interrupted repair. */
+  checkpointedReplacementProviderContinuationId?: string | null;
+  cwd: string;
+  launchPolicy: unknown;
+  model?: string | null;
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+};
+export type ProviderContinuationRepairResult = {
+  handle: ProviderActionHandle;
+  outcome: "rematerialized" | "replaced";
+  previousProviderContinuationId: string;
+  replacementProviderContinuationId: string;
+};
+export type ProviderFailureCode = "provider_continuation_missing";
+
+export class ProviderActionFailure extends Error {
+  readonly providerFailureCode: ProviderFailureCode;
+  readonly providerContinuationId: string;
+
+  constructor(message: string, code: ProviderFailureCode, providerContinuationId: string) {
+    super(message);
+    this.name = "ProviderActionFailure";
+    this.providerFailureCode = code;
+    this.providerContinuationId = providerContinuationId;
+  }
+}
 
 export interface ProviderActionPort {
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
@@ -115,6 +145,11 @@ export interface ProviderActionPort {
     detachSignal?: AbortSignal;
     checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
   }): Promise<ProviderRoomTurnResult>;
+  repairContinuation?(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: {
+    /** Persist the replacement before it becomes the sole authoritative handle. */
+    checkpointReplacement: (providerContinuationId: string) => Promise<void>;
+    detachSignal?: AbortSignal;
+  }): Promise<ProviderContinuationRepairResult>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;

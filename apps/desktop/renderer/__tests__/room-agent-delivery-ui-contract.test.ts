@@ -47,6 +47,7 @@ describe("durable room delivery UI contracts", () => {
     assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "idle")), "attention");
     assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "responding")), "attention");
     assert.equal(roomAgentDeliveryGroup(state("connected", "waiting_for_desktop_credentials", "idle")), "attention");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "restoring_conversation", "idle")), "restoring");
     assert.equal(roomAgentDeliveryGroup(state("reconnecting", "queued", "responding")), "disconnected");
     assert.equal(roomAgentDeliveryGroup(state("disconnected", "queued", "responding")), "disconnected");
     assert.equal(roomAgentDeliverySummary(state("connected", "waiting_for_desktop_credentials", "idle").roomAgentState!), "Waiting for desktop credential handoff");

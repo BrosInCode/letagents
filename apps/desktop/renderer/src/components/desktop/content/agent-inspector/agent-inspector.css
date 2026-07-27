@@ -81,7 +81,8 @@
 .agent-inspector-state-label[data-state="listening"] > span { background: #4ade80; }
 .agent-inspector-state-label[data-state="responding"] > span { background: #60a5fa; }
 .agent-inspector-state-label[data-state="reconnecting"] > span,
-.agent-inspector-state-label[data-state="starting"] > span { background: #fbbf24; }
+.agent-inspector-state-label[data-state="starting"] > span,
+.agent-inspector-state-label[data-state="restoring_conversation"] > span { background: #fbbf24; }
 .agent-inspector-state-label[data-state="needs_attention"] > span { background: #fb7185; }
 
 .agent-inspector-close,
@@ -206,7 +207,26 @@
 .agent-inspector-overview { display: grid; gap: 12px; }
 .agent-inspector-now,
 .agent-inspector-readiness,
+.agent-inspector-continuation-recovery,
 .agent-inspector-overview-section { border: 1px solid rgba(255, 255, 255, 0.075); border-radius: 16px; background: rgba(255, 255, 255, 0.026); }
+.agent-inspector-continuation-recovery { padding: 14px; border-color: rgba(251, 191, 36, 0.22); background: rgba(251, 191, 36, 0.055); }
+.agent-inspector-continuation-recovery[data-state="failed"] { border-color: rgba(251, 113, 133, 0.24); background: rgba(251, 113, 133, 0.055); }
+.agent-inspector-continuation-recovery[data-state="restored"] { border-color: rgba(74, 222, 128, 0.2); background: rgba(74, 222, 128, 0.045); }
+.agent-inspector-continuation-recovery-copy { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: start; }
+.agent-inspector-continuation-recovery-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 10px; background: rgba(251, 191, 36, 0.1); color: #fbbf24; }
+.agent-inspector-continuation-recovery[data-state="failed"] .agent-inspector-continuation-recovery-mark { background: rgba(251, 113, 133, 0.1); color: #fda4af; }
+.agent-inspector-continuation-recovery[data-state="restored"] .agent-inspector-continuation-recovery-mark { background: rgba(74, 222, 128, 0.1); color: #86efac; }
+.agent-inspector-continuation-recovery-mark svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.agent-inspector-continuation-recovery strong { display: block; font-size: .8rem; line-height: 1.4; }
+.agent-inspector-continuation-recovery p { margin: 4px 0 0; color: var(--text-secondary, #a1a1aa); font-size: .73rem; line-height: 1.45; }
+.agent-inspector-continuation-dismiss { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary, #a1a1aa); cursor: pointer; }
+.agent-inspector-continuation-dismiss svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.agent-inspector-continuation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0 40px; }
+.agent-inspector-continuation-actions button { min-height: 44px; padding: 0 12px; border: 1px solid rgba(255,255,255,.14); border-radius: 10px; background: rgba(255,255,255,.07); color: var(--text,#fafafa); font: inherit; font-size: .73rem; font-weight: 670; cursor: pointer; }
+.agent-inspector-continuation-actions button:disabled { cursor: default; opacity: .5; }
+.agent-inspector-continuation-actions button:first-child { border-color: rgba(147,197,253,.34); background: rgba(96,165,250,.12); }
+.agent-inspector-continuation-dismiss:focus-visible,
+.agent-inspector-continuation-actions button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
 .agent-inspector-now { display: flex; gap: 11px; padding: 14px; }
 .agent-inspector-now[data-kind="attention"] { border-color: rgba(251, 113, 133, 0.2); background: rgba(251, 113, 133, 0.055); }
 .agent-inspector-now-marker { display: grid; place-items: center; width: 30px; min-width: 30px; height: 30px; border-radius: 10px; background: rgba(96, 165, 250, 0.1); color: #93c5fd; }
@@ -401,5 +421,6 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
   .agent-inspector-surface { border-color: rgba(255, 255, 255, 0.42); background: #101011; }
   .agent-inspector-now,
   .agent-inspector-readiness,
+  .agent-inspector-continuation-recovery,
   .agent-inspector-overview-section { border-color: rgba(255, 255, 255, 0.28); }
 }

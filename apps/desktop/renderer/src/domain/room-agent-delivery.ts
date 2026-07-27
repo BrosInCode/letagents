@@ -6,7 +6,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
 
-export type RoomAgentDeliveryGroup = "listening" | "responding" | "attention" | "disconnected";
+export type RoomAgentDeliveryGroup = "listening" | "responding" | "restoring" | "attention" | "disconnected";
 
 type RoomAgentActivityEntry = Pick<
   DesktopSupervisorManifestEntry,
@@ -108,6 +108,7 @@ export function roomAgentDeliveryGroup(
   // 2.0.40. The successor always supplies the explicit ingress axis.
   const ingressState = state.ingress?.state ?? (state.connection.state === "connected" ? "observing" : "stopped");
   if (state.inbox.state === "waiting_for_desktop_credentials") return "attention";
+  if (state.inbox.state === "restoring_conversation") return "restoring";
   if (state.connection.state !== "connected") return "disconnected";
   if (ingressState === "backoff") return "disconnected";
   if (ingressState === "blocked") return "attention";
@@ -127,6 +128,7 @@ export function roomAgentDeliverySummary(
 ): string {
   const ingressState = state.ingress?.state ?? (state.connection.state === "connected" ? "observing" : "stopped");
   if (state.inbox.state === "waiting_for_desktop_credentials") return "Waiting for desktop credential handoff";
+  if (state.inbox.state === "restoring_conversation") return "Restoring conversation";
   if (state.connection.state === "reconnecting") return "Reconnecting";
   if (state.connection.state === "disconnected") return "Disconnected";
   if (ingressState === "backoff") return "Reconnecting to room messages";

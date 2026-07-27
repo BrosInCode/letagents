@@ -1073,6 +1073,20 @@ export function registerDesktopIpcHandlers(
     },
   );
   targetIpcMain.handle(
+    "desktop:supervisor:restore-agent-conversation",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorConversationRestoreInput): Promise<void> => {
+      if (isDesktopSmokeCheck()) throw new Error("Conversation restoration is unavailable in the desktop smoke environment.");
+      await supervisorDaemonClient.restoreAgentConversation(input);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor:skip-room-delivery",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomDeliverySkipInput): Promise<void> => {
+      if (isDesktopSmokeCheck()) throw new Error("Room delivery skipping is unavailable in the desktop smoke environment.");
+      await supervisorDaemonClient.skipRoomDelivery(input);
+    },
+  );
+  targetIpcMain.handle(
     "desktop:supervisor:reconnect-agent",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorReconnectInput): Promise<DesktopSupervisorManifestEntry> => {
       if (isDesktopSmokeCheck()) throw new Error("Agent reconnection is unavailable in the desktop smoke environment.");
