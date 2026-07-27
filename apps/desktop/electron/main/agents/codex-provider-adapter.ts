@@ -47,6 +47,9 @@ import {
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnResult,
   type ProviderRoomTurnOptions,
+  type ProviderContinuationRepairRequest,
+  type ProviderContinuationRepairResult,
+  ProviderContinuationMissingError,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -70,6 +73,15 @@ function isUnmaterializedEmptyThreadRead(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase();
   return message.includes("not materialized yet")
     && message.includes("includeturns is unavailable before first user message");
+}
+
+function isMissingContinuation(error: unknown, continuationId: string): boolean {
+  const message = errorMessage(error).trim();
+  return new RegExp(`^thread not found:\\s*${escapeRegExp(continuationId)}$`, "i").test(message);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export interface CodexAdapterRpc {
@@ -105,6 +117,7 @@ export interface CodexProviderAdapterDependencies {
     },
   ): Promise<void>;
   now(): string;
+  sleep(ms: number): Promise<void>;
 }
 
 export interface CodexProviderAdapterOptions {
@@ -297,6 +310,7 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   observeProcessExit: defaultObserveProcessExit,
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
   now: () => new Date().toISOString(),
+  sleep: delay,
 };
 
 class CodexProviderHandle implements ProviderHandle {
@@ -312,15 +326,28 @@ class CodexProviderHandle implements ProviderHandle {
   readonly terminalTurns = new Map<string, string>();
   readonly turnWaiters = new Map<string, { owner: symbol; resolve: (status: string) => void; reject: (error: Error) => void }>();
   readonly roomTurnResults = new CodexTurnResultAccumulator();
+  providerContinuationId: string;
 
   constructor(
     readonly workAttemptId: string,
     readonly pid: number | null,
-    readonly providerContinuationId: string,
+    providerContinuationId: string,
     readonly providerConnection: ProviderConnectionRef,
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
-  ) {}
+  ) {
+    this.providerContinuationId = providerContinuationId;
+  }
+
+  replaceContinuation(providerContinuationId: string): void {
+    if (this.turnWaiters.size) {
+      throw new Error("Codex continuation repair cannot replace a thread while a turn observer is active.");
+    }
+    this.terminalTurns.clear();
+    this.roomTurnResults.clearAll();
+    this.providerContinuationId = providerContinuationId;
+    this.state = "idle";
+  }
 
   observedState(): ProviderObservedState {
     return this.state;
@@ -354,7 +381,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   capabilities(): ProviderAdapterCapabilities {
-    return { ...BASE_CODEX_CAPABILITIES, resume: this.resumeSupported };
+    return {
+      ...BASE_CODEX_CAPABILITIES,
+      resume: this.resumeSupported,
+      continuationRepair: "same_process",
+    };
   }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
@@ -573,6 +604,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       });
     } catch (error) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      if (isMissingContinuation(error, handle.providerContinuationId)) {
+        throw new ProviderContinuationMissingError(handle.providerContinuationId);
+      }
       throw error;
     }
     const turnId = started.turn?.id?.trim();
@@ -634,6 +668,114 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.state = "working";
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
+  }
+
+  /**
+   * Verify a missing durable conversation over a short materialization grace
+   * window, then create a replacement thread on this exact live app-server.
+   * The handle object is retained so process-exit and stream ownership remain
+   * singular; only its fenced continuation identity changes.
+   */
+  async repairContinuation(
+    providerHandle: ProviderHandle,
+    request: ProviderContinuationRepairRequest,
+    options: {
+      checkpointReplacement: (providerContinuationId: string) => Promise<void>;
+      detachSignal?: AbortSignal;
+    },
+  ): Promise<ProviderContinuationRepairResult> {
+    const handle = this.requireHandle(providerHandle);
+    const expected = request.expectedProviderContinuationId.trim();
+    if (!expected || expected !== handle.providerContinuationId
+      || request.workAttemptId !== handle.workAttemptId) {
+      throw new Error("Codex continuation repair no longer targets the exact active handle.");
+    }
+    if (handle.terminal) throw new Error("Codex continuation repair requires a live provider process.");
+    if (handle.turnWaiters.size) throw new Error("Codex continuation repair is unsafe while a provider turn is active.");
+
+    const assertAttached = () => {
+      if (options.detachSignal?.aborted) {
+        throw new CodexRoomTurnObservationDetachedError("Codex continuation repair detached.");
+      }
+      if (handle.terminal || this.handles.get(handle.workAttemptId) !== handle
+        || handle.providerContinuationId !== expected) {
+        throw new Error("Codex continuation repair lost exact provider authority.");
+      }
+    };
+
+    // Probe at absolute offsets 0s, 1s, 3s, and 7s. The waits are therefore
+    // the differences between offsets, not 1s + 3s + 7s (which would turn the
+    // advertised seven-second grace into eleven seconds).
+    const probeDelays = [0, 1_000, 2_000, 4_000];
+    const probe = async (threadId: string): Promise<boolean> => {
+      for (const waitMs of probeDelays) {
+        if (waitMs) await this.deps.sleep(waitMs);
+        assertAttached();
+        try {
+          const read = await handle.client.request<ThreadReadResult>("thread/read", {
+            threadId,
+            includeTurns: false,
+          });
+          if (read.thread?.id === threadId) return true;
+          throw new Error("Codex continuation repair resolved a different thread.");
+        } catch (error) {
+          if (!isMissingContinuation(error, threadId)) throw error;
+        }
+      }
+      return false;
+    };
+
+    const checkpointedReplacement = request.checkpointedReplacementProviderContinuationId?.trim() || null;
+    if (checkpointedReplacement) {
+      if (checkpointedReplacement === expected) {
+        throw new Error("A checkpointed replacement must differ from the missing conversation.");
+      }
+      if (!await probe(checkpointedReplacement)) {
+        throw new Error("The checkpointed replacement conversation is unavailable; refusing to create another orphan.");
+      }
+      await options.checkpointReplacement(checkpointedReplacement);
+      assertAttached();
+      handle.replaceContinuation(checkpointedReplacement);
+      return {
+        handle,
+        outcome: "replaced",
+        previousProviderContinuationId: expected,
+        replacementProviderContinuationId: checkpointedReplacement,
+      };
+    }
+
+    if (await probe(expected)) {
+      return {
+        handle,
+        outcome: "rematerialized",
+        previousProviderContinuationId: expected,
+        replacementProviderContinuationId: expected,
+      };
+    }
+
+    assertAttached();
+    const policy = normalizeLaunchPolicy(request.launchPolicy);
+    const started = await handle.client.request<CodexThreadResult>("thread/start", {
+      cwd: request.cwd,
+      ...policy,
+      ...(request.model ? { model: request.model } : {}),
+      ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
+    });
+    const replacement = started.thread?.id?.trim();
+    if (!replacement || replacement === expected) {
+      throw new Error("Codex continuation repair did not return a distinct replacement thread.");
+    }
+    // This is the commit barrier: an uncheckpointed thread remains an idle
+    // orphan and can never become authoritative.
+    await options.checkpointReplacement(replacement);
+    assertAttached();
+    handle.replaceContinuation(replacement);
+    return {
+      handle,
+      outcome: "replaced",
+      previousProviderContinuationId: expected,
+      replacementProviderContinuationId: replacement,
+    };
   }
 
   async stop(
@@ -935,21 +1077,30 @@ export class CodexProviderAdapter implements ProviderAdapter {
       await client.connect();
       await requireLetAgentsWorkplace(client);
       let read: ThreadReadResult;
+      let continuationMissing = false;
       try {
         read = await client.request<ThreadReadResult>("thread/read", {
           threadId: ref.providerContinuationId,
           includeTurns: true,
         });
       } catch (error) {
-        if (!isUnmaterializedEmptyThreadRead(error)) throw error;
-        // Codex creates daemon-inbox threads before their first room turn.
-        // Those threads deliberately reject includeTurns, but the metadata
-        // read still proves that this exact live endpoint owns the durable
-        // continuation. Never use this fallback for generic read failures.
-        read = await client.request<ThreadReadResult>("thread/read", {
-          threadId: ref.providerContinuationId,
-          includeTurns: false,
-        });
+        if (isMissingContinuation(error, ref.providerContinuationId)) {
+          // The process endpoint is still authenticated below. Preserve a live
+          // handle so the daemon can journal and repair this missing
+          // continuation without launching a competing app-server.
+          continuationMissing = true;
+          read = { thread: { id: ref.providerContinuationId, turns: [] } };
+        } else {
+          if (!isUnmaterializedEmptyThreadRead(error)) throw error;
+          // Codex creates daemon-inbox threads before their first room turn.
+          // Those threads deliberately reject includeTurns, but the metadata
+          // read still proves that this exact live endpoint owns the durable
+          // continuation. Never use this fallback for generic read failures.
+          read = await client.request<ThreadReadResult>("thread/read", {
+            threadId: ref.providerContinuationId,
+            includeTurns: false,
+          });
+        }
       }
       if (read.thread?.id !== ref.providerContinuationId) {
         throw new Error("Codex app-server did not verify the exact durable continuation thread.");
@@ -985,13 +1136,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
         client,
         launch,
       );
-      handle.state = "working";
+      handle.state = continuationMissing ? "idle" : "working";
       this.handles.set(ref.workAttemptId, handle);
       this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
       for (const notification of pendingNotifications.splice(0)) {
         this.consumeNotification(handle, notification);
       }
-      this.publishStream(handle, "thread/read", read, "transcript_snapshot");
+      if (!continuationMissing) {
+        this.publishStream(handle, "thread/read", read, "transcript_snapshot");
+      }
       return handle;
     } catch (error) {
       client.close();

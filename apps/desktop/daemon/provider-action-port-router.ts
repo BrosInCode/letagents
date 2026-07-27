@@ -9,6 +9,8 @@ import type {
   ProviderRoomTurnRequest,
   ProviderRoomTurnRecoveryRequest,
   ProviderRoomTurnResult,
+  ProviderContinuationRepairRequest,
+  ProviderContinuationRepairResult,
   ProviderActionSpawn,
   ProviderActionStreamEvent,
   ProviderActionTerminal,
@@ -35,6 +37,12 @@ export type NativeProviderAdapter = {
   controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> }): Promise<ProviderRoomTurnResult>;
+  repairContinuation?(handle: NativeHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<{
+    handle: NativeHandle;
+    outcome: "rematerialized" | "replaced";
+    previousProviderContinuationId: string;
+    replacementProviderContinuationId: string;
+  }>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -156,6 +164,22 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.recoverRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room-turn recovery.`);
     return adapter.recoverRoomTurn(remembered.handle, request, options);
+  }
+
+  async repairContinuation(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderContinuationRepairResult> {
+    const remembered = this.required(handle);
+    const adapter = await this.adapter(remembered.provider);
+    if (!adapter.repairContinuation) throw new Error(`Provider '${remembered.provider}' does not support continuation repair.`);
+    const repaired = await adapter.repairContinuation(remembered.handle, request, options);
+    if (repaired.handle.workAttemptId !== handle.workAttemptId || repaired.handle.pid !== handle.pid
+      || !sameProviderActionConnectionIdentity(repaired.handle.providerConnection, handle.providerConnection)) {
+      throw new Error("Provider continuation repair changed the verified provider process identity.");
+    }
+    this.handles.set(handle.workAttemptId, { provider: remembered.provider, handle: repaired.handle });
+    return {
+      ...repaired,
+      handle: publicHandle(repaired.handle, handle.appliedConfigurationRevision),
+    };
   }
 
   async stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {

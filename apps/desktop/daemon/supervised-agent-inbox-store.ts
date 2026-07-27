@@ -3,7 +3,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 
-export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "cancelled_by_room_move";
+export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "cancelled_by_room_move" | "cancelled_by_user";
 export type SupervisedInboxReceiptState = SupervisedInboxState | "queued_behind_blocked";
 export type InboxActivation = Record<string, unknown>;
 export type IngressMessage = { source_message_id: string; source_message: unknown; activation: InboxActivation };
@@ -12,12 +12,12 @@ export type SupervisedInboxItem = {
   inbox_item_id: string; agent_id: string; room_id: string; source_message_id: string;
   source_message: unknown; activation: InboxActivation; fifo_sequence: number; state: SupervisedInboxState;
   attempt_count: number; action_id: string; reply_client_message_id: string; provider_turn_id: string | null;
-  outcome: string | null; last_error: string | null; blocked_by_inbox_item_id: string | null;
+  outcome: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; blocked_by_inbox_item_id: string | null;
   next_attempt_at_ms: number | null; created_at: string; updated_at: string; acknowledged_at: string | null;
 };
 export type SupervisedInboxReceipt = SupervisedInboxItem & { receipt_state: SupervisedInboxReceiptState };
 export type SupervisedInboxEvent = {
-  phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled";
+  phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled";
   observed_at: string;
   detail: string | null;
 };
@@ -34,16 +34,35 @@ export type AgentInspectorDetail = {
   availability: "available" | "pruned" | "not_loaded";
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: InboxActivation | null } | null;
-  receipt: { state: SupervisedInboxState; attempt_count: number; provider_turn_id: string | null; outcome: unknown; last_error: string | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
+  receipt: { state: SupervisedInboxState; attempt_count: number; provider_turn_id: string | null; outcome: unknown; last_error: string | null; failure_code: "provider_continuation_missing" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
   terminal: { outcome: string; normalized_text: string | null; evidence_source: string; observed_at: string } | null;
   publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
+  continuation_repair: ProviderContinuationRepair | null;
   timeline: SupervisedInboxEvent[];
-  items: Array<{ source_message_id: string; inbox_item_id: string; state: SupervisedInboxState; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: unknown; provider_turn_id: string | null; last_error: string | null; canonical_message_id: string | null }>;
+  items: Array<{ source_message_id: string; inbox_item_id: string; state: SupervisedInboxState; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: unknown; provider_turn_id: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; canonical_message_id: string | null }>;
   history_boundary: { earliest_retained_observed_message_id: string | null; earliest_retained_inbox_message_id: string | null; earliest_retained_receipt_sequence: number | null; pruned_before_message_id: string | null; pruned_at: string | null } | null;
 };
 type Row = Record<string, unknown>;
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
-const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"]);
+export type ProviderContinuationRepair = {
+  repair_id: string;
+  agent_id: string;
+  room_id: string;
+  inbox_item_id: string;
+  daemon_generation: number;
+  execution_generation_id: string;
+  work_attempt_id: string;
+  expected_pid: number;
+  expected_process_identity: string;
+  missing_continuation: string;
+  replacement_continuation: string | null;
+  phase: "probing" | "replacement_created" | "committed" | "failed";
+  attempt_count: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"]);
 const RETAINED_TERMINAL_RECEIPTS_PER_AGENT = 200;
 const RETAINED_OBSERVED_MESSAGES_PER_AGENT = 500;
 const RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT = 2_000;
@@ -51,7 +70,7 @@ const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInbo
   pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "retryable", "blocked"],
   awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "retryable", "blocked"],
   result_recovery: ["publishing", "acknowledged_no_reply", "blocked"], publishing: ["acknowledged", "retryable", "blocked"],
-  retryable: ["pending", "blocked"], blocked: ["pending"], acknowledged: [], acknowledged_no_reply: [], cancelled_by_room_move: [],
+  retryable: ["pending", "blocked"], blocked: ["pending", "cancelled_by_user"], acknowledged: [], acknowledged_no_reply: [], cancelled_by_room_move: [], cancelled_by_user: [],
 };
 
 /** Durable, provider-neutral room delivery queue. It owns neither polling nor turns. */
@@ -141,8 +160,8 @@ export class SupervisedAgentInboxStore {
         const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${message.source_message_id}:action:v1`;
         const replyId = `supervised-room:${input.agent_id}:${input.room_id}:${message.source_message_id}:reply:v1`;
         run(database.prepare(`INSERT INTO supervised_agent_inbox
-          (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
-          VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
+          (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+          VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
           inboxItemId, input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), sequence, actionId, replyId, timestamp, timestamp);
         this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
         this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
@@ -167,7 +186,7 @@ export class SupervisedAgentInboxStore {
 
   async head(agentId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       return row ? rowToItem(row) : null;
     });
   }
@@ -201,7 +220,7 @@ export class SupervisedAgentInboxStore {
     return this.read(async (database) => {
       const boundary = database.prepare("SELECT * FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?").get(agentId, roomId) as Row | undefined;
       // Work rows are newest-first so a reopened Inspector starts at current work.
-      const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,p.canonical_message_id
+      const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,i.failure_code,p.canonical_message_id
         FROM supervised_agent_inbox i LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
         WHERE i.agent_id=? AND i.room_id=? ORDER BY i.fifo_sequence DESC LIMIT 50`).all(agentId, roomId) as Row[]).map(rowToInspectorItem);
       const row = sourceMessageId ? database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId) as Row | undefined : undefined;
@@ -210,20 +229,23 @@ export class SupervisedAgentInboxStore {
         const pruned = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_pruned_sources WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const observed = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const availability: AgentInspectorDetail["availability"] = pruned ? "pruned" : observed ? "not_loaded" : "not_loaded";
-        return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items, history_boundary: history };
+        return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, history_boundary: history };
       }
       const item = rowToItem(row);
       const events = (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
       const terminal = database.prepare("SELECT outcome,normalized_text,evidence_source,observed_at FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const publication = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
+      const repair = database.prepare("SELECT * FROM provider_continuation_repairs WHERE inbox_item_id=? ORDER BY created_at DESC LIMIT 1").get(item.inbox_item_id) as Row | undefined;
       return { availability: "available", entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
         source_message: safeSource(item.source_message, item.source_message_id, roomId, item.activation),
-        receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms },
+        receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, failure_code: item.failure_code, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms },
         terminal: terminal ? { outcome: String(terminal.outcome), normalized_text: terminal.normalized_text === null ? null : String(terminal.normalized_text), evidence_source: String(terminal.evidence_source), observed_at: String(terminal.observed_at) } : null,
-        publication: publication ? { client_message_id: String(publication.client_message_id), canonical_message_id: String(publication.canonical_message_id), room_id: String(publication.room_id) } : null, timeline: events, items, history_boundary: history };
+        publication: publication ? { client_message_id: String(publication.client_message_id), canonical_message_id: String(publication.canonical_message_id), room_id: String(publication.room_id) } : null,
+        continuation_repair: repair ? rowToContinuationRepair(repair) : null,
+        timeline: events, items, history_boundary: history };
     });
   }
-  async transition(inboxItemId: string, next: SupervisedInboxState, patch: Partial<Pick<SupervisedInboxItem, "provider_turn_id" | "outcome" | "last_error" | "next_attempt_at_ms" | "blocked_by_inbox_item_id">> = {}): Promise<SupervisedInboxItem> {
+  async transition(inboxItemId: string, next: SupervisedInboxState, patch: Partial<Pick<SupervisedInboxItem, "provider_turn_id" | "outcome" | "last_error" | "failure_code" | "next_attempt_at_ms" | "blocked_by_inbox_item_id">> = {}): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
@@ -235,9 +257,9 @@ export class SupervisedAgentInboxStore {
       if (next === "dispatching" && item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
       const attempts = item.attempt_count;
       const timestamp = this.now(); const acknowledged = finalStates.has(next) ? timestamp : null;
-      run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
+      run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,failure_code=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
         next, attempts, valueOrCurrent(patch, "provider_turn_id", item.provider_turn_id), valueOrCurrent(patch, "outcome", item.outcome), valueOrCurrent(patch, "last_error", item.last_error),
-        valueOrCurrent(patch, "blocked_by_inbox_item_id", item.blocked_by_inbox_item_id), valueOrCurrent(patch, "next_attempt_at_ms", item.next_attempt_at_ms), timestamp, acknowledged, inboxItemId);
+        valueOrCurrent(patch, "failure_code", item.failure_code), valueOrCurrent(patch, "blocked_by_inbox_item_id", item.blocked_by_inbox_item_id), valueOrCurrent(patch, "next_attempt_at_ms", item.next_attempt_at_ms), timestamp, acknowledged, inboxItemId);
       const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
       const event = phaseForTransition(next);
       if (event) {
@@ -252,7 +274,7 @@ export class SupervisedAgentInboxStore {
   }
   async claimHead(agentId: string): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
       if (item.state === "result_recovery") return item;
@@ -452,7 +474,7 @@ export class SupervisedAgentInboxStore {
   async commitRoomMoveQueue(input: { operation_id: string; agent_id: string; old_room_id: string; after_fifo_sequence: number }): Promise<number> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
-        WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+        WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence`).all(input.agent_id, input.old_room_id, input.after_fifo_sequence) as Row[];
       const timestamp = this.now();
       for (const row of rows) {
@@ -544,7 +566,186 @@ export class SupervisedAgentInboxStore {
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
-  async retryBlocked(inboxItemId: string): Promise<SupervisedInboxItem> { return this.transition(inboxItemId, "pending", { blocked_by_inbox_item_id: null, next_attempt_at_ms: null }); }
+  async retryBlocked(inboxItemId: string): Promise<SupervisedInboxItem> {
+    return this.transition(inboxItemId, "pending", {
+      blocked_by_inbox_item_id: null,
+      next_attempt_at_ms: null,
+      failure_code: null,
+    });
+  }
+
+  async beginContinuationRepair(input: {
+    agent_id: string;
+    room_id: string;
+    inbox_item_id: string;
+    daemon_generation: number;
+    execution_generation_id: string;
+    work_attempt_id: string;
+    expected_pid: number;
+    expected_process_identity: string;
+    missing_continuation: string;
+  }): Promise<ProviderContinuationRepair> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
+      if (!row) throw new Error("The blocked room message no longer exists.");
+      const item = rowToItem(row);
+      if (item.agent_id !== input.agent_id || item.room_id !== input.room_id
+        || item.state !== "blocked" || item.failure_code !== "provider_continuation_missing"
+        || item.attempt_count !== 0 || item.provider_turn_id || item.outcome) {
+        throw new Error("Conversation restoration is no longer safe for this room message.");
+      }
+      this.assertCurrentHead(database, item);
+      const active = database.prepare(`SELECT * FROM provider_continuation_repairs
+        WHERE agent_id=? AND phase NOT IN ('committed','failed') LIMIT 1`).get(input.agent_id) as Row | undefined;
+      if (active) {
+        const repair = rowToContinuationRepair(active);
+        if (repair.inbox_item_id !== input.inbox_item_id
+          || repair.execution_generation_id !== input.execution_generation_id
+          || repair.work_attempt_id !== input.work_attempt_id
+          || repair.expected_pid !== input.expected_pid
+          || repair.expected_process_identity !== input.expected_process_identity
+          || repair.missing_continuation !== input.missing_continuation) {
+          throw new Error("Another continuation repair owns this agent.");
+        }
+        if (repair.daemon_generation !== input.daemon_generation) {
+          run(database.prepare("UPDATE provider_continuation_repairs SET daemon_generation=?,updated_at=? WHERE repair_id=?"),
+            input.daemon_generation, this.now(), repair.repair_id);
+          return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repair.repair_id) as Row);
+        }
+        return repair;
+      }
+      const failed = database.prepare(`SELECT * FROM provider_continuation_repairs
+        WHERE agent_id=? AND inbox_item_id=? AND phase='failed'
+        ORDER BY created_at DESC LIMIT 1`).get(input.agent_id, input.inbox_item_id) as Row | undefined;
+      if (failed) {
+        const repair = rowToContinuationRepair(failed);
+        if (repair.execution_generation_id !== input.execution_generation_id
+          || repair.work_attempt_id !== input.work_attempt_id
+          || repair.expected_pid !== input.expected_pid
+          || repair.expected_process_identity !== input.expected_process_identity
+          || repair.missing_continuation !== input.missing_continuation) {
+          throw new Error("The failed continuation repair belongs to a different provider authority.");
+        }
+        const timestamp = this.now();
+        run(database.prepare(`UPDATE provider_continuation_repairs
+          SET daemon_generation=?,phase=?,attempt_count=attempt_count+1,last_error=NULL,updated_at=?
+          WHERE repair_id=?`),
+        input.daemon_generation, repair.replacement_continuation ? "replacement_created" : "probing", timestamp, repair.repair_id);
+        run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?"),
+          "Restoring the saved provider conversation before any model work starts.", timestamp, input.inbox_item_id);
+        this.recordEvent(database, input.inbox_item_id, `conversation_restoring:${repair.repair_id}:${repair.attempt_count + 1}`, "conversation_restoring", timestamp, "Retrying conversation restoration with the exact current provider authority.");
+        return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repair.repair_id) as Row);
+      }
+      const timestamp = this.now();
+      const repairId = randomUUID();
+      run(database.prepare(`INSERT INTO provider_continuation_repairs
+        (repair_id,agent_id,room_id,inbox_item_id,daemon_generation,execution_generation_id,work_attempt_id,expected_pid,expected_process_identity,missing_continuation,replacement_continuation,phase,attempt_count,last_error,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,NULL,'probing',1,NULL,?,?)`),
+      repairId, input.agent_id, input.room_id, input.inbox_item_id, input.daemon_generation,
+      input.execution_generation_id, input.work_attempt_id, input.expected_pid,
+      input.expected_process_identity, input.missing_continuation, timestamp, timestamp);
+      run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?"),
+        "Restoring the saved provider conversation before any model work starts.", timestamp, input.inbox_item_id);
+      this.recordEvent(database, input.inbox_item_id, `conversation_restoring:${repairId}`, "conversation_restoring", timestamp, "Verifying the saved conversation on the existing provider process.");
+      return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row);
+    }));
+  }
+
+  async checkpointContinuationReplacement(repairId: string, replacementContinuation: string): Promise<ProviderContinuationRepair> {
+    if (!replacementContinuation.trim()) throw new Error("Replacement continuation is required.");
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row | undefined;
+      if (!row) throw new Error("Unknown continuation repair.");
+      const repair = rowToContinuationRepair(row);
+      if (repair.phase === "committed") {
+        if (repair.replacement_continuation !== replacementContinuation) throw new Error("Committed continuation repair has a different replacement.");
+        return repair;
+      }
+      if (repair.phase === "failed") throw new Error("A failed continuation repair cannot install a replacement.");
+      if (repair.replacement_continuation && repair.replacement_continuation !== replacementContinuation) {
+        throw new Error("Continuation repair replacement identity changed.");
+      }
+      run(database.prepare(`UPDATE provider_continuation_repairs
+        SET replacement_continuation=?,phase='replacement_created',updated_at=? WHERE repair_id=?`),
+      replacementContinuation, this.now(), repairId);
+      return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row);
+    }));
+  }
+
+  async commitContinuationRepair(repairId: string, authoritativeContinuation: string, continuityReset: boolean): Promise<SupervisedInboxItem> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row | undefined;
+      if (!row) throw new Error("Unknown continuation repair.");
+      const repair = rowToContinuationRepair(row);
+      if (repair.phase === "failed") throw new Error("A failed continuation repair cannot be committed.");
+      if (repair.replacement_continuation) {
+        if (repair.replacement_continuation !== authoritativeContinuation) {
+          throw new Error("Continuation repair cannot commit a different replacement conversation.");
+        }
+      } else if (authoritativeContinuation !== repair.missing_continuation) {
+        throw new Error("A rematerialized conversation must match the original continuation.");
+      }
+      const itemRow = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(repair.inbox_item_id) as Row | undefined;
+      if (!itemRow) throw new Error("Continuation repair lost its room message.");
+      const item = rowToItem(itemRow);
+      if (item.state !== "blocked" || item.attempt_count !== 0 || item.provider_turn_id || item.outcome) {
+        throw new Error("Continuation repair can no longer release this room message.");
+      }
+      this.assertCurrentHead(database, item);
+      const timestamp = this.now();
+      run(database.prepare(`UPDATE provider_continuation_repairs
+        SET replacement_continuation=?,phase='committed',last_error=NULL,updated_at=? WHERE repair_id=?`),
+      authoritativeContinuation, timestamp, repairId);
+      run(database.prepare(`UPDATE supervised_agent_inbox
+        SET state='pending',last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?
+        WHERE inbox_item_id=?`), timestamp, item.inbox_item_id);
+      const detail = continuityReset
+        ? "Conversation restored with a replacement thread; durable agent identity and workspace were preserved."
+        : "The saved conversation became available again; no replacement was created.";
+      this.recordEvent(database, item.inbox_item_id, `conversation_restored:${repairId}`, "conversation_restored", timestamp, detail);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+    }));
+  }
+
+  async failContinuationRepair(repairId: string, error: string): Promise<ProviderContinuationRepair> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row | undefined;
+      if (!row) throw new Error("Unknown continuation repair.");
+      const repair = rowToContinuationRepair(row);
+      if (repair.phase === "committed") return repair;
+      const timestamp = this.now();
+      run(database.prepare("UPDATE provider_continuation_repairs SET phase='failed',last_error=?,updated_at=? WHERE repair_id=?"),
+        error, timestamp, repairId);
+      run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=? AND state='blocked'"),
+        error, timestamp, repair.inbox_item_id);
+      return rowToContinuationRepair(database.prepare("SELECT * FROM provider_continuation_repairs WHERE repair_id=?").get(repairId) as Row);
+    }));
+  }
+
+  async latestContinuationRepair(agentId: string): Promise<ProviderContinuationRepair | null> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC LIMIT 1").get(agentId) as Row | undefined;
+      return row ? rowToContinuationRepair(row) : null;
+    });
+  }
+
+  async skipBlocked(inboxItemId: string): Promise<SupervisedInboxItem> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!row) throw new Error("The blocked room message no longer exists.");
+      const item = rowToItem(row);
+      if (item.state !== "blocked" || item.attempt_count !== 0 || item.provider_turn_id || item.outcome) {
+        throw new Error("This message cannot be skipped because provider work may already have started.");
+      }
+      this.assertCurrentHead(database, item);
+      const timestamp = this.now();
+      run(database.prepare(`UPDATE supervised_agent_inbox
+        SET state='cancelled_by_user',last_error=NULL,failure_code=NULL,updated_at=?,acknowledged_at=?
+        WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, "Skipped by the user before any provider turn started.");
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
   /**
    * Normalize work interrupted by a daemon crash before a new runtime is
    * allowed to pump it. A persisted reply is authoritative terminal evidence:
@@ -554,7 +755,7 @@ export class SupervisedAgentInboxStore {
    */
   async normalizeStartupRecovery(agentId: string): Promise<SupervisedInboxItem[]> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move') ORDER BY fifo_sequence").all(agentId) as Row[];
+      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
       const recovered: SupervisedInboxItem[] = [];
       for (const row of rows) {
         const item = rowToItem(row);
@@ -616,10 +817,10 @@ export class SupervisedAgentInboxStore {
         FROM supervised_agent_inbox i
         LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
         WHERE i.agent_id=? AND (
-          i.state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+          i.state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
           OR i.inbox_item_id IN (
             SELECT inbox_item_id FROM supervised_agent_inbox
-            WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+            WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence DESC LIMIT ?
           )
         ) ORDER BY i.fifo_sequence`).all(agentId, agentId, limit) as Row[];
@@ -670,6 +871,7 @@ export class SupervisedAgentInboxStore {
   async removeAgent(agentId: string): Promise<void> {
     await this.exclusive(async (database) => this.transaction(database, () => {
       run(database.prepare("DELETE FROM supervised_agent_effects WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM provider_continuation_repairs WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_observed_messages WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=?"), agentId);
@@ -708,7 +910,7 @@ export class SupervisedAgentInboxStore {
   private require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }
   private requireNumericCursor(cursor: string): void { if (!/^(?:msg_)?\d+$/.test(cursor)) throw new Error("Supervised inbox cursor must be a numeric room message id."); }
   private assertCurrentHead(database: DatabaseSync, item: SupervisedInboxItem): void {
-    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
+    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
   }
   private recordEvent(database: DatabaseSync, inboxItemId: string, idempotencyKey: string, phase: SupervisedInboxEvent["phase"], observedAt: string, detail: string | null): void {
@@ -725,7 +927,7 @@ export class SupervisedAgentInboxStore {
     const stale = database.prepare(`SELECT i.inbox_item_id,i.provider_turn_id,i.room_id,i.source_message_id
       FROM supervised_agent_inbox i
       WHERE i.agent_id=?
-        AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move')
+        AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
         AND NOT EXISTS (
           SELECT 1 FROM supervised_agent_effects e
           WHERE e.agent_id=i.agent_id AND e.provider_turn_id=i.provider_turn_id
@@ -775,6 +977,7 @@ function phaseForTransition(state: SupervisedInboxState): SupervisedInboxEvent["
   if (state === "retryable") return "retry_scheduled";
   if (state === "blocked") return "blocked";
   if (state === "cancelled_by_room_move") return "room_move_cancelled";
+  if (state === "cancelled_by_user") return "user_cancelled";
   if (state === "pending") return "queued";
   return null;
 }
@@ -787,10 +990,30 @@ function isNewerCursor(candidate: string, current: string | null): boolean {
 }
 
 function rowToItem(row: Row): SupervisedInboxItem {
-  return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
+  return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
 }
 function rowToEvent(row: Row): SupervisedInboxEvent { return { phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail) }; }
-function rowToInspectorItem(row: Row): AgentInspectorDetail["items"][number] { const source = safeSource(JSON.parse(String(row.source_message_json)), String(row.source_message_id), "", {}); return { source_message_id: String(row.source_message_id), inbox_item_id: String(row.inbox_item_id), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), updated_at: String(row.updated_at), sender: source?.sender ?? null, text_preview: source?.text ? source.text.slice(0, 240) : null, created_at: source?.created_at ?? null, outcome: safeOutcome(row.outcome === null ? null : String(row.outcome)), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), last_error: row.last_error === null ? null : String(row.last_error), canonical_message_id: row.canonical_message_id === null ? null : String(row.canonical_message_id) }; }
+function rowToInspectorItem(row: Row): AgentInspectorDetail["items"][number] { const source = safeSource(JSON.parse(String(row.source_message_json)), String(row.source_message_id), "", {}); return { source_message_id: String(row.source_message_id), inbox_item_id: String(row.inbox_item_id), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), updated_at: String(row.updated_at), sender: source?.sender ?? null, text_preview: source?.text ? source.text.slice(0, 240) : null, created_at: source?.created_at ?? null, outcome: safeOutcome(row.outcome === null ? null : String(row.outcome)), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", canonical_message_id: row.canonical_message_id === null ? null : String(row.canonical_message_id) }; }
+function rowToContinuationRepair(row: Row): ProviderContinuationRepair {
+  return {
+    repair_id: String(row.repair_id),
+    agent_id: String(row.agent_id),
+    room_id: String(row.room_id),
+    inbox_item_id: String(row.inbox_item_id),
+    daemon_generation: Number(row.daemon_generation),
+    execution_generation_id: String(row.execution_generation_id),
+    work_attempt_id: String(row.work_attempt_id),
+    expected_pid: Number(row.expected_pid),
+    expected_process_identity: String(row.expected_process_identity),
+    missing_continuation: String(row.missing_continuation),
+    replacement_continuation: row.replacement_continuation === null ? null : String(row.replacement_continuation),
+    phase: String(row.phase) as ProviderContinuationRepair["phase"],
+    attempt_count: Number(row.attempt_count),
+    last_error: row.last_error === null ? null : String(row.last_error),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
 function safeOutcome(outcome: string | null): unknown { try { return outcome ? JSON.parse(outcome) : null; } catch { return null; } }
 function safeSource(source: unknown, id: string, roomId: string, activation: InboxActivation): AgentInspectorDetail["source_message"] { const value = source && typeof source === "object" ? source as Record<string, unknown> : {}; const reply = value.reply_to && typeof value.reply_to === "object" ? value.reply_to as Record<string, unknown> : {}; return { id, room_id: roomId, sender: typeof value.sender === "string" ? value.sender : null, text: typeof value.text === "string" ? value.text : null, created_at: typeof value.timestamp === "string" ? value.timestamp : null, reply_to: typeof value.thread_reply_to_id === "string" ? value.thread_reply_to_id : typeof reply.id === "string" ? reply.id : null, thread_root_id: typeof value.thread_root_id === "string" ? value.thread_root_id : null, activation }; }
 function boundaryToDetail(row: Row): NonNullable<AgentInspectorDetail["history_boundary"]> { return { earliest_retained_observed_message_id: row.earliest_retained_observed_message_id === null ? null : String(row.earliest_retained_observed_message_id), earliest_retained_inbox_message_id: row.earliest_retained_inbox_message_id === null ? null : String(row.earliest_retained_inbox_message_id), earliest_retained_receipt_sequence: row.earliest_retained_receipt_sequence === null ? null : Number(row.earliest_retained_receipt_sequence), pruned_before_message_id: row.pruned_before_message_id === null ? null : String(row.pruned_before_message_id), pruned_at: row.pruned_at === null ? null : String(row.pruned_at) }; }

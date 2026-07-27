@@ -56,7 +56,11 @@
         :test-id="`room-thread-message-${parent.id}`"
         :delivery-receipts="deliveryReceiptsByMessage[parent.id] || []"
         :delivery-recovery-available="deliveryRecoveryAvailable"
+        :continuation-repair-available="continuationRepairAvailable"
+        :room-delivery-skip-available="roomDeliverySkipAvailable"
         :delivery-retry-keys="deliveryRetryKeys"
+        :continuation-repair-keys="continuationRepairKeys"
+        :room-delivery-skip-keys="roomDeliverySkipKeys"
         :provider-label="resolveMessageProviderLabel(parent, participants, presence, supervisorEntries)"
         @quote-reply="quoteInThread(parent)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
@@ -67,6 +71,8 @@
         @open-github-event="$emit('open-github-event', $event)"
         @open-task="$emit('open-task', $event)"
         @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
+        @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
+        @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
       />
 
       <div class="room-thread-divider">
@@ -94,7 +100,11 @@
           :test-id="`room-thread-reply-${reply.id}`"
           :delivery-receipts="deliveryReceiptsByMessage[reply.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
+          :continuation-repair-available="continuationRepairAvailable"
+          :room-delivery-skip-available="roomDeliverySkipAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
+          :continuation-repair-keys="continuationRepairKeys"
+          :room-delivery-skip-keys="roomDeliverySkipKeys"
           :provider-label="resolveMessageProviderLabel(reply, participants, presence, supervisorEntries)"
           @quote-reply="quoteInThread(reply)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
@@ -105,6 +115,8 @@
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
           @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
+          @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
+          @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
       </template>
 
@@ -248,9 +260,13 @@ const props = defineProps<{
   searchQuery: string;
   activeSearchMessageId: string | null;
   taskReferenceIds: ReadonlySet<string>;
-  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; attemptCount: number; providerTurnId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;
+  continuationRepairKeys?: ReadonlySet<string>;
+  roomDeliverySkipKeys?: ReadonlySet<string>;
 }>();
 
 const emit = defineEmits<{
@@ -266,6 +282,8 @@ const emit = defineEmits<{
   "remove-attachment": [uploadId: string];
   "stage-dropped-attachments": [files: File[]];
   "retry-delivery": [agentId: string, sourceMessageId: string];
+  "restore-conversation": [agentId: string, sourceMessageId: string];
+  "skip-delivery": [agentId: string, sourceMessageId: string];
 }>();
 
 const draft = ref("");

@@ -436,6 +436,7 @@ const inspectorTruthfulGroups = computed(() => {
   const groups = [
     { key: "listening", label: "Listening", description: "Connected and ready for a routed room message.", agents: [] as AgentInspectorProjection[] },
     { key: "responding", label: "Responding", description: "A bounded room turn is in progress.", agents: [] as AgentInspectorProjection[] },
+    { key: "restoring_conversation", label: "Restoring conversation", description: "Recovering a missing private conversation without restarting the provider.", agents: [] as AgentInspectorProjection[] },
     { key: "reconnecting", label: "Reconnecting", description: "Restoring the room observation path.", agents: [] as AgentInspectorProjection[] },
     { key: "needs_attention", label: "Needs attention", description: "A runtime or delivery step needs your input.", agents: [] as AgentInspectorProjection[] },
     { key: "starting", label: "Starting", description: "Preparing the provider and room observation path.", agents: [] as AgentInspectorProjection[] },

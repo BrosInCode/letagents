@@ -365,6 +365,8 @@ export interface DesktopSupervisorDaemonStatus {
   startedAt: string;
   capabilities: {
     roomDeliveryRetry: boolean;
+    providerContinuationRepair: boolean;
+    roomDeliverySkip: boolean;
     agentInspectorDetail: boolean;
     agentInspectorSettings: boolean;
     agentRoomMove: boolean;
@@ -453,7 +455,7 @@ export interface DesktopSupervisorActivityEvent {
 
 export type DesktopRoomAgentConnectionState = "connected" | "reconnecting" | "disconnected";
 export type DesktopRoomAgentIngressState = "starting" | "observing" | "backoff" | "blocked" | "stopped";
-export type DesktopRoomAgentInboxState = "empty" | "queued" | "blocked" | "waiting_for_desktop_credentials";
+export type DesktopRoomAgentInboxState = "empty" | "queued" | "blocked" | "restoring_conversation" | "waiting_for_desktop_credentials";
 export type DesktopRoomAgentTurnState = "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed";
 export type DesktopRoomAgentTaskState = "none" | "assigned" | "working" | "blocked";
 export type DesktopRoomAgentReceiptState =
@@ -466,11 +468,13 @@ export type DesktopRoomAgentReceiptState =
   | "acknowledged_no_reply"
   | "retryable"
   | "blocked"
+  | "restoring_conversation"
   | "cancelled_by_room_move"
+  | "cancelled_by_user"
   | "queued_behind_blocked";
 
 export interface DesktopRoomAgentCausalEvent {
-  phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled";
+  phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled";
   observedAt: string;
   detail: string | null;
 }
@@ -487,6 +491,7 @@ export interface DesktopRoomAgentDeliveryReceipt {
   providerTurnId: string | null;
   blockedByMessageId: string | null;
   error: string | null;
+  failureCode: "provider_continuation_missing" | null;
   updatedAt: string;
   timeline: DesktopRoomAgentCausalEvent[];
 }
@@ -613,6 +618,8 @@ export interface DesktopSupervisorRoomDeliveryRetryInput {
   executionGenerationId: string;
   agentSessionId: string;
 }
+export type DesktopSupervisorConversationRestoreInput = DesktopSupervisorRoomDeliveryRetryInput;
+export type DesktopSupervisorRoomDeliverySkipInput = DesktopSupervisorRoomDeliveryRetryInput;
 
 /** Reinstall Electron-held credentials without touching the provider runtime. */
 export interface DesktopSupervisorReconnectInput {
@@ -650,14 +657,23 @@ export interface DesktopSupervisorAttemptDetail {
 }
 export interface DesktopSupervisorAgentInspectorDetailInput { entryId: string; roomId: string; sourceMessageId?: string | null; }
 export interface DesktopSupervisorAgentInspectorHistoryBoundary { earliest_retained_observed_message_id: string | null; earliest_retained_inbox_message_id: string | null; earliest_retained_receipt_sequence: number | null; pruned_before_message_id: string | null; pruned_at: string | null; }
-export interface DesktopSupervisorAgentInspectorItem { source_message_id: string; inbox_item_id: string; state: Exclude<DesktopRoomAgentReceiptState, "queued_behind_blocked">; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; provider_turn_id: string | null; last_error: string | null; canonical_message_id: string | null; }
+export interface DesktopSupervisorAgentInspectorItem { source_message_id: string; inbox_item_id: string; state: Exclude<DesktopRoomAgentReceiptState, "queued_behind_blocked" | "restoring_conversation">; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; provider_turn_id: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; canonical_message_id: string | null; }
+export interface DesktopSupervisorContinuationRepair {
+  repair_id: string; agent_id: string; room_id: string; inbox_item_id: string;
+  daemon_generation: number; execution_generation_id: string; work_attempt_id: string;
+  expected_pid: number; expected_process_identity: string;
+  missing_continuation: string; replacement_continuation: string | null;
+  phase: "probing" | "replacement_created" | "committed" | "failed";
+  attempt_count: number; last_error: string | null; created_at: string; updated_at: string;
+}
 export interface DesktopSupervisorAgentInspectorDetail {
   availability: "available" | "pruned" | "not_loaded";
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: Record<string, unknown> | null } | null;
-  receipt: { state: DesktopRoomAgentReceiptState; attempt_count: number; provider_turn_id: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; last_error: string | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
+  receipt: { state: DesktopRoomAgentReceiptState; attempt_count: number; provider_turn_id: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
   terminal: { outcome: string; normalized_text: string | null; evidence_source: string; observed_at: string } | null;
   publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
+  continuation_repair: DesktopSupervisorContinuationRepair | null;
   timeline: DesktopRoomAgentCausalEvent[]; items: DesktopSupervisorAgentInspectorItem[]; history_boundary: DesktopSupervisorAgentInspectorHistoryBoundary | null;
 }
 

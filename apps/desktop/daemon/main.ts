@@ -10,7 +10,7 @@ import { WorkDurabilityStore } from "./durability-store.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
-import type { ProviderActionAttachTerminal, ProviderActionHandle, ProviderActionPort, ProviderActionRef, ProviderActionSpawn, ProviderActionStreamEvent, ProviderActionTerminal, ProviderTurnControlResult } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, type ProviderActionAttachTerminal, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal, type ProviderTurnControlResult } from "./provider-action-port.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
@@ -725,6 +725,7 @@ export class SupervisorDaemon {
           }
           return { charter: configuration.charter };
         },
+        (input) => this.restoreMissingProviderContinuation(input),
       )
       : null;
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
@@ -761,6 +762,32 @@ export class SupervisorDaemon {
       if (request.method === "supervisor.retry_room_delivery") {
         const params = this.paramsRecord(request.params);
         await this.retryRoomDelivery({
+          entryId: String(params.entry_id ?? ""),
+          roomId: String(params.room_id ?? ""),
+          sourceMessageId: String(params.source_message_id ?? ""),
+          workAttemptId: String(params.work_attempt_id ?? ""),
+          executionGenerationId: String(params.execution_generation_id ?? ""),
+          agentSessionId: String(params.agent_session_id ?? ""),
+          daemonGeneration: Number(params.daemon_generation ?? NaN),
+        });
+        return { accepted: true };
+      }
+      if (request.method === "supervisor.restore_agent_conversation") {
+        const params = this.paramsRecord(request.params);
+        await this.restoreAgentConversation({
+          entryId: String(params.entry_id ?? ""),
+          roomId: String(params.room_id ?? ""),
+          sourceMessageId: String(params.source_message_id ?? ""),
+          workAttemptId: String(params.work_attempt_id ?? ""),
+          executionGenerationId: String(params.execution_generation_id ?? ""),
+          agentSessionId: String(params.agent_session_id ?? ""),
+          daemonGeneration: Number(params.daemon_generation ?? NaN),
+        });
+        return { accepted: true };
+      }
+      if (request.method === "supervisor.skip_room_delivery") {
+        const params = this.paramsRecord(request.params);
+        await this.skipRoomDelivery({
           entryId: String(params.entry_id ?? ""),
           roomId: String(params.room_id ?? ""),
           sourceMessageId: String(params.source_message_id ?? ""),
@@ -1242,6 +1269,258 @@ export class SupervisorDaemon {
       daemonGeneration: agent.daemonGeneration, providerContinuationId: agent.handle.providerContinuationId, pid: agent.handle.pid,
     })) throw new Error("The room delivery binding is no longer current; refresh before retrying.");
     await this.supervisedDelivery.retry(agent, input.sourceMessageId);
+  }
+
+  private async restoreAgentConversation(input: {
+    entryId: string; roomId: string; sourceMessageId: string; workAttemptId: string;
+    executionGenerationId: string; agentSessionId: string; daemonGeneration: number;
+  }): Promise<void> {
+    if (!this.supervisedDelivery || !this.providerPort?.repairContinuation) {
+      throw new Error("This supervisor cannot restore provider conversations.");
+    }
+    const agent = await this.resolveExactRoomDeliveryControlAgent(input, true);
+    await this.supervisedDelivery.restoreConversation(agent, input.sourceMessageId);
+  }
+
+  private async skipRoomDelivery(input: {
+    entryId: string; roomId: string; sourceMessageId: string; workAttemptId: string;
+    executionGenerationId: string; agentSessionId: string; daemonGeneration: number;
+  }): Promise<void> {
+    if (!this.supervisedDelivery) throw new Error("This supervisor cannot skip room delivery.");
+    const agent = await this.resolveExactRoomDeliveryControlAgent(input, false);
+    await this.supervisedDelivery.skipMessage(agent, input.sourceMessageId);
+  }
+
+  private async resolveExactRoomDeliveryControlAgent(input: {
+    entryId: string; roomId: string; sourceMessageId: string; workAttemptId: string;
+    executionGenerationId: string; agentSessionId: string; daemonGeneration: number;
+  }, requireHandle: boolean): Promise<SupervisedIngressAgent> {
+    for (const [field, value] of Object.entries(input)) {
+      if ((typeof value === "string" && !value.trim()) || (field === "daemonGeneration" && !Number.isSafeInteger(value))) {
+        throw new Error(`Exact room delivery control ${field} is required.`);
+      }
+    }
+    if (input.daemonGeneration !== this.singleton.currentGeneration) {
+      throw new Error("The supervisor generation changed; refresh the agent before continuing.");
+    }
+    const entry = await this.store.getEntry(input.entryId);
+    const handle = this.liveHandles.get(input.entryId) ?? null;
+    const binding = await this.workerBindings.get(input.entryId);
+    if (!entry || !binding || (requireHandle && !handle)
+      || entry.room_id !== input.roomId
+      || entry.desired_state !== "running"
+      || entry.delivery_mode === "desktop_events"
+      || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")
+      || entry.work_attempt_id !== input.workAttemptId
+      || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
+      || binding.room_id !== input.roomId
+      || binding.work_attempt_id !== input.workAttemptId
+      || binding.execution_generation_id !== input.executionGenerationId
+      || binding.agent_session_id !== input.agentSessionId
+      || (handle && (handle.workAttemptId !== input.workAttemptId
+        || handle.providerContinuationId !== entry.provider_ref?.provider_continuation_id))) {
+      throw new Error("The room delivery authority is stale; refresh the agent before continuing.");
+    }
+    const credential = await this.workerBindings.credentialFor(binding);
+    if (!credential) throw new Error("Waiting for desktop credential handoff before continuing.");
+    const agent: SupervisedIngressAgent = {
+      agentId: entry.id,
+      roomId: binding.room_id,
+      provider: entry.provider,
+      charter: entry.charter,
+      apiUrl: binding.api_url,
+      agentSessionId: binding.agent_session_id,
+      bearer: credential,
+      handle,
+      workAttemptId: binding.work_attempt_id,
+      providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
+      pid: handle?.pid ?? entry.provider_ref?.provider_connection?.pid ?? null,
+      executionGenerationId: binding.execution_generation_id,
+      daemonGeneration: this.singleton.currentGeneration,
+      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+    };
+    if (!await this.isExactSupervisedDeliveryAuthority(agent)) {
+      throw new Error("The room delivery authority changed; refresh the agent before continuing.");
+    }
+    return agent;
+  }
+
+  /**
+   * Repair one pre-turn missing provider conversation without replacing its
+   * process, workspace, execution generation, worker session, or room route.
+   * This lane is serialized with lifecycle convergence so persistence and
+   * handle promotion cannot race a restart or handoff.
+   */
+  private async restoreMissingProviderContinuation(input: {
+    agent: SupervisedIngressAgent;
+    item: import("./supervised-agent-inbox-store.js").SupervisedInboxItem;
+    manual: boolean;
+  }): Promise<"restored" | "replaced" | "authority_changed" | "failed"> {
+    const { agent, item } = input;
+    const repairContinuation = this.providerPort?.repairContinuation?.bind(this.providerPort);
+    if (!repairContinuation) return "failed";
+    return this.serializeEntryTick(agent.agentId, async () => {
+      if (this.handoffScheduled || agent.daemonGeneration !== this.singleton.currentGeneration) return "authority_changed";
+      await this.singleton.assertCurrent();
+
+      const previousRepair = await this.supervisedInbox.latestContinuationRepair(agent.agentId);
+      const entry = await this.store.getEntry(agent.agentId);
+      const handle = this.liveHandles.get(agent.agentId);
+      const binding = await this.workerBindings.get(agent.agentId);
+      const connection = handle?.providerConnection;
+      const processIdentity = connection?.processIdentity?.trim() || null;
+      const expectedPid = connection?.pid ?? handle?.pid ?? null;
+      if (!entry || !handle || !binding || !entry.work_attempt_id || !entry.provider_ref
+        || item.agent_id !== entry.id || item.room_id !== entry.room_id
+        || item.state !== "blocked" || item.failure_code !== "provider_continuation_missing"
+        || item.attempt_count !== 0 || item.provider_turn_id || item.outcome
+        || binding.entry_id !== entry.id || binding.room_id !== entry.room_id
+        || binding.work_attempt_id !== entry.work_attempt_id
+        || binding.execution_generation_id !== entry.provider_ref.execution_generation_id
+        || binding.agent_session_id !== agent.agentSessionId
+        || handle.workAttemptId !== entry.work_attempt_id
+        || expectedPid === null || expectedPid <= 0 || !processIdentity) {
+        return "authority_changed";
+      }
+      const credential = await this.workerBindings.credentialFor(binding);
+      if (!credential || credential !== agent.bearer) return "authority_changed";
+
+      const durableContinuation = entry.provider_ref.provider_continuation_id;
+      const missingContinuation = previousRepair?.inbox_item_id === item.inbox_item_id
+        ? previousRepair.missing_continuation
+        : agent.providerContinuationId;
+      if (!missingContinuation) return "failed";
+      const replacementAlreadyDurable = previousRepair?.replacement_continuation ?? null;
+      const canReconcileFailedReplacement = previousRepair?.inbox_item_id === item.inbox_item_id
+        && previousRepair.phase === "failed"
+        && replacementAlreadyDurable !== null
+        && durableContinuation === replacementAlreadyDurable
+        && handle.providerContinuationId === replacementAlreadyDurable;
+      if (!input.manual
+        && previousRepair?.inbox_item_id === item.inbox_item_id
+        && previousRepair.phase === "failed"
+        && !canReconcileFailedReplacement) {
+        return "failed";
+      }
+      const continuationIsRepairTarget = durableContinuation === missingContinuation
+        || (replacementAlreadyDurable !== null && durableContinuation === replacementAlreadyDurable);
+      if (!continuationIsRepairTarget
+        || !sameProviderActionConnectionIdentity(entry.provider_ref.provider_connection, connection)) {
+        return "authority_changed";
+      }
+
+      const repair = await this.supervisedInbox.beginContinuationRepair({
+        agent_id: entry.id,
+        room_id: entry.room_id,
+        inbox_item_id: item.inbox_item_id,
+        daemon_generation: this.singleton.currentGeneration,
+        execution_generation_id: entry.provider_ref.execution_generation_id,
+        work_attempt_id: entry.work_attempt_id,
+        expected_pid: expectedPid,
+        expected_process_identity: processIdentity,
+        missing_continuation: missingContinuation,
+      });
+
+      // A predecessor may have completed every authority-changing commit and
+      // crashed before releasing the inbox row. Reconcile that fact without
+      // creating or probing another thread.
+      if (repair.replacement_continuation
+        && durableContinuation === repair.replacement_continuation
+        && handle.providerContinuationId === repair.replacement_continuation) {
+        await this.supervisedInbox.commitContinuationRepair(
+          repair.repair_id,
+          repair.replacement_continuation,
+          true,
+        );
+        return "restored";
+      }
+
+      if (durableContinuation !== repair.missing_continuation
+        || handle.providerContinuationId !== repair.missing_continuation) {
+        return "authority_changed";
+      }
+
+      try {
+        const result = await repairContinuation(handle, {
+          workAttemptId: entry.work_attempt_id,
+          expectedProviderContinuationId: repair.missing_continuation,
+          checkpointedReplacementProviderContinuationId: repair.replacement_continuation,
+          cwd: entry.workspace_path ?? "",
+          launchPolicy: entry.provider_launch_policy,
+          model: entry.model,
+          reasoningEffort: entry.reasoning_effort ?? null,
+        }, {
+          checkpointReplacement: async (replacementContinuation) => {
+            await this.singleton.assertCurrent();
+            const checkpointed = await this.supervisedInbox.checkpointContinuationReplacement(
+              repair.repair_id,
+              replacementContinuation,
+            );
+            const current = await this.store.getEntry(entry.id);
+            const currentHandle = this.liveHandles.get(entry.id);
+            if (!current || currentHandle !== handle
+              || current.work_attempt_id !== repair.work_attempt_id
+              || current.provider_ref?.execution_generation_id !== repair.execution_generation_id
+              || current.provider_ref.provider_continuation_id !== repair.missing_continuation
+              || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, handle.providerConnection)) {
+              throw new Error("Provider authority changed before the replacement conversation could be committed.");
+            }
+            const attempt = await this.durability.getAttempt(repair.work_attempt_id);
+            if (attempt.checkpoints.at(-1)?.provider_continuation_id !== replacementContinuation) {
+              await this.durability.checkpoint(repair.work_attempt_id, {
+                room_cursor: null,
+                provider_continuation_id: replacementContinuation,
+              });
+            }
+            await this.updateManifestEntry(entry.id, (candidate) => {
+              if (candidate.work_attempt_id !== repair.work_attempt_id
+                || candidate.provider_ref?.execution_generation_id !== repair.execution_generation_id
+                || candidate.provider_ref.provider_continuation_id !== repair.missing_continuation
+                || !sameProviderActionConnectionIdentity(candidate.provider_ref.provider_connection, handle.providerConnection)) {
+                throw new Error("Provider authority changed during replacement conversation persistence.");
+              }
+              return {
+                ...candidate,
+                provider_ref: {
+                  ...candidate.provider_ref,
+                  provider_continuation_id: checkpointed.replacement_continuation!,
+                },
+              };
+            });
+          },
+        });
+
+        if (result.handle.workAttemptId !== repair.work_attempt_id
+          || result.handle.pid !== repair.expected_pid
+          || !sameProviderActionConnectionIdentity(result.handle.providerConnection, connection)
+          || result.previousProviderContinuationId !== repair.missing_continuation) {
+          throw new Error("Continuation repair returned a different provider process or work attempt.");
+        }
+        const continuityReset = result.outcome === "replaced";
+        if (continuityReset) {
+          const committedEntry = await this.store.getEntry(entry.id);
+          if (committedEntry?.provider_ref?.provider_continuation_id !== result.replacementProviderContinuationId) {
+            throw new Error("Replacement conversation was not durable before handle promotion.");
+          }
+          await this.installProviderHandle(entry.id, result.handle, repair.execution_generation_id);
+        }
+        await this.supervisedInbox.commitContinuationRepair(
+          repair.repair_id,
+          result.replacementProviderContinuationId,
+          continuityReset,
+        );
+        this.notifyStateChanged();
+        return continuityReset ? "replaced" : "restored";
+      } catch (error) {
+        const detail = redactCredentialText(error instanceof Error ? error.message : "Conversation restoration failed.").value;
+        await this.supervisedInbox.failContinuationRepair(
+          repair.repair_id,
+          `Couldn't restore this agent's provider conversation. ${detail}`,
+        ).catch(() => undefined);
+        this.notifyStateChanged();
+        return "failed";
+      }
+    });
   }
 
   /** Inspector reads are exact-entry scoped; a room mismatch never falls back to history. */
@@ -2106,6 +2385,8 @@ export class SupervisorDaemon {
       implementation_version: DAEMON_IMPLEMENTATION_VERSION,
       capabilities: {
         room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn),
+        provider_continuation_repair: Boolean(this.supervisedDelivery && this.providerPort?.repairContinuation),
+        room_delivery_skip: Boolean(this.supervisedDelivery),
         agent_inspector_detail_v1: true,
         agent_inspector_settings_v1: true,
         agent_room_move_v1: true,
@@ -3161,8 +3442,12 @@ export class SupervisorDaemon {
     const credential = bindingMatchesCurrentGeneration && binding
       ? await this.workerBindings.credentialFor(binding)
       : null;
-    const deliveryReceipts = projectDeliveryReceipts(receipts);
-    const nonfinal = receipts.filter((receipt) => !["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move"].includes(receipt.state));
+    const continuationRepair = await this.supervisedInbox.latestContinuationRepair(entry.id);
+    const activeContinuationRepair = continuationRepair && !["committed", "failed"].includes(continuationRepair.phase)
+      ? continuationRepair
+      : null;
+    const deliveryReceipts = projectDeliveryReceipts(receipts, activeContinuationRepair?.inbox_item_id ?? null);
+    const nonfinal = receipts.filter((receipt) => !["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(receipt.state));
     const head = nonfinal[0] ?? null;
     const blocked = receipts.find((receipt) => receipt.receipt_state === "blocked") ?? null;
     const hasCurrentBinding = Boolean(bindingMatchesCurrentGeneration && binding);
@@ -3176,6 +3461,13 @@ export class SupervisorDaemon {
           pending_count: nonfinal.length,
           blocked_by_message_id: null,
           detail: `Daemon inbox cutover needs attention; legacy polling remains fenced. ${entry.delivery_cutover?.error ?? "Exact turn state is uncertain."}`,
+        }
+      : activeContinuationRepair
+      ? {
+          state: "restoring_conversation" as const,
+          pending_count: nonfinal.length,
+          blocked_by_message_id: blocked?.source_message_id ?? null,
+          detail: "Restoring the blocked message before any model turn starts.",
         }
       : !hasCurrentBinding || !credential
       ? { state: "waiting_for_desktop_credentials" as const, pending_count: nonfinal.length, blocked_by_message_id: blocked?.source_message_id ?? null, detail: waitingForDesktopGrant || hasCurrentBinding ? "Waiting for desktop credential handoff." : "A current worker binding is required before delivery can start." }
@@ -3219,7 +3511,15 @@ export class SupervisorDaemon {
           deliveryMode: entry.delivery_mode ?? "mcp_polling",
         }) ?? null
       : null;
-    const projectedTurn = projectDeliveryTurn(head, activeTurn);
+    const projectedTurn = activeContinuationRepair
+      ? {
+          state: "idle" as const,
+          inbox_item_id: head?.inbox_item_id ?? null,
+          source_message_id: head?.source_message_id ?? null,
+          provider_turn_id: null,
+          detail: "Conversation restoration is happening before any model turn starts.",
+        }
+      : projectDeliveryTurn(head, activeTurn);
     const turn = cutoverNeedsAttention
       ? {
           state: "failed" as const,
@@ -5663,14 +5963,14 @@ export class SupervisorDaemon {
   }
 }
 
-function projectDeliveryReceipts(receipts: readonly SupervisedInboxReceiptWithTimeline[]): DaemonManifestEntryView["delivery_receipts"] {
+function projectDeliveryReceipts(receipts: readonly SupervisedInboxReceiptWithTimeline[], restoringInboxItemId: string | null): DaemonManifestEntryView["delivery_receipts"] {
   const sourceMessageByInboxId = new Map(receipts.map((receipt) => [receipt.inbox_item_id, receipt.source_message_id]));
   return receipts.map((receipt) => ({
     inbox_item_id: receipt.inbox_item_id,
     source_message_id: receipt.source_message_id,
     reply_client_message_id: receipt.reply_client_message_id,
     canonical_message_id: receipt.canonical_message_id,
-    state: receipt.receipt_state,
+    state: receipt.inbox_item_id === restoringInboxItemId ? "restoring_conversation" : receipt.receipt_state,
     attempt_count: receipt.attempt_count,
     provider_turn_id: receipt.provider_turn_id,
     // Inbox ids are daemon-private. The projection exposes only the public
@@ -5679,6 +5979,7 @@ function projectDeliveryReceipts(receipts: readonly SupervisedInboxReceiptWithTi
       ? sourceMessageByInboxId.get(receipt.blocked_by_inbox_item_id) ?? null
       : null,
     error: receipt.last_error,
+    failure_code: receipt.failure_code,
     updated_at: receipt.updated_at,
     timeline: receipt.timeline,
   }));

@@ -59,6 +59,11 @@ export type SupervisedRoomMoveCommitter = (input: {
   agent: SupervisedIngressAgent;
   inboxItemId: string;
 }) => Promise<void>;
+export type SupervisedContinuationRestorer = (input: {
+  agent: SupervisedIngressAgent;
+  item: SupervisedInboxItem;
+  manual: boolean;
+}) => Promise<"restored" | "replaced" | "authority_changed" | "failed">;
 
 const SUCCESSFUL_POLL_PACE_MS = 25;
 const POLL_ERROR_BACKOFF_BASE_MS = 250;
@@ -102,6 +107,7 @@ export class SupervisedAgentDelivery {
     private readonly waitForPollDelay: SupervisedPollWait = abortablePollDelay,
     private readonly commitPreparedRoomMove?: SupervisedRoomMoveCommitter,
     private readonly resolveTurnConfiguration?: SupervisedTurnConfigurationResolver,
+    private readonly restoreMissingContinuation?: SupervisedContinuationRestorer,
   ) {}
 
   fence(): void {
@@ -373,6 +379,57 @@ export class SupervisedAgentDelivery {
     }
   }
 
+  restoreConversation(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
+    if (!this.restoreMissingContinuation || !this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId)) {
+      return Promise.reject(new Error("Conversation restoration is unavailable for this exact agent."));
+    }
+    const controller = new AbortController();
+    return this.trackAgentWork(agent.agentId, this.track(controller, this.restoreConversationOperation(agent, sourceMessageId, controller)));
+  }
+
+  private async restoreConversationOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
+    if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+    const item = (await this.inbox.receipts(agent.agentId)).find((candidate) =>
+      candidate.source_message_id === sourceMessageId
+      && candidate.state === "blocked"
+      && candidate.failure_code === "provider_continuation_missing");
+    if (!item) throw new Error("The missing conversation is no longer blocking this exact message.");
+    const outcome = await this.restoreMissingContinuation!({ agent, item, manual: true });
+    if (outcome === "failed") {
+      throw new Error("Couldn't restore this agent's provider conversation.");
+    }
+    if (outcome === "authority_changed") {
+      throw new Error("The agent changed while its conversation was being restored. Refresh and check again.");
+    }
+    // A replacement continuation installs a successor ingress agent and its
+    // own delivery pump. When the original conversation merely rematerializes,
+    // this exact agent remains authoritative and the repaired pending head
+    // needs an explicit wake-up; otherwise it waits for an unrelated poll.
+    if (outcome === "restored" && !this.schedulePump(agent)) {
+      throw new Error("The room delivery binding changed before the restored message could resume.");
+    }
+  }
+
+  skipMessage(agent: SupervisedIngressAgent, sourceMessageId: string): Promise<void> {
+    if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId)) {
+      return Promise.reject(new Error("The room delivery binding changed before the message could be skipped."));
+    }
+    const controller = new AbortController();
+    return this.trackAgentWork(agent.agentId, this.track(controller, this.skipMessageOperation(agent, sourceMessageId, controller)));
+  }
+
+  private async skipMessageOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
+    if (!await this.hasIngressAuthority(agent, controller)) throw new AuthorityLostError();
+    const item = (await this.inbox.receipts(agent.agentId)).find((candidate) =>
+      candidate.source_message_id === sourceMessageId && candidate.state === "blocked");
+    if (!item) throw new Error("The blocked room message is no longer available for this exact agent.");
+    await this.inbox.skipBlocked(item.inbox_item_id);
+    if (!await this.hasIngressAuthority(agent, controller)) {
+      throw new Error("The room delivery binding changed after the message was safely skipped.");
+    }
+    this.schedulePump(agent);
+  }
+
   private schedulePump(agent: SupervisedIngressAgent): boolean {
     if (this.fenced || this.stoppingAgents.has(agent.agentId)) return false;
     // pump() registers its controller and operation before its first await, so
@@ -408,6 +465,15 @@ export class SupervisedAgentDelivery {
       }
       for (;;) {
         if (!await this.hasExecutionAuthority(agent, controller)) return;
+        const head = await this.inbox.head(agent.agentId);
+        if (head?.state === "blocked" && head.failure_code === "provider_continuation_missing" && this.restoreMissingContinuation) {
+          const restored = await this.restoreMissingContinuation({ agent, item: head, manual: false });
+          // A replacement installs a successor handle and starts a successor
+          // delivery epoch. This stale pump must retire, while a rematerialized
+          // conversation can continue on the current exact handle.
+          if (restored !== "restored") return;
+          continue;
+        }
         const item = await this.inbox.claimHead(agent.agentId);
         if (!item) return; // blocked, in-flight, or empty: FIFO remains intact.
         await this.deliver(agent, item, controller);
@@ -543,6 +609,29 @@ export class SupervisedAgentDelivery {
       const message = error instanceof Error ? error.message : "Room delivery failed.";
       const current = await this.inbox.get(item.inbox_item_id);
       if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply") return;
+      const failure = error as { providerFailureCode?: unknown; providerContinuationId?: unknown };
+      if (failure.providerFailureCode === "provider_continuation_missing"
+        && current.attempt_count === 0
+        && !current.provider_turn_id
+        && !current.outcome) {
+        const missingContinuation = typeof failure.providerContinuationId === "string"
+          ? failure.providerContinuationId
+          : agent.providerContinuationId;
+        if (!missingContinuation || missingContinuation !== agent.providerContinuationId) {
+          await this.inbox.transition(item.inbox_item_id, "blocked", {
+            last_error: "The provider reported a different missing conversation. Automatic restoration was refused.",
+          });
+          return;
+        }
+        const blocked = await this.inbox.transition(item.inbox_item_id, "blocked", {
+          failure_code: "provider_continuation_missing",
+          last_error: "The saved provider conversation is unavailable. Restoring it before any model work starts.",
+        });
+        if (this.restoreMissingContinuation) {
+          await this.restoreMissingContinuation({ agent, item: blocked, manual: false });
+        }
+        return;
+      }
       if ((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome === "ambiguous") {
         await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
         return;

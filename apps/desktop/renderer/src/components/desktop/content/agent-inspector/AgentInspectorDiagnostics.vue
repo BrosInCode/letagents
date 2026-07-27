@@ -23,6 +23,13 @@
       </dl>
     </section>
 
+    <section v-if="continuationRepairFacts.length" class="agent-inspector-overview-section" aria-labelledby="agent-inspector-diagnostics-continuation-title">
+      <div class="agent-inspector-section-heading"><p id="agent-inspector-diagnostics-continuation-title">Conversation repair</p></div>
+      <dl class="agent-inspector-context-list">
+        <div v-for="item in continuationRepairFacts" :key="item.label"><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div>
+      </dl>
+    </section>
+
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-diagnostics-events-title">
       <div class="agent-inspector-section-heading"><p id="agent-inspector-diagnostics-events-title">Recent runtime events</p><span>{{ diagnostics.activity.length }} retained</span></div>
       <p v-if="diagnostics.activityTruncated" class="agent-inspector-settings-note">Only the newest retained events are shown.</p>
@@ -44,8 +51,9 @@ import { computed, ref } from "vue";
 import { copyTextToClipboard } from "../../../../domain/clipboard";
 import { agentInspectorDiagnosticsReport, projectAgentInspectorDiagnostics } from "../../../../domain/agent-inspector-diagnostics";
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
+import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 
-const props = defineProps<{ projection: AgentInspectorProjection }>();
+const props = defineProps<{ projection: AgentInspectorProjection; workResource: AgentInspectorWorkResource }>();
 const copying = ref(false);
 const copyState = ref<"idle" | "copied" | "failed">("idle");
 const diagnostics = computed(() => projectAgentInspectorDiagnostics(props.projection));
@@ -64,5 +72,18 @@ const recoveryFacts = computed(() => [
   { label: "Turn", value: diagnostics.value.recovery.turn || "Unavailable" }, { label: "Turn recovery", value: diagnostics.value.recovery.turnControl || "None" },
   ...(diagnostics.value.recovery.lastError ? [{ label: "Latest error", value: diagnostics.value.recovery.lastError }] : []),
 ]);
+const continuationRepairFacts = computed(() => {
+  const repair = props.workResource.detail?.continuation_repair;
+  if (!repair) return [];
+  return [
+    { label: "Phase", value: repair.phase },
+    { label: "Repair", value: repair.repair_id },
+    { label: "Inbox item", value: repair.inbox_item_id },
+    { label: "Missing thread", value: repair.missing_continuation },
+    { label: "Replacement thread", value: repair.replacement_continuation || "Not created" },
+    { label: "Attempts", value: String(repair.attempt_count) },
+    ...(repair.last_error ? [{ label: "Repair error", value: repair.last_error }] : []),
+  ];
+});
 async function copyReport(): Promise<void> { copying.value = true; copyState.value = "idle"; copyState.value = await copyTextToClipboard(agentInspectorDiagnosticsReport(diagnostics.value)) ? "copied" : "failed"; copying.value = false; }
 </script>

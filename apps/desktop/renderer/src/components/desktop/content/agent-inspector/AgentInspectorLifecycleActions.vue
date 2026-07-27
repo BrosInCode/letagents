@@ -78,9 +78,16 @@ const confirmDanger = ref(false);
 // Turn control belongs beside the live "Now" state. Keeping it out of the
 // generic lifecycle bar prevents a destructive-looking stop control from
 // competing with routine agent actions.
-const availableActions = computed(() => props.actions.filter((action) => action.available && !action.danger && action.kind !== "stop_turn"));
+const availableActions = computed(() => props.actions.filter((action) =>
+  action.available
+  && !action.danger
+  && action.kind !== "stop_turn"
+  && action.kind !== "restore_conversation"
+  && action.kind !== "skip_message"));
 const compactPriority: Record<AgentInspectorActionAvailability["kind"], number> = {
   retry_delivery: 0,
+  restore_conversation: 0,
+  skip_message: 1,
   stop_turn: 1,
   steer_turn: 1,
   resolve_turn_control: 1,

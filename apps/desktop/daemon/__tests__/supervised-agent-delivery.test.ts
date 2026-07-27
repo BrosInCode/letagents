@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createConnection } from "node:net";
 import test from "node:test";
 
-import type { ProviderActionPort } from "../provider-action-port.js";
+import { ProviderActionFailure, type ProviderActionPort } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
@@ -18,9 +18,19 @@ const agent = {
   workAttemptId: "attempt", providerContinuationId: "thread", pid: 1,
 };
 const currentAuthority = async () => true;
-const provider = (runRoomTurn: NonNullable<ProviderActionPort["runRoomTurn"]>, recoverRoomTurn?: NonNullable<ProviderActionPort["recoverRoomTurn"]>) => ({
-  capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true, turnControl: "unsupported" as const }),
+const provider = (
+  runRoomTurn: NonNullable<ProviderActionPort["runRoomTurn"]>,
+  recoverRoomTurn?: NonNullable<ProviderActionPort["recoverRoomTurn"]>,
+  repairContinuation?: NonNullable<ProviderActionPort["repairContinuation"]>,
+) => ({
+  capabilities: async () => ({
+    resume: true, midTurnInjection: false, transcriptAccess: true,
+    permissionPromptBridging: false, survivesRestart: true,
+    turnControl: "unsupported" as const,
+    continuationRepair: repairContinuation ? "same_process" as const : "unsupported" as const,
+  }),
   spawn: async () => { throw new Error("not used"); }, attach: async () => null, attachAction: async () => ({ state: "absent" as const }), resume: async () => { throw new Error("not used"); }, poke: async () => {}, stop: async () => ({ endedAt: "", exitCode: 0, signal: null, terminalCause: "stopped" as const, providerContinuationId: null }), onExit: async () => () => {}, runRoomTurn, recoverRoomTurn,
+  repairContinuation,
 } satisfies ProviderActionPort);
 
 function deferred<T>() {
@@ -1297,6 +1307,210 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
   }
 });
 
+test("daemon socket restores and skips only exact pre-turn authority without replacing the provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-restore-socket-"));
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    const paths = {
+      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+      manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
+      attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
+      workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+    };
+    const identity = {
+      attempt: "00000000-0000-4000-8000-000000000031",
+      execution: "00000000-0000-4000-8000-000000000032",
+      session: "00000000-0000-4000-8000-000000000033",
+    };
+    const connection = {
+      kind: "codex_app_server" as const,
+      url: "http://127.0.0.1:43131",
+      pid: 43131,
+      processIdentity: "pid:43131:birth:durable",
+    };
+    const liveHandle = {
+      workAttemptId: identity.attempt,
+      providerContinuationId: "thread-missing",
+      pid: connection.pid,
+      providerConnection: connection,
+      observedState: "idle" as const,
+    };
+    let repairs = 0;
+    let turns = 0;
+    const durableCheckpoints: string[] = [];
+    daemon = new SupervisorDaemon(
+      paths,
+      "darwin",
+      provider(
+        async (handle, _request, options) => {
+          turns += 1;
+          assert.equal(handle, liveHandle, "repair promotes the same live provider handle");
+          assert.equal(handle.pid, connection.pid);
+          assert.equal(handle.providerConnection?.processIdentity, connection.processIdentity);
+          await options?.checkpointTurnStarted?.("turn-after-repair");
+          return { turnId: "turn-after-repair", outcome: "no_reply", text: null };
+        },
+        undefined,
+        async (handle, request, options) => {
+          repairs += 1;
+          assert.equal(handle, liveHandle);
+          assert.equal(request.expectedProviderContinuationId, "thread-missing");
+          assert.equal(request.workAttemptId, identity.attempt);
+          await options.checkpointReplacement("thread-replacement");
+          liveHandle.providerContinuationId = "thread-replacement";
+          return {
+            handle: liveHandle,
+            outcome: "replaced",
+            previousProviderContinuationId: "thread-missing",
+            replacementProviderContinuationId: "thread-replacement",
+          };
+        },
+      ),
+      false,
+      60_000,
+      undefined,
+      {},
+      {
+        poll: ({ signal }) => new Promise((resolve) => {
+          signal.addEventListener("abort", () => resolve({}), { once: true });
+        }),
+        publish: async () => { throw new Error("no-reply turn must not publish"); },
+      },
+    );
+    const internals = daemon as unknown as {
+      liveHandles: Map<string, typeof liveHandle>;
+      supervisedInbox: SupervisedAgentInboxStore;
+      workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+      durability: {
+        getAttempt(id: string): Promise<{ work_attempt_id: string; checkpoints: Array<{ provider_continuation_id: string | null }> }>;
+        checkpoint(id: string, input: { provider_continuation_id: string | null }): Promise<void>;
+      };
+    };
+    await daemon.start();
+    internals.durability.getAttempt = async (id) => {
+      assert.equal(id, identity.attempt);
+      return {
+        work_attempt_id: id,
+        checkpoints: durableCheckpoints.map((provider_continuation_id) => ({ provider_continuation_id })),
+      };
+    };
+    internals.durability.checkpoint = async (id, checkpoint) => {
+      assert.equal(id, identity.attempt);
+      assert.ok(checkpoint.provider_continuation_id);
+      durableCheckpoints.push(checkpoint.provider_continuation_id);
+    };
+    const put = await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: {
+        id: "stone", room_id: "room", display_name: "Stone", provider: "codex",
+        model: "gpt-5.6-sol", charter: "test", desired_state: "running",
+        observed_state: "idle", condition: "none", permission_profile_id: null,
+        delivery_mode: "daemon_inbox", created_by: "test", created_at: new Date().toISOString(),
+        workspace_path: root, work_attempt_id: identity.attempt,
+        provider_ref: {
+          work_attempt_id: identity.attempt,
+          provider_continuation_id: "thread-missing",
+          provider_connection: connection,
+          execution_generation_id: identity.execution,
+        },
+      },
+    });
+    assert.equal(put.ok, true, put.error);
+    internals.liveHandles.set("stone", liveHandle);
+    await internals.workerBindings.bind({
+      entry_id: "stone", room_id: "room", work_attempt_id: identity.attempt,
+      execution_generation_id: identity.execution, agent_session_id: identity.session,
+      agent_session_token: "stone-token", api_url: "https://letagents.test",
+    });
+    await internals.supervisedInbox.ingestPoll({
+      agent_id: "stone", room_id: "room", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1" }, activation: {} }],
+    });
+    const blocked = await internals.supervisedInbox.claimHead("stone");
+    await internals.supervisedInbox.transition(blocked!.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: 00000000-0000-4000-8000-000000000099",
+    });
+    const generation = (await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number };
+    const exact = {
+      entry_id: "stone", room_id: "room", source_message_id: "msg_1",
+      work_attempt_id: identity.attempt, execution_generation_id: identity.execution,
+      agent_session_id: identity.session, daemon_generation: generation.generation,
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.restore_agent_conversation", {
+      ...exact,
+      daemon_generation: generation.generation + 1,
+    })).ok, false, "stale daemon generations fail before any repair side effect");
+
+    const originalProcessIdentity = liveHandle.providerConnection.processIdentity;
+    liveHandle.providerConnection = { ...connection, processIdentity: "pid:43131:birth:reused" };
+    assert.equal(
+      (await daemonRequest(paths.socketPath, "supervisor.restore_agent_conversation", exact)).ok,
+      false,
+      "changed process identity fails closed",
+    );
+    liveHandle.providerConnection = { ...connection, processIdentity: originalProcessIdentity };
+
+    const concurrent = await Promise.all([
+      daemonRequest(paths.socketPath, "supervisor.restore_agent_conversation", exact),
+      daemonRequest(paths.socketPath, "supervisor.restore_agent_conversation", exact),
+    ]);
+    assert.equal(concurrent.filter((response) => response.ok).length, 1, "only one concurrent restore owns the blocked head");
+    await waitForAsync(async () =>
+      (await internals.supervisedInbox.receipts("stone"))[0]?.state === "acknowledged_no_reply",
+    );
+    const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{
+      id: string;
+      work_attempt_id?: string;
+      provider_ref?: {
+        provider_continuation_id: string;
+        execution_generation_id: string;
+        provider_connection: { pid: number | null; processIdentity?: string | null };
+      };
+    }>;
+    const restored = manifest.find((entry) => entry.id === "stone")!;
+    assert.equal(restored.work_attempt_id, identity.attempt);
+    assert.equal(restored.provider_ref?.execution_generation_id, identity.execution);
+    assert.equal(restored.provider_ref?.provider_continuation_id, "thread-replacement");
+    assert.equal(restored.provider_ref?.provider_connection.pid, connection.pid);
+    assert.equal(restored.provider_ref?.provider_connection.processIdentity, connection.processIdentity);
+    assert.deepEqual(durableCheckpoints, ["thread-replacement"]);
+    assert.equal(repairs, 1);
+    assert.equal(turns, 1);
+
+    await internals.supervisedInbox.ingestPoll({
+      agent_id: "stone", room_id: "room", last_observed_message_id: "msg_2",
+      messages: [{ source_message_id: "msg_2", source_message: { id: "msg_2" }, activation: {} }],
+    });
+    const skippable = await internals.supervisedInbox.claimHead("stone");
+    await internals.supervisedInbox.transition(skippable!.inbox_item_id, "blocked", { last_error: "safe pre-turn block" });
+    const skipExact = { ...exact, source_message_id: "msg_2" };
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.skip_room_delivery", skipExact)).ok, true);
+    assert.equal((await internals.supervisedInbox.get(skippable!.inbox_item_id))?.state, "cancelled_by_user");
+
+    await internals.supervisedInbox.ingestPoll({
+      agent_id: "stone", room_id: "room", last_observed_message_id: "msg_3",
+      messages: [{ source_message_id: "msg_3", source_message: { id: "msg_3" }, activation: {} }],
+    });
+    const ambiguous = await internals.supervisedInbox.claimHead("stone");
+    await internals.supervisedInbox.checkpointTurnStarted(ambiguous!.inbox_item_id, "turn-ambiguous");
+    await internals.supervisedInbox.transition(ambiguous!.inbox_item_id, "blocked", { last_error: "ambiguous native result" });
+    assert.equal(
+      (await daemonRequest(paths.socketPath, "supervisor.skip_room_delivery", {
+        ...exact,
+        source_message_id: "msg_3",
+      })).ok,
+      false,
+      "skip is unavailable after an exact provider turn starts",
+    );
+
+    await daemon.stop();
+    daemon = null;
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("startup recovery republishes a durable publishing outcome without rerunning its provider turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-republish-recovery-"));
   try {
@@ -1371,5 +1585,183 @@ test("startup recovery reattaches only a persisted exact provider turn and block
     await ambiguousDelivery.pump(agent);
     assert.equal((await ambiguousStore.receipts(agent.agentId))[0]?.state, "blocked");
     await ambiguousStore.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a typed pre-turn missing conversation restores the same inbox item before one real turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-restore-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await ingest(store);
+    let providerInvocations = 0;
+    let restorations = 0;
+    const published: string[] = [];
+    const delivery = new SupervisedAgentDelivery(
+      store,
+      provider(async (_handle, request, options) => {
+        providerInvocations += 1;
+        if (providerInvocations === 1) {
+          throw new ProviderActionFailure(
+            "The saved provider conversation is unavailable.",
+            "provider_continuation_missing",
+            "thread",
+          );
+        }
+        await options?.checkpointTurnStarted?.("turn-restored");
+        return { turnId: "turn-restored", outcome: "reply", text: "restored reply" };
+      }),
+      {
+        poll: async () => ({}),
+        publish: async (input) => {
+          published.push(input.clientMessageId);
+          return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+        },
+      },
+      currentAuthority,
+      0,
+      async () => {},
+      undefined,
+      undefined,
+      undefined,
+      async ({ item }) => {
+        restorations += 1;
+        assert.equal(item.state, "blocked");
+        assert.equal(item.failure_code, "provider_continuation_missing");
+        assert.equal(item.attempt_count, 0);
+        assert.equal(item.provider_turn_id, null);
+        await store.retryBlocked(item.inbox_item_id);
+        return "restored";
+      },
+    );
+
+    await delivery.pump(agent);
+
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(restorations, 1);
+    assert.equal(providerInvocations, 2, "the first invocation failed before native turn/start; only the successor started work");
+    assert.equal(receipt.attempt_count, 1, "attempt_count advances only for the one acknowledged provider turn");
+    assert.equal(receipt.state, "acknowledged");
+    assert.deepEqual(published, [receipt.reply_client_message_id]);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("missing-conversation evidence after a turn starts never invokes automatic restoration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-ambiguous-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await ingest(store);
+    let runInvocations = 0;
+    let restorations = 0;
+    const delivery = new SupervisedAgentDelivery(
+      store,
+      provider(async (_handle, _request, options) => {
+        runInvocations += 1;
+        await options?.checkpointTurnStarted?.("turn-ambiguous");
+        throw new ProviderActionFailure(
+          "The saved provider conversation became unavailable after turn/start.",
+          "provider_continuation_missing",
+          "thread",
+        );
+      }),
+      { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } },
+      currentAuthority,
+      0,
+      async () => {},
+      undefined,
+      undefined,
+      undefined,
+      async () => { restorations += 1; return "restored"; },
+    );
+
+    await delivery.pump(agent);
+
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(runInvocations, 1, "a persisted exact turn is never replaced by another model turn");
+    assert.equal(restorations, 0);
+    assert.equal(receipt.state, "blocked");
+    assert.equal(receipt.provider_turn_id, "turn-ambiguous");
+    assert.equal(receipt.attempt_count, 1);
+    assert.equal(receipt.failure_code, null);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("manual conversation restoration reports failure instead of falsely acknowledging the control", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-manual-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.transition(item.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: thread",
+    });
+    const delivery = new SupervisedAgentDelivery(
+      store,
+      provider(async () => { throw new Error("must not run"); }),
+      { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } },
+      currentAuthority,
+      0,
+      async () => {},
+      undefined,
+      undefined,
+      undefined,
+      async () => "failed",
+    );
+
+    await assert.rejects(
+      delivery.restoreConversation(agent, item.source_message_id),
+      /Couldn't restore this agent's provider conversation/,
+    );
+    assert.equal((await store.get(item.inbox_item_id))?.state, "blocked");
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("manual rematerialization wakes the repaired pending head without waiting for another poll", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-manual-restored-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.transition(item.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: 00000000-0000-0000-0000-000000000001",
+    });
+    let providerTurns = 0;
+    let polls = 0;
+    const published: string[] = [];
+    const delivery = new SupervisedAgentDelivery(
+      store,
+      provider(async (_handle, request, options) => {
+        providerTurns += 1;
+        await options?.checkpointTurnStarted?.("turn-after-rematerialization");
+        return { turnId: "turn-after-rematerialization", outcome: "reply", text: "restored reply" };
+      }),
+      {
+        poll: async () => { polls += 1; return {}; },
+        publish: async (input) => {
+          published.push(input.clientMessageId);
+          return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+        },
+      },
+      currentAuthority,
+      0,
+      async () => {},
+      undefined,
+      undefined,
+      undefined,
+      async ({ item: blocked }) => {
+        await store.retryBlocked(blocked.inbox_item_id);
+        return "restored";
+      },
+    );
+
+    await delivery.restoreConversation(agent, item.source_message_id);
+    await waitForAsync(async () => (await store.get(item.inbox_item_id))?.state === "acknowledged");
+
+    assert.equal(providerTurns, 1, "the rematerialized conversation resumes its blocked message immediately");
+    assert.equal(polls, 0, "delivery does not rely on unrelated ingress to wake the pending head");
+    assert.deepEqual(published, [item.reply_client_message_id]);
+    await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

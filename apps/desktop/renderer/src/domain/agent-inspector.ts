@@ -17,6 +17,7 @@ export type AgentInspectorOverallState =
   | "retired"
   | "paused"
   | "needs_attention"
+  | "restoring_conversation"
   | "reconnecting"
   | "responding"
   | "listening"
@@ -62,6 +63,8 @@ export type AgentInspectorActionKind =
   | "steer_turn"
   | "resolve_turn_control"
   | "retry_delivery"
+  | "restore_conversation"
+  | "skip_message"
   | "retire_agent"
   | "save_settings"
   | "move_room"
@@ -180,6 +183,13 @@ export interface AgentInspectorProjection {
   now: AgentInspectorNowProjection | null;
   assignedWork: AgentInspectorTaskProjection[];
   recentOutcome: { label: string; observedAt: string } | null;
+  continuationRecovery: {
+    state: "restoring" | "failed" | "restored";
+    sourceMessageId: string;
+    detail: string;
+    canRestore: boolean;
+    canSkip: boolean;
+  } | null;
   turnControl: AgentInspectorTurnControlProjection | null;
   actions: AgentInspectorActionAvailability[];
   mentionInsertText: string | null;
@@ -191,6 +201,8 @@ export interface AgentInspectorProjectionOptions {
   roomId: string | null;
   tasks?: readonly DesktopTaskSummary[];
   deliveryRetryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
   resourceFreshness?: "fresh" | "stale";
   mentionInsertTextByEntryId?: ReadonlyMap<string, string>;
 }
@@ -230,6 +242,7 @@ export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry
   if (entry.desiredState === "paused" || entry.observedState === "paused" || entry.observedState === "pausing") {
     return "paused";
   }
+  if (room?.inbox.state === "restoring_conversation") return "restoring_conversation";
   if (
     entry.condition !== "none"
     || entry.observedState === "failed"
@@ -259,6 +272,7 @@ function overallPresentation(state: AgentInspectorOverallState): { label: string
     case "retired": return { label: "Stopped", detail: "This saved agent is no longer running." };
     case "paused": return { label: "Paused", detail: "Room work is held until you resume the agent." };
     case "needs_attention": return { label: "Needs attention", detail: "A blocked runtime or delivery step needs your input." };
+    case "restoring_conversation": return { label: "Restoring conversation", detail: "Recovering the agent’s private Codex conversation without restarting its provider." };
     case "reconnecting": return { label: "Reconnecting", detail: "Restoring the room observation path." };
     case "responding": return { label: "Responding", detail: "A bounded room turn is in progress." };
     case "listening": return { label: "Listening", detail: "Connected and ready for a routed room message." };
@@ -282,7 +296,7 @@ function readiness(entry: DesktopSupervisorManifestEntry): AgentInspectorReadine
   const inbox = room?.inbox;
   const inboxTone: AgentInspectorReadinessTone = inbox?.state === "blocked" || inbox?.state === "waiting_for_desktop_credentials"
     ? "blocked"
-    : inbox?.state === "queued" ? "waiting" : inbox ? "ready" : "offline";
+    : inbox?.state === "queued" || inbox?.state === "restoring_conversation" ? "waiting" : inbox ? "ready" : "offline";
   const turn = room?.turn;
   const turnTone: AgentInspectorReadinessTone = turn?.state === "failed"
     ? "blocked"
@@ -305,7 +319,9 @@ function readiness(entry: DesktopSupervisorManifestEntry): AgentInspectorReadine
     {
       key: "inbox",
       label: "Inbox",
-      value: inbox ? `${titleCase(inbox.state)}${inbox.pendingCount ? ` · ${inbox.pendingCount}` : ""}` : "Unavailable",
+      value: inbox
+        ? `${inbox.state === "restoring_conversation" ? "Restoring the blocked message" : titleCase(inbox.state)}${inbox.pendingCount ? ` · ${inbox.pendingCount}` : ""}`
+        : "Unavailable",
       detail: inbox?.detail ?? null,
       tone: inboxTone,
     },
@@ -369,6 +385,14 @@ function nowProjection(
       observedAt: entry.roomAgentState?.connection.observedAt ?? entry.bindingUpdatedAt,
     };
   }
+  if (overallState === "restoring_conversation") {
+    return {
+      kind: "progress",
+      label: "Restoring conversation",
+      summary: "Checking the saved conversation, then safely creating a replacement only if it is truly missing.",
+      observedAt: entry.roomAgentState?.connection.observedAt ?? entry.bindingUpdatedAt,
+    };
+  }
   return null;
 }
 
@@ -403,6 +427,8 @@ function recentOutcome(entry: DesktopSupervisorManifestEntry): AgentInspectorPro
     result_recovery: "Result needs recovery",
     blocked: "Delivery needs attention",
     cancelled_by_room_move: "Cancelled after moving rooms",
+    cancelled_by_user: "Skipped by you",
+    restoring_conversation: "Restoring the blocked conversation",
   };
   return { label: labels[receipt.state] ?? titleCase(receipt.state), observedAt: receipt.updatedAt };
 }
@@ -563,13 +589,30 @@ export async function agentInspectorTurnControlActionIdIfCurrent(
 function actionAvailability(
   entry: DesktopSupervisorManifestEntry,
   deliveryRetryAvailable: boolean,
+  continuationRepairAvailable: boolean,
+  roomDeliverySkipAvailable: boolean,
   resourceFreshness: "fresh" | "stale",
   mentionInsertText: string | null,
   turnControl: AgentInspectorTurnControlProjection | null,
 ): AgentInspectorActionAvailability[] {
   const blockedReceipts = entry.deliveryReceipts?.filter((receipt) =>
-    receipt.state === "blocked" && Boolean(receipt.sourceMessageId.trim())) ?? [];
+    receipt.state === "blocked"
+    && receipt.failureCode !== "provider_continuation_missing"
+    && Boolean(receipt.sourceMessageId.trim())) ?? [];
   const blockedReceipt = blockedReceipts.length === 1 ? blockedReceipts[0] : null;
+  const missingContinuationReceipts = entry.deliveryReceipts?.filter((receipt) =>
+    receipt.failureCode === "provider_continuation_missing"
+    && ["blocked", "restoring_conversation"].includes(receipt.state)
+    && Boolean(receipt.sourceMessageId.trim())) ?? [];
+  const missingContinuationReceipt = missingContinuationReceipts.length === 1
+    ? missingContinuationReceipts[0]
+    : null;
+  const recoveryIsActive = missingContinuationReceipt?.state === "restoring_conversation";
+  const safeToRestoreOrSkip = Boolean(
+    missingContinuationReceipt
+    && missingContinuationReceipt.attemptCount === 0
+    && !missingContinuationReceipt.providerTurnId,
+  );
   const stateDependentActionsAvailable = resourceFreshness === "fresh";
   const canStopTurn = turnControl?.canStop === true;
   return [
@@ -585,8 +628,45 @@ function actionAvailability(
       available: Boolean(stateDependentActionsAvailable && deliveryRetryAvailable && blockedReceipt),
       sourceMessageId: blockedReceipt?.sourceMessageId,
     },
+    {
+      kind: "restore_conversation",
+      label: "Restore and retry",
+      available: Boolean(stateDependentActionsAvailable && continuationRepairAvailable && safeToRestoreOrSkip && !recoveryIsActive),
+      sourceMessageId: missingContinuationReceipt?.sourceMessageId,
+    },
+    {
+      kind: "skip_message",
+      label: "Skip message",
+      available: Boolean(stateDependentActionsAvailable && roomDeliverySkipAvailable && safeToRestoreOrSkip && !recoveryIsActive),
+      sourceMessageId: missingContinuationReceipt?.sourceMessageId,
+    },
     { kind: "retire_agent", label: "Retire agent", available: stateDependentActionsAvailable && entry.desiredState !== "stopped", danger: true },
   ];
+}
+
+function continuationRecovery(
+  entry: DesktopSupervisorManifestEntry,
+  actions: readonly AgentInspectorActionAvailability[],
+): AgentInspectorProjection["continuationRecovery"] {
+  const receipt = [...(entry.deliveryReceipts ?? [])]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .find((candidate) =>
+      candidate.failureCode === "provider_continuation_missing"
+      || candidate.timeline.some((event) => event.phase === "conversation_restored"));
+  if (!receipt) return null;
+  const restored = receipt.timeline.some((event) => event.phase === "conversation_restored");
+  const restoring = receipt.state === "restoring_conversation";
+  return {
+    state: restored && !restoring ? "restored" : restoring ? "restoring" : "failed",
+    sourceMessageId: receipt.sourceMessageId,
+    detail: restored && !restoring
+      ? "The agent’s identity and workspace were preserved, but its earlier private Codex conversation was unavailable."
+      : restoring
+        ? "The provider remains connected while LetAgents verifies and repairs the missing conversation."
+        : "Couldn’t restore this agent’s Codex conversation.",
+    canRestore: actions.some((action) => action.kind === "restore_conversation" && action.available),
+    canSkip: actions.some((action) => action.kind === "skip_message" && action.available),
+  };
 }
 
 export function projectAgentInspector(
@@ -610,6 +690,15 @@ export function projectAgentInspector(
       canResolve: false,
       detail: "Live supervisor state is required before this turn can be changed.",
     };
+  const actions = actionAvailability(
+    entry,
+    options.deliveryRetryAvailable ?? false,
+    options.continuationRepairAvailable ?? false,
+    options.roomDeliverySkipAvailable ?? false,
+    resourceFreshness,
+    mentionInsertText,
+    turnControl,
+  );
   return {
     entryId: entry.id,
     roomId: entry.roomId,
@@ -626,8 +715,9 @@ export function projectAgentInspector(
     now: nowProjection(entry, overallState),
     assignedWork: exactAssignedWork(entry, options.tasks ?? []),
     recentOutcome: recentOutcome(entry),
+    continuationRecovery: continuationRecovery(entry, actions),
     turnControl,
-    actions: actionAvailability(entry, options.deliveryRetryAvailable ?? false, resourceFreshness, mentionInsertText, turnControl),
+    actions,
     mentionInsertText,
     resourceFreshness,
     entry,

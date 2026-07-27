@@ -118,6 +118,344 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
   } finally { await env.cleanup(); }
 });
 
+test("continuation repair journal resumes across daemon generations and releases only its exact head", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-27T12:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "repairable",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: 00000000-0000-0000-0000-000000000001",
+    });
+    const repair = await store.beginContinuationRepair({
+      agent_id: "repairable",
+      room_id: "room",
+      inbox_item_id: item!.inbox_item_id,
+      daemon_generation: 4,
+      execution_generation_id: "execution_1",
+      work_attempt_id: "attempt_1",
+      expected_pid: 4100,
+      expected_process_identity: "pid-4100-birth-1",
+      missing_continuation: "00000000-0000-0000-0000-000000000001",
+    });
+    await store.checkpointContinuationReplacement(
+      repair.repair_id,
+      "00000000-0000-0000-0000-000000000002",
+    );
+    await store.close();
+
+    const successor = new SupervisedAgentInboxStore(env.database, () => "2026-07-27T12:00:07.000Z");
+    const resumed = await successor.beginContinuationRepair({
+      agent_id: "repairable",
+      room_id: "room",
+      inbox_item_id: item!.inbox_item_id,
+      daemon_generation: 5,
+      execution_generation_id: "execution_1",
+      work_attempt_id: "attempt_1",
+      expected_pid: 4100,
+      expected_process_identity: "pid-4100-birth-1",
+      missing_continuation: "00000000-0000-0000-0000-000000000001",
+    });
+    assert.equal(resumed.repair_id, repair.repair_id);
+    assert.equal(resumed.daemon_generation, 5);
+    assert.equal(resumed.phase, "replacement_created");
+    assert.equal(resumed.replacement_continuation, "00000000-0000-0000-0000-000000000002");
+    await assert.rejects(
+      successor.commitContinuationRepair(
+        resumed.repair_id,
+        "00000000-0000-0000-0000-000000000003",
+        true,
+      ),
+      /different replacement conversation/,
+      "the journal cannot be committed with an uncheckpointed continuation",
+    );
+    const released = await successor.commitContinuationRepair(
+      resumed.repair_id,
+      resumed.replacement_continuation!,
+      true,
+    );
+    assert.equal(released.state, "pending");
+    assert.equal(released.failure_code, null);
+    assert.equal(released.attempt_count, 0);
+    assert.equal((await successor.latestContinuationRepair("repairable"))?.phase, "committed");
+    assert.deepEqual(
+      (await successor.receipts("repairable"))[0]!.timeline.map((event) => event.phase),
+      ["received", "queued", "blocked", "conversation_restoring", "conversation_restored"],
+    );
+    await successor.close();
+  } finally { await env.cleanup(); }
+});
+
+test("v12 migration types only exact pre-turn historical missing-thread failures", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const historicalError = "thread not found: 00000000-0000-0000-0000-000000000001";
+    const [safe] = await store.ingestPoll({
+      agent_id: "safe",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "safe", source_message: {}, activation: {} }],
+    });
+    await store.transition(safe!.inbox_item_id, "blocked", { last_error: historicalError });
+
+    const [started] = await store.ingestPoll({
+      agent_id: "started",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "started", source_message: {}, activation: {} }],
+    });
+    await store.transition(started!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(started!.inbox_item_id, "turn_started");
+    await store.transition(started!.inbox_item_id, "blocked", { last_error: historicalError });
+
+    const [wrapped] = await store.ingestPoll({
+      agent_id: "wrapped",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "wrapped", source_message: {}, activation: {} }],
+    });
+    await store.transition(wrapped!.inbox_item_id, "blocked", {
+      last_error: `Provider failed because ${historicalError}`,
+    });
+    await store.close();
+
+    // Recreate the physical v12 delivery tables around these real rows. This
+    // is the exact predecessor shape shipped before continuation repair.
+    const database = new DatabaseSync(env.database);
+    database.exec(`
+      PRAGMA foreign_keys=OFF;
+      BEGIN IMMEDIATE;
+      DROP TABLE provider_continuation_repairs;
+      DROP TABLE supervised_agent_inbox_events;
+      DROP TABLE supervised_agent_terminal_results;
+      DROP TABLE supervised_agent_publications;
+      ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v13_source;
+      CREATE TABLE supervised_agent_inbox (
+        inbox_item_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
+        source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
+        fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
+        state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move')),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+        action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
+        provider_turn_id TEXT, outcome TEXT, last_error TEXT,
+        blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
+        next_attempt_at_ms INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, acknowledged_at TEXT,
+        UNIQUE(agent_id,room_id,source_message_id), UNIQUE(agent_id,fifo_sequence),
+        UNIQUE(inbox_item_id,agent_id,room_id)
+      ) STRICT;
+      INSERT INTO supervised_agent_inbox
+        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+        SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
+        FROM supervised_agent_inbox_v13_source;
+      DROP TABLE supervised_agent_inbox_v13_source;
+      CREATE INDEX supervised_agent_inbox_head ON supervised_agent_inbox(agent_id,fifo_sequence);
+      CREATE TABLE supervised_agent_inbox_events (
+        inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+        event_sequence INTEGER NOT NULL CHECK(event_sequence > 0), idempotency_key TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled')),
+        observed_at TEXT NOT NULL, detail TEXT,
+        PRIMARY KEY(inbox_item_id,event_sequence), UNIQUE(inbox_item_id,idempotency_key)
+      ) STRICT;
+      CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
+      CREATE TABLE supervised_agent_terminal_results (
+        inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
+        normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
+        terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
+      CREATE TABLE supervised_agent_publications (
+        inbox_item_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+        client_message_id TEXT NOT NULL, canonical_message_id TEXT NOT NULL, published_at TEXT NOT NULL,
+        FOREIGN KEY(inbox_item_id,agent_id,room_id)
+          REFERENCES supervised_agent_inbox(inbox_item_id,agent_id,room_id) ON DELETE CASCADE,
+        UNIQUE(room_id,client_message_id), UNIQUE(room_id,canonical_message_id)
+      ) STRICT;
+      CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(agent_id,room_id);
+      UPDATE manifest_metadata SET schema_version=12 WHERE singleton=1;
+      PRAGMA user_version=12;
+      COMMIT;
+      PRAGMA foreign_keys=ON;
+    `);
+    database.close();
+
+    const migrated = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await migrated.get(safe!.inbox_item_id))?.failure_code, "provider_continuation_missing");
+    assert.equal((await migrated.get(started!.inbox_item_id))?.failure_code, null, "a started turn remains ambiguous");
+    assert.equal((await migrated.get(wrapped!.inbox_item_id))?.failure_code, null, "similar prose is never promoted to recovery authority");
+    await migrated.close();
+  } finally { await env.cleanup(); }
+});
+
+test("current v13 repair rolls back its temporary journal backup as one atomic unit", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [item] = await store.ingestPoll({
+      agent_id: "repairable",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: 00000000-0000-0000-0000-000000000001",
+    });
+    const repair = await store.beginContinuationRepair({
+      agent_id: "repairable",
+      room_id: "room",
+      inbox_item_id: item!.inbox_item_id,
+      daemon_generation: 4,
+      execution_generation_id: "execution_1",
+      work_attempt_id: "attempt_1",
+      expected_pid: 4100,
+      expected_process_identity: "pid-4100-birth-1",
+      missing_continuation: "00000000-0000-0000-0000-000000000001",
+    });
+    await store.close();
+
+    // Simulate a current v13 marker paired with the rolled-back v12 delivery
+    // graph that the repair path is designed to heal. Keep the v13 repair
+    // journal in place so applyV13Shape must use its TEMP backup path.
+    const database = new DatabaseSync(env.database);
+    database.exec(`
+      PRAGMA foreign_keys=OFF;
+      BEGIN IMMEDIATE;
+      CREATE TEMP TABLE inbox_v13_backup AS SELECT * FROM supervised_agent_inbox;
+      DROP TABLE supervised_agent_inbox_events;
+      DROP TABLE supervised_agent_terminal_results;
+      DROP TABLE supervised_agent_publications;
+      DROP TABLE supervised_agent_inbox;
+      CREATE TABLE supervised_agent_inbox (
+        inbox_item_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
+        source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
+        fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
+        state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move')),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+        action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
+        provider_turn_id TEXT, outcome TEXT, last_error TEXT,
+        blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
+        next_attempt_at_ms INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, acknowledged_at TEXT,
+        UNIQUE(agent_id,room_id,source_message_id), UNIQUE(agent_id,fifo_sequence),
+        UNIQUE(inbox_item_id,agent_id,room_id)
+      ) STRICT;
+      INSERT INTO supervised_agent_inbox
+        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+        SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
+        FROM temp.inbox_v13_backup;
+      DROP TABLE temp.inbox_v13_backup;
+      CREATE INDEX supervised_agent_inbox_head ON supervised_agent_inbox(agent_id,fifo_sequence);
+      CREATE TABLE supervised_agent_inbox_events (
+        inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+        event_sequence INTEGER NOT NULL CHECK(event_sequence > 0), idempotency_key TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled')),
+        observed_at TEXT NOT NULL, detail TEXT,
+        PRIMARY KEY(inbox_item_id,event_sequence), UNIQUE(inbox_item_id,idempotency_key)
+      ) STRICT;
+      CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
+      CREATE TABLE supervised_agent_terminal_results (
+        inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
+        normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
+        terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
+      CREATE TABLE supervised_agent_publications (
+        inbox_item_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+        client_message_id TEXT NOT NULL, canonical_message_id TEXT NOT NULL, published_at TEXT NOT NULL,
+        FOREIGN KEY(inbox_item_id,agent_id,room_id)
+          REFERENCES supervised_agent_inbox(inbox_item_id,agent_id,room_id) ON DELETE CASCADE,
+        UNIQUE(room_id,client_message_id), UNIQUE(room_id,canonical_message_id)
+      ) STRICT;
+      CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(agent_id,room_id);
+      COMMIT;
+      PRAGMA foreign_keys=ON;
+    `);
+
+    const interrupted = new DaemonStateSchema(
+      undefined,
+      undefined,
+      undefined,
+      () => { throw new Error("interrupt after v13 journal backup"); },
+    );
+    assert.throws(
+      () => interrupted.createSchema(database),
+      /interrupt after v13 journal backup/,
+    );
+    assert.equal(
+      (database.prepare("SELECT COUNT(*) AS count FROM provider_continuation_repairs WHERE repair_id=?").get(repair.repair_id) as { count: number }).count,
+      1,
+      "rollback restores the authoritative continuation-repair journal",
+    );
+    assert.equal(
+      (database.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('supervised_agent_inbox') WHERE name='failure_code'").get() as { count: number }).count,
+      0,
+      "rollback restores the complete predecessor inbox shape",
+    );
+    assert.equal(
+      (database.prepare("SELECT COUNT(*) AS count FROM temp.sqlite_master WHERE name='provider_continuation_repairs_v13_backup'").get() as { count: number }).count,
+      0,
+      "rollback removes the temporary journal backup",
+    );
+
+    new DaemonStateSchema().createSchema(database);
+    assert.equal(
+      (database.prepare("SELECT COUNT(*) AS count FROM provider_continuation_repairs WHERE repair_id=?").get(repair.repair_id) as { count: number }).count,
+      1,
+      "a clean retry preserves the journal while repairing the inbox",
+    );
+    assert.equal(
+      (database.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('supervised_agent_inbox') WHERE name='failure_code'").get() as { count: number }).count,
+      1,
+    );
+    database.close();
+  } finally { await env.cleanup(); }
+});
+
+test("skip message is honest, pre-turn only, and releases the next FIFO item", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [first, second] = await store.ingestPoll({
+      agent_id: "skipper",
+      room_id: "room",
+      last_observed_message_id: "2",
+      messages: [
+        { source_message_id: "1", source_message: {}, activation: {} },
+        { source_message_id: "2", source_message: {}, activation: {} },
+      ],
+    });
+    await store.transition(first!.inbox_item_id, "blocked", { last_error: "safe pre-turn failure" });
+    const skipped = await store.skipBlocked(first!.inbox_item_id);
+    assert.equal(skipped.state, "cancelled_by_user");
+    assert.ok(skipped.acknowledged_at);
+    assert.equal((await store.receipts("skipper"))[0]!.timeline.at(-1)?.phase, "user_cancelled");
+    assert.equal((await store.claimHead("skipper"))?.inbox_item_id, second!.inbox_item_id);
+
+    const [ambiguous] = await store.ingestPoll({
+      agent_id: "ambiguous",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
+    });
+    await store.transition(ambiguous!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(ambiguous!.inbox_item_id, "turn-started");
+    await store.transition(ambiguous!.inbox_item_id, "blocked", { last_error: "terminal evidence ambiguous" });
+    await assert.rejects(
+      store.skipBlocked(ambiguous!.inbox_item_id),
+      /provider work may already have started/,
+    );
+    assert.equal((await store.get(ambiguous!.inbox_item_id))?.state, "blocked");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("room move compensation restores only its source queue and exact pre-move cursor idempotently", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");

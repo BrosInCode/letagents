@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 12;
+export const DAEMON_STATE_SCHEMA_VERSION = 13;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -14,6 +14,8 @@ export class DaemonStateSchema {
     private readonly postV6CommitBeforeScrubHook?: () => void,
     /** Test-only failure seam used to prove a pending scrub fails closed. */
     private readonly beforeV6ScrubHook?: () => void,
+    /** Test-only interruption seam after the v13 repair journal is backed up. */
+    private readonly afterV13RepairJournalBackupHook?: () => void,
   ) {}
 
 createSchema(database: DatabaseSync): void {
@@ -75,11 +77,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV11ToV12(database);
     return;
   }
+  if (existingVersion === 12) {
+    this.migrateV12ToV13(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV12Shape(database);
+    this.repairAndValidateV13Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -353,8 +359,7 @@ createSchema(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -378,8 +383,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -404,8 +408,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -430,8 +433,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     this.applyV4Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -495,8 +497,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     // tables, so complete and validate the current shape before advancing
     // either version marker.
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -547,8 +548,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     this.validateV3Shape(database);
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -571,8 +571,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV3Shape(database);
     this.validateV6Shape(database);
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -591,8 +590,7 @@ migrateV7ToV8(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -609,8 +607,7 @@ migrateV8ToV9(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.advanceDeliveryToCurrent(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -626,8 +623,7 @@ migrateV9ToV10(database: DatabaseSync): void {
   this.repairAndValidateV9Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -643,8 +639,7 @@ migrateV10ToV11(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     if (this.tableColumns(database, "agent_purge_operations").size) this.rebuildPurgeOperationsV11(database);
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -660,8 +655,24 @@ migrateV11ToV12(database: DatabaseSync): void {
   this.repairAndValidateV11Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.applyV12Shape(database);
-    this.validateV12Shape(database);
+    this.applyCurrentSchemaTail(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V13 journals safe same-process continuation repair and user cancellation. */
+migrateV12ToV13(database: DatabaseSync): void {
+  this.repairAndValidateV12Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV13Shape(database);
+    this.validateV13Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -944,27 +955,40 @@ private applyV12Shape(database: DatabaseSync): void {
       )
     ) STRICT;
   `);
-  if (existed) return;
+  if (!existed) {
+    // V11 had no mint journal. Seed only facts that its durable records can
+    // actually prove; omitted legacy bindings deliberately remain unknown.
+    const now = new Date().toISOString();
+    run(database.prepare(`
+      INSERT INTO supervised_worker_mint_states
+        (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
+      SELECT b.agent_id,m.room_id,'daemon:' || b.agent_id,
+        CASE WHEN b.binding_agent_session_id IS NULL THEN 'minting_unknown' ELSE 'exact' END,
+        b.binding_agent_session_id,COALESCE(b.binding_updated_at,?)
+      FROM retained_worker_bindings b
+      JOIN agent_room_memberships m USING(agent_id)
+      WHERE b.last_worker_binding_present=1
+    `), now);
+    run(database.prepare(`
+      INSERT OR REPLACE INTO supervised_worker_mint_states
+        (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
+      SELECT agent_id,room_id,'daemon:' || agent_id,'exact',agent_session_id,updated_at
+      FROM supervised_worker_sessions
+    `));
+  }
+}
 
-  // V11 had no mint journal. Seed only facts that its durable records can
-  // actually prove; omitted legacy bindings deliberately remain unknown.
-  const now = new Date().toISOString();
-  run(database.prepare(`
-    INSERT INTO supervised_worker_mint_states
-      (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
-    SELECT b.agent_id,m.room_id,'daemon:' || b.agent_id,
-      CASE WHEN b.binding_agent_session_id IS NULL THEN 'minting_unknown' ELSE 'exact' END,
-      b.binding_agent_session_id,COALESCE(b.binding_updated_at,?)
-    FROM retained_worker_bindings b
-    JOIN agent_room_memberships m USING(agent_id)
-    WHERE b.last_worker_binding_present=1
-  `), now);
-  run(database.prepare(`
-    INSERT OR REPLACE INTO supervised_worker_mint_states
-      (agent_id,room_id,agent_instance_id,phase,agent_session_id,updated_at)
-    SELECT agent_id,room_id,'daemon:' || agent_id,'exact',agent_session_id,updated_at
-    FROM supervised_worker_sessions
-  `));
+/**
+ * Every legacy migration in this file advances directly to the current
+ * paired version marker. Keep the physical v12 validation ahead of the v13
+ * inbox rebuild so an incomplete predecessor can never be disguised by the
+ * continuation-repair tables.
+ */
+private applyCurrentSchemaTail(database: DatabaseSync): void {
+  this.applyV12Shape(database);
+  this.validateV12Shape(database);
+  this.applyV13Shape(database);
+  this.validateV13Shape(database);
 }
 
 private validateV12Shape(database: DatabaseSync): void {
@@ -999,6 +1023,238 @@ repairAndValidateV12Shape(database: DatabaseSync): void {
     throw new Error("Daemon state v12 is missing its mint-state table and cannot safely reconstruct erased mint attempts.");
   }
   this.validateV12Shape(database);
+}
+
+private applyV13Shape(database: DatabaseSync): void {
+  const hasRepairJournal = this.tableColumns(database, "provider_continuation_repairs").size > 0;
+  if (this.tableColumns(database, "supervised_agent_inbox").has("failure_code")
+    && hasRepairJournal) {
+    // The causal event table is additive evidence. A current-version reopen
+    // may safely recreate an absent empty journal, but it must never rebuild
+    // the authoritative inbox or repair journal in place.
+    if (!this.tableColumns(database, "supervised_agent_inbox_events").size) {
+      database.exec(`
+        CREATE TABLE supervised_agent_inbox_events (
+          inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+          event_sequence INTEGER NOT NULL CHECK(event_sequence > 0),
+          idempotency_key TEXT NOT NULL,
+          phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled','conversation_restoring','conversation_restored','user_cancelled')),
+          observed_at TEXT NOT NULL,
+          detail TEXT,
+          PRIMARY KEY(inbox_item_id,event_sequence),
+          UNIQUE(inbox_item_id,idempotency_key)
+        ) STRICT;
+        CREATE INDEX supervised_agent_inbox_events_timeline
+          ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
+      `);
+    }
+    return;
+  }
+
+  // A rolled-back version marker or interrupted legacy repair can retain the
+  // current repair journal while temporarily rebuilding the older delivery
+  // tables. Preserve those rows outside the foreign-key graph while the
+  // authoritative inbox is rebuilt, then restore them against the new parent.
+  if (hasRepairJournal) {
+    database.exec(`
+      DROP TABLE IF EXISTS temp.provider_continuation_repairs_v13_backup;
+      CREATE TEMP TABLE provider_continuation_repairs_v13_backup AS
+        SELECT * FROM provider_continuation_repairs;
+      DROP TABLE provider_continuation_repairs;
+    `);
+    this.afterV13RepairJournalBackupHook?.();
+  }
+  database.exec(`
+    PRAGMA defer_foreign_keys = ON;
+    ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_pre_v13;
+
+    CREATE TABLE supervised_agent_inbox (
+      inbox_item_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
+      source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
+      fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
+      state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')),
+      attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+      action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
+      provider_turn_id TEXT, outcome TEXT, last_error TEXT,
+      failure_code TEXT CHECK(failure_code IS NULL OR failure_code='provider_continuation_missing'),
+      blocked_by_inbox_item_id TEXT REFERENCES supervised_agent_inbox(inbox_item_id),
+      next_attempt_at_ms INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, acknowledged_at TEXT,
+      UNIQUE(agent_id,room_id,source_message_id), UNIQUE(agent_id,fifo_sequence),
+      UNIQUE(inbox_item_id,agent_id,room_id)
+    ) STRICT;
+    INSERT INTO supervised_agent_inbox
+      (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+      SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,
+        CASE WHEN state='blocked' AND attempt_count=0 AND provider_turn_id IS NULL AND outcome IS NULL
+          AND lower(last_error) GLOB 'thread not found: ????????-????-????-????-????????????'
+          THEN 'provider_continuation_missing' ELSE NULL END,
+        blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
+      FROM supervised_agent_inbox_pre_v13;
+
+    CREATE TABLE supervised_agent_inbox_events_v13 (
+      inbox_item_id TEXT NOT NULL REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+      event_sequence INTEGER NOT NULL CHECK(event_sequence > 0),
+      idempotency_key TEXT NOT NULL,
+      phase TEXT NOT NULL CHECK(phase IN ('received','queued','turn_started','turn_finished','result_unreadable','publish_started','published','no_reply','retry_scheduled','blocked','room_move_cancelled','conversation_restoring','conversation_restored','user_cancelled')),
+      observed_at TEXT NOT NULL, detail TEXT,
+      PRIMARY KEY(inbox_item_id,event_sequence), UNIQUE(inbox_item_id,idempotency_key)
+    ) STRICT;
+    INSERT INTO supervised_agent_inbox_events_v13 SELECT * FROM supervised_agent_inbox_events;
+
+    CREATE TABLE supervised_agent_terminal_results_v13 (
+      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
+      normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
+      terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO supervised_agent_terminal_results_v13 SELECT * FROM supervised_agent_terminal_results;
+
+    CREATE TABLE supervised_agent_publications_v13 (
+      inbox_item_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+      client_message_id TEXT NOT NULL, canonical_message_id TEXT NOT NULL, published_at TEXT NOT NULL,
+      FOREIGN KEY(inbox_item_id,agent_id,room_id)
+        REFERENCES supervised_agent_inbox(inbox_item_id,agent_id,room_id) ON DELETE CASCADE,
+      UNIQUE(room_id,client_message_id), UNIQUE(room_id,canonical_message_id)
+    ) STRICT;
+    INSERT INTO supervised_agent_publications_v13 SELECT * FROM supervised_agent_publications;
+
+    DROP TABLE supervised_agent_inbox_events;
+    DROP TABLE supervised_agent_terminal_results;
+    DROP TABLE supervised_agent_publications;
+    DROP TABLE supervised_agent_inbox_pre_v13;
+
+    ALTER TABLE supervised_agent_inbox_events_v13 RENAME TO supervised_agent_inbox_events;
+    ALTER TABLE supervised_agent_terminal_results_v13 RENAME TO supervised_agent_terminal_results;
+    ALTER TABLE supervised_agent_publications_v13 RENAME TO supervised_agent_publications;
+
+    CREATE INDEX supervised_agent_inbox_head ON supervised_agent_inbox(agent_id,fifo_sequence);
+    CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
+    CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
+    CREATE INDEX supervised_agent_publications_agent_room ON supervised_agent_publications(agent_id,room_id);
+
+    CREATE TABLE provider_continuation_repairs (
+      repair_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      inbox_item_id TEXT NOT NULL,
+      daemon_generation INTEGER NOT NULL CHECK(daemon_generation >= 1),
+      execution_generation_id TEXT NOT NULL,
+      work_attempt_id TEXT NOT NULL,
+      expected_pid INTEGER NOT NULL CHECK(expected_pid > 0),
+      expected_process_identity TEXT NOT NULL,
+      missing_continuation TEXT NOT NULL,
+      replacement_continuation TEXT,
+      phase TEXT NOT NULL CHECK(phase IN ('probing','replacement_created','committed','failed')),
+      attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(inbox_item_id,agent_id,room_id)
+        REFERENCES supervised_agent_inbox(inbox_item_id,agent_id,room_id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE UNIQUE INDEX one_active_provider_continuation_repair
+      ON provider_continuation_repairs(agent_id) WHERE phase NOT IN ('committed','failed');
+    CREATE INDEX provider_continuation_repairs_inbox
+      ON provider_continuation_repairs(inbox_item_id,updated_at);
+  `);
+  if (hasRepairJournal) {
+    database.exec(`
+      INSERT INTO provider_continuation_repairs
+        SELECT * FROM temp.provider_continuation_repairs_v13_backup;
+      DROP TABLE temp.provider_continuation_repairs_v13_backup;
+    `);
+  }
+}
+
+private validateV13Shape(database: DatabaseSync): void {
+  this.validateV12Shape(database);
+  const inboxColumns = this.tableColumns(database, "supervised_agent_inbox");
+  const repairColumns = this.tableColumns(database, "provider_continuation_repairs");
+  const expectedInboxColumns = [
+    "inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json",
+    "activation_json", "fifo_sequence", "state", "attempt_count", "action_id",
+    "reply_client_message_id", "provider_turn_id", "outcome", "last_error", "failure_code",
+    "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at",
+  ];
+  const expectedRepairColumns = [
+    "repair_id", "agent_id", "room_id", "inbox_item_id", "daemon_generation",
+    "execution_generation_id", "work_attempt_id", "expected_pid",
+    "expected_process_identity", "missing_continuation", "replacement_continuation",
+    "phase", "attempt_count", "last_error", "created_at", "updated_at",
+  ];
+  if (inboxColumns.size !== expectedInboxColumns.length
+    || expectedInboxColumns.some((column) => !inboxColumns.has(column))
+    || repairColumns.size !== expectedRepairColumns.length
+    || expectedRepairColumns.some((column) => !repairColumns.has(column))) {
+    throw new Error("Daemon state v13 continuation-repair shape is incomplete.");
+  }
+  const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
+  const repairs = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='provider_continuation_repairs'").get() as Row | undefined;
+  const events = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox_events'").get() as Row | undefined;
+  const inboxSql = String(inbox?.sql);
+  const repairSql = String(repairs?.sql);
+  const eventSql = String(events?.sql);
+  if (!inbox || !repairs || !events
+    || !/cancelled_by_user/i.test(inboxSql)
+    || !/CHECK\s*\(\s*failure_code\s+IS\s+NULL\s+OR\s+failure_code\s*=\s*'provider_continuation_missing'\s*\)/i.test(inboxSql)
+    || !/phase\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*phase\s+IN\s*\(\s*'probing'\s*,\s*'replacement_created'\s*,\s*'committed'\s*,\s*'failed'\s*\)\s*\)/i.test(repairSql)
+    || !/FOREIGN KEY\s*\(\s*inbox_item_id\s*,\s*agent_id\s*,\s*room_id\s*\)\s*REFERENCES\s+supervised_agent_inbox/i.test(repairSql)
+    || !/conversation_restoring/i.test(eventSql) || !/conversation_restored/i.test(eventSql) || !/user_cancelled/i.test(eventSql)
+    || !/STRICT\s*$/i.test(inboxSql) || !/STRICT\s*$/i.test(repairSql) || !/STRICT\s*$/i.test(eventSql)) {
+    throw new Error("Daemon state v13 continuation-repair tables are invalid.");
+  }
+  const indexes: Record<string, { table: string; unique: number; partial: number; columns: string[] }> = {
+    one_active_provider_continuation_repair: {
+      table: "provider_continuation_repairs", unique: 1, partial: 1, columns: ["agent_id"],
+    },
+    provider_continuation_repairs_inbox: {
+      table: "provider_continuation_repairs", unique: 0, partial: 0, columns: ["inbox_item_id", "updated_at"],
+    },
+  };
+  for (const [name, expected] of Object.entries(indexes)) {
+    const listed = (database.prepare(`PRAGMA index_list(${expected.table})`).all() as Row[])
+      .find((row) => row.name === name);
+    const terms = (database.prepare(`PRAGMA index_xinfo(${name})`).all() as Row[])
+      .filter((row) => Number(row.key) === 1)
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno));
+    if (!listed || String(listed.origin) !== "c" || Number(listed.unique) !== expected.unique
+      || Number(listed.partial) !== expected.partial || terms.length !== expected.columns.length
+      || terms.some((term, index) => Number(term.cid) < 0 || term.name !== expected.columns[index]
+        || Number(term.desc) !== 0 || String(term.coll).toUpperCase() !== "BINARY")) {
+      throw new Error(`Daemon state v13 index ${name} is invalid.`);
+    }
+  }
+  const activeIndex = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='index' AND name='one_active_provider_continuation_repair'",
+  ).get() as Row | undefined;
+  if (!activeIndex
+    || !/WHERE\s+phase\s+NOT\s+IN\s*\(\s*'committed'\s*,\s*'failed'\s*\)/i.test(String(activeIndex.sql))) {
+    throw new Error("Daemon state v13 active continuation-repair index is invalid.");
+  }
+  if (database.prepare("PRAGMA foreign_key_check").get()) {
+    throw new Error("Daemon state v13 failed foreign-key validation.");
+  }
+}
+
+repairAndValidateV13Shape(database: DatabaseSync): void {
+  // Preserve every predecessor's additive repair guarantees on current
+  // opens. The v7 validator recognizes the v13 inbox discriminator, so this
+  // repairs only unchanged authority/configuration columns and never
+  // downgrades the current delivery state machine.
+  this.repairAndValidateV12Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV13Shape(database);
+    this.validateV13Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+  this.finishPendingV6SecretScrub(database);
 }
 
 private applyV8Shape(database: DatabaseSync): void {
@@ -1290,6 +1546,7 @@ repairAndValidateV7Shape(database: DatabaseSync): void {
   if (this.tableColumns(database, "worker_session_bindings").has("agent_session_token")) {
     throw new Error("Daemon state v7 must not persist agent_session_token.");
   }
+  const hasV13DeliveryShape = this.tableColumns(database, "supervised_agent_inbox").has("failure_code");
   const needsLegacyPresenceRepair = this.tableColumns(database, "reconciliation_records").has("exit_timestamps_json")
     && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
   const needsV2AdditiveRepair = !this.tableColumns(database, "agent_configurations").has("provider_launch_policy_undefined")
@@ -1298,13 +1555,18 @@ repairAndValidateV7Shape(database: DatabaseSync): void {
     || !this.tableColumns(database, "agent_configurations").has("delivery_cutover_json")
     || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id");
   const needsV7AdditiveRepair = !this.tableColumns(database, "supervised_agent_terminal_results").size
-    || !this.tableColumns(database, "supervised_agent_inbox_events").size;
+    || (!hasV13DeliveryShape && !this.tableColumns(database, "supervised_agent_inbox_events").size);
+  const deferMissingV13Events = hasV13DeliveryShape
+    && !this.tableColumns(database, "supervised_agent_inbox_events").size;
+  if (hasV13DeliveryShape && !this.tableColumns(database, "supervised_agent_terminal_results").size) {
+    throw new Error("Daemon state v13 is missing terminal-result evidence and cannot safely reconstruct it.");
+  }
   if (!needsLegacyPresenceRepair && !needsV2AdditiveRepair && !needsBoundedDeliveryRepair && !needsV7AdditiveRepair) {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
     this.validateV6Shape(database, false);
     this.validateBoundedDeliveryV6Shape(database);
-    this.validateV7Shape(database);
+    this.validateV7Shape(database, !deferMissingV13Events);
     this.finishPendingV6SecretScrub(database);
     return;
   }
@@ -1322,7 +1584,7 @@ repairAndValidateV7Shape(database: DatabaseSync): void {
     if (needsBoundedDeliveryRepair) this.applyBoundedDeliveryV6Shape(database);
     this.validateBoundedDeliveryV6Shape(database);
     if (needsV7AdditiveRepair) this.applyV7Shape(database);
-    this.validateV7Shape(database);
+    this.validateV7Shape(database, !deferMissingV13Events);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -1885,15 +2147,20 @@ applyV7Shape(database: DatabaseSync): void {
   }
 }
 
-validateV7Shape(database: DatabaseSync): void {
+validateV7Shape(database: DatabaseSync, includeInboxEvents = true): void {
+  // The inbox discriminator is sufficient during current-version repair:
+  // the additive repair journal may be absent while the authoritative inbox
+  // has already reached v13.
+  const hasV13DeliveryShape = this.tableColumns(database, "supervised_agent_inbox").has("failure_code");
   const required: Record<string, string[]> = {
-    supervised_agent_inbox: ["inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "fifo_sequence", "state", "attempt_count", "action_id", "reply_client_message_id", "provider_turn_id", "outcome", "last_error", "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at"],
+    supervised_agent_inbox: ["inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "fifo_sequence", "state", "attempt_count", "action_id", "reply_client_message_id", "provider_turn_id", "outcome", "last_error", ...(hasV13DeliveryShape ? ["failure_code"] : []), "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at"],
     supervised_agent_inbox_events: ["inbox_item_id", "event_sequence", "idempotency_key", "phase", "observed_at", "detail"],
     supervised_agent_terminal_results: ["inbox_item_id", "agent_id", "execution_generation_id", "provider_turn_id", "outcome", "normalized_text", "evidence_source", "terminal_evidence_json", "observed_at", "updated_at"],
     supervised_agent_observed_messages: ["agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "activation_decision", "observed_at"],
     supervised_agent_effects: ["effect_id", "agent_id", "room_id", "execution_generation_id", "provider_turn_id", "mcp_request_id", "tool_name", "request_json", "state", "result_json", "error", "created_at", "updated_at"],
     supervised_agent_ingress_health: ["agent_id", "room_id", "execution_generation_id", "state", "detail", "observed_at", "updated_at"],
   };
+  if (!includeInboxEvents) delete required.supervised_agent_inbox_events;
   for (const [table, expected] of Object.entries(required)) {
     const details = database.prepare(`PRAGMA table_xinfo(${table})`).all() as Array<{ name: string; hidden: number }>;
     const columns = details.map((column) => String(column.name));

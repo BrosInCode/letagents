@@ -34,7 +34,11 @@
           :local-agent-work="localAgentWork"
           :delivery-receipts-by-message="deliveryReceiptsByMessage"
           :delivery-recovery-available="deliveryRecoveryAvailable"
+          :continuation-repair-available="continuationRepairAvailable"
+          :room-delivery-skip-available="roomDeliverySkipAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
+          :continuation-repair-keys="continuationRepairKeys"
+          :room-delivery-skip-keys="roomDeliverySkipKeys"
           :participants="participants"
           :presence="presence"
           :supervisor-entries="roomSupervisorEntries"
@@ -55,6 +59,8 @@
           @open-github-event="emit('open-github-event', $event)"
           @open-task="emit('open-task', $event)"
           @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
+          @restore-conversation="(agentId, sourceMessageId) => emit('restore-conversation', agentId, sourceMessageId)"
+          @skip-delivery="(agentId, sourceMessageId) => emit('skip-delivery', agentId, sourceMessageId)"
           @scroll-position="emit('scroll-position', $event)"
         />
 
@@ -164,10 +170,16 @@
         :task-reference-ids="taskReferenceIds"
         :delivery-receipts-by-message="deliveryReceiptsByMessage"
         :delivery-recovery-available="deliveryRecoveryAvailable"
+        :continuation-repair-available="continuationRepairAvailable"
+        :room-delivery-skip-available="roomDeliverySkipAvailable"
         :delivery-retry-keys="deliveryRetryKeys"
+        :continuation-repair-keys="continuationRepairKeys"
+        :room-delivery-skip-keys="roomDeliverySkipKeys"
         :presence="presence"
         :supervisor-entries="roomSupervisorEntries"
         @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
+        @restore-conversation="(agentId, sourceMessageId) => emit('restore-conversation', agentId, sourceMessageId)"
+        @skip-delivery="(agentId, sourceMessageId) => emit('skip-delivery', agentId, sourceMessageId)"
         @close="closeThread"
         @open-image="openImageViewer"
         @open-agent="openAgentModal"
@@ -236,9 +248,13 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
-  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null }> >;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; attemptCount: number; providerTurnId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
   deliveryRetryKeys?: ReadonlySet<string>;
+  continuationRepairKeys?: ReadonlySet<string>;
+  roomDeliverySkipKeys?: ReadonlySet<string>;
   revealedMessageId?: string | null;
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
@@ -291,6 +307,8 @@ const emit = defineEmits<{
   "open-events": [];
   "open-task": [taskId: string];
   "retry-delivery": [agentId: string, sourceMessageId: string];
+  "restore-conversation": [agentId: string, sourceMessageId: string];
+  "skip-delivery": [agentId: string, sourceMessageId: string];
   "reveal-message": [messageId: string];
   "message-reveal-unavailable": [messageId: string];
   "dismiss-event-preview": [messageId: string];

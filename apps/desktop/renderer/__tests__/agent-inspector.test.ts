@@ -58,11 +58,14 @@ function receipt(
   return {
     inboxItemId: `inbox_${sourceMessageId}`,
     sourceMessageId,
+    replyClientMessageId: `reply_${sourceMessageId}`,
+    canonicalMessageId: null,
     state,
     attemptCount: 1,
     providerTurnId: "turn_1",
     blockedByMessageId: null,
     error: null,
+    failureCode: null,
     updatedAt: "2026-07-23T10:00:05.000Z",
     timeline: [],
     ...overrides,
@@ -490,6 +493,51 @@ test("stale resources preserve last-good facts but disable state-dependent actio
   assert.equal(staleActive?.turnControl?.canStop, false);
   assert.equal(staleActive?.turnControl?.canCorrect, false);
   assert.match(staleActive?.turnControl?.detail ?? "", /Live supervisor state/);
+});
+
+test("missing-conversation recovery is actionable only before a provider turn starts", () => {
+  const missing = receipt("message_missing", "blocked", {
+    attemptCount: 0,
+    providerTurnId: null,
+    failureCode: "provider_continuation_missing",
+    error: "The saved provider conversation is unavailable.",
+  });
+  const recoverable = projectAgentInspector(entry({ deliveryReceipts: [missing] }), {
+    roomId: "focus_1",
+    continuationRepairAvailable: true,
+    roomDeliverySkipAvailable: true,
+  });
+  assert.equal(recoverable?.continuationRecovery?.state, "failed");
+  assert.equal(recoverable?.continuationRecovery?.canRestore, true);
+  assert.equal(recoverable?.continuationRecovery?.canSkip, true);
+  assert.equal(recoverable?.actions.find((action) => action.kind === "restore_conversation")?.sourceMessageId, "message_missing");
+
+  const restoring = projectAgentInspector(entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "restoring_conversation", pendingCount: 1, blockedByMessageId: "message_missing", detail: null },
+      turn: { state: "idle", inboxItemId: missing.inboxItemId, sourceMessageId: missing.sourceMessageId, providerTurnId: null, detail: null },
+    },
+    deliveryReceipts: [{ ...missing, state: "restoring_conversation" }],
+  }), {
+    roomId: "focus_1",
+    continuationRepairAvailable: true,
+    roomDeliverySkipAvailable: true,
+  });
+  assert.equal(restoring?.overallLabel, "Restoring conversation");
+  assert.equal(restoring?.continuationRecovery?.state, "restoring");
+  assert.equal(restoring?.continuationRecovery?.canRestore, false);
+  assert.equal(restoring?.continuationRecovery?.canSkip, false);
+
+  const ambiguous = projectAgentInspector(entry({
+    deliveryReceipts: [{ ...missing, attemptCount: 1, providerTurnId: "turn_started" }],
+  }), {
+    roomId: "focus_1",
+    continuationRepairAvailable: true,
+    roomDeliverySkipAvailable: true,
+  });
+  assert.equal(ambiguous?.continuationRecovery?.canRestore, false, "started provider work cannot enter the replacement-conversation lane");
+  assert.equal(ambiguous?.continuationRecovery?.canSkip, false, "started provider work can never be silently released");
 });
 
 test("the shell resource folds exact pushes and preserves capped activity across polls", () => {

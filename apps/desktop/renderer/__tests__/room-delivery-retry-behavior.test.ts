@@ -223,6 +223,51 @@ test("mounted shared message retry button is a native, exact, capability-aware c
   busy.app.unmount();
 });
 
+test("missing-conversation controls render only before provider work starts", () => {
+  const restores: Array<[string, string]> = [];
+  const skips: Array<[string, string]> = [];
+  const base = {
+    message: message(),
+    threadSummary: emptyThreadSummary,
+    activeThreadRoot: false,
+    highlightQuery: "",
+    searchActive: false,
+    continuationRepairAvailable: true,
+    roomDeliverySkipAvailable: true,
+    onRestoreConversation: (agentId: string, sourceMessageId: string) => restores.push([agentId, sourceMessageId]),
+    onSkipDelivery: (agentId: string, sourceMessageId: string) => skips.push([agentId, sourceMessageId]),
+  };
+  const safeReceipt = {
+    agentId: "oak",
+    agentName: "Oak",
+    state: "blocked",
+    blockedByMessageId: null,
+    failureCode: "provider_continuation_missing",
+    attemptCount: 0,
+    providerTurnId: null,
+  };
+  const safe = mount(DesktopChatMessage, { ...base, deliveryReceipts: [safeReceipt] });
+  const restoreButton = buttonByText(safe.root, "Restore and retry");
+  const skipButton = buttonByText(safe.root, "Skip message");
+  (restoreButton.props.onClick as () => void)();
+  (skipButton.props.onClick as () => void)();
+  assert.deepEqual(restores, [["oak", "message_1"]]);
+  assert.deepEqual(skips, [["oak", "message_1"]]);
+  safe.app.unmount();
+
+  const ambiguous = mount(DesktopChatMessage, {
+    ...base,
+    deliveryReceipts: [{ ...safeReceipt, attemptCount: 1, providerTurnId: "turn_started" }],
+  });
+  assert.equal(
+    buttons(ambiguous.root).some((button) =>
+      descendants(button).some((child) => child.text === "Restore and retry" || child.text === "Skip message")),
+    false,
+    "started provider work must never expose replacement or cancellation controls",
+  );
+  ambiguous.app.unmount();
+});
+
 test("mounted main viewport and thread panel forward the same retry event contract", async () => {
   const mainCalls: Array<[string, string]> = [];
   const viewport = mount(RoomMessageViewport, {
