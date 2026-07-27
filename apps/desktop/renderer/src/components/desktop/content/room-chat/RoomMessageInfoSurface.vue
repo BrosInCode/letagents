@@ -43,19 +43,25 @@
         </p>
 
         <div v-else-if="info" class="room-message-info-body">
-          <p class="room-message-info-summary">
-            Seen by {{ info.summaryCounts.seenCount }} {{ info.summaryCounts.seenCount === 1 ? 'person' : 'people' }}
-            · {{ info.summaryCounts.askedCount }} {{ info.summaryCounts.askedCount === 1 ? 'agent' : 'agents' }} asked<template v-if="info.summaryCounts.replyCount > 0">
-            · {{ info.summaryCounts.replyCount }} {{ info.summaryCounts.replyCount === 1 ? 'reply' : 'replies' }}</template>
-          </p>
+          <div v-if="info.agentsAsked.length === 0 && info.seenByPeople.length === 0 && info.alsoObserved.length === 0" class="room-message-info-quiet">
+            <span class="room-message-info-quiet-mark" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M8 5v3.5l2.2 1.3M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <div>
+              <strong>No activity yet</strong>
+              <p>Nobody else has read this, and no agent was asked to respond. Evidence appears here as it happens.</p>
+            </div>
+          </div>
 
           <section v-if="info.agentsAsked.length > 0" class="room-message-info-section">
-            <h4>Agents asked</h4>
+            <h4>Agents asked · {{ info.agentsAsked.length }}</h4>
             <ul>
               <li v-for="agent in info.agentsAsked" :key="agent.receiptId">
-                <div class="room-message-info-agent">
+                <span class="room-message-info-avatar" data-kind="agent" aria-hidden="true">{{ initial(agent.actorLabel) }}</span>
+                <div class="room-message-info-identity">
                   <span class="room-message-info-name">{{ agent.actorLabel }}</span>
                   <span class="room-message-info-detail">
+                    <span class="room-message-info-dot" :data-tone="receiptTone(agent.receiptState, agent.observed)" aria-hidden="true" />
                     {{ receiptStatusLabel(agent.receiptState, agent.observed) }}
                     <template v-if="agent.activationReasonLabel"> · {{ agent.activationReasonLabel }}</template>
                   </span>
@@ -71,20 +77,19 @@
               </li>
             </ul>
           </section>
-          <p v-else class="room-message-info-empty">No agents were asked to respond.</p>
 
           <section v-if="info.seenByPeople.length > 0" class="room-message-info-section">
-            <h4>Read by people</h4>
+            <h4>Read by people · {{ info.seenByPeople.length }}</h4>
             <ul>
               <li v-for="person in info.seenByPeople" :key="`${person.name}:${person.seenAt}`">
-                <div class="room-message-info-agent">
+                <span class="room-message-info-avatar" data-kind="person" aria-hidden="true">{{ initial(person.name) }}</span>
+                <div class="room-message-info-identity">
                   <span class="room-message-info-name">{{ person.name }}</span>
-                  <span class="room-message-info-detail">Read {{ formatTime(person.seenAt) }}</span>
                 </div>
+                <span class="room-message-info-time">{{ formatTime(person.seenAt) }}</span>
               </li>
             </ul>
           </section>
-          <p v-else class="room-message-info-empty">No one else has read this yet.</p>
 
           <details v-if="info.alsoObserved.length > 0" class="room-message-info-disclosure">
             <summary>Observed by {{ info.alsoObserved.length }} {{ info.alsoObserved.length === 1 ? 'agent' : 'agents' }} · no response requested</summary>
@@ -163,6 +168,23 @@ function receiptStatusLabel(state: string, observed: boolean): string {
     case "cancelled": return "Cancelled";
     case "unavailable": return "Unavailable";
     default: return state;
+  }
+}
+
+function initial(label: string): string {
+  return (label.trim()[0] ?? "?").toUpperCase();
+}
+
+/** Semantic tone for the status dot; text carries the exact state. */
+function receiptTone(state: string, observed: boolean): string {
+  switch (state) {
+    case "replied": return "positive";
+    case "responding": return "active";
+    case "queued": return observed ? "active" : "waiting";
+    case "retrying": return "waiting";
+    case "blocked": return "attention";
+    case "unavailable": return "attention";
+    default: return "neutral";
   }
 }
 
