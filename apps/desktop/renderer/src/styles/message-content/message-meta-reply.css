@@ -169,6 +169,12 @@
   color: var(--text);
 }
 
+.room-message-context-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
 .room-message-context-menu {
   position: fixed;
   z-index: 20;

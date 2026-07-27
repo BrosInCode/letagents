@@ -241,6 +241,30 @@ export interface DesktopRoomMessageAttachment {
   contentBase64: string | null;
 }
 
+/** Public Message-info projection (cloud rooms). Mirrors GET /rooms/:room/messages/:id/info. */
+export interface DesktopMessageInfo {
+  message: {
+    id: string;
+    sender: string;
+    textPreview: string;
+    timestamp: string;
+    threadRootId: string;
+    replyToId: string | null;
+  };
+  seenByPeople: Array<{ name: string; avatarUrl: string | null; seenAt: string }>;
+  agentsAsked: Array<{
+    receiptId: string;
+    agentKey: string;
+    actorLabel: string;
+    activationReasonLabel: string;
+    receiptState: string;
+    observed: boolean;
+    replyMessageId: string | null;
+  }>;
+  alsoObserved: Array<{ agentKey: string; displayName: string }>;
+  summaryCounts: { seenCount: number; askedCount: number; replyCount: number; observedCount: number };
+}
+
 export interface DesktopRoomMessage {
   id: string;
   /** Exact idempotency identity supplied by the message publisher. */

@@ -63,6 +63,7 @@
         :room-delivery-skip-keys="roomDeliverySkipKeys"
         :provider-label="resolveMessageProviderLabel(parent, participants, presence, supervisorEntries)"
         @quote-reply="quoteInThread(parent)"
+        @message-info="(messageId, context) => $emit('message-info', messageId, context)"
         @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
         @jump-to-thread-root="$emit('jump-message', parent.id)"
         @scroll-to-message="navigateThreadMessageReference"
@@ -107,6 +108,7 @@
           :room-delivery-skip-keys="roomDeliverySkipKeys"
           :provider-label="resolveMessageProviderLabel(reply, participants, presence, supervisorEntries)"
           @quote-reply="quoteInThread(reply)"
+          @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
           @jump-to-thread-root="$emit('jump-message', parent.id)"
           @scroll-to-message="navigateThreadMessageReference"
@@ -270,6 +272,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   close: [];
   "open-image": [imageId: string];
   "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>];

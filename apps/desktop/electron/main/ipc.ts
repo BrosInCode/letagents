@@ -184,6 +184,7 @@ import {
   getDesktopGitHubIntegrationStatus,
   getDesktopRoomLatestMessages,
   getDesktopRoomMessage,
+  getDesktopRoomMessageInfo,
   getDesktopRoomStorage,
   getDesktopRoomThread,
   getDesktopRoomThreads,
@@ -404,6 +405,15 @@ export function registerDesktopIpcHandlers(
       roomIdentifiers: string[],
     ): Promise<DesktopRoomLatestMessage[]> =>
       getDesktopRoomLatestMessages(Array.isArray(roomIdentifiers) ? roomIdentifiers : []),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-message-info",
+    async (
+      _event,
+      roomIdentifier: string,
+      messageId: string,
+    ): Promise<import("../ipc-types.js").DesktopMessageInfo | null> =>
+      getDesktopRoomMessageInfo(roomIdentifier, messageId),
   );
   targetIpcMain.handle(
     "desktop:room:get-message",
