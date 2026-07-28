@@ -53,6 +53,19 @@ export interface AgentInspectorNowProjection {
   observedAt: string | null;
 }
 
+export interface AgentInspectorDeliveryProgressProjection {
+  phase: "starting" | "responding" | "recovering" | "publishing";
+  label: string;
+  detail: string;
+  sourceMessageId: string | null;
+  /**
+   * True while this desktop is completing the idempotent retry RPC. The
+   * room-level coordinator owns this fact, so closing the Inspector cannot
+   * make the request look idle or allow a duplicate click.
+   */
+  requestedLocally: boolean;
+}
+
 export type AgentInspectorActionKind =
   | "mention"
   | "pause"
@@ -180,6 +193,7 @@ export interface AgentInspectorProjection {
   overallLabel: string;
   overallDetail: string;
   readiness: AgentInspectorReadinessFact[];
+  deliveryProgress: AgentInspectorDeliveryProgressProjection | null;
   now: AgentInspectorNowProjection | null;
   assignedWork: AgentInspectorTaskProjection[];
   recentOutcome: { label: string; observedAt: string } | null;
@@ -205,6 +219,7 @@ export interface AgentInspectorProjectionOptions {
   roomDeliverySkipAvailable?: boolean;
   resourceFreshness?: "fresh" | "stale";
   mentionInsertTextByEntryId?: ReadonlyMap<string, string>;
+  deliveryRetryingKeys?: ReadonlySet<string>;
 }
 
 const ACTIVE_TURN_STATES = new Set(["dispatching", "responding", "publishing", "retrying"]);
@@ -391,6 +406,66 @@ function nowProjection(
       label: "Restoring conversation",
       summary: "Checking the saved conversation, then safely creating a replacement only if it is truly missing.",
       observedAt: entry.roomAgentState?.connection.observedAt ?? entry.bindingUpdatedAt,
+    };
+  }
+  return null;
+}
+
+function deliveryProgress(
+  entry: DesktopSupervisorManifestEntry,
+  deliveryRetryingKeys: ReadonlySet<string>,
+  hasLiveNow: boolean,
+): AgentInspectorDeliveryProgressProjection | null {
+  const turn = entry.roomAgentState?.turn;
+  const retryKeyPrefix = `${entry.id}:`;
+  const localRetryKey = [...deliveryRetryingKeys].find((key) => key.startsWith(retryKeyPrefix)) ?? null;
+  const localRetrySourceMessageId = localRetryKey?.slice(retryKeyPrefix.length) || null;
+  const requestedLocally = Boolean(localRetrySourceMessageId);
+  const sourceMessageId = turn?.sourceMessageId ?? localRetrySourceMessageId;
+
+  if (turn?.state === "publishing") {
+    return {
+      phase: "publishing",
+      label: "Publishing response",
+      detail: "The response is ready and is being added to the room.",
+      sourceMessageId,
+      requestedLocally,
+    };
+  }
+  if (turn?.state === "retrying") {
+    return {
+      phase: "recovering",
+      label: "Recovering response",
+      detail: turn.detail?.trim() || "Resuming the failed delivery step without repeating completed work.",
+      sourceMessageId,
+      requestedLocally,
+    };
+  }
+  if (turn?.state === "dispatching") {
+    return {
+      phase: "starting",
+      label: "Starting delivery",
+      detail: turn.detail?.trim() || "Handing the room message to the agent.",
+      sourceMessageId,
+      requestedLocally,
+    };
+  }
+  if (turn?.state === "responding" && !hasLiveNow) {
+    return {
+      phase: "responding",
+      label: "Agent is responding",
+      detail: turn.detail?.trim() || "Working on the routed room message.",
+      sourceMessageId,
+      requestedLocally,
+    };
+  }
+  if (localRetrySourceMessageId) {
+    return {
+      phase: "starting",
+      label: "Retrying delivery",
+      detail: "Checking the blocked message and safely resuming its delivery.",
+      sourceMessageId,
+      requestedLocally: true,
     };
   }
   return null;
@@ -676,6 +751,7 @@ export function projectAgentInspector(
   if (!options.roomId || entry.roomId !== options.roomId) return null;
   const overallState = agentInspectorOverallState(entry);
   const presentation = overallPresentation(overallState);
+  const now = nowProjection(entry, overallState);
   const resourceFreshness = options.resourceFreshness ?? "fresh";
   const mentionInsertText = options.mentionInsertTextByEntryId?.get(entry.id) ?? null;
   const rawTurnControl = projectAgentInspectorTurnControl(entry);
@@ -712,7 +788,12 @@ export function projectAgentInspector(
     overallLabel: presentation.label,
     overallDetail: presentation.detail,
     readiness: readiness(entry),
-    now: nowProjection(entry, overallState),
+    deliveryProgress: deliveryProgress(
+      entry,
+      options.deliveryRetryingKeys ?? new Set(),
+      now?.kind === "progress" && overallState === "responding",
+    ),
+    now,
     assignedWork: exactAssignedWork(entry, options.tasks ?? []),
     recentOutcome: recentOutcome(entry),
     continuationRecovery: continuationRecovery(entry, actions),

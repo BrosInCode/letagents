@@ -311,6 +311,12 @@ export interface ProviderContinuationRepairRequest {
   expectedProviderContinuationId: string;
   /** A thread/start result already checkpointed by an interrupted repair. */
   checkpointedReplacementProviderContinuationId?: string | null;
+  /**
+   * This exact continuation already appeared to rematerialize and then failed
+   * the next turn/start. Skip another optimistic reuse and create a durable
+   * replacement instead.
+   */
+  forceReplacement?: boolean;
   cwd: string;
   launchPolicy: unknown;
   model?: string | null;

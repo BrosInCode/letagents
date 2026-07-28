@@ -40,11 +40,13 @@ function assertProviderHandle(
 class FakeRpc implements CodexAdapterRpc {
   readonly requests: RecordedRequest[] = [];
   readonly threadReadCounts = new Map<string, number>();
+  readonly threadResumeCounts = new Map<string, number>();
   connected = false;
   closed = false;
   turnStatus = "completed";
   private threadStartCount = 0;
   private readonly missingThreadReads = new Map<string, number>();
+  private readonly missingThreadResumes = new Map<string, number>();
   private readonly disconnectListeners = new Set<() => void>();
 
   constructor(
@@ -87,12 +89,18 @@ class FakeRpc implements CodexAdapterRpc {
     }
     if (method === "thread/resume") {
       const threadId = (params as { threadId: string }).threadId;
+      this.threadResumeCounts.set(threadId, (this.threadResumeCounts.get(threadId) ?? 0) + 1);
       if (!this.options.resumeSupported) throw new Error("JSON-RPC -32601: method not found");
       if (threadId === "00000000-0000-0000-0000-000000000000") {
         if (this.options.placeholderResumeIsFatal) {
           throw new Error("protocol error: invalid placeholder continuation");
         }
         throw new Error("thread not found");
+      }
+      const missingResumes = this.missingThreadResumes.get(threadId) ?? 0;
+      if (missingResumes > 0) {
+        if (Number.isFinite(missingResumes)) this.missingThreadResumes.set(threadId, missingResumes - 1);
+        throw new Error(`thread not found: ${threadId}`);
       }
       return { thread: { id: threadId } } as T;
     }
@@ -157,8 +165,8 @@ class FakeRpc implements CodexAdapterRpc {
     this.notify(notification);
   }
 
-  markThreadMissing(threadId: string, readCount = Number.POSITIVE_INFINITY): void {
-    this.missingThreadReads.set(threadId, readCount);
+  markThreadMissing(threadId: string, resumeCount = Number.POSITIVE_INFINITY): void {
+    this.missingThreadResumes.set(threadId, resumeCount);
   }
 }
 
@@ -671,12 +679,15 @@ test("Codex reports an exact missing conversation as a typed pre-turn failure", 
   assert.equal(handle.pid, 4100);
 });
 
-test("Codex repairs a confirmed missing conversation on the same app-server process", async () => {
+test("Codex repairs a readable-but-not-runnable conversation on the same app-server process", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
   const client = harness.clients[0]!;
-  const readsBefore = client.threadReadCounts.get("thread-1") ?? 0;
+  const resumesBefore = client.threadResumeCounts.get("thread-1") ?? 0;
+  const readsBefore = client.requests.filter((request) =>
+    request.method === "thread/read"
+    && (request.params as { threadId?: string } | undefined)?.threadId === "thread-1").length;
   client.markThreadMissing("thread-1");
   const checkpointed: string[] = [];
 
@@ -703,7 +714,14 @@ test("Codex repairs a confirmed missing conversation on the same app-server proc
   });
   assert.deepEqual(checkpointed, ["thread-1-replacement-1"]);
   assert.deepEqual(harness.sleeps, [1_000, 2_000, 4_000], "probes occur at absolute 0s, 1s, 3s, and 7s");
-  assert.equal((client.threadReadCounts.get("thread-1") ?? 0) - readsBefore, 4);
+  assert.equal((client.threadResumeCounts.get("thread-1") ?? 0) - resumesBefore, 4);
+  assert.equal(
+    client.requests.filter((request) =>
+      request.method === "thread/read"
+      && (request.params as { threadId?: string } | undefined)?.threadId === "thread-1").length - readsBefore,
+    0,
+    "metadata readability is not accepted as execution readiness",
+  );
   assert.equal(client.requests.filter((request) => request.method === "thread/start").length, 2);
   assert.equal(harness.launches.length, 1, "repair must not launch another app-server");
   assert.equal(handle.pid, 4100);
@@ -740,6 +758,31 @@ test("Codex reuses a conversation that materializes during the grace window", as
   assert.deepEqual(harness.sleeps, [1_000, 2_000]);
   assert.equal(checkpoints, 0);
   assert.equal(client.requests.filter((request) => request.method === "thread/start").length, 1);
+});
+
+test("Codex force-replaces a continuation that already failed after rematerialization", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const checkpointed: string[] = [];
+
+  const result = await adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "thread-1",
+    forceReplacement: true,
+    cwd: "/tmp/letagents-work-attempt",
+    launchPolicy: spawnRequest().launchPolicy,
+  }, {
+    checkpointReplacement: async (continuation) => { checkpointed.push(continuation); },
+  });
+
+  assert.equal(result.outcome, "replaced");
+  assert.equal(result.replacementProviderContinuationId, "thread-1-replacement-1");
+  assert.equal(handle.providerContinuationId, "thread-1-replacement-1");
+  assert.deepEqual(checkpointed, ["thread-1-replacement-1"]);
+  assert.equal(client.threadResumeCounts.get("thread-1") ?? 0, 0, "a disproven rematerialization is never probed again");
+  assert.deepEqual(harness.sleeps, []);
 });
 
 test("Codex resumes a checkpointed replacement after a repair crash without creating another thread", async () => {

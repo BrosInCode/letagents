@@ -14,7 +14,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
-import { isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
+import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
@@ -89,6 +89,50 @@ test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs("36000000ms"), 36_030_000);
   assert.equal(workplaceLivenessStaleAfterMs("999999999"), 86_430_000);
   assert.equal(workplaceLivenessStaleAfterMs("invalid"), 210_000);
+});
+
+test("continuation repair resumes every uncommitted journal phase from the original missing conversation", () => {
+  const inboxItemId = "inbox_1";
+  const originalContinuation = "thread_missing";
+  const promotedReplacement = "thread_replacement";
+  for (const phase of ["probing", "replacement_created", "failed"] as const) {
+    assert.equal(
+      continuationRepairMissingContinuation({
+        inbox_item_id: inboxItemId,
+        phase,
+        missing_continuation: originalContinuation,
+      }, inboxItemId, promotedReplacement),
+      originalContinuation,
+      `${phase} remains owned by the interrupted repair journal`,
+    );
+  }
+  assert.equal(
+    continuationRepairMissingContinuation({
+      inbox_item_id: inboxItemId,
+      phase: "committed",
+      missing_continuation: originalContinuation,
+    }, inboxItemId, promotedReplacement),
+    promotedReplacement,
+    "only a committed repair makes the replacement the next missing continuation",
+  );
+  assert.equal(
+    continuationRepairMissingContinuation({
+      inbox_item_id: "another_inbox",
+      phase: "replacement_created",
+      missing_continuation: originalContinuation,
+    }, inboxItemId, promotedReplacement),
+    promotedReplacement,
+    "a repair for another FIFO item cannot claim this one",
+  );
+});
+
+test("continuation repair exhaustion policy treats the exact durable error as already persisted", () => {
+  assert.equal(continuationRepairExhaustionNeedsPersistence(null), true);
+  assert.equal(continuationRepairExhaustionNeedsPersistence("another failure"), true);
+  assert.equal(
+    continuationRepairExhaustionNeedsPersistence(CONTINUATION_REPAIR_EXHAUSTED_ERROR),
+    false,
+  );
 });
 
 test("resolveReadyReachedAt stamps ready once, monotonically, and only when running + unblocked + live (task_84)", () => {

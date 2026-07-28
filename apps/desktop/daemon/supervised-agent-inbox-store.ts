@@ -722,9 +722,62 @@ export class SupervisedAgentInboxStore {
     }));
   }
 
+  async exhaustCommittedContinuationRepair(
+    inboxItemId: string,
+    repairId: string,
+    error: string,
+  ): Promise<SupervisedInboxItem> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const repairRow = database.prepare(
+        "SELECT * FROM provider_continuation_repairs WHERE repair_id=?",
+      ).get(repairId) as Row | undefined;
+      const itemRow = database.prepare(
+        "SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?",
+      ).get(inboxItemId) as Row | undefined;
+      if (!repairRow || !itemRow) throw new Error("Conversation restoration evidence is no longer available.");
+      const repair = rowToContinuationRepair(repairRow);
+      const item = rowToItem(itemRow);
+      if (
+        repair.inbox_item_id !== item.inbox_item_id
+        || repair.agent_id !== item.agent_id
+        || repair.phase !== "committed"
+        || item.state !== "blocked"
+        || item.failure_code !== "provider_continuation_missing"
+        || item.attempt_count !== 0
+        || item.provider_turn_id
+        || item.outcome
+      ) {
+        throw new Error("Conversation restoration can no longer be exhausted safely.");
+      }
+      this.assertCurrentHead(database, item);
+      const timestamp = this.now();
+      run(
+        database.prepare(
+          "UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?",
+        ),
+        error,
+        timestamp,
+        inboxItemId,
+      );
+      this.recordEvent(
+        database,
+        inboxItemId,
+        `continuation_repair_exhausted:${repairId}`,
+        "blocked",
+        timestamp,
+        error,
+      );
+      return rowToItem(
+        database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row,
+      );
+    }));
+  }
+
   async latestContinuationRepair(agentId: string): Promise<ProviderContinuationRepair | null> {
     return this.read(async (database) => {
-      const row = database.prepare("SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare(
+        "SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+      ).get(agentId) as Row | undefined;
       return row ? rowToContinuationRepair(row) : null;
     });
   }

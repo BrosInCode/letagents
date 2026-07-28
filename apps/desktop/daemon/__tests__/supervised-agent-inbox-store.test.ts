@@ -190,6 +190,60 @@ test("continuation repair journal resumes across daemon generations and releases
   } finally { await env.cleanup(); }
 });
 
+test("a committed repair can be durably exhausted without reopening the blocked head", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-27T12:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "repair-loop",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: thread-1",
+    });
+    const repair = await store.beginContinuationRepair({
+      agent_id: "repair-loop",
+      room_id: "room",
+      inbox_item_id: item!.inbox_item_id,
+      daemon_generation: 4,
+      execution_generation_id: "execution_1",
+      work_attempt_id: "attempt_1",
+      expected_pid: 4100,
+      expected_process_identity: "pid-4100-birth-1",
+      missing_continuation: "thread-1",
+    });
+    await store.commitContinuationRepair(repair.repair_id, "thread-1", false);
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.transition(item!.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: thread-1",
+    });
+
+    const exhausted = await store.exhaustCommittedContinuationRepair(
+      item!.inbox_item_id,
+      repair.repair_id,
+      "Automatic recovery stopped to prevent a retry loop.",
+    );
+    assert.equal(exhausted.state, "blocked");
+    assert.equal(exhausted.attempt_count, 0);
+    assert.equal(exhausted.last_error, "Automatic recovery stopped to prevent a retry loop.");
+    await store.exhaustCommittedContinuationRepair(
+      item!.inbox_item_id,
+      repair.repair_id,
+      "Automatic recovery stopped to prevent a retry loop.",
+    );
+    assert.equal(
+      (await store.receipts("repair-loop"))[0]!.timeline.filter((event) =>
+        event.detail === "Automatic recovery stopped to prevent a retry loop.").length,
+      1,
+      "replayed exhaustion records one durable blocked event",
+    );
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("v12 migration types only exact pre-turn historical missing-thread failures", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);
@@ -290,6 +344,127 @@ test("v12 migration types only exact pre-turn historical missing-thread failures
     assert.equal((await migrated.get(started!.inbox_item_id))?.failure_code, null, "a started turn remains ambiguous");
     assert.equal((await migrated.get(wrapped!.inbox_item_id))?.failure_code, null, "similar prose is never promoted to recovery authority");
     await migrated.close();
+  } finally { await env.cleanup(); }
+});
+
+test("current v13 repairs an intermediate inbox missing the failure-code constraint", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [item] = await store.ingestPoll({
+      agent_id: "partial-v13",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "blocked", {
+      failure_code: "provider_continuation_missing",
+      last_error: "thread not found: 00000000-0000-0000-0000-000000000001",
+    });
+    const repair = await store.beginContinuationRepair({
+      agent_id: "partial-v13",
+      room_id: "room",
+      inbox_item_id: item!.inbox_item_id,
+      daemon_generation: 4,
+      execution_generation_id: "execution_1",
+      work_attempt_id: "attempt_1",
+      expected_pid: 4100,
+      expected_process_identity: "pid-4100-birth-1",
+      missing_continuation: "00000000-0000-0000-0000-000000000001",
+    });
+    await store.close();
+
+    // Reproduce the intermediate v13 build that added the column and journal
+    // but omitted the failure-code CHECK from the persisted table definition.
+    const partial = new DatabaseSync(env.database);
+    const schemaVersion = (partial.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
+    partial.exec("PRAGMA writable_schema=ON");
+    partial.prepare(`
+      UPDATE sqlite_master
+      SET sql=replace(
+        sql,
+        'failure_code TEXT CHECK(failure_code IS NULL OR failure_code=''provider_continuation_missing'')',
+        'failure_code TEXT'
+      )
+      WHERE type='table' AND name='supervised_agent_inbox'
+    `).run();
+    partial.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+    partial.close();
+
+    const repaired = new SupervisedAgentInboxStore(env.database);
+    assert.equal(
+      (await repaired.get(item!.inbox_item_id))?.failure_code,
+      "provider_continuation_missing",
+      "typed failure authority survives the table repair",
+    );
+    assert.equal(
+      (await repaired.latestContinuationRepair("partial-v13"))?.repair_id,
+      repair.repair_id,
+      "the continuation-repair journal survives the table repair",
+    );
+    await repaired.close();
+
+    const inspection = new DatabaseSync(env.database);
+    const inboxSql = (inspection.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'",
+    ).get() as { sql: string }).sql;
+    assert.match(
+      inboxSql,
+      /CHECK\s*\(\s*failure_code\s+IS\s+NULL\s+OR\s+failure_code\s*=\s*'provider_continuation_missing'\s*\)/i,
+    );
+    assert.equal(
+      (inspection.prepare(
+        "SELECT COUNT(*) AS count FROM supervised_agent_inbox_events WHERE inbox_item_id=?",
+      ).get(item!.inbox_item_id) as { count: number }).count,
+      4,
+      "causal inbox events survive the table repair",
+    );
+    assert.equal(inspection.prepare("PRAGMA foreign_key_check").get(), undefined);
+    inspection.close();
+  } finally { await env.cleanup(); }
+});
+
+test("current v13 rejects unsupported failure codes even when the repair journal is absent", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [item] = await store.ingestPoll({
+      agent_id: "unsupported-failure",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.close();
+
+    const malformed = new DatabaseSync(env.database);
+    const schemaVersion = (malformed.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
+    malformed.exec(`
+      PRAGMA foreign_keys=OFF;
+      DROP TABLE provider_continuation_repairs;
+      PRAGMA writable_schema=ON;
+    `);
+    malformed.prepare(`
+      UPDATE sqlite_master
+      SET sql=replace(
+        sql,
+        'failure_code TEXT CHECK(failure_code IS NULL OR failure_code=''provider_continuation_missing'')',
+        'failure_code TEXT'
+      )
+      WHERE type='table' AND name='supervised_agent_inbox'
+    `).run();
+    malformed.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};`);
+    malformed.close();
+
+    const unsupported = new DatabaseSync(env.database);
+    unsupported.prepare(
+      "UPDATE supervised_agent_inbox SET failure_code='future_failure' WHERE inbox_item_id=?",
+    ).run(item!.inbox_item_id);
+    unsupported.close();
+
+    const rejected = new SupervisedAgentInboxStore(env.database);
+    await assert.rejects(
+      () => rejected.get(item!.inbox_item_id),
+      /unsupported continuation failure code/,
+    );
+    await rejected.close();
   } finally { await env.cleanup(); }
 });
 

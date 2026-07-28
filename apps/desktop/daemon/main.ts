@@ -21,7 +21,7 @@ import { deriveProviderConfigurationSnapshot, type ProviderReasoningEffort } fro
 import { assertSupervisedPermissionProfileAvailable, supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
-import { SupervisedAgentInboxStore, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
+import { SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
@@ -91,6 +91,23 @@ const WORKER_MINT_TIMEOUT_MS = 2_000;
 const WORKER_MINT_MAX_ATTEMPTS = 3;
 const WORKER_MINT_RETRY_DELAY_MS = 100;
 const WORKER_MINT_FALLBACK_FRESH_MS = 2 * 60_000;
+export const CONTINUATION_REPAIR_EXHAUSTED_ERROR =
+  "The replacement conversation also became unavailable before a model turn started. Automatic recovery stopped to prevent a retry loop.";
+
+export function continuationRepairMissingContinuation(
+  previousRepair: Pick<ProviderContinuationRepair, "inbox_item_id" | "phase" | "missing_continuation"> | null,
+  inboxItemId: string,
+  currentContinuation: string,
+): string {
+  return previousRepair?.inbox_item_id === inboxItemId
+    && previousRepair.phase !== "committed"
+    ? previousRepair.missing_continuation
+    : currentContinuation;
+}
+
+export function continuationRepairExhaustionNeedsPersistence(lastError: string | null): boolean {
+  return lastError !== CONTINUATION_REPAIR_EXHAUSTED_ERROR;
+}
 
 function supervisedProviderLabel(provider: string): string {
   switch (provider.trim().toLowerCase()) {
@@ -1386,9 +1403,33 @@ export class SupervisorDaemon {
       if (!credential || credential !== agent.bearer) return "authority_changed";
 
       const durableContinuation = entry.provider_ref.provider_continuation_id;
-      const missingContinuation = previousRepair?.inbox_item_id === item.inbox_item_id
-        ? previousRepair.missing_continuation
-        : agent.providerContinuationId;
+      const currentContinuation = agent.providerContinuationId;
+      if (!currentContinuation) return "failed";
+      const previousCommittedForCurrentContinuation = Boolean(
+        previousRepair
+        && previousRepair.inbox_item_id === item.inbox_item_id
+        && previousRepair.phase === "committed"
+        && previousRepair.replacement_continuation === currentContinuation,
+      );
+      const previousRepairOnlyRematerialized = previousCommittedForCurrentContinuation
+        && previousRepair!.missing_continuation === previousRepair!.replacement_continuation;
+      if (previousCommittedForCurrentContinuation && !previousRepairOnlyRematerialized && !input.manual) {
+        if (!continuationRepairExhaustionNeedsPersistence(item.last_error)) return "failed";
+        await this.supervisedInbox.exhaustCommittedContinuationRepair(
+          item.inbox_item_id,
+          previousRepair!.repair_id,
+          CONTINUATION_REPAIR_EXHAUSTED_ERROR,
+        );
+        this.notifyStateChanged();
+        return "failed";
+      }
+      const forceReplacement = previousCommittedForCurrentContinuation
+        && (previousRepairOnlyRematerialized || input.manual);
+      const missingContinuation = continuationRepairMissingContinuation(
+        previousRepair,
+        item.inbox_item_id,
+        currentContinuation,
+      );
       if (!missingContinuation) return "failed";
       const replacementAlreadyDurable = previousRepair?.replacement_continuation ?? null;
       const canReconcileFailedReplacement = previousRepair?.inbox_item_id === item.inbox_item_id
@@ -1445,6 +1486,7 @@ export class SupervisorDaemon {
           workAttemptId: entry.work_attempt_id,
           expectedProviderContinuationId: repair.missing_continuation,
           checkpointedReplacementProviderContinuationId: repair.replacement_continuation,
+          forceReplacement,
           cwd: entry.workspace_path ?? "",
           launchPolicy: entry.provider_launch_policy,
           model: entry.model,

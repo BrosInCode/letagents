@@ -8,7 +8,12 @@
       :data-action="action.kind"
       @click="emitIntent(action)"
     >
-      {{ action.label }}
+      <span
+        v-if="busy && busyKind === action.kind"
+        class="agent-inspector-action-spinner"
+        aria-hidden="true"
+      ></span>
+      {{ busy && busyKind === action.kind ? progressLabel(action) : action.label }}
     </button>
 
     <div v-if="hasOverflow" ref="overflowRoot" class="agent-inspector-overflow" @focusout="handleOverflowFocusOut">
@@ -61,13 +66,16 @@ import type {
 } from "../../../../domain/agent-inspector";
 import { AGENT_INSPECTOR_RETIRE_CONFIRMATION } from "../../../../domain/agent-inspector-settings";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   entryId: string;
   roomId: string;
   actions: readonly AgentInspectorActionAvailability[];
   busy: boolean;
+  busyKind?: AgentInspectorActionIntent["kind"] | null;
   compact: boolean;
-}>();
+}>(), {
+  busyKind: null,
+});
 const emit = defineEmits<{ action: [intent: AgentInspectorActionIntent] }>();
 
 const overflowOpen = ref(false);
@@ -122,6 +130,11 @@ function emitIntent(action: AgentInspectorActionAvailability): void {
     kind: action.kind,
     ...(action.sourceMessageId ? { sourceMessageId: action.sourceMessageId } : {}),
   });
+}
+
+function progressLabel(action: AgentInspectorActionAvailability): string {
+  if (action.kind === "retry_delivery") return "Retrying…";
+  return action.label;
 }
 
 function emitOverflowIntent(action: AgentInspectorActionAvailability): void {
