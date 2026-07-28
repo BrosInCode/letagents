@@ -36,6 +36,7 @@ import {
   branchScopedGitRoomName,
   gitRoomFromBranchRoomIdentifier,
 } from "./managed-agent-branch-scope.js";
+import { inspectClaudeCodeVersion } from "./claude-code-version.js";
 import {
   getDesktopAgentProvider,
   isDesktopAgentProviderId,
@@ -283,6 +284,19 @@ async function claudeCodePreflight(
   }
 
   const version = firstOutputLine(versionResult);
+  const versionReadiness = inspectClaudeCodeVersion(version ?? "");
+  if (!versionReadiness.supported) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Claude Code needs an update.",
+      detail: versionReadiness.error,
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
   const authResult = await execFileWithTimeout(command, ["auth", "status"], { timeoutMs });
   if (!authResult.ok) {
     return {

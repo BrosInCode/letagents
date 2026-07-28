@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -48,6 +48,7 @@ import {
   getJsonLetAgentsMcpServerFromRaw,
   LETAGENTS_NPX_ARGS,
 } from "../mcp-config.js";
+import { requireSupportedClaudeCodeVersion } from "./claude-code-version.js";
 
 // P2a (plan v10 §4.8/§6): Claude Code through its NATIVE harness. The legacy
 // managed-Claude engine runs the Agent SDK in-process inside Electron — no OS
@@ -62,6 +63,7 @@ import {
 // auth, and MCP config (v10 §3 — the workplace, not the runtime).
 
 const INIT_TIMEOUT_MS = 30_000;
+const VERSION_TIMEOUT_MS = 8_000;
 
 /** One parsed stream-json line from the CLI. */
 type ClaudeStreamMessage = Record<string, unknown> & { type?: unknown; subtype?: unknown };
@@ -82,6 +84,7 @@ export interface ClaudeCliChild {
 }
 
 export interface ClaudeCodeProviderAdapterDependencies {
+  readVersion(claudeBin: string): Promise<string>;
   launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild;
   createLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
@@ -261,6 +264,24 @@ export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env, overrides: N
   return env;
 }
 
+function defaultReadVersion(claudeBin: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      claudeBin,
+      ["--version"],
+      { timeout: VERSION_TIMEOUT_MS, env: claudeCliEnv(process.env) },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`Claude Code could not be checked: ${errorMessage(error)}`));
+          return;
+        }
+        resolve(String(stdout || stderr || ""));
+      },
+    );
+    child.stdin?.end();
+  });
+}
+
 function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild {
   const child = spawn(input.claudeBin, input.args, {
     cwd: input.cwd,
@@ -395,6 +416,7 @@ async function defaultCreateLetAgentsMcpConfig(): Promise<{ path: string; dispos
 }
 
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
+  readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
   createLetAgentsMcpConfig: defaultCreateLetAgentsMcpConfig,
   signalProcess: defaultSignalProcess,
@@ -627,6 +649,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!req.agentDisplayName?.trim()) {
       throw new Error("Claude spawn requires the durable agent display name from the manifest.");
     }
+    const versionOutput = await this.deps.readVersion(this.claudeBin);
+    requireSupportedClaudeCodeVersion(versionOutput);
 
     const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
     const managedMcpConfig = await this.deps.createLetAgentsMcpConfig();

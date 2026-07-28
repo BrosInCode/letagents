@@ -97,6 +97,7 @@ interface HarnessOptions {
   identities?: Map<number, string | null | undefined>;
   /** Defaults to true (a well-behaved CLI); fence tests opt out to exercise escalation. */
   dieOnSigterm?: boolean;
+  versionOutput?: string;
 }
 
 function argValue(args: string[], flag: string): string | null {
@@ -115,8 +116,13 @@ function createHarness(options: HarnessOptions = {}) {
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 4100;
   let mcpConfigDisposals = 0;
+  let versionReads = 0;
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
+    async readVersion() {
+      versionReads += 1;
+      return options.versionOutput ?? "2.1.220 (Claude Code)";
+    },
     async createLetAgentsMcpConfig() {
       return {
         path: "/private/tmp/letagents-claude-mcp-test/mcp.json",
@@ -194,6 +200,7 @@ function createHarness(options: HarnessOptions = {}) {
     identities,
     dependencies,
     get mcpConfigDisposals() { return mcpConfigDisposals; },
+    get versionReads() { return versionReads; },
   };
 }
 
@@ -276,6 +283,7 @@ test("spawn launches the headless CLI with verbatim policy flags, verifies the w
     processIdentity: birthIdentity(4100),
   });
   assert.equal(handle.observedState(), "working");
+  assert.equal(harness.versionReads, 1, "the installed CLI is checked immediately before launch");
 
   const child = harness.children[0]!;
   assert.equal(child.written.length, 1, "exactly one start-prompt user message");
@@ -287,6 +295,20 @@ test("spawn launches the headless CLI with verbatim policy flags, verifies the w
   assert.ok(!/Never call yourself Codex/.test(prompt), "codename guard names this provider, not Codex");
 
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
+});
+
+test("spawn blocks an outdated Claude CLI before creating credentials or a provider process", async () => {
+  const harness = createHarness({ versionOutput: "2.1.69 (Claude Code)" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+
+  await assert.rejects(
+    adapter.spawn(spawnRequest()),
+    /Claude Code 2\.1\.69 is too old.*2\.1\.70 or newer.*claude update/,
+  );
+  assert.equal(harness.versionReads, 1);
+  assert.equal(harness.launches.length, 0);
+  assert.equal(harness.children.length, 0);
+  assert.equal(harness.mcpConfigDisposals, 0, "no credential-bearing MCP config exists before runtime admission");
 });
 
 test("Claude supervised launch passes the exact daemon generation bridge to its LetAgents MCP workplace", async () => {
