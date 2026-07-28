@@ -217,6 +217,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
         const module = await import(new URL("../dist-electron/main/agents/cursor-provider-adapter.js", import.meta.url).href) as { CursorProviderAdapter?: new () => NativeProviderAdapter };
         if (module.CursorProviderAdapter) return new module.CursorProviderAdapter();
       }
+      if (provider === "open-model") {
+        const module = await import(new URL("../dist-electron/main/agents/open-model-provider-adapter.js", import.meta.url).href) as { OpenModelProviderAdapter?: new () => NativeProviderAdapter };
+        if (module.OpenModelProviderAdapter) return new module.OpenModelProviderAdapter();
+      }
       throw new Error(`No supervised native adapter is available for ${provider}.`);
     })();
     this.adapters.set(provider, loaded);
@@ -261,5 +265,6 @@ function providerFromConnection(connection: ProviderActionRef["providerConnectio
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
+  if (connection?.kind === "opencode_server") return "open-model";
   return null;
 }

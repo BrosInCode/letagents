@@ -111,8 +111,6 @@ import {
   summarizeItems,
 } from "./codex-session-status.js";
 import { runDesktopAgentProviderPreflight } from "./providers.js";
-import { openModelCodexLaunch } from "./open-model-launch.js";
-import { readOpenModelSettings } from "./open-model-settings.js";
 import {
   normalizeManagedAgentEffortForProvider,
   normalizeManagedAgentModel,
@@ -197,18 +195,6 @@ desktopManagedAgentRuntimes.register({
   stop: stopDesktopManagedCodexAgent,
   retry: retryDesktopManagedCodexAgent,
   dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
-});
-desktopManagedAgentRuntimes.register({
-  providerId: "open-model",
-  listSessions: listDesktopManagedOpenModelAgentSessions,
-  start: startDesktopManagedOpenModelAgent,
-  // Open-model sessions live in the shared Codex-engine store: the codex
-  // runtime's inspect/stop/dispatch handle them (attribution stays correct
-  // via provider_id), so this runtime only lists and starts.
-  inspect: async () => null,
-  stop: async () => null,
-  retry: async () => null,
-  dispatchRoomStreamEvent: () => {},
 });
 desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
 desktopManagedAgentRuntimes.register(createDesktopCursorRuntime());
@@ -990,14 +976,6 @@ function rehydrateDaemonOwnedCodexSession(session: DesktopCodexLiveSessionState)
   return session;
 }
 
-function listDesktopManagedOpenModelAgentSessions(
-  roomIdentifier?: string | null,
-): DesktopManagedAgentSession[] {
-  return listDesktopManagedCodexLiveSessionsForProvider("open-model", roomIdentifier)
-    .map((session) => bindCodexLiveSessionToWorker(session))
-    .map(toPublicManagedAgentSession);
-}
-
 export function listDesktopManagedAgentSessions(
   roomIdentifier?: string | null,
 ): DesktopManagedAgentSession[] {
@@ -1073,24 +1051,6 @@ export function buildCodexManagedAgentLaunchContext(
     launch: configOverrides.length ? { configOverrides } : {},
     dedicatedServer: Boolean(configOverrides.length),
   };
-}
-
-async function startDesktopManagedOpenModelAgent(
-  input: DesktopManagedAgentStartInput,
-): Promise<DesktopManagedAgentStartResult> {
-  const settings = await readOpenModelSettings();
-  const selectedModel = normalizeManagedAgentModel(input.model) || settings.model;
-  const launch = openModelCodexLaunch({ ...settings, model: selectedModel });
-  return startDesktopManagedCodexEngineAgent(input, {
-    providerId: "open-model",
-    providerName: "Open Model",
-    ideLabel: "Open Model",
-    model: selectedModel,
-    effort: null,
-    launch,
-    dedicatedServer: true,
-    forceDesktopEvents: true,
-  });
 }
 
 async function startDesktopManagedCodexEngineAgent(

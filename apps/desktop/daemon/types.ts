@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.57";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.58";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -176,7 +176,8 @@ export type DaemonAgentLaunchIntent = {
 export type DaemonProviderConnection =
   | { kind: "codex_app_server"; url: string; pid: number | null; processIdentity?: string | null }
   | { kind: "claude_cli"; pid: number | null; processIdentity?: string | null }
-  | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null };
+  | { kind: "cursor_cli"; pid: number | null; processIdentity?: string | null }
+  | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string };
 
 export type DaemonProviderRuntimeReference = {
   work_attempt_id: string;

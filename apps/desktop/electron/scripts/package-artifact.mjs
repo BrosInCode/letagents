@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +9,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const release = join(root, "release", "LetAgents-darwin");
 const bundle = join(release, "LetAgents.app");
 const app = join(bundle, "Contents", "Resources", "app");
+const openCodeVersion = "1.18.9";
 await rm(release, { recursive: true, force: true });
 await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, { recursive: true });
 await mkdir(app, { recursive: true });
@@ -19,15 +20,28 @@ const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"
 await writeFile(join(app, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
 await cp(join(root, "package-lock.json"), join(app, "package-lock.json"));
 await promisify(execFile)("npm", ["ci", "--omit=dev", "--ignore-scripts", "--prefer-offline"], { cwd: app, maxBuffer: 8 * 1024 * 1024 });
+const requestedOpenCode = process.env.LETAGENTS_OPENCODE_BIN?.trim() || "opencode";
+const openCodePath = requestedOpenCode.includes("/")
+  ? await realpath(requestedOpenCode)
+  : (await promisify(execFile)("which", [requestedOpenCode])).stdout.trim();
+const openCodeReportedVersion = (await promisify(execFile)(openCodePath, ["--version"])).stdout.trim();
+if (!openCodeReportedVersion.includes(openCodeVersion)) {
+  throw new Error(`Packaging requires OpenCode ${openCodeVersion}; found '${openCodeReportedVersion || "unknown"}'.`);
+}
+await mkdir(join(app, "runtime"), { recursive: true });
+await cp(openCodePath, join(app, "runtime", "opencode"));
+await chmod(join(app, "runtime", "opencode"), 0o755);
 
 const required = [
   "dist-electron/main.js",
   "dist-electron/main/agents/codex-provider-adapter.js",
   "dist-electron/main/agents/claude-code-provider-adapter.js",
+  "dist-electron/main/agents/open-model-provider-adapter.js",
   "dist-daemon/main.js",
   "dist-daemon/provider-action-port-router.js",
   "dist-renderer/index.html",
   "node_modules/vue/package.json",
+  "runtime/opencode",
 ];
 const files = [];
 for (const relative of required) {

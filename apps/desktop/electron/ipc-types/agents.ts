@@ -45,7 +45,8 @@ export interface DesktopAgentProvider {
    */
   supervisedDeliveryMode?: Extract<DesktopManagedAgentDeliveryMode, "mcp_polling" | "daemon_inbox"> | null;
   runtimeCommand: string | null;
-  mcpTargetId: DesktopMcpInstallTargetId;
+  /** External MCP-install target. Null when the supervised runtime injects its own bridge. */
+  mcpTargetId: DesktopMcpInstallTargetId | null;
   permissionProfiles: DesktopManagedAgentPermissionProfile[];
   defaultPermissionProfileId: DesktopManagedAgentPermissionProfileId | null;
 }

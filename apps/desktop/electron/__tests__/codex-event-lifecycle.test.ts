@@ -315,7 +315,6 @@ async function seedDeliverableSession(input: {
   sessionId?: string;
   workerSessionId?: string;
   displayName?: string;
-  providerId?: "codex" | "open-model";
   ideLabel?: string;
   stopPhrase?: string;
   cwd?: string;
@@ -338,9 +337,6 @@ async function seedDeliverableSession(input: {
     session_id: workerSessionId,
     session_token: `${workerSessionId}_token`,
     room_id: input.roomIdentifier,
-    // The runtime/instance markers stay codex-prefixed for every Codex-engine
-    // provider (codex AND open-model) — worker binding matches on these exact
-    // per-token markers.
     runtime: `codex:${token}`,
     agent_instance_id: `desktop-codex:${token}`,
     actor_label: `${displayName} | EmmyMay's agent | ${input.ideLabel ?? "Codex"}`,
@@ -353,7 +349,6 @@ async function seedDeliverableSession(input: {
     room_id: input.roomIdentifier,
     room_identifier: input.roomIdentifier,
     display_name: displayName,
-    provider_id: input.providerId === "open-model" ? "open-model" : undefined,
     token,
     agent_session_id: workerSessionId,
     thread_id: `thread_${sessionId}`,
@@ -698,55 +693,7 @@ test("codex stop-phrase message still ends the session when its turn is interrup
   }
 });
 
-// --- 6. open-model rides the codex runtime ---------------------------------
-
-test("open-model sessions ride the codex runtime with codex:-prefixed markers", async () => {
-  resetState();
-  const roomIdentifier = "local_room_open_model_ride";
-  const seeded = await seedDeliverableSession({
-    roomIdentifier,
-    sessionId: "open_model_ride",
-    workerSessionId: "agent_session_open_model_ride",
-    displayName: "OpenModelRiver",
-    providerId: "open-model",
-    ideLabel: "Open Model",
-  });
-  const server = installFakeCodexServer({ turnReplies: ["Open Model delivered via the codex runtime."] });
-  try {
-    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
-      id: "msg_open_model_ride",
-      text: "please check this",
-      threadRootId: "msg_open_model_ride",
-    }));
-
-    const reply = await waitFor(async () => {
-      const page = await getLocalChatMessages(roomIdentifier);
-      return page.messages.find((message) => message.text === "Open Model delivered via the codex runtime.") ?? null;
-    }, "open-model reply delivered by the codex runtime");
-
-    assert.ok(reply);
-    // Delivered exactly once — the open-model runtime's own dispatch is a no-op;
-    // the codex runtime is what picks up open-model live sessions.
-    assert.equal(server.turnStartCount(), 1);
-    const session = getCurrentCodexLiveSession(roomIdentifier);
-    assert.equal(session?.provider_id, "open-model");
-    assert.equal(session?.status, "completed");
-    // The invariant that the port must preserve: codex:-prefixed runtime and
-    // desktop-codex:-prefixed instance markers. Delivery only succeeds because
-    // the worker binding matched on these exact codex-prefixed markers.
-    const worker = getStoredAgentSession(seeded.agent_session_id ?? null);
-    assert.ok(worker?.runtime?.startsWith("codex:"), `runtime marker was ${worker?.runtime}`);
-    assert.ok(
-      worker?.agent_instance_id?.startsWith("desktop-codex:"),
-      `instance marker was ${worker?.agent_instance_id}`,
-    );
-    assert.equal(worker?.liveness_capability, "desktop_supervised_codex_app_server");
-  } finally {
-    server.restore();
-  }
-});
-
-// --- 7. change-baseline timing ----------------------------------------------
+// --- 6. change-baseline timing ----------------------------------------------
 
 test("codex captures the change baseline after the previous turn goes idle, not at enqueue", async () => {
   resetState();

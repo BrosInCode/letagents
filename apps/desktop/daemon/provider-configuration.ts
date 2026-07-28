@@ -51,7 +51,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   const policy = plainPolicy(input.launchPolicy, provider);
   const normalizedModel = input.model?.trim() ?? null;
 
-  if (provider === "codex" || provider === "open-model") {
+  if (provider === "codex") {
     for (const key of reservedCodexPolicy) if (Object.hasOwn(policy, key)) throw new Error(`Codex launch policy cannot override '${key}'.`);
     const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access"]);
     requirePolicyMatch(policy, "approvalPolicy", "never", provider);
@@ -59,6 +59,22 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     return {
       provider, model: normalizedModel, reasoningEffort: input.reasoningEffort, permissionProfileId: profile,
       launchPolicy: { ...policy, approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+      configurationRevision: input.configurationRevision,
+    };
+  }
+
+  if (provider === "open-model") {
+    if (input.reasoningEffort !== null) {
+      throw new Error("Open Model reasoning effort is controlled by the selected endpoint and model.");
+    }
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access"]);
+    requirePolicyMatch(policy, "permission", { "*": "allow" }, provider);
+    return {
+      provider,
+      model: normalizedModel,
+      reasoningEffort: null,
+      permissionProfileId: profile,
+      launchPolicy: { ...policy, permission: { "*": "allow" } },
       configurationRevision: input.configurationRevision,
     };
   }
@@ -140,8 +156,10 @@ export function deriveProviderConfigurationSnapshot(
 }
 
 function stripProfileAuthority(provider: string, policy: Record<string, unknown>): Record<string, unknown> {
-  const authorityKeys = provider === "codex" || provider === "open-model"
+  const authorityKeys = provider === "codex"
     ? ["approvalPolicy", "sandboxPolicy"]
+    : provider === "open-model"
+      ? ["permission"]
     : provider === "claude-code" || provider === "claude"
       ? ["permissionMode", "dangerouslySkipPermissions"]
       : provider === "cursor"

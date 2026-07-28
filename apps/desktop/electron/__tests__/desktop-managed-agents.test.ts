@@ -449,7 +449,6 @@ async function setupDesktopEventRoomToolSession(input: {
   displayName: string;
   cwd?: string;
   repoBranch?: string | null;
-  providerId?: "codex" | "open-model";
   ideLabel?: string;
 }): Promise<void> {
   const token = `LOCAL_CODEX_ROOM_${input.sessionId}`;
@@ -476,7 +475,6 @@ async function setupDesktopEventRoomToolSession(input: {
     room_identifier: input.roomIdentifier,
     room_display_name: "Desktop Event Room",
     display_name: input.displayName,
-    provider_id: input.providerId === "open-model" ? "open-model" : undefined,
     cwd: input.cwd ?? "/tmp/repo",
     repo_branch: input.repoBranch ?? "codex/git-rooms",
     token,
@@ -1601,65 +1599,6 @@ test("desktop room tool result prompts return structured brokered results", () =
   assert.match(prompt, /worker session token was not exposed/);
   assert.match(prompt, /untrusted room\/task\/artifact content/);
   assert.match(prompt, /LETAGENTS_ROOM_TOOL_REQUEST/);
-});
-
-test("Open Model desktop events run two brokered room tools before the final reply", async () => {
-  resetState();
-  const roomIdentifier = "local_room_open_model_tools";
-  await setupDesktopEventRoomToolSession({
-    roomIdentifier,
-    sessionId: "open_model_room_tools",
-    workerSessionId: "agent_session_open_model_tools",
-    displayName: "OpenModelRiver",
-    providerId: "open-model",
-    ideLabel: "Open Model",
-  });
-
-  const firstRequest =
-    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"get_board","arguments":{"open":true}}`;
-  const secondRequest =
-    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"post_status","arguments":{"status":"checking board"},"idempotency_key":"event_1:status"}`;
-  const websocket = installScriptedCodexWebSocketForTest([
-    firstRequest,
-    secondRequest,
-    "Final public reply after tools.",
-  ]);
-  const fetchMock = installReadyAndReasoningFetchForTest();
-  try {
-    dispatchRoomStreamEventToManagedAgents(messageEvent({
-      roomIdentifier,
-      message: {
-        ...messageEvent().message,
-        id: "msg_open_model_tools",
-        text: "please check the board and report back",
-        threadRootId: "msg_open_model_tools",
-      },
-    }));
-
-    const finalMessage = await waitForCondition(async () => {
-      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
-      const page = await getLocalChatMessages(roomIdentifier);
-      return page.messages.find((message) => message.text === "Final public reply after tools.") ?? null;
-    }, "Open Model desktop event final local reply");
-
-    assert.equal(finalMessage.sender, "OpenModelRiver | EmmyMay's agent | Open Model");
-    const page = await getLocalChatMessages(roomIdentifier);
-    assert.ok(page.messages.some((message) => message.text === "[status] checking board"));
-    assert.equal(
-      websocket.sentMessages.filter((message) => message.method === "turn/start").length,
-      3,
-    );
-    assert.match(websocket.prompts[0] ?? "", /please check the board and report back/);
-    assert.match(websocket.prompts[1] ?? "", /Desktop room tool result/);
-    assert.match(websocket.prompts[1] ?? "", /"tool": "get_board"/);
-    assert.match(websocket.prompts[2] ?? "", /Desktop room tool result/);
-    assert.match(websocket.prompts[2] ?? "", /"tool": "post_status"/);
-    assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.provider_id, "open-model");
-    assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.last_error, null);
-  } finally {
-    fetchMock.restore();
-    websocket.restore();
-  }
 });
 
 test("Codex desktop events report malformed brokered room tool requests", async () => {
@@ -3968,12 +3907,12 @@ test("Codex app-server launcher uses the trusted worktree as its process cwd", a
 
 test("Codex app-server launcher captures early process output without leaking env secrets", async () => {
   const bin = join(tempDir, "codex-failing-app-server");
-  const secret = "open-model-secret-for-test";
+  const secret = "provider-secret-for-test";
   writeFileSync(
     bin,
     [
       "#!/usr/bin/env node",
-      "const secret = process.env.LETAGENTS_OPEN_MODEL_API_KEY || '';",
+      "const secret = process.env.OPENAI_API_KEY || '';",
       "process.stderr.write('fatal app-server key ');",
       "process.stderr.write(secret.slice(0, 7));",
       "setTimeout(() => {",
@@ -3986,7 +3925,7 @@ test("Codex app-server launcher captures early process output without leaking en
   );
 
   const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
-    env: { LETAGENTS_OPEN_MODEL_API_KEY: secret },
+    env: { OPENAI_API_KEY: secret },
   });
   const exit = await waitForCodexLaunchExitForTest(launch);
 
