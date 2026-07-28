@@ -814,6 +814,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const createInput = { creationRequestId: "request_alpha", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Durable Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
     const created = await client.create(createInput);
     assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
+    assert.equal(created.deliveryMode, "daemon_inbox");
     assert.equal(wire.entries[0]?.last_worker_binding, null, "production creation durably attests that no worker session exists yet");
     const retried = await client.create(createInput);
     assert.equal(retried.id, created.id, "one Start request is idempotent across retries");
@@ -897,7 +898,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const listed = await client.list(created.roomId);
     assert.equal(listed.find((entry) => entry.id === second.id)?.desiredState, "running", "stopping one same-provider agent does not affect its peer");
     assert.equal((await client.readAttempt(created.id)).workspacePath, null);
-    await client.create({
+    const claude = await client.create({
       roomIdentifier: "git-room:github.com:owner/claude-repo",
       displayName: "Durable Claude",
       providerId: "claude-code",
@@ -905,6 +906,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
       repoRootPath: "/tmp/claude-work",
       launchPolicy: { permissionMode: "acceptEdits", model: "sonnet" },
     });
+    assert.equal(claude.deliveryMode, "mcp_polling");
     assert.deepEqual(
       wire.entries.find((candidate) => candidate.provider === "claude-code")?.provider_launch_policy,
       { permissionMode: "acceptEdits", model: "sonnet" },
@@ -1040,7 +1042,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.56");
+    assert.equal(status.implementationVersion, "2.0.57");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

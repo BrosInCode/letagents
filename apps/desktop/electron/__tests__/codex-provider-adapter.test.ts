@@ -358,6 +358,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
   }), handle);
 
   assert.deepEqual(adapter.capabilities(), {
+    deliveryModes: ["mcp_polling", "daemon_inbox"],
     resume: true,
     midTurnInjection: false,
     transcriptAccess: true,

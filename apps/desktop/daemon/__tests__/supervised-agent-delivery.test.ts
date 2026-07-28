@@ -40,7 +40,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-test("Codex daemon delivery refuses legacy mcp_polling ingress", async () => {
+test("daemon delivery refuses mcp_polling ingress for every provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
   let polls = 0;
@@ -54,7 +54,9 @@ test("Codex daemon delivery refuses legacy mcp_polling ingress", async () => {
     currentAuthority,
   );
   try {
-    await delivery.poll({ ...agent, deliveryMode: "mcp_polling" });
+    for (const candidate of ["codex", "claude-code", "cursor"]) {
+      await delivery.poll({ ...agent, provider: candidate, deliveryMode: "mcp_polling" });
+    }
     assert.equal(polls, 0);
   } finally {
     await store.close();
@@ -62,7 +64,7 @@ test("Codex daemon delivery refuses legacy mcp_polling ingress", async () => {
   }
 });
 
-test("Codex daemon delivery treats an absent mode as historical mcp_polling", async () => {
+test("daemon delivery treats an absent mode as historical mcp_polling", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
   let polls = 0;
@@ -73,6 +75,22 @@ test("Codex daemon delivery treats an absent mode as historical mcp_polling", as
     const { deliveryMode: _deliveryMode, ...historicalAgent } = agent;
     await delivery.poll(historicalAgent);
     assert.equal(polls, 0);
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-provider-neutral-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let polls = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+    poll: async () => { polls += 1; return {}; }, publish: async () => {},
+  }, currentAuthority);
+  try {
+    await delivery.poll({ ...agent, provider: "claude-code", deliveryMode: "daemon_inbox" });
+    assert.equal(polls, 1);
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });

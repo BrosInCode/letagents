@@ -114,6 +114,16 @@ test("fresh Codex launch provisions before paused claim, installs before activat
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
 });
 
+test("provider-owned polling creates a paused entry without provisioning a host grant", async () => {
+  const h = harness();
+  const result = await h.coordinator.createPausedAndInstall({
+    creationRequestId: "launch_1234567", roomIdentifier: "room_alias", displayName: "Claude",
+    providerId: "claude-code", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
+  });
+  assert.equal(result.agentKey, "");
+  assert.deepEqual(h.events, ["create:room_alias"]);
+});
+
 test("grant failure occurs before the paused manifest can be activated", async () => {
   const h = harness({ provision: async () => { throw new Error("owner auth unavailable"); } });
   await assert.rejects(h.coordinator.createPausedAndInstall({
@@ -130,6 +140,28 @@ test("app restart same daemon generation reinstalls idempotently without a hando
   assert.equal(h.events.some((event) => event === "install:7"), true);
   assert.equal(h.events.some((event) => event === "bootstrap:supervised_launch_1234567:7"), true, "a cursorless pre-upgrade running entry is admitted without provider recovery");
   assert.equal(h.events.some((event) => event.includes("provision")), false);
+});
+
+test("grant reconciliation follows daemon_inbox ownership instead of provider identity", async () => {
+  const h = harness();
+  const providerNeutralEntry = { ...entry(), provider: "claude-code" };
+  h.grants.set("owner/supervised_launch_1234567", {
+    metadata: metadata("owner/supervised_launch_1234567"),
+    token: "secret_same",
+    entryId: "supervised_launch_1234567",
+    lastInstalledDaemonGeneration: 7,
+  });
+  const daemon = { ...h.daemon, async list() { h.events.push("list"); return [providerNeutralEntry]; } };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+  );
+  await coordinator.reconcileDesiredRunning();
+  assert.equal(h.events.includes("install:7"), true);
+  assert.equal(h.events.some((event) => event.startsWith("bootstrap:")), true);
 });
 
 test("reconciliation admits a cursorless stopped entry without changing its lifecycle", async () => {

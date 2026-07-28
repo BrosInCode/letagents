@@ -19,6 +19,7 @@ const agentProviders: DesktopAgentProvider[] = [
       "auth_preflight",
       "turn_control",
     ],
+    supervisedDeliveryMode: "mcp_polling",
     runtimeCommand: "claude",
     mcpTargetId: "claude-code",
     permissionProfiles: listManagedAgentPermissionProfiles("claude-code"),
@@ -29,6 +30,7 @@ const agentProviders: DesktopAgentProvider[] = [
     name: "Antigravity",
     description: "Join from Antigravity.",
     capabilities: ["external_mcp"],
+    supervisedDeliveryMode: null,
     runtimeCommand: null,
     mcpTargetId: "antigravity",
     permissionProfiles: [],
@@ -44,6 +46,7 @@ const agentProviders: DesktopAgentProvider[] = [
       "auth_preflight",
       "turn_control",
     ],
+    supervisedDeliveryMode: null,
     runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
     permissionProfiles: listManagedAgentPermissionProfiles("cursor"),
@@ -62,6 +65,7 @@ const agentProviders: DesktopAgentProvider[] = [
       "turn_control",
       "reasoning_stream",
     ],
+    supervisedDeliveryMode: "daemon_inbox",
     runtimeCommand: "codex",
     mcpTargetId: "codex",
     permissionProfiles: listManagedAgentPermissionProfiles("codex"),
@@ -78,6 +82,7 @@ const agentProviders: DesktopAgentProvider[] = [
       "turn_control",
       "reasoning_stream",
     ],
+    supervisedDeliveryMode: null,
     runtimeCommand: "codex",
     mcpTargetId: "codex",
     permissionProfiles: listManagedAgentPermissionProfiles("open-model"),
@@ -103,4 +108,14 @@ export function getDesktopAgentProvider(
   providerId: DesktopAgentProviderId,
 ): DesktopAgentProvider | null {
   return agentProviders.find((provider) => provider.id === providerId) ?? null;
+}
+
+export function supervisedDeliveryModeForProvider(
+  providerId: DesktopAgentProviderId,
+): "mcp_polling" | "daemon_inbox" {
+  const provider = getDesktopAgentProvider(providerId);
+  if (!provider?.capabilities.includes("supervised_runtime") || !provider.supervisedDeliveryMode) {
+    throw new Error(`${provider?.name ?? providerId} is not available through the supervised engine.`);
+  }
+  return provider.supervisedDeliveryMode;
 }
