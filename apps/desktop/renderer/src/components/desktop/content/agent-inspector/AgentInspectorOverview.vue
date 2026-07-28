@@ -1,5 +1,6 @@
 <template>
   <div class="agent-inspector-overview">
+    <AgentInspectorDeliveryProgress :progress="projection.deliveryProgress" />
     <AgentInspectorContinuationRecovery
       :entry-id="projection.entryId"
       :recovery="projection.continuationRecovery"
@@ -49,6 +50,7 @@
 
 <script setup lang="ts">
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
+import AgentInspectorDeliveryProgress from "./AgentInspectorDeliveryProgress.vue";
 import AgentInspectorNow from "./AgentInspectorNow.vue";
 import AgentInspectorContinuationRecovery from "./AgentInspectorContinuationRecovery.vue";
 import AgentInspectorReadinessRail from "./AgentInspectorReadinessRail.vue";

@@ -40,17 +40,18 @@
       :entry-id="projection.entryId"
       :room-id="projection.roomId"
       :actions="projection.actions"
-      :busy="actionState?.status === 'running'"
+      :busy="lifecycleActionBusy"
+      :busy-kind="lifecycleBusyKind"
       :compact="compact"
       @action="emit('action', $event)"
     />
 
     <p
-      v-if="actionState?.message"
+      v-if="visibleActionMessage"
       class="agent-inspector-action-message"
-      :data-state="actionState.status"
+      :data-state="actionState?.status"
     >
-      {{ actionState.message }}
+      {{ visibleActionMessage }}
     </p>
 
     <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleTabKeydown">
@@ -150,6 +151,17 @@ const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
 const selectedTab = ref<"overview" | "work" | "settings" | "diagnostics">("overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
+const retryRequestIsPending = computed(() => props.projection.deliveryProgress?.requestedLocally === true);
+const lifecycleActionBusy = computed(() => props.actionState?.status === "running" || retryRequestIsPending.value);
+const lifecycleBusyKind = computed<AgentInspectorActionIntent["kind"] | null>(() =>
+  props.actionState?.status === "running"
+    ? props.actionState.kind
+    : retryRequestIsPending.value ? "retry_delivery" : null);
+const visibleActionMessage = computed(() => {
+  if (!props.actionState?.message) return null;
+  if (props.actionState.kind === "retry_delivery" && props.actionState.status !== "error") return null;
+  return props.actionState.message;
+});
 
 function focusInitial(): void {
   closeButton.value?.focus({ preventScroll: true });

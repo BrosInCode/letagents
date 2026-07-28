@@ -229,6 +229,87 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
   assert.equal(projectAgentInspector(finished, { roomId: "focus_1" })?.now, null, "completion clears active Now instead of retaining a stale progress echo");
 });
 
+test("delivery progress follows durable turn phases without duplicating the thinking surface", () => {
+  const withTurn = (state: "dispatching" | "responding" | "retrying" | "publishing") => projectAgentInspector(entry({
+    deliveryReceipts: state === "responding"
+      ? [receipt("message_1", "awaiting_result", {
+        timeline: [{ phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
+      })]
+      : [],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: {
+        state,
+        inboxItemId: "inbox_message_1",
+        sourceMessageId: "message_1",
+        providerTurnId: state === "dispatching" ? null : "turn_1",
+        detail: null,
+      },
+    },
+  }), { roomId: "focus_1" });
+
+  assert.deepEqual(withTurn("dispatching")?.deliveryProgress, {
+    phase: "starting",
+    label: "Starting delivery",
+    detail: "Handing the room message to the agent.",
+    sourceMessageId: "message_1",
+    requestedLocally: false,
+  });
+  assert.equal(withTurn("responding")?.deliveryProgress, null, "the existing Now surface owns live model progress");
+  assert.equal(withTurn("retrying")?.deliveryProgress?.phase, "recovering");
+  assert.equal(withTurn("publishing")?.deliveryProgress?.phase, "publishing");
+  assert.equal(projectAgentInspector(entry(), { roomId: "focus_1" })?.deliveryProgress, null);
+
+  const respondingWhileReconnecting = entry({
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      ingress: { state: "backoff", observedAt: null, detail: "Gateway timeout" },
+      turn: {
+        state: "responding",
+        inboxItemId: "inbox_message_1",
+        sourceMessageId: "message_1",
+        providerTurnId: "turn_1",
+        detail: null,
+      },
+    },
+  });
+  assert.equal(
+    projectAgentInspector(respondingWhileReconnecting, { roomId: "focus_1" })?.deliveryProgress?.phase,
+    "responding",
+    "delivery stays visible when another health axis owns the overall state",
+  );
+});
+
+test("a pending retry remains projectable after the Inspector closes and reopens", () => {
+  const blocked = entry({
+    deliveryReceipts: [receipt("message_1", "blocked", {
+      attemptCount: 0,
+      providerTurnId: null,
+      error: "Delivery failed",
+    })],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      inbox: { state: "blocked", pendingCount: 1, blockedByMessageId: "message_1", detail: "Delivery failed" },
+      turn: { state: "failed", inboxItemId: "inbox_message_1", sourceMessageId: "message_1", providerTurnId: null, detail: "Delivery failed" },
+    },
+  });
+  const options = {
+    roomId: "focus_1",
+    deliveryRetryingKeys: new Set(["supervised_1:message_1"]),
+  };
+  const beforeClose = projectAgentInspector(blocked, options);
+  const afterReopen = projectAgentInspector(blocked, options);
+
+  assert.deepEqual(afterReopen?.deliveryProgress, beforeClose?.deliveryProgress);
+  assert.deepEqual(afterReopen?.deliveryProgress, {
+    phase: "starting",
+    label: "Retrying delivery",
+    detail: "Checking the blocked message and safely resuming its delivery.",
+    sourceMessageId: "message_1",
+    requestedLocally: true,
+  });
+});
+
 test("turn control is available only for the exact responding provider turn", () => {
   const responding = entry({
     roomAgentState: {

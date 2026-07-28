@@ -88,6 +88,7 @@ export type ProviderContinuationRepairRequest = {
   expectedProviderContinuationId: string;
   /** A thread/start result already checkpointed by an interrupted repair. */
   checkpointedReplacementProviderContinuationId?: string | null;
+  forceReplacement?: boolean;
   cwd: string;
   launchPolicy: unknown;
   model?: string | null;
