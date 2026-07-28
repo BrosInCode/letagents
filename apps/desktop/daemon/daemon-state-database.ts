@@ -1026,9 +1026,15 @@ repairAndValidateV12Shape(database: DatabaseSync): void {
 }
 
 private applyV13Shape(database: DatabaseSync): void {
+  const inboxColumns = this.tableColumns(database, "supervised_agent_inbox");
+  const hasFailureCode = inboxColumns.has("failure_code");
   const hasRepairJournal = this.tableColumns(database, "provider_continuation_repairs").size > 0;
-  if (this.tableColumns(database, "supervised_agent_inbox").has("failure_code")
-    && hasRepairJournal) {
+  const inboxDefinition = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'",
+  ).get() as Row | undefined;
+  const hasCanonicalFailureCodeConstraint = /CHECK\s*\(\s*failure_code\s+IS\s+NULL\s+OR\s+failure_code\s*=\s*'provider_continuation_missing'\s*\)/i
+    .test(String(inboxDefinition?.sql));
+  if (hasFailureCode && hasRepairJournal && hasCanonicalFailureCodeConstraint) {
     // The causal event table is additive evidence. A current-version reopen
     // may safely recreate an absent empty journal, but it must never rebuild
     // the authoritative inbox or repair journal in place.
@@ -1050,6 +1056,29 @@ private applyV13Shape(database: DatabaseSync): void {
     }
     return;
   }
+  if (hasFailureCode) {
+    const invalidFailureCode = database.prepare(`
+      SELECT failure_code
+      FROM supervised_agent_inbox
+      WHERE failure_code IS NOT NULL
+        AND failure_code <> 'provider_continuation_missing'
+      LIMIT 1
+    `).get() as Row | undefined;
+    if (invalidFailureCode) {
+      throw new Error("Daemon state v13 inbox contains an unsupported continuation failure code.");
+    }
+  }
+  const migratedFailureCode = hasFailureCode
+    ? `CASE
+        WHEN failure_code='provider_continuation_missing' THEN failure_code
+        WHEN state='blocked' AND attempt_count=0 AND provider_turn_id IS NULL AND outcome IS NULL
+          AND lower(last_error) GLOB 'thread not found: ????????-????-????-????-????????????'
+          THEN 'provider_continuation_missing'
+        ELSE NULL
+      END`
+    : `CASE WHEN state='blocked' AND attempt_count=0 AND provider_turn_id IS NULL AND outcome IS NULL
+        AND lower(last_error) GLOB 'thread not found: ????????-????-????-????-????????????'
+        THEN 'provider_continuation_missing' ELSE NULL END`;
 
   // A rolled-back version marker or interrupted legacy repair can retain the
   // current repair journal while temporarily rebuilding the older delivery
@@ -1086,9 +1115,7 @@ private applyV13Shape(database: DatabaseSync): void {
     INSERT INTO supervised_agent_inbox
       (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
       SELECT inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,
-        CASE WHEN state='blocked' AND attempt_count=0 AND provider_turn_id IS NULL AND outcome IS NULL
-          AND lower(last_error) GLOB 'thread not found: ????????-????-????-????-????????????'
-          THEN 'provider_continuation_missing' ELSE NULL END,
+        ${migratedFailureCode},
         blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at
       FROM supervised_agent_inbox_pre_v13;
 

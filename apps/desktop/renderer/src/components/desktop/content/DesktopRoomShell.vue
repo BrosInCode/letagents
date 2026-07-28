@@ -646,6 +646,7 @@ const agentInspectorProjections = computed(() => {
     roomDeliverySkipAvailable: roomDeliverySkipAvailable.value,
     resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesResource.value.state),
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
+    deliveryRetryingKeys: deliveryRetryingKeys.value,
   });
 });
 const selectedAgentDetailProjection = computed(() => {
@@ -2912,6 +2913,7 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
   };
   let operationDaemonGeneration: number | null = null;
   let turnControlFence: AgentInspectorTurnControlFence | null = null;
+  let refreshedDuringOperation = false;
   try {
     let updated: DesktopSupervisorManifestEntry | null = null;
     if (intent.kind === "pause") {
@@ -3002,14 +3004,35 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       if (!intent.sourceMessageId || !entry.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
         throw new Error("The delivery binding changed. Refresh and try again.");
       }
-      await desktopIpc.supervisor.retryRoomDelivery({
-        entryId: entry.id,
-        roomId: intent.roomId,
-        sourceMessageId: intent.sourceMessageId,
-        workAttemptId: entry.workAttemptId,
-        executionGenerationId: entry.executionGenerationId,
-        agentSessionId: entry.agentSessionId,
+      const sourceMessageId = intent.sourceMessageId;
+      const workAttemptId = entry.workAttemptId;
+      const executionGenerationId = entry.executionGenerationId;
+      const agentSessionId = entry.agentSessionId;
+      const retryResult = await deliveryRetryCoordinator.run({
+        agentId: entry.id,
+        sourceMessageId,
+      }, async () => {
+        await desktopIpc.supervisor.retryRoomDelivery({
+          entryId: entry.id,
+          roomId: intent.roomId,
+          sourceMessageId,
+          workAttemptId,
+          executionGenerationId,
+          agentSessionId,
+        });
+        await refreshManagedAgentSessions();
+        refreshedDuringOperation = true;
       });
+      if (!retryResult.started) {
+        if (currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) {
+          agentInspectorActionState.value = clearAgentInspectorActionStateIfMatching(
+            agentInspectorActionState.value,
+            operationId,
+          );
+        }
+        return;
+      }
+      if (!retryResult.ok) throw retryResult.error;
     } else if (intent.kind === "restore_conversation" || intent.kind === "skip_message") {
       const entry = projection.entry;
       if (!intent.sourceMessageId || !entry.workAttemptId || !entry.executionGenerationId || !entry.agentSessionId) {
@@ -3049,7 +3072,7 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         roomIdentifier: intent.roomId,
         inspectorRequestVersion: requestVersion,
       });
-    } else {
+    } else if (!refreshedDuringOperation) {
       await refreshManagedAgentSessions();
     }
     if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;

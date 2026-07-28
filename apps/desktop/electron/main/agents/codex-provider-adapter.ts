@@ -706,19 +706,32 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // Probe at absolute offsets 0s, 1s, 3s, and 7s. The waits are therefore
     // the differences between offsets, not 1s + 3s + 7s (which would turn the
     // advertised seven-second grace into eleven seconds).
+    const policy = normalizeLaunchPolicy(request.launchPolicy);
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
         if (waitMs) await this.deps.sleep(waitMs);
         assertAttached();
         try {
-          const read = await handle.client.request<ThreadReadResult>("thread/read", {
+          // A metadata-only thread/read can succeed for a persisted Codex
+          // thread that the live app-server still cannot execute. thread/resume
+          // is the materialization boundary: only its exact acknowledgement is
+          // evidence that a following turn/start may use this continuation.
+          const resumed = await handle.client.request<CodexThreadResult>("thread/resume", {
             threadId,
-            includeTurns: false,
+            cwd: request.cwd,
+            ...policy,
+            ...(request.model ? { model: request.model } : {}),
+            ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
           });
-          if (read.thread?.id === threadId) return true;
+          assertAttached();
+          if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
         } catch (error) {
+          if (isMethodNotFound(error)) {
+            this.resumeSupported = false;
+            throw new Error("Codex app-server cannot materialize a saved conversation because thread/resume is unavailable.");
+          }
           if (!isMissingContinuation(error, threadId)) throw error;
         }
       }
@@ -744,7 +757,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       };
     }
 
-    if (await probe(expected)) {
+    if (!request.forceReplacement && await probe(expected)) {
       return {
         handle,
         outcome: "rematerialized",
@@ -754,7 +767,6 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
 
     assertAttached();
-    const policy = normalizeLaunchPolicy(request.launchPolicy);
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
       cwd: request.cwd,
       ...policy,

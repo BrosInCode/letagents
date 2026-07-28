@@ -140,6 +140,18 @@
   font-weight: 690;
   transition: transform 120ms var(--inspector-ease-out), background-color 140ms ease, border-color 140ms ease;
 }
+.agent-inspector-action-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 7px;
+  box-sizing: border-box;
+  vertical-align: -2px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: agent-inspector-progress-spin 900ms linear infinite;
+}
 .agent-inspector-actions > button:disabled,
 .agent-inspector-overflow-menu button:disabled { cursor: default; opacity: 0.5; }
 .agent-inspector-overflow { position: relative; margin-left: auto; }
@@ -206,6 +218,7 @@
 .agent-inspector-work-empty, .agent-inspector-work-refresh { margin: 0; color: var(--text-secondary, #a1a1aa); font-size: .73rem; line-height: 1.4; }
 .agent-inspector-overview { display: grid; gap: 12px; }
 .agent-inspector-now,
+.agent-inspector-delivery-progress,
 .agent-inspector-readiness,
 .agent-inspector-continuation-recovery,
 .agent-inspector-overview-section { border: 1px solid rgba(255, 255, 255, 0.075); border-radius: 16px; background: rgba(255, 255, 255, 0.026); }
@@ -227,6 +240,86 @@
 .agent-inspector-continuation-actions button:first-child { border-color: rgba(147,197,253,.34); background: rgba(96,165,250,.12); }
 .agent-inspector-continuation-dismiss:focus-visible,
 .agent-inspector-continuation-actions button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+.agent-inspector-delivery-progress {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 11px;
+  align-items: start;
+  padding: 14px;
+  border-color: rgba(96, 165, 250, 0.21);
+  background: rgba(96, 165, 250, 0.055);
+}
+.agent-inspector-delivery-progress[data-phase="recovering"] {
+  border-color: rgba(251, 191, 36, 0.22);
+  background: rgba(251, 191, 36, 0.055);
+}
+.agent-inspector-delivery-progress-indicator {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  background: rgba(96, 165, 250, 0.1);
+  color: #93c5fd;
+}
+.agent-inspector-delivery-progress[data-phase="recovering"] .agent-inspector-delivery-progress-indicator {
+  background: rgba(251, 191, 36, 0.1);
+  color: #fbbf24;
+}
+.agent-inspector-delivery-progress-indicator::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: agent-inspector-progress-spin 900ms linear infinite;
+}
+.agent-inspector-delivery-progress-indicator > span {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.agent-inspector-delivery-progress p {
+  margin: 0;
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.agent-inspector-delivery-progress strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.84rem;
+  font-weight: 680;
+  line-height: 1.35;
+}
+.agent-inspector-delivery-progress div > span {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.agent-inspector-delivery-progress-enter-active {
+  transition: opacity 180ms var(--inspector-ease-out), transform 180ms var(--inspector-ease-out);
+}
+.agent-inspector-delivery-progress-leave-active {
+  transition: opacity 140ms var(--inspector-ease-out), transform 140ms var(--inspector-ease-out);
+}
+.agent-inspector-delivery-progress-enter-from,
+.agent-inspector-delivery-progress-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+@keyframes agent-inspector-progress-spin {
+  to { transform: rotate(360deg); }
+}
 .agent-inspector-now { display: flex; gap: 11px; padding: 14px; }
 .agent-inspector-now[data-kind="attention"] { border-color: rgba(251, 113, 133, 0.2); background: rgba(251, 113, 133, 0.055); }
 .agent-inspector-now-marker { display: grid; place-items: center; width: 30px; min-width: 30px; height: 30px; border-radius: 10px; background: rgba(96, 165, 250, 0.1); color: #93c5fd; }
@@ -392,6 +485,15 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
   .agent-inspector-scrim-leave-active { transition-property: opacity; transition-duration: 120ms; }
   .agent-inspector-panel-enter-from,
   .agent-inspector-panel-leave-to { transform: none; }
+  .agent-inspector-delivery-progress-enter-active,
+  .agent-inspector-delivery-progress-leave-active { transition-property: opacity; transition-duration: 120ms; }
+  .agent-inspector-delivery-progress-enter-from,
+  .agent-inspector-delivery-progress-leave-to { transform: none; }
+  .agent-inspector-delivery-progress-indicator::before,
+  .agent-inspector-action-spinner {
+    animation: none;
+    border-right-color: currentColor;
+  }
   .agent-inspector-close,
   .agent-inspector-overflow-trigger,
   .agent-inspector-actions > button,
@@ -420,6 +522,7 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
 @media (prefers-contrast: more) {
   .agent-inspector-surface { border-color: rgba(255, 255, 255, 0.42); background: #101011; }
   .agent-inspector-now,
+  .agent-inspector-delivery-progress,
   .agent-inspector-readiness,
   .agent-inspector-continuation-recovery,
   .agent-inspector-overview-section { border-color: rgba(255, 255, 255, 0.28); }
