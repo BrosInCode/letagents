@@ -1226,11 +1226,11 @@ test("worker mint crash windows stay unknown until exact public identity precede
     internals.publishNativeActivity = async () => true;
     internals.workerBindings.bind = async () => { throw new Error("simulated binding write failure"); };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-      ...entry, id: "host_grant_bind_retry", provider: "codex", delivery_mode: "daemon_inbox", observed_state: "absent",
+      ...entry, id: "host_grant_bind_retry", provider: "claude-code", delivery_mode: "daemon_inbox", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id, last_worker_binding: null,
     } });
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(spawns, 0, "daemon_inbox Codex cannot spawn without the desktop grant");
+    assert.equal(spawns, 0, "no daemon_inbox provider can spawn without the desktop grant");
     await admitDaemonInboxForProviderTest(daemon, "host_grant_bind_retry", entry.room_id);
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const install = { entry_id: "host_grant_bind_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-1", supervisor_grant: "host-grant-secret", grant_generation: 7, api_url: "http://127.0.0.1:3000", host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation };
@@ -1473,6 +1473,103 @@ test("stop fences a launch waiting on provider capabilities before generation cr
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
+});
+
+test("provider delivery capabilities block mismatches while legacy omissions remain compatible", async () => {
+  const runCase = async (
+    id: "delivery_mode_mismatch" | "legacy_delivery_capabilities",
+    deliveryModes: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox"> | undefined,
+  ) => {
+    const env = await fixture();
+    const paths = {
+      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+      attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    };
+    const workspace = await provisionedWorkspace(env.root, id);
+    const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+    const attempt = await durability.createAttempt({
+      taskId: id,
+      leaseId: id,
+      leaseEpoch: 0,
+      workspacePath: workspace.path,
+      workAttemptId: workspace.id,
+    });
+    await durability.close();
+    const handle = {
+      workAttemptId: attempt.work_attempt_id,
+      pid: 4401,
+      providerContinuationId: `${id}-continuation`,
+      observedState: "working" as const,
+    };
+    let spawns = 0;
+    const capabilities = {
+      resume: false,
+      midTurnInjection: false,
+      transcriptAccess: true,
+      permissionPromptBridging: false,
+      survivesRestart: true,
+      ...(deliveryModes ? { deliveryModes } : {}),
+    };
+    if (!deliveryModes) {
+      assert.equal(Object.hasOwn(capabilities, "deliveryModes"), false, "the legacy capability really omits the new field");
+    }
+    const port: ProviderActionPort = {
+      capabilities: async () => capabilities,
+      spawn: async () => { spawns += 1; return handle; },
+      attach: async () => null,
+      attachAction: async () => ({ state: "absent" }),
+      resume: async () => { throw new Error("fresh compatibility launch must not resume"); },
+      poke: async () => {},
+      stop: async () => ({
+        endedAt: new Date().toISOString(),
+        exitCode: 0,
+        signal: null,
+        terminalCause: "stopped",
+        providerContinuationId: handle.providerContinuationId,
+      }),
+      onExit: async () => () => {},
+      onStream: async () => () => {},
+    };
+    const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+    try {
+      await daemon.start();
+      await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry,
+        id,
+        provider: "claude-code",
+        delivery_mode: "mcp_polling",
+        observed_state: "absent",
+        workspace_path: attempt.workspace_path,
+        work_attempt_id: attempt.work_attempt_id,
+      } });
+      if (deliveryModes) {
+        await eventually(async () => {
+          const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
+          return current?.observed_state === "failed" && current.condition === "coordination_blocked";
+        }, "incompatible provider delivery mode rejection");
+        const blocked = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+        assert.match(blocked.last_error ?? "", /Claude Code does not support mcp_polling room delivery/);
+        const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+        assert.equal(result.execution_generations.length, 0, "an incompatible adapter cannot create a durable generation");
+        assert.equal(spawns, 0, "an incompatible adapter cannot reach provider dispatch");
+      } else {
+        await eventually(async () => {
+          const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
+          return current?.observed_state === "working";
+        }, "legacy provider capability launch");
+        const result = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as { execution_generations: unknown[] };
+        assert.equal(result.execution_generations.length, 1, "an older adapter still creates the provider generation");
+        assert.equal(spawns, 1, "an older adapter still reaches provider dispatch");
+      }
+    } finally {
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
+  };
+
+  await runCase("delivery_mode_mismatch", ["daemon_inbox"]);
+  await runCase("legacy_delivery_capabilities", undefined);
 });
 
 test("stop during grant mint and pause during capabilities both fence before provider dispatch", async () => {

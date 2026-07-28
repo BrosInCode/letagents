@@ -92,6 +92,7 @@ export interface CursorProviderAdapterOptions {
 }
 
 const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
+  deliveryModes: ["mcp_polling"],
   // `--resume <session_id>` is the documented continuation across per-turn
   // children (the legacy engine already relies on it); the adapter asserts the
   // session identity echo per turn. Subject to TrailDelta's task_38 spike cell.

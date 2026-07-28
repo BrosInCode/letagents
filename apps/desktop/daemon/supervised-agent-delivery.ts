@@ -6,7 +6,7 @@ export type SupervisedIngressAgent = {
   roomId: string;
   provider: string;
   charter?: string;
-  /** Codex daemon ingress is legal only after the durable cutover commits. */
+  /** Daemon ingress is legal only after durable ownership commits. */
   deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   /** Bound worker API origin; never inferred from a persisted credential. */
   apiUrl: string;
@@ -373,7 +373,7 @@ export class SupervisedAgentDelivery {
     }
     // The control RPC acknowledges the durable blocked -> pending transition
     // and installation of tracked work, never the provider turn itself. A
-    // Codex turn can outlive Electron's control-RPC timeout by minutes.
+    // A provider turn can outlive Electron's control-RPC timeout by minutes.
     if (!this.schedulePump(agent)) {
       throw new Error("The room delivery binding changed before retry could start.");
     }
@@ -551,7 +551,7 @@ export class SupervisedAgentDelivery {
       }, markDispatched: async () => {
         // Compatibility only for a pre-checkpoint adapter during upgrade. It
         // retains the truthful activity projection but cannot replace the
-        // exact turn-id callback implemented by bounded Codex.
+        // exact turn-id callback implemented by the bounded-turn adapter.
         if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
         setActive("responding");
@@ -562,7 +562,7 @@ export class SupervisedAgentDelivery {
         setActive("responding");
       }, checkpointTerminalResult, detachSignal: controller.signal });
       // Native provider turns are intentionally not cancelable by the daemon:
-      // a handoff must retire our authority, not kill a user's Codex process.
+      // a handoff must retire our authority, not kill a user's provider process.
       // Do not put this promise in the drain group. Instead, race its result
       // with retirement so stop/handoff can return after network/DB work is
       // drained. The attached late-result handler consumes the promise but has
@@ -582,9 +582,9 @@ export class SupervisedAgentDelivery {
       }
       if (result.outcome === "unreadable") {
         if (item.state === "result_recovery") {
-          await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "Codex completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
+          await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
         } else {
-          await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "Codex completed, but its final answer could not be read. Re-reading the same completed turn." });
+          await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
         }
         return;
       }
@@ -597,7 +597,7 @@ export class SupervisedAgentDelivery {
       const text = result.text?.trim();
       if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
       // The terminal payload is checkpointed before the external publication.
-      // A crash after this point retries the same client id without rerunning Codex.
+      // A crash after this point retries the same client id without rerunning the provider.
       await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
       setActive("publishing");
       if (!await this.publish(agent, item, text, controller)) return;
@@ -749,9 +749,9 @@ export class SupervisedAgentDelivery {
   }
 
   private daemonIngressAllowed(agent: SupervisedIngressAgent): boolean {
-    // Older non-Codex adapters retain their established mcp-polling path. New
-    // Codex delivery must present the committed daemon_inbox ownership fact.
-    return agent.provider !== "codex" || agent.deliveryMode === "daemon_inbox";
+    // The durable delivery mode is the sole ingress-ownership fact. Provider
+    // identity must never create a second poller for an mcp_polling worker.
+    return agent.deliveryMode === "daemon_inbox";
   }
 
   private currentRefreshEpoch(agentId: string): number { return this.refreshEpochs.get(agentId) ?? 0; }

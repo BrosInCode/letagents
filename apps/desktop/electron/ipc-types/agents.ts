@@ -39,6 +39,11 @@ export interface DesktopAgentProvider {
   name: string;
   description: string;
   capabilities: DesktopAgentProviderCapability[];
+  /**
+   * Durable room-ingress owner selected when this provider is admitted to the
+   * supervisor. Null means the provider is not available through that engine.
+   */
+  supervisedDeliveryMode?: Extract<DesktopManagedAgentDeliveryMode, "mcp_polling" | "daemon_inbox"> | null;
   runtimeCommand: string | null;
   mcpTargetId: DesktopMcpInstallTargetId;
   permissionProfiles: DesktopManagedAgentPermissionProfile[];

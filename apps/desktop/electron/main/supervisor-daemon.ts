@@ -21,12 +21,13 @@ import type {
 } from "../ipc-types.js";
 import { apiUrl, desktopRoot, workspaceRoot } from "./paths.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
+import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.56";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.57";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -403,9 +404,10 @@ export class SupervisorDaemonClient {
       observed_state: "absent",
       condition: "none",
       permission_profile_id: input.permissionProfileId ?? null,
-      // Supervised Codex is daemon-driven.  This is a durable routing fact,
-      // deliberately separate from opaque native app-server launch policy.
-      delivery_mode: input.providerId === "codex" ? "daemon_inbox" : "mcp_polling",
+      // Admission declares the durable ingress owner independently from the
+      // provider's opaque native launch policy. Provider descriptors opt into
+      // daemon delivery only after their bounded-turn adapter is ready.
+      delivery_mode: supervisedDeliveryModeForProvider(input.providerId),
       // A caller-supplied policy belongs to the selected native provider. Do
       // not reinterpret it as a LetAgents permission profile on its way to
       // the daemon. The Codex default remains only for the existing UI that

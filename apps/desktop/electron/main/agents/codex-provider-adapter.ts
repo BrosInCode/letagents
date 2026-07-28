@@ -128,6 +128,7 @@ export interface CodexProviderAdapterOptions {
 }
 
 const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
+  deliveryModes: ["mcp_polling", "daemon_inbox"],
   // P0 task_28 did not prove native mid-turn injection or approval bridging.
   // Resume is populated per app-server after a protocol-level probe.
   resume: false,

@@ -103,6 +103,7 @@ export interface ClaudeCodeProviderAdapterOptions {
 }
 
 const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
+  deliveryModes: ["mcp_polling"],
   // Empirically proven by the task_36 acceptance spike (msg_1382): `--resume
   // <session_id>` continues the SAME session id. The adapter asserts that
   // identity on every resume and the regression suite pins it.

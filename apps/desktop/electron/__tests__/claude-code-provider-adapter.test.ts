@@ -590,6 +590,7 @@ test("resume presents the recorded continuation and asserts the spike-proven sam
   // Codex's exact-thread resume.
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  assert.deepEqual(adapter.capabilities().deliveryModes, ["mcp_polling"]);
   assert.equal(adapter.capabilities().resume, true);
   assert.equal(adapter.capabilities().survivesRestart, false, "bounded recovery, not survival");
   const handle = await adapter.resume(
