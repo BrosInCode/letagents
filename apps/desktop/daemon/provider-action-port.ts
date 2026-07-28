@@ -4,6 +4,8 @@
  * outside Electron's failure domain.
  */
 export type ProviderActionCapabilities = {
+  /** Explicit adapter admission for durable room-ingress ownership. */
+  deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
   resume: boolean;
   midTurnInjection: boolean;
   transcriptAccess: boolean;

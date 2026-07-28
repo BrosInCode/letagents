@@ -33,6 +33,11 @@ export type ProviderAdapterId = "codex" | "claude-code" | "cursor";
 
 // Negotiated per adapter; each `true` requires a proven spike cell (v10 §4.8).
 export interface ProviderAdapterCapabilities {
+  /**
+   * Room-ingress modes this adapter can safely run. Daemon inbox support
+   * requires bounded run/recover semantics, not merely a long-lived process.
+   */
+  deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
   /** Continue the SAME provider session across a restart (vs. starting fresh). */
   resume: boolean;
   /** Inject a message into a running session at its next tool boundary (poke). */

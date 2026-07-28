@@ -1,7 +1,7 @@
 import { apiFetch } from "./auth.js";
 import { getOrCreateDesktopHostId } from "./agents/state.js";
 import {
-  getOrCreateDesktopCodexAgentIdentity,
+  getOrCreateDesktopSupervisorAgentIdentity,
   getOrProvisionDesktopSupervisorGrantForAgent,
   readDesktopSupervisorGrantAgentKeyForEntry,
   readDesktopSupervisorGrantForAgent,
@@ -12,6 +12,7 @@ import {
 } from "./supervisor-grant.js";
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
 import { getJoinedRoomInfo } from "./rooms/room-info.js";
+import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
 type GrantResponse = {
@@ -44,7 +45,7 @@ export type SupervisedGrantPreparation = {
 };
 
 export type SupervisorGrantCoordinatorOperations = {
-  resolveIdentity: typeof getOrCreateDesktopCodexAgentIdentity;
+  resolveIdentity: typeof getOrCreateDesktopSupervisorAgentIdentity;
   provision: typeof getOrProvisionDesktopSupervisorGrantForAgent;
   readEntryAgentKey: typeof readDesktopSupervisorGrantAgentKeyForEntry;
   readGrant: typeof readDesktopSupervisorGrantForAgent;
@@ -52,7 +53,7 @@ export type SupervisorGrantCoordinatorOperations = {
 };
 
 const defaultOperations: SupervisorGrantCoordinatorOperations = {
-  resolveIdentity: getOrCreateDesktopCodexAgentIdentity,
+  resolveIdentity: getOrCreateDesktopSupervisorAgentIdentity,
   provision: getOrProvisionDesktopSupervisorGrantForAgent,
   readEntryAgentKey: readDesktopSupervisorGrantAgentKeyForEntry,
   readGrant: readDesktopSupervisorGrantForAgent,
@@ -109,7 +110,7 @@ export class SupervisorGrantCoordinator {
     if (!/^supervised_[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(entryId)) {
       throw new Error("A valid supervised agent creation request id is required.");
     }
-    if (input.providerId !== "codex") {
+    if (supervisedDeliveryModeForProvider(input.providerId) !== "daemon_inbox") {
       return { entry: await this.daemon.create(input), agentKey: "" };
     }
     return this.serialize(entryId, async () => {
@@ -118,7 +119,11 @@ export class SupervisorGrantCoordinator {
       // invite code, or mixed-case Git identifier. Persist the canonical value
       // in the daemon manifest too so restart reuse compares like for like.
       const roomId = await this.resolveRoomId(input.roomIdentifier);
-      const agentKey = await this.operations.resolveIdentity({ entryId, displayName: input.displayName }, { apiFetch: this.request });
+      const agentKey = await this.operations.resolveIdentity({
+        entryId,
+        displayName: input.displayName,
+        providerId: input.providerId,
+      }, { apiFetch: this.request });
       // Failure here occurs before the durable claim, hence cannot activate a
       // daemon-inbox worker without its scoped authority.
       const grant = await this.operations.provision({
@@ -182,7 +187,7 @@ export class SupervisorGrantCoordinator {
       // admission first: installHostGrant cannot converge a cursorless entry,
       // bootstrapRoomIngress writes the boundary before running convergence,
       // and stopped entries remain stopped.
-      .filter((entry) => entry.provider === "codex" && entry.deliveryMode === "daemon_inbox"
+      .filter((entry) => entry.deliveryMode === "daemon_inbox"
         && (entry.desiredState === "running" || entry.desiredState === "stopped"))
       .map((entry) => this.reconcileEntry(
         entry,
@@ -195,7 +200,7 @@ export class SupervisorGrantCoordinator {
 
   /** Install a paused entry before resume/restart activation. */
   async prepareEntryForActivation(entry: DesktopSupervisorManifestEntry): Promise<void> {
-    if (entry.provider !== "codex" || entry.deliveryMode !== "daemon_inbox") return;
+    if (entry.deliveryMode !== "daemon_inbox") return;
     const status = await this.daemon.ensureRunning();
     await this.reconcileEntry(entry, status.generation, false, status.capabilities?.agentRoomMove === true);
   }
@@ -265,7 +270,11 @@ export class SupervisorGrantCoordinator {
       if (!agentKey) {
         // Legacy entries can be recovered only from a durable mapping or by
         // creating a new explicit identity. Labels are never identity inputs.
-        const created = await this.operations.resolveIdentity({ entryId: entry.id, displayName: entry.displayName }, { apiFetch: this.request });
+        const created = await this.operations.resolveIdentity({
+          entryId: entry.id,
+          displayName: entry.displayName,
+          providerId: entry.provider,
+        }, { apiFetch: this.request });
         await this.provisionAndInstall(entry, created, daemonGeneration, true, credentialOnly);
         return;
       }
@@ -276,7 +285,7 @@ export class SupervisorGrantCoordinator {
         // provisioning whenever no usable encrypted grant proves this local
         // mapping, so restart recovery converges on the exact canonical key.
         const resolved = await this.operations.resolveIdentity(
-          { entryId: entry.id, displayName: entry.displayName },
+          { entryId: entry.id, displayName: entry.displayName, providerId: entry.provider },
           { apiFetch: this.request },
         );
         await this.provisionAndInstall(entry, resolved, daemonGeneration, true, credentialOnly);
@@ -431,7 +440,11 @@ export class SupervisorGrantCoordinator {
   }> {
     let agentKey = await this.operations.readEntryAgentKey(entry.id);
     if (!agentKey) {
-      agentKey = await this.operations.resolveIdentity({ entryId: entry.id, displayName: entry.displayName }, { apiFetch: this.request });
+      agentKey = await this.operations.resolveIdentity({
+        entryId: entry.id,
+        displayName: entry.displayName,
+        providerId: entry.provider,
+      }, { apiFetch: this.request });
     }
     const stored = await this.operations.readGrant(agentKey);
     // A matching destination scope is not revocation evidence. Move/rollback

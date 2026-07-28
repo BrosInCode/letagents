@@ -1258,8 +1258,7 @@ export class SupervisorDaemon {
     const binding = await this.workerBindings.get(input.entryId);
     if (!entry || !handle || !binding
       || entry.room_id !== input.roomId
-      || entry.delivery_mode === "desktop_events"
-      || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")
+      || entry.delivery_mode !== "daemon_inbox"
       || entry.work_attempt_id !== input.workAttemptId
       || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
       || binding.room_id !== input.roomId
@@ -1326,8 +1325,7 @@ export class SupervisorDaemon {
     if (!entry || !binding || (requireHandle && !handle)
       || entry.room_id !== input.roomId
       || entry.desired_state !== "running"
-      || entry.delivery_mode === "desktop_events"
-      || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")
+      || entry.delivery_mode !== "daemon_inbox"
       || entry.work_attempt_id !== input.workAttemptId
       || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
       || binding.room_id !== input.roomId
@@ -2094,9 +2092,7 @@ export class SupervisorDaemon {
       await this.startDeliveryCutover(entryId);
       return;
     }
-    if (!entry
-      || entry.delivery_mode === "desktop_events"
-      || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")) return;
+    if (!entry || entry.delivery_mode !== "daemon_inbox") return;
     // Once the activating response is durable, a prepared room move owns this
     // agent's ingress transition.  Do not restart polling in either room while
     // its crash-recoverable commit is waiting for credentials or reconciliation.
@@ -2394,8 +2390,7 @@ export class SupervisorDaemon {
       || entry.id !== authority.agentId
       || entry.room_id !== authority.roomId
       || entry.desired_state !== "running"
-      || entry.delivery_mode === "desktop_events"
-      || (entry.provider === "codex" && entry.delivery_mode !== "daemon_inbox")
+      || entry.delivery_mode !== "daemon_inbox"
       || entry.provider !== authority.provider
       || entry.work_attempt_id !== authority.workAttemptId
       || entry.provider_ref?.work_attempt_id !== authority.workAttemptId
@@ -3776,9 +3771,9 @@ export class SupervisorDaemon {
 
     if (entry.desired_state === "running") {
       if (entry.condition === "quarantined") return;
-      // daemon_inbox Codex has no ambient MCP credential.  Do not create a
-      // provider (or even a new work execution) until Electron installs the
-      // exact host grant over the local daemon socket.
+      // A daemon-inbox provider has no ambient room credential. Do not create
+      // it (or even a new work execution) until Electron installs the exact
+      // host grant over the local daemon socket.
       if (this.requiresHostGrant(entry) && !this.currentHostGrant(entry)) return;
       // A running provider from before cursor admission must not attach,
       // resume, or spawn in the grant-install/bootstrap gap. Bootstrap owns
@@ -3883,6 +3878,17 @@ export class SupervisorDaemon {
       const currentAfterCapabilities = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
       if (!currentAfterCapabilities) return;
       entry = currentAfterCapabilities;
+      const deliveryMode = entry.delivery_mode ?? "mcp_polling";
+      if (capabilities.deliveryModes && !capabilities.deliveryModes.includes(deliveryMode)) {
+        await this.transition(
+          entry.id,
+          "failed",
+          "coordination_blocked",
+          `${supervisedProviderLabel(entry.provider)} does not support ${deliveryMode} room delivery.`,
+          "daemon-convergence",
+        );
+        return;
+      }
       const resumed = Boolean(ref && capabilities.resume);
       if (this.requiresHostGrant(entry)) {
         const grant = this.currentHostGrant(entry);
@@ -4855,7 +4861,7 @@ export class SupervisorDaemon {
   }
 
   private requiresHostGrant(entry: DaemonManifestEntry): boolean {
-    return entry.provider === "codex" && entry.delivery_mode === "daemon_inbox";
+    return entry.delivery_mode === "daemon_inbox";
   }
 
   private currentHostGrant(entry: DaemonManifestEntry): InstalledHostGrant | null {

@@ -951,17 +951,25 @@ export async function revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(
 
 /**
  * Resolve (or create once) the server-owned identity used by a daemon-inbox
- * Codex entry.  The stable name is derived from the immutable entry id, while
- * the returned canonical key remains the server's authority.  This must run
- * before grant provisioning because the API correctly rejects unknown agents.
+ * supervisor entry. The stable name is derived from the immutable entry id,
+ * while the returned canonical key remains the server's authority. This must
+ * run before grant provisioning because the API correctly rejects unknown
+ * agents.
  */
-export async function getOrCreateDesktopCodexAgentIdentity(input: {
+export async function getOrCreateDesktopSupervisorAgentIdentity(input: {
   entryId: string;
   displayName?: string | null;
+  providerId?: string | null;
 }, options: { apiFetch?: typeof apiFetch } = {}): Promise<string> {
   const entryId = input.entryId.trim();
   if (!entryId) throw new Error("A durable supervised entry identity is required.");
-  const name = `desktop-codex-${createHash("sha256").update(entryId).digest("hex").slice(0, 32)}`;
+  // Missing provider ids belong to the historical Codex call shape. Preserve
+  // that namespace so existing encrypted grants keep the same principal while
+  // new providers receive their own stable, opaque identity namespace.
+  const providerNamespace = (input.providerId?.trim().toLowerCase() || "codex")
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "supervised";
+  const name = `desktop-${providerNamespace}-${createHash("sha256").update(entryId).digest("hex").slice(0, 32)}`;
   const request = options.apiFetch ?? apiFetch;
   // Re-registering the deterministic name is intentionally idempotent. It
   // also repairs registries written by builds that lowercased the canonical
@@ -969,10 +977,10 @@ export async function getOrCreateDesktopCodexAgentIdentity(input: {
   // local data alone.
   const created = await request<{ canonical_key?: unknown }>("/agents", {
     method: "POST",
-    body: JSON.stringify({ name, display_name: input.displayName?.trim() || "Codex agent" }),
+    body: JSON.stringify({ name, display_name: input.displayName?.trim() || "Supervised agent" }),
   });
   if (typeof created.canonical_key !== "string" || !created.canonical_key.trim()) {
-    throw new Error("LetAgents did not return a canonical Codex agent identity.");
+    throw new Error("LetAgents did not return a canonical supervised agent identity.");
   }
   const agentKey = canonicalSupervisorGrantAgentKey(created.canonical_key);
   await withRegistryMutation(async () => {

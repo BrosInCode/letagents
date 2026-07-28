@@ -10,7 +10,7 @@ import {
   decryptSupervisorGrantFromStorage,
   desktopSupervisorGrantInstallationId,
   encryptSupervisorGrantForStorage,
-  getOrCreateDesktopCodexAgentIdentity,
+  getOrCreateDesktopSupervisorAgentIdentity,
   getOrProvisionDesktopSupervisorGrantForAgent,
   provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
@@ -364,7 +364,7 @@ test("identity resolution preserves server casing and repairs a lowercased legac
       entryAgentKeys: { [entryId]: "emmymay/desktop-codex-stale" },
     })}\n`, "utf8");
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
-    const resolved = await getOrCreateDesktopCodexAgentIdentity({
+    const resolved = await getOrCreateDesktopSupervisorAgentIdentity({
       entryId,
       displayName: "StoneRidge",
     }, {
@@ -376,8 +376,26 @@ test("identity resolution preserves server casing and repairs a lowercased legac
     assert.equal(resolved, "EmmyMay/desktop-codex-canonical");
     assert.equal(requests.length, 1);
     assert.equal(requests[0]?.path, "/agents");
+    assert.match(String(requests[0]?.body.name), /^desktop-codex-/);
     const registry = JSON.parse(await readFile(path, "utf8")) as { entryAgentKeys: Record<string, string> };
     assert.equal(registry.entryAgentKeys[entryId], "EmmyMay/desktop-codex-canonical");
+  });
+});
+
+test("new supervised providers receive their own stable identity namespace", async () => {
+  await withRegistry(async () => {
+    let requestedName = "";
+    await getOrCreateDesktopSupervisorAgentIdentity({
+      entryId: "supervised_claude_identity",
+      displayName: "Claude",
+      providerId: "claude-code",
+    }, {
+      apiFetch: (async <T>(_path: string, init?: { body?: string }) => {
+        requestedName = String((JSON.parse(init?.body ?? "{}") as { name?: unknown }).name ?? "");
+        return { canonical_key: "EmmyMay/desktop-claude-code-canonical" } as T;
+      }) as never,
+    });
+    assert.match(requestedName, /^desktop-claude-code-/);
   });
 });
 

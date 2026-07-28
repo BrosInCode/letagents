@@ -22,7 +22,10 @@ import {
   saveOpenModelSettings,
 } from "../main/agents/open-model-settings.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
-import { listDesktopAgentProviders } from "../main/agents/provider-registry.js";
+import {
+  listDesktopAgentProviders,
+  supervisedDeliveryModeForProvider,
+} from "../main/agents/provider-registry.js";
 
 const secretStorage = {
   isEncryptionAvailable: () => true,
@@ -349,6 +352,12 @@ test("Open Model remains capability-gated from durable supervision", () => {
   assert.ok(claude?.capabilities.includes("supervised_runtime"));
   assert.ok(openModel?.capabilities.includes("desktop_managed_runtime"));
   assert.equal(openModel?.capabilities.includes("supervised_runtime"), false);
+});
+
+test("supervised provider admission declares room delivery without provider-name checks", () => {
+  assert.equal(supervisedDeliveryModeForProvider("codex"), "daemon_inbox");
+  assert.equal(supervisedDeliveryModeForProvider("claude-code"), "mcp_polling");
+  assert.throws(() => supervisedDeliveryModeForProvider("cursor"), /not available through the supervised engine/);
 });
 
 test("codexAppServerLaunchArgs threads config overrides after the trust override", () => {
