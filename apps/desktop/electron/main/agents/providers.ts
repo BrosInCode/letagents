@@ -449,7 +449,13 @@ export async function runDesktopAgentProviderPreflight(
   const withManagedRuntimeValidation = async (
     result: DesktopAgentProviderPreflight,
   ): Promise<DesktopAgentProviderPreflight> => {
-    if (!result.canStart || !provider.capabilities.includes("desktop_managed_runtime")) {
+    if (
+      !result.canStart
+      || (
+        !provider.capabilities.includes("desktop_managed_runtime")
+        && !provider.capabilities.includes("supervised_runtime")
+      )
+    ) {
       return result;
     }
     const validation = await validateDesktopManagedAgentModel({
@@ -498,23 +504,38 @@ export async function runDesktopAgentProviderPreflight(
     }
     return withManagedRuntimeValidation({
       providerId: provider.id,
-      status: provider.capabilities.includes("desktop_managed_runtime")
+      status: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      )
         ? input.repoRootPath?.trim()
           ? "ready"
           : "repo_required"
         : "ready",
-      canStart: provider.capabilities.includes("desktop_managed_runtime") && Boolean(input.repoRootPath?.trim()),
-      message: provider.capabilities.includes("desktop_managed_runtime")
+      canStart: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      ) && Boolean(input.repoRootPath?.trim()),
+      message: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      )
         ? input.repoRootPath?.trim()
           ? `${provider.name} is ready to start.`
           : `Choose a local repository before starting ${provider.name}.`
         : `${provider.name} is connected to LetAgents.`,
-      detail: provider.capabilities.includes("desktop_managed_runtime")
+      detail: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      )
         ? input.repoRootPath?.trim()
-          ? "Smoke mode can launch and supervise this local provider."
-          : "A desktop-managed agent needs a local repo or worktree for code actions."
+          ? "The desktop can launch and supervise this local provider."
+          : "A supervised agent needs a local repo or worktree for code actions."
         : "Open this agent app, then ask it to join this room through LetAgents.",
-      nextAction: provider.capabilities.includes("desktop_managed_runtime") && !input.repoRootPath?.trim()
+      nextAction: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      ) && !input.repoRootPath?.trim()
         ? "choose_repo"
         : null,
       version: provider.id === "codex" ? "codex smoke" : null,

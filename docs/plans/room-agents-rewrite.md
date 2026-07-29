@@ -99,16 +99,16 @@ unproven cell keeps execution visibility capability-gated in the UI.
 | --- | --- | --- | --- | --- | --- | --- |
 | Codex | Dedicated app-server child | Yes: PID plus recorded birth/command identity | Yes: child exit plus fenced RPC-close handling | Exact app-server thread resume | Native RPC/stream events | Full P1c floor; reference implementation. |
 | Open Model | Dedicated Codex app-server with provider config and API-key environment override | **Gated:** the Electron session persists PID but not birth/command identity | **Gated:** exit is visible, but RPC loss is not joined to a persisted identity fence | **Gated:** live-thread continuation exists, but this path is not wired to the durable adapter attach/resume contract | Yes for bounded/redacted Codex events | Task 39 validation found protocol reuse but not P1c lifecycle parity. Keep the app-owned runtime; do not advertise `supervised_runtime` until a separate daemon-adapter task closes the identity, fencing, and resume gaps. See `open-model-codex-parity-validation.md`. |
-| Claude Code | In-process `@anthropic-ai/claude-agent-sdk` `query()` in Electron main | No independent OS child or birth identity | Turn iterator/result only; app exit ends it | SDK `session_id` resumes a later query, but it does not survive the Electron process | SDK messages while Electron is alive | Capability-gate is the current state: stream evidence while the app is alive, `survivesRestart=false`, and execution visibility unavailable after app restart. Task 36 is the accepted/in-progress daemon-owned headless Claude CLI adapter; its spike cells must prove the resume/injection claims before it upgrades any capability. |
+| Claude Code | Persistent headless `claude` stream-json child, idle between daemon-owned turns | Yes: PID plus recorded birth identity; fresh daemons fence an unreachable exact child | Yes: exact result UUID plus process exit; transcript recovery fails closed without an `end_turn` boundary | Minted session ID and exact `--resume` | Native stream-json events plus exact session JSONL recovery | Daemon-inbox enabled. The former in-process Agent SDK runtime and Claude polling path are removed; `survivesRestart=false` remains honest because stdio cannot be reattached. |
 | Cursor | `cursor-agent` child per delivered turn (`--resume <session_id>`) | Yes during a turn; no persistent generation between turns | Child close code/signal per turn | Session id is passed to the next turn | Stream-json items and transcript tail per turn | Model idle-between-turns honestly: last-turn terminal/transcript evidence, never a claimed live process. |
 
 Required spike cells for every non-Codex provider are: (1) launch shape and native
 permission-policy passthrough, (2) process identity where a process exists, (3) terminal
 ordering, (4) continuation/resume, (5) bounded public stream, (6) long quiet turn, and
 (7) slow-but-alive request. A cell may enable only the matching `capabilities()` bit.
-The concrete evidence seams at the time of this matrix are
-`claude-code-runner.ts` and its runtime tests, `cursor-runner.ts` and its stream/runtime
-tests, and `open-model-launch.ts` plus the Codex app-server lifecycle tests. A provider
+The concrete evidence seams are `claude-code-provider-adapter.ts` and its
+bounded-turn/recovery tests, `cursor-runner.ts` and its stream/runtime tests, and
+`open-model-launch.ts` plus the Codex app-server lifecycle tests. A provider
 with no independently observable process must never be used as terminal evidence for
 replacement; it reports bounded recovery instead.
 

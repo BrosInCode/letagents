@@ -135,7 +135,10 @@ export function useAddAgentPresentation(
         "Provider setup needs attention. Check the provider app, then try again.",
       );
     }
-    if (!hasDesktopManagedRuntime(selectedProvider.value)) {
+    if (
+      !hasDesktopManagedRuntime(selectedProvider.value)
+      && !hasSupervisedRuntime(selectedProvider.value)
+    ) {
       return "Use the handoff below to bring it into this room.";
     }
     return hasSupervisedRuntime(selectedProvider.value)
@@ -152,7 +155,10 @@ export function useAddAgentPresentation(
   const runtimeLabel = computed(() => {
     if (preflight.value?.version) return preflight.value.version;
     if (preflight.value?.status === "missing_runtime") return "Missing";
-    if (selectedProvider.value?.capabilities.includes("desktop_managed_runtime")) return "Required";
+    if (
+      selectedProvider.value?.capabilities.includes("desktop_managed_runtime")
+      || selectedProvider.value?.capabilities.includes("supervised_runtime")
+    ) return "Required";
     return "External app";
   });
   const bridgeLabel = computed(() => {
@@ -218,7 +224,7 @@ export function useAddAgentPresentation(
     if (/^local[_-]/i.test(props.roomIdentifier) || /^git-room:local:/i.test(props.roomIdentifier)) {
       return "Supervision needs a cloud room for durable workplace reachability. Local-only rooms keep the existing path.";
     }
-    return "A detached daemon owns desired state and recovery. Closing this app does not stop the Codex worker.";
+    return "A detached daemon owns desired state and recovery. Closing this app does not stop the supervised agent.";
   });
   const showCursorMcpPolicySelector = computed(() => shouldShowCursorMcpPolicySelector(selectedProvider.value));
   const showDeliverySelector = computed(() => shouldShowDeliveryModeSelector(selectedProvider.value));
@@ -303,7 +309,10 @@ export function useAddAgentPresentation(
     return `Use ${managedAgentEffortLabel(selectedEffort.value).toLowerCase()} reasoning effort for this agent session.`;
   });
   const selectedPermissionProfileWarning = computed(() => {
-    if (!hasDesktopManagedRuntime(selectedProvider.value)) return null;
+    if (
+      !hasDesktopManagedRuntime(selectedProvider.value)
+      && !hasSupervisedRuntime(selectedProvider.value)
+    ) return null;
     const profile = selectedPermissionProfile.value;
     if (!profile || profile.status !== "available") return null;
     const providerName = selectedProvider.value?.name?.trim() || "this agent";

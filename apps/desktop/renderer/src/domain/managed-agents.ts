@@ -877,6 +877,7 @@ export function isExternalMcpProviderReady(
   return Boolean(
     provider &&
     !hasDesktopManagedRuntime(provider) &&
+    !hasSupervisedRuntime(provider) &&
     preflight?.status === "ready" &&
     preflight.mcpStatus === "installed",
   );
@@ -885,7 +886,7 @@ export function isExternalMcpProviderReady(
 export function agentProviderNeedsDesktopRepo(
   provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
 ): boolean {
-  return hasDesktopManagedRuntime(provider);
+  return hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider);
 }
 
 export const defaultCursorMcpPolicy: DesktopCursorMcpPolicy = "filter_letagents";
@@ -943,7 +944,7 @@ export function shouldShowOpenModelConfig(
 export function shouldShowManagedModelSelector(
   provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
 ): boolean {
-  return Boolean(provider && hasDesktopManagedRuntime(provider));
+  return Boolean(provider && (hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider)));
 }
 
 export function shouldShowDeliveryModeSelector(

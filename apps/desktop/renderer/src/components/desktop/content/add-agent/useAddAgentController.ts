@@ -350,10 +350,17 @@ async function retrySupervisedLaunch(): Promise<void> {
 
 async function startManagedAgent(): Promise<void> {
   if (!selectedProviderId.value || !props.repoRootPath || startOperationInFlight) return;
-  if (!hasDesktopManagedRuntime(selectedProvider.value)) return;
+  if (
+    !hasDesktopManagedRuntime(selectedProvider.value)
+    && !hasSupervisedRuntime(selectedProvider.value)
+  ) return;
   const requestVersion = setup.currentVersion();
   const requestRoomIdentifier = props.roomIdentifier;
   const requestLaunchMode = launchMode.value;
+  if (
+    (requestLaunchMode === "legacy" && !hasDesktopManagedRuntime(selectedProvider.value))
+    || (requestLaunchMode === "supervised" && !hasSupervisedRuntime(selectedProvider.value))
+  ) return;
   const requestProviderId = selectedProviderId.value;
   const requestProviderName = selectedProvider.value?.name ?? "Agent";
   const requestRepoRootPath = props.repoRootPath;

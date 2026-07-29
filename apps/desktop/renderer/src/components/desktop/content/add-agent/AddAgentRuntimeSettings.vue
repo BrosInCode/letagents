@@ -6,7 +6,7 @@
     data-testid="desktop-add-agent-lifecycle"
   >
     <span>Lifecycle</span>
-    <div class="desktop-add-agent-segmented">
+    <div v-if="hasDesktopManagedRuntime(provider)" class="desktop-add-agent-segmented">
       <button type="button" :data-selected="launchMode === 'legacy'" :aria-pressed="launchMode === 'legacy'" data-testid="desktop-add-agent-lifecycle-legacy" @click="emit('update:launchMode', 'legacy')">This app</button>
       <button type="button" :data-selected="launchMode === 'supervised'" :aria-pressed="launchMode === 'supervised'" data-testid="desktop-add-agent-lifecycle-supervised" @click="emit('update:launchMode', 'supervised')">Supervised</button>
     </div>
@@ -40,7 +40,7 @@
   </section>
 
   <section
-    v-if="provider?.capabilities.includes('desktop_managed_runtime') && permissionProfiles.length"
+    v-if="(hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider)) && permissionProfiles.length"
     class="desktop-add-agent-permissions"
     aria-label="Agent permissions"
   >
@@ -106,6 +106,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import {
   cursorMcpPolicyOptions,
+  hasDesktopManagedRuntime,
   hasSupervisedRuntime,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
