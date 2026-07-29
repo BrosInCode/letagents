@@ -11,7 +11,6 @@ import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
 } from "../src/components/desktop/content/add-agent/useSupervisedLaunchRecovery";
-import { supervisedPermissionBridgeIsUnavailable } from "../src/components/desktop/content/add-agent/useAddAgentPresentation";
 
 function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): DesktopSupervisorManifestEntry {
   return {
@@ -494,13 +493,6 @@ test("the shared supervised start policy preserves authoritative live fences", (
   }), true);
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasActiveLaunch: true }), false);
   assert.equal(canStartNewSupervisedLaunch({ ...base, recoveringCandidate: true }), false);
-});
-
-test("unsupported supervised Claude permissions stay blocked after ready or failed scans", () => {
-  assert.equal(supervisedPermissionBridgeIsUnavailable("supervised", "claude-code", "ask_before_write"), true);
-  assert.equal(supervisedPermissionBridgeIsUnavailable("supervised", "claude-code", "full_access"), false);
-  assert.equal(supervisedPermissionBridgeIsUnavailable("legacy", "claude-code", "ask_before_write"), false);
-  assert.equal(supervisedPermissionBridgeIsUnavailable("supervised", "codex", "ask_before_write"), false);
 });
 
 test("a stalled recovery scan times out into an actionable retry instead of disabling Start forever", async () => {
@@ -2040,8 +2032,8 @@ test("only providers with isolated supervised runtimes offer Add another", () =>
     providerId: "codex", entry: ready, supportsConcurrentAgents: true,
   }), true);
   assert.equal(canAddAnotherSupervisedAgent({
-    providerId: "claude-code", entry: { ...ready, provider: "claude-code" }, supportsConcurrentAgents: false,
-  }), false);
+    providerId: "claude-code", entry: { ...ready, provider: "claude-code" }, supportsConcurrentAgents: true,
+  }), true);
   assert.equal(canAddAnotherSupervisedAgent({
     providerId: "open-model", entry: { ...ready, provider: "open-model" }, supportsConcurrentAgents: true,
   }), true);
@@ -2102,34 +2094,39 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
   assert.equal(createdInput?.model, "gpt-5.6");
 });
 
-test("Open Model creation uses the same friendly codename contract as Codex", async () => {
-  let createdInput: Record<string, unknown> | null = null;
-  await createSupervisedAgentFromSnapshot({
-    listAgents: async () => [entry({ displayName: "GardenSignal" })],
-    createAgent: async (input: Record<string, unknown>) => {
-      createdInput = input;
-      return entry({
-        id: "supervised_open_model",
-        displayName: String(input.displayName),
-        provider: String(input.providerId),
-      });
-    },
-  } as never, {
-    creationRequestId: "open-model-request",
-    providerId: "open-model",
-    providerName: "Open Model",
-    roomIdentifier: "room-1",
-    repoRootPath: "/repo",
-    charter: "Investigate the task.",
-    permissionProfileId: "full_access",
-    launchPolicy: null,
-    model: "qwen/agent-model",
-  }, () => true);
+test("Claude and Open Model creation use the same friendly codename contract as Codex", async () => {
+  for (const provider of [
+    { id: "claude-code", name: "Claude Code", model: "claude-sonnet", permissionProfileId: "read_only" },
+    { id: "open-model", name: "Open Model", model: "qwen/agent-model", permissionProfileId: "full_access" },
+  ] as const) {
+    let createdInput: Record<string, unknown> | null = null;
+    await createSupervisedAgentFromSnapshot({
+      listAgents: async () => [entry({ displayName: "GardenSignal" })],
+      createAgent: async (input: Record<string, unknown>) => {
+        createdInput = input;
+        return entry({
+          id: `supervised_${provider.id}`,
+          displayName: String(input.displayName),
+          provider: String(input.providerId),
+        });
+      },
+    } as never, {
+      creationRequestId: `${provider.id}-request`,
+      providerId: provider.id,
+      providerName: provider.name,
+      roomIdentifier: "room-1",
+      repoRootPath: "/repo",
+      charter: "Investigate the task.",
+      permissionProfileId: provider.permissionProfileId,
+      launchPolicy: null,
+      model: provider.model,
+    }, () => true);
 
-  assert.equal(createdInput?.providerId, "open-model");
-  assert.match(String(createdInput?.displayName), /^[A-Z][A-Za-z]+$/);
-  assert.doesNotMatch(String(createdInput?.displayName), /open model|supervised agent/i);
-  assert.notEqual(createdInput?.displayName, "GardenSignal");
+    assert.equal(createdInput?.providerId, provider.id);
+    assert.match(String(createdInput?.displayName), /^[A-Z][A-Za-z]+$/);
+    assert.doesNotMatch(String(createdInput?.displayName), /claude|open model|supervised agent/i);
+    assert.notEqual(createdInput?.displayName, "GardenSignal");
+  }
 });
 
 test("modal close or provider invalidation during name lookup fences durable creation", async () => {

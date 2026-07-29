@@ -61,9 +61,9 @@ test("managed provider spawn attestation rejects downgraded or unsupported autho
   assert.throws(() => attestProviderSpawnPolicy("claude-code", {
     ...request,
     reasoningEffort: "high",
-    permissionProfileId: "ask_before_write",
+    permissionProfileId: "read_only",
     launchPolicy: {
-      permissionMode: "acceptEdits",
+      permissionMode: "plan",
       dangerouslySkipPermissions: false,
     },
   }), /does not support.*reasoning effort/);

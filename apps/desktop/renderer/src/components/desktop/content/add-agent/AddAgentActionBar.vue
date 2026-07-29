@@ -96,9 +96,6 @@
     <span v-else-if="launchMode === 'supervised' && charterMissing" class="desktop-add-agent-confirmation">
       Add a charter before starting the supervised agent.
     </span>
-    <span v-else-if="permissionBlocker" class="desktop-add-agent-confirmation">
-      {{ permissionBlocker }}
-    </span>
     <span v-else-if="launchMode === 'supervised' && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
       {{ recoveryScanStatus === "error"
         ? "Previous launches could not be checked. Starting now creates a new supervised agent."
@@ -152,7 +149,6 @@ const props = defineProps<{
   startingAgent: boolean;
   setupConfirmationActive: boolean;
   externalInstruction: string | null;
-  permissionBlocker: string | null;
   permissionWarning: string | null;
   supervised: AddAgentSupervisedUi;
   charterMissing: boolean;

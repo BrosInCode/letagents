@@ -32,10 +32,11 @@ const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reaso
 /**
  * Admission may share a room/provider lane only when every durable entry owns
  * an independently addressable native runtime. Codex uses separate app-server
- * threads; Open Model launches one isolated OpenCode server per entry.
+ * threads; Claude launches an isolated CLI/session per entry; Open Model
+ * launches one isolated OpenCode server per entry.
  */
 export function providerSupportsConcurrentSupervisedAgents(provider: string): boolean {
-  return provider === "codex" || provider === "open-model";
+  return provider === "codex" || provider === "claude-code" || provider === "claude" || provider === "open-model";
 }
 
 /**
@@ -91,7 +92,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   if (input.reasoningEffort !== null) throw new Error(`Provider '${provider}' does not support reasoning effort.`);
   if (provider === "claude-code" || provider === "claude") {
     scalarCliPolicy(policy, "Claude");
-    const profile = resolveProfile(provider, input.permissionProfileId, "ask_before_write", ["read_only", "ask_before_write", "full_access"]);
+    const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "full_access"]);
     const authority = profile === "read_only"
       ? { permissionMode: "plan", dangerouslySkipPermissions: false }
       : profile === "full_access"

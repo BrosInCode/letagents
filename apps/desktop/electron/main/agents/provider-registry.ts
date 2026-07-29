@@ -17,6 +17,7 @@ const agentProviders: DesktopAgentProvider[] = [
       "supervised_runtime",
       "auth_preflight",
       "turn_control",
+      "concurrent_supervised_agents",
     ],
     supervisedDeliveryMode: "daemon_inbox",
     runtimeCommand: "claude",

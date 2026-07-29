@@ -45,7 +45,7 @@ interface ConfigurationBindings {
 export function useAddAgentConfiguration() {
   const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
   const launchMode = ref<"legacy" | "supervised">("legacy");
-  const supervisedCharter = ref("Work from the room board, coordinate in the room, and keep polling until stopped.");
+  const supervisedCharter = ref("Work from the room board, coordinate through the room, and help move assigned work forward.");
   const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
   const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
   const openModelBaseUrl = ref("");

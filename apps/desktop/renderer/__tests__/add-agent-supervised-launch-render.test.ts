@@ -140,7 +140,6 @@ async function renderReadyLaunch(controller: ReturnType<typeof readyController>[
         startingAgent: false,
         setupConfirmationActive: false,
         externalInstruction: null,
-        permissionBlocker: null,
         permissionWarning: null,
         supervised: controller,
         charterMissing: false,
