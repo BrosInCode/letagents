@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveProviderConfigurationSnapshot, resolveProviderConfigurationSnapshot } from "../provider-configuration.js";
+import {
+  deriveProviderConfigurationSnapshot,
+  providerSupportsConcurrentSupervisedAgents,
+  resolveProviderConfigurationSnapshot,
+} from "../provider-configuration.js";
 import { supervisedPermissionProfilesForProvider } from "../supervised-permission-profiles.js";
 
 test("provider configuration maps permission profiles to native launch authority", () => {
@@ -37,6 +41,15 @@ test("provider configuration maps permission profiles to native launch authority
     permissionMode: "plan",
     dangerouslySkipPermissions: false,
   });
+
+  assert.equal(resolveProviderConfigurationSnapshot({
+    provider: "claude-code",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: null,
+    launchPolicy: {},
+    configurationRevision: 1,
+  }).permissionProfileId, "read_only");
 
   assert.deepEqual(resolveProviderConfigurationSnapshot({
     provider: "cursor",
@@ -129,4 +142,12 @@ test("supervised profile contract gates Claude prompt approval without changing 
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "full_access")?.status, "available");
+});
+
+test("isolated supervised provider runtimes admit multiple agents in one room", () => {
+  assert.equal(providerSupportsConcurrentSupervisedAgents("codex"), true);
+  assert.equal(providerSupportsConcurrentSupervisedAgents("claude-code"), true);
+  assert.equal(providerSupportsConcurrentSupervisedAgents("claude"), true);
+  assert.equal(providerSupportsConcurrentSupervisedAgents("open-model"), true);
+  assert.equal(providerSupportsConcurrentSupervisedAgents("cursor"), false);
 });

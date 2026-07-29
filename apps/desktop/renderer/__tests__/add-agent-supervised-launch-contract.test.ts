@@ -44,6 +44,14 @@ const controllerSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/useAddAgentController.ts",
   import.meta.url,
 )), "utf8");
+const configurationSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/useAddAgentConfiguration.ts",
+  import.meta.url,
+)), "utf8");
+const presentationSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/useAddAgentPresentation.ts",
+  import.meta.url,
+)), "utf8");
 const setupSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/useAddAgentSetup.ts",
   import.meta.url,
@@ -172,12 +180,8 @@ test("failed recovery scans allow a new launch without hiding real setup blocker
       < actionBarSource.indexOf('recoveryScanStatus !== \'ready\''),
     "charter guidance must precede the non-blocking recovery error copy",
   );
-  assert.ok(
-    actionBarSource.indexOf('v-else-if="permissionBlocker"')
-      < actionBarSource.indexOf('recoveryScanStatus !== \'ready\''),
-    "permission blockers must precede the non-blocking recovery error copy",
-  );
-  assert.match(modalSource, /:permission-blocker="supervisedPermissionBridgeUnavailable/);
+  assert.doesNotMatch(actionBarSource, /permissionBlocker/);
+  assert.doesNotMatch(modalSource, /supervisedPermissionBridgeUnavailable/);
 });
 
 test("an active supervised launch owns the action bar instead of stale preflight actions", () => {
@@ -191,20 +195,31 @@ test("an active supervised launch owns the action bar instead of stale preflight
   assert.match(actionBarSource, /providerLabel\} setup is in progress/);
 });
 
-test("a ready Codex launch can start another without stopping the completed agent", () => {
-  assert.match(launchActionsSource, /"data-testid": "desktop-add-agent-add-another-codex"/);
-  assert.match(launchActionsSource, /Add another Codex agent/);
-  assert.match(launchComponentSource, /props\.controller\.launch\.canAddAnotherCodexAgent\.value/);
-  assert.match(launchComponentSource, /@add-another="controller\.launch\.dismissReadyCodexLaunchForAnother"/);
-  assert.match(launchSource, /function dismissReadyCodexLaunchForAnother\(\): void/);
+test("a ready supervised launch can start another without stopping the completed agent", () => {
+  assert.match(launchActionsSource, /"data-testid": "desktop-add-agent-add-another-supervised"/);
+  assert.match(launchActionsSource, /`Add another \$\{props\.providerName\} agent`/);
+  assert.match(launchComponentSource, /props\.controller\.launch\.canAddAnotherSupervisedAgent\.value/);
+  assert.match(launchComponentSource, /@add-another="controller\.launch\.dismissReadyLaunchForAnother"/);
+  assert.match(launchSource, /function dismissReadyLaunchForAnother\(\): void/);
   const releaseBody = launchSource.slice(
-    launchSource.indexOf("function dismissReadyCodexLaunchForAnother"),
+    launchSource.indexOf("function dismissReadyLaunchForAnother"),
     launchSource.indexOf("function resetActiveLaunch"),
   );
   assert.match(releaseBody, /dismiss\(\);/);
   assert.doesNotMatch(releaseBody, /stop\(/);
-  assert.match(controllerSource, /suggestSupervisedCodexCodename\(existingDisplayNames, snapshot\.creationRequestId\)/);
+  assert.match(controllerSource, /suggestSupervisedAgentCodename\([\s\S]*?existingDisplayNames,[\s\S]*?snapshot\.creationRequestId/);
   assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName,/);
+});
+
+test("bounded supervised defaults never tell providers to own polling and Claude exposes no ignored effort control", () => {
+  assert.doesNotMatch(configurationSource, /keep polling until stopped/);
+  assert.match(presentationSource, /return "Managed at launch"/);
+  assert.match(
+    configurationSource,
+    /Work from the room board, coordinate through the room, and help move assigned work forward/,
+  );
+  assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\)/);
+  assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
 });
 
 test("the supervised action island owns complete responsive interaction styles", () => {

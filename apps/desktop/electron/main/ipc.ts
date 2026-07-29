@@ -937,11 +937,6 @@ export function registerDesktopIpcHandlers(
         if (provider === "claude-code" && input.permissionProfileId === "ask_before_write") {
           throw new LaunchBlockedError("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged. Choose Read-only or Full access.", "retry");
         }
-        if (provider === "claude-code") {
-          // Repair legacy `npx -y letagents` configs before the daemon launches
-          // inside a pristine managed checkout named `letagents`.
-          await refreshInstalledLetAgentsMcpServerAuth();
-        }
         // Contact the background supervisor first so its (un)availability is an
         // honest, owner-visible fact rather than a hidden part of the claim.
         try {
@@ -1010,7 +1005,6 @@ export function registerDesktopIpcHandlers(
       };
       launchFact("launch.requested", "You asked LetAgents to resume this saved launch.");
       try {
-        if (entry.provider === "claude-code") await refreshInstalledLetAgentsMcpServerAuth();
         await supervisorDaemonClient.ensureRunning();
         await supervisorGrantCoordinator.prepareEntryForActivation(entry);
         launchFact("supervisor.connected", "Background agent management is available.");
@@ -1047,10 +1041,14 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
-      if (desiredState === "running") await refreshInstalledLetAgentsMcpServerAuth();
       if (desiredState === "running") {
         const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
         if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
+        // Claude receives a private managed MCP config at launch. Other
+        // providers retain their existing external-config refresh behavior.
+        if (entry.provider !== "claude-code") {
+          await refreshInstalledLetAgentsMcpServerAuth();
+        }
         await supervisorGrantCoordinator.prepareEntryForActivation(entry);
       }
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);

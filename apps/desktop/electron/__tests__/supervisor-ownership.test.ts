@@ -19,7 +19,7 @@ test("supervisor list projects canonical agent keys for renderer mention routing
   assert.match(listHandler, /agentKey:/);
 });
 
-test("paused launch recovery reuses the guarded ownership transfer path", () => {
+test("paused launch recovery reuses guarded ownership without requiring a user Claude MCP install", () => {
   const resumeHandler = ipcSource.slice(
     ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),
     ipcSource.indexOf('"desktop:supervisor:set-desired-state"'),
@@ -28,7 +28,8 @@ test("paused launch recovery reuses the guarded ownership transfer path", () => 
   assert.match(resumeHandler, /listDesktopManagedAgentSessions\(entry\.roomId\)/);
   assert.match(resumeHandler, /stopDesktopManagedAgent/);
   assert.match(resumeHandler, /compareAndSetDesiredState\(manifest\.id, "paused", "running"\)/);
-  assert.match(resumeHandler, /entry\.provider === "claude-code"[\s\S]*refreshInstalledLetAgentsMcpServerAuth/);
+  assert.match(resumeHandler, /supervisorGrantCoordinator\.prepareEntryForActivation\(entry\)/);
+  assert.doesNotMatch(resumeHandler, /refreshInstalledLetAgentsMcpServerAuth/);
 });
 
 test("supervisor ownership claims before legacy teardown and activates last", async () => {

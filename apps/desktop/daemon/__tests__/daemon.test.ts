@@ -4619,41 +4619,38 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
   }
 });
 
-test("concurrent Claude Code creation ids on one lane yield one durable owner", async () => {
+test("concurrent Claude Code creation ids create independent durable owners", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   let daemon = new SupervisorDaemon(paths, "darwin");
+  const candidate = (id: string): DaemonManifestEntry => ({
+    ...entry,
+    id,
+    room_id: "focus_37",
+    provider: "claude-code",
+    desired_state: "paused",
+    observed_state: "paused",
+  });
   try {
     await daemon.start();
-    const candidate = (id: string): DaemonManifestEntry => ({
-      ...entry,
-      id,
-      room_id: "focus_37",
-      provider: "claude-code",
-      desired_state: "paused",
-      observed_state: "paused",
-    });
-    const results = await Promise.all([
-      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("owner_a") }),
-      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("owner_b") }),
+    const [firstCreate, secondCreate] = await Promise.all([
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("claude_alpha") }),
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("claude_bravo") }),
     ]);
-    assert.equal(results.filter((result) => result.ok).length, 1);
-    assert.equal(results.filter((result) => !result.ok).length, 1);
-    assert.match(results.find((result) => !result.ok)?.error ?? "", /already owned by supervised entry/);
-    let manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    assert.equal(manifest.length, 1);
-    const winner = manifest[0]!.id;
-    const loser = winner === "owner_a" ? "owner_b" : "owner_a";
+    assert.equal(firstCreate.ok, true);
+    assert.equal(secondCreate.ok, true);
 
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: winner, desired_state: "running",
-    })).ok, true);
-
-    const retry = await daemonRequest(paths.socketPath, "manifest.put", { entry: candidate(winner) });
+    for (const id of ["claude_alpha", "claude_bravo"]) {
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id,
+        desired_state: "running",
+      })).ok, true);
+    }
+    const retry = await daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("claude_alpha") });
     assert.equal(retry.ok, true);
     assert.equal((retry.result as DaemonManifestEntry).desired_state, "running", "a stale creation retry cannot rewind lifecycle state");
     const conflictingRetry = await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: { ...candidate(winner), charter: "different agent" },
+      entry: { ...candidate("claude_alpha"), charter: "different agent" },
     });
     assert.equal(conflictingRetry.ok, false);
     assert.match(conflictingRetry.error ?? "", /already bound to different agent parameters/);
@@ -4661,59 +4658,12 @@ test("concurrent Claude Code creation ids on one lane yield one durable owner", 
     await daemon.stop();
     daemon = new SupervisorDaemon(paths, "darwin");
     await daemon.start();
-    manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    assert.equal(manifest.filter((candidate) => candidate.id === winner).length, 1, "daemon restart preserves exactly one durable request owner");
-    assert.equal(manifest.find((candidate) => candidate.id === winner)?.desired_state, "running");
-    const blockedLegacy = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
+    const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.equal(manifest.filter((item) => item.room_id === "focus_37" && item.provider === "claude-code").length, 2);
+    assert.ok(manifest.every((item) => item.desired_state === "running"));
+    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
       reservation_id: "legacy_blocked_by_any_supervised", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    });
-    assert.equal(blockedLegacy.ok, false, "any active supervised agent keeps the legacy provider engine fenced out");
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: winner, desired_state: "stopped",
-    })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: candidate(loser),
-    })).ok, false, "stop intent alone cannot release a provider lane before observed stop");
-    await daemon.stop();
-    const stoppedWinner = await new ManifestStore(paths.manifestPath).load();
-    await new ManifestStore(paths.manifestPath).write(stoppedWinner.generation, stoppedWinner.entries.map((item) => (
-      item.id === winner ? { ...item, observed_state: "stopped" as const } : item
-    )));
-    daemon = new SupervisorDaemon(paths, "darwin");
-    await daemon.start();
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: candidate(loser),
-    })).ok, true, "the losing creation id can claim the lane after the prior owner is observably stopped");
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: loser, desired_state: "running",
-    })).ok, true);
-    const blockedPredecessorRestart = await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: winner, desired_state: "running",
-    });
-    assert.equal(blockedPredecessorRestart.ok, false, "a stopped predecessor cannot reactivate after a successor claims the lane");
-    assert.match(blockedPredecessorRestart.error ?? "", /already owned by supervised entry/);
-    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    })).ok, false, "the successor supervised owner fences legacy starts");
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: loser, desired_state: "stopped",
-    })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    })).ok, false, "legacy remains fenced until the supervised provider is observably stopped");
-    await daemon.stop();
-    const stoppedLoser = await new ManifestStore(paths.manifestPath).load();
-    await new ManifestStore(paths.manifestPath).write(stoppedLoser.generation, stoppedLoser.entries.map((item) => (
-      item.id === loser ? { ...item, observed_state: "stopped" as const } : item
-    )));
-    daemon = new SupervisorDaemon(paths, "darwin");
-    await daemon.start();
-    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_after_all_supervised_stop", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    })).ok, true, "legacy migration is available only after every supervised owner stops");
-    assert.equal((await daemonRequest(paths.socketPath, "lane.release_legacy", {
-      reservation_id: "legacy_after_all_supervised_stop",
-    })).ok, true);
+    })).ok, false, "any active supervised Claude agent keeps the legacy provider engine fenced out");
   } finally {
     await daemon.stop();
     await env.cleanup();
@@ -5161,14 +5111,14 @@ test("two supervised Codex claims wait together behind one legacy Codex owner", 
   }
 });
 
-test("daemon restart quarantines duplicate Claude Code lane owners from older manifests", async () => {
+test("daemon restart quarantines duplicate single-lane provider owners from older manifests", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const duplicate = (id: string): DaemonManifestEntry => ({
     ...entry,
     id,
     room_id: "room_upgrade_duplicate",
-    provider: "claude-code",
+    provider: "cursor",
     desired_state: "running",
     observed_state: "working",
   });
@@ -5189,7 +5139,77 @@ test("daemon restart quarantines duplicate Claude Code lane owners from older ma
   }
 });
 
-test("a concurrent Claude Code creation race mints one provider generation", async () => {
+test("Open Model admits multiple isolated supervised agents in one room", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const candidate = (id: string): DaemonManifestEntry => ({
+    ...entry,
+    id,
+    room_id: "open_model_multi_agent_room",
+    provider: "open-model",
+    display_name: id === "open_model_alpha" ? "QuartzCove" : "GardenSignal",
+    desired_state: "paused",
+    observed_state: "paused",
+  });
+  try {
+    await daemon.start();
+    const created = await Promise.all([
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("open_model_alpha") }),
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("open_model_bravo") }),
+    ]);
+    assert.ok(created.every((result) => result.ok));
+    const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.deepEqual(manifest.map((item) => item.id).sort(), ["open_model_alpha", "open_model_bravo"]);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("display-name repair preserves the exact supervised runtime", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const original: DaemonManifestEntry = {
+    ...entry,
+    id: "open_model_identity_repair",
+    provider: "open-model",
+    display_name: "Open Model supervised agent",
+    desired_state: "paused",
+    observed_state: "paused",
+  };
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: original })).ok, true);
+    const renamed = await daemonRequest(paths.socketPath, "manifest.set_display_name", {
+      id: original.id,
+      display_name: "QuartzCove",
+    });
+    assert.equal(renamed.ok, true);
+    const result = renamed.result as DaemonManifestEntry;
+    assert.equal(result.display_name, "QuartzCove");
+    assert.equal(result.id, original.id);
+    assert.equal(result.provider, original.provider);
+    assert.equal(result.work_attempt_id, original.work_attempt_id);
+    assert.deepEqual(result.provider_ref, original.provider_ref);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("concurrent Claude Code creation mints one isolated provider generation per agent", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -5211,7 +5231,12 @@ test("a concurrent Claude Code creation race mints one provider generation", asy
     capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async (request) => {
       spawnCount += 1;
-      return { workAttemptId: request.workAttemptId, pid: 4400, providerContinuationId: "race-generation-continuation", observedState: "working" as const };
+      return {
+        workAttemptId: request.workAttemptId,
+        pid: 4400 + spawnCount,
+        providerContinuationId: `race-generation-continuation-${spawnCount}`,
+        observedState: "working" as const,
+      };
     },
     attach: async () => null,
     attachAction: async () => ({ state: "absent" }),
@@ -5238,19 +5263,23 @@ test("a concurrent Claude Code creation race mints one provider generation", asy
       daemonRequest(paths.socketPath, "manifest.put", { entry: candidate(0) }),
       daemonRequest(paths.socketPath, "manifest.put", { entry: candidate(1) }),
     ]);
-    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(results.filter((result) => result.ok).length, 2);
     const owners = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    assert.equal(owners.length, 1);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: owners[0]!.id,
-      desired_state: "running",
-    })).ok, true);
-    await eventually(async () => spawnCount === 1, "single winning supervised generation");
+    assert.equal(owners.length, 2);
+    for (const owner of owners) {
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id: owner.id,
+        desired_state: "running",
+      })).ok, true);
+    }
+    await eventually(async () => spawnCount === 2, "one isolated supervised generation per Claude agent");
 
     const durable = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
-    const persisted = await durable.getAttempt(owners[0]!.work_attempt_id!);
-    assert.equal(persisted.execution_generations.length, 1);
-    assert.equal(persisted.execution_generations.filter((generation) => generation.terminal === null).length, 1);
+    for (const owner of owners) {
+      const persisted = await durable.getAttempt(owner.work_attempt_id!);
+      assert.equal(persisted.execution_generations.length, 1);
+      assert.equal(persisted.execution_generations.filter((generation) => generation.terminal === null).length, 1);
+    }
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
