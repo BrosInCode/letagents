@@ -115,6 +115,7 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["POST", "/rooms/room_1/board-intents"], ["POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute"],
     ["POST", "/rooms/room_1/tasks/task_1/focus-room"], ["POST", "/rooms/room_1/participants/clear-disconnected"],
     ["PATCH", "/rooms/room_1"], ["POST", "/rooms/room_1/artifacts/future-action"],
+    ["GET", "/rental/provider/requests"], ["POST", "/rental/sessions/rental_1/complete"],
   ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
 });
 
