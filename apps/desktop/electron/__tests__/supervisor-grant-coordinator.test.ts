@@ -114,6 +114,70 @@ test("fresh Codex launch provisions before paused claim, installs before activat
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
 });
 
+test("fresh Open Model launch installs the desktop-held endpoint credential before convergence", async () => {
+  const h = harness();
+  const events: string[] = [];
+  const daemon = {
+    ...h.daemon,
+    async create(input: { roomIdentifier: string }) {
+      events.push("create");
+      return {
+        ...entry(),
+        provider: "open-model",
+        model: "qwen/agent-model",
+        roomId: input.roomIdentifier,
+        desiredState: "paused" as const,
+      };
+    },
+    async installOpenModelCredential(input: {
+      apiKey: string | null;
+      baseUrl: string;
+      model: string;
+      daemonGeneration: number;
+    }) {
+      events.push("credential");
+      assert.equal(input.apiKey, "provider-key");
+      assert.equal(input.baseUrl, "https://models.example.test/v1");
+      assert.equal(input.model, "qwen/agent-model");
+      assert.equal(input.daemonGeneration, 7);
+      return "installed" as const;
+    },
+    async installHostGrant(input: { supervisorGrant: string }) {
+      events.push("grant");
+      assert.equal(input.supervisorGrant, "secret_provisioned");
+      return "installed" as const;
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+    async () => ({
+      apiKey: "provider-key",
+      baseUrl: "https://models.example.test/v1",
+      model: "qwen/default-model",
+      savedAt: "2026-07-28T00:00:00.000Z",
+    }),
+  );
+
+  const result = await coordinator.createPausedAndInstall({
+    creationRequestId: "launch_1234567",
+    roomIdentifier: "room_1",
+    displayName: "Open Quartz",
+    providerId: "open-model",
+    charter: "help",
+    model: "qwen/agent-model",
+    permissionProfileId: "full_access",
+    repoRootPath: "/tmp/repo",
+  });
+
+  assert.deepEqual(events, ["create", "credential", "grant"]);
+  assert.equal(result.entry.provider, "open-model");
+  assert.equal(JSON.stringify(result).includes("provider-key"), false);
+});
+
 test("Claude daemon-inbox launch provisions its own exact host grant before activation", async () => {
   const h = harness();
   const result = await h.coordinator.createPausedAndInstall({

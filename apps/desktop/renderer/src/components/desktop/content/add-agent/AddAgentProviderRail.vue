@@ -12,7 +12,10 @@
       @click="emit('select', provider.id)"
     >
       <span class="desktop-add-agent-provider-icon" aria-hidden="true">
-        <McpHarnessIcon :target-id="provider.mcpTargetId" />
+        <McpHarnessIcon v-if="provider.mcpTargetId" :target-id="provider.mcpTargetId" />
+        <svg v-else viewBox="0 0 20 20" fill="none">
+          <path d="M5.5 6.5 2.75 10l2.75 3.5M14.5 6.5l2.75 3.5-2.75 3.5M11.5 4l-3 12" />
+        </svg>
       </span>
       <span>
         <strong>{{ provider.name }}</strong>

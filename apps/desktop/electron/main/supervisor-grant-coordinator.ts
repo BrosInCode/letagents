@@ -13,6 +13,7 @@ import {
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
 import { getJoinedRoomInfo } from "./rooms/room-info.js";
 import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
+import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
 type GrantResponse = {
@@ -82,6 +83,7 @@ export class SupervisorGrantCoordinator {
       if (!roomId) throw new Error("LetAgents did not resolve a canonical room identity for this supervised agent.");
       return roomId;
     },
+    private readonly resolveOpenModelSettings: () => Promise<StoredOpenModelSettings> = readOpenModelSettings,
   ) {}
 
   private async serialize<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
@@ -510,6 +512,23 @@ export class SupervisorGrantCoordinator {
     daemonGeneration: number,
     credentialOnly = false,
   ): Promise<void> {
+    if (entry.provider === "open-model") {
+      const settings = await this.resolveOpenModelSettings();
+      const model = entry.model?.trim() || settings.model.trim();
+      if (!settings.baseUrl.trim() || !model) {
+        throw new Error("Configure an Open Model endpoint and model before activating this agent.");
+      }
+      const credential = await this.daemon.installOpenModelCredential({
+        entryId: entry.id,
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl,
+        model,
+        daemonGeneration,
+      });
+      if (credential !== "installed") {
+        throw new Error("Background agent management changed generation before the Open Model credential could be installed.");
+      }
+    }
     const installed = await this.daemon.installHostGrant({
       entryId: entry.id, roomId: entry.roomId, agentKey,
       grantId: grant.metadata.grantId, supervisorGrant: grant.token,

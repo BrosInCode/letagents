@@ -64,6 +64,13 @@ type InstalledHostGrant = {
   grantGeneration: number; apiUrl: string; daemonGeneration: number;
   hostId: string; installationId: string; expiresAt: string;
 };
+type InstalledOpenModelCredential = {
+  entryId: string;
+  apiKey: string | null;
+  baseUrl: string;
+  model: string;
+  daemonGeneration: number;
+};
 /** A short-lived, process-only worker bearer.  It is intentionally never durable. */
 type CachedWorkerAuthorization = {
   entryId: string; roomId: string; agentKey: string; workAttemptId: string | null;
@@ -662,6 +669,8 @@ export class SupervisorDaemon {
   private readonly pendingResumeBindings = new Map<string, PendingResumeBinding>();
   /** Installed by the desktop over the local socket; intentionally never serialized. */
   private readonly hostGrants = new Map<string, InstalledHostGrant>();
+  /** Open Model endpoint authority is decrypted by Electron and held here only for this daemon generation. */
+  private readonly openModelCredentials = new Map<string, InstalledOpenModelCredential>();
   /** Latest successful bootstrap/launch mint, fenced to one effective grant and attempt. */
   private readonly cachedWorkerAuthorizations = new Map<string, CachedWorkerAuthorization>();
   /** Initial-tail reads are authority-bearing admission operations. */
@@ -1065,6 +1074,16 @@ export class SupervisorDaemon {
           credential_only: params.credential_only === true,
         });
       }
+      if (request.method === "supervisor.install_open_model_credential") {
+        const params = this.paramsRecord(request.params);
+        return this.installOpenModelCredential({
+          entry_id: String(params.entry_id ?? ""),
+          api_key: params.api_key === null ? null : String(params.api_key ?? ""),
+          base_url: String(params.base_url ?? ""),
+          model: String(params.model ?? ""),
+          daemon_generation: Number(params.daemon_generation ?? NaN),
+        });
+      }
       if (request.method === "supervisor.bootstrap_room_ingress") {
         const params = this.paramsRecord(request.params);
         return this.beginBootstrap(this.bootstrapRoomIngress.bind(this), {
@@ -1152,6 +1171,7 @@ export class SupervisorDaemon {
     this.handoffScheduled = true;
     this.notifyStateChanged();
     this.hostGrants.clear();
+    this.openModelCredentials.clear();
     this.cachedWorkerAuthorizations.clear();
     await this.fenceAndDrainDeliveryCutovers();
     await this.supervisedDelivery?.fenceAndDrain();
@@ -1188,6 +1208,7 @@ export class SupervisorDaemon {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
     this.hostGrants.clear();
+    this.openModelCredentials.clear();
     this.cachedWorkerAuthorizations.clear();
     const failures: unknown[] = [];
     try { await this.fenceAndDrainDeliveryCutovers(); } catch (error) { failures.push(error); }
@@ -2452,6 +2473,7 @@ export class SupervisorDaemon {
     // dispatch preflight then proves every native return is journaled before
     // the acknowledgement can authorize Electron to replace this daemon.
     this.hostGrants.clear();
+    this.openModelCredentials.clear();
     if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
     await Promise.all([...this.providerDispatchReservations]);
     if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
@@ -2723,7 +2745,7 @@ export class SupervisorDaemon {
       } catch (error) {
         return { outcome: "invalid" as const, error: schedulerErrorDetail(error) };
       }
-      this.liveBindingIdentities.delete(entryId); this.cachedWorkerAuthorizations.delete(entryId); this.hostGrants.delete(entryId);
+      this.liveBindingIdentities.delete(entryId); this.cachedWorkerAuthorizations.delete(entryId); this.hostGrants.delete(entryId); this.openModelCredentials.delete(entryId);
       return { outcome: "purged" as const };
     }));
   }
@@ -3920,6 +3942,14 @@ export class SupervisorDaemon {
         permissionProfileId,
         configurationRevision: launchConfiguration.config_revision,
       }, launchConfiguration.provider_launch_policy);
+      const openModelCredential = entry.provider === "open-model"
+        ? this.openModelCredentials.get(entry.id) ?? null
+        : null;
+      if (entry.provider === "open-model"
+        && (!openModelCredential
+          || openModelCredential.daemonGeneration !== this.singleton.currentGeneration)) {
+        throw new Error("Waiting for desktop Open Model credential handoff.");
+      }
       const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
       const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
       if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
@@ -3945,7 +3975,16 @@ export class SupervisorDaemon {
         supervisorSocketPath: this.socket.path,
         supervisorExecutionGenerationId: execution.execution_generation_id,
         ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
-        ...(devMcpServerEntryPath && entry.provider === "codex" ? { devMcpServerEntryPath } : {}),
+        ...(devMcpServerEntryPath && (entry.provider === "codex" || entry.provider === "open-model")
+          ? { devMcpServerEntryPath }
+          : {}),
+        ...(openModelCredential ? {
+          providerCredential: {
+            apiKey: openModelCredential.apiKey,
+            baseUrl: openModelCredential.baseUrl,
+            model: launchSnapshot.model?.trim() || openModelCredential.model,
+          },
+        } : {}),
       };
       let providerPersisted = false;
       let providerDispatched = false;
@@ -5002,6 +5041,7 @@ export class SupervisorDaemon {
   private async ownsDaemonGeneration(expectedGeneration: number): Promise<boolean> {
     if (this.handoffScheduled) {
       this.hostGrants.clear();
+      this.openModelCredentials.clear();
       this.cachedWorkerAuthorizations.clear();
       return false;
     }
@@ -5010,6 +5050,7 @@ export class SupervisorDaemon {
       await this.singleton.assertCurrent();
       if (this.handoffScheduled) {
         this.hostGrants.clear();
+        this.openModelCredentials.clear();
         this.cachedWorkerAuthorizations.clear();
         return false;
       }
@@ -5018,6 +5059,7 @@ export class SupervisorDaemon {
       // A successor acquired the singleton without this process completing its
       // normal handoff path. Drop every process-memory credential immediately.
       this.hostGrants.clear();
+      this.openModelCredentials.clear();
       this.cachedWorkerAuthorizations.clear();
       return false;
     }
@@ -5026,6 +5068,7 @@ export class SupervisorDaemon {
   private revokeHostGrantIfCurrent(entryId: string, grant: InstalledHostGrant): void {
     if (this.hostGrants.get(entryId) === grant) {
       this.hostGrants.delete(entryId);
+      this.openModelCredentials.delete(entryId);
       this.cachedWorkerAuthorizations.delete(entryId);
     }
   }
@@ -5193,6 +5236,46 @@ export class SupervisorDaemon {
       execution_generation_id: session.executionGenerationId, agent_session_id: session.agentSessionId,
       agent_session_token: session.bearer, credential_ref: session.bearerId, api_url: session.apiUrl,
     }, mayPublish);
+  }
+
+  /** Desktop-only local RPC. Provider endpoint authority remains process-memory-only. */
+  private async installOpenModelCredential(input: {
+    entry_id: string;
+    api_key: string | null;
+    base_url: string;
+    model: string;
+    daemon_generation: number;
+  }): Promise<{ status: "installed" | "stale" }> {
+    if (!input.entry_id.trim() || !input.base_url.trim() || !input.model.trim()) {
+      throw new Error("Open Model credential handoff requires an entry, endpoint, and model.");
+    }
+    if (input.api_key !== null && !input.api_key.trim()) {
+      throw new Error("Open Model API key must be non-empty or null.");
+    }
+    let baseUrl: URL;
+    try {
+      baseUrl = new URL(input.base_url);
+    } catch {
+      throw new Error("Open Model credential handoff contains an invalid endpoint.");
+    }
+    if (!["http:", "https:"].includes(baseUrl.protocol)
+      || baseUrl.username
+      || baseUrl.password
+      || baseUrl.hash) {
+      throw new Error("Open Model credential handoff contains an unsafe endpoint.");
+    }
+    if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
+    const entry = await this.store.getEntry(input.entry_id);
+    if (!entry || entry.provider !== "open-model") return { status: "stale" };
+    if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
+    this.openModelCredentials.set(entry.id, {
+      entryId: entry.id,
+      apiKey: input.api_key,
+      baseUrl: input.base_url.replace(/\/+$/, ""),
+      model: input.model.trim(),
+      daemonGeneration: input.daemon_generation,
+    });
+    return { status: "installed" };
   }
 
   /** Desktop-only local RPC. The host grant itself is never copied to SQLite, activity, or manifests. */

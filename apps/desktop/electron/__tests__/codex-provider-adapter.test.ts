@@ -904,6 +904,7 @@ test("Codex supervised launch passes only its daemon generation binding to the M
     LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+    LETAGENTS_SUPERVISOR_PROVIDER: "codex",
     LETAGENTS_EXECUTION_PROFILE: "interactive_desktop",
   });
   assert.deepEqual(harness.supervisorBridgeContexts, [{
@@ -939,6 +940,7 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
     LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+    LETAGENTS_SUPERVISOR_PROVIDER: "codex",
     LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
     LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
     LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent_session_exact",

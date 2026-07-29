@@ -50,9 +50,11 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   });
 }
 
-function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): NativeProviderAdapter {
+type FakeProvider = "codex" | "claude-code" | "open-model";
+
+function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAdapter {
   const handles = new Map<string, ReturnType<typeof nativeHandle>>();
-  let nextPid = provider === "codex" ? 100 : 200;
+  let nextPid = provider === "codex" ? 100 : provider === "claude-code" ? 200 : 300;
   return {
     capabilities: () => ({
       resume: true,
@@ -99,10 +101,10 @@ function fakeAdapter(provider: "codex" | "claude-code", calls: string[]): Native
 }
 
 function nativeHandle(
-  provider: "codex" | "claude-code",
+  provider: FakeProvider,
   workAttemptId: string,
   providerContinuationId: string,
-  pid = provider === "codex" ? 101 : 202,
+  pid = provider === "codex" ? 101 : provider === "claude-code" ? 202 : 303,
 ) {
   return {
     workAttemptId,
@@ -110,7 +112,15 @@ function nativeHandle(
     providerContinuationId,
     providerConnection: provider === "codex"
       ? { kind: "codex_app_server" as const, url: `ws://127.0.0.1:${pid}`, pid, processIdentity: `codex:${pid}` }
-      : { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
+      : provider === "open-model"
+        ? {
+            kind: "opencode_server" as const,
+            url: `http://127.0.0.1:${pid}`,
+            pid,
+            processIdentity: `opencode:${pid}`,
+            serverAuthPath: `/tmp/opencode-${pid}.json`,
+          }
+        : { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
     observedState: () => "working" as const,
   };
 }
@@ -244,6 +254,36 @@ test("provider router only returns a cached handle for an exact durable connecti
     "codex:spawn:alpha-attempt",
     "codex:spawn:bravo-attempt",
   ], "connection mismatches are rejected by the router instead of delegated to an adapter");
+});
+
+test("provider router selects Open Model from an exact OpenCode connection", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("open-model", calls);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawned = await router.spawn({
+    provider: "open-model",
+    workAttemptId: "open-model-attempt",
+    roomId: "room",
+    cwd: "/tmp/open-model",
+    launchPolicy: { permission: { "*": "allow" } },
+    providerCredential: {
+      apiKey: "provider-secret",
+      baseUrl: "https://models.example.test/v1",
+      model: "open-model/test",
+    },
+  });
+  assert.equal(spawned.providerConnection?.kind, "opencode_server");
+
+  const freshRouter = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  assert.deepEqual(await freshRouter.attach({
+    workAttemptId: spawned.workAttemptId,
+    providerContinuationId: spawned.providerContinuationId!,
+    providerConnection: spawned.providerConnection,
+  }), spawned);
+  assert.deepEqual(calls, [
+    "open-model:spawn:open-model-attempt",
+    "open-model:attach:open-model-attempt",
+  ]);
 });
 
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {

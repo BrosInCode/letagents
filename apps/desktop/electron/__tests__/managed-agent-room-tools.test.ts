@@ -469,7 +469,7 @@ test("managed room tool loop executes multiple requests before returning the pub
   assert.match(prompts[1] ?? "", /Desktop room tool result/);
 });
 
-test("managed room tool loop supports text-only Codex and Open Model continuations", async () => {
+test("managed room tool loop supports text-only Codex continuations", async () => {
   const requestLine = `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"read_messages","arguments":{"limit":1}}`;
   const initialTurn: ManagedAgentRoomToolLoopTurn = { text: requestLine };
 

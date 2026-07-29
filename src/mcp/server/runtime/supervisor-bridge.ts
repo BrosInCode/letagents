@@ -149,7 +149,7 @@ async function requireCurrentSupervisedCoordinates(
   if (env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_room_turn") {
     throw new Error("Supervised effects require the supervised_room_turn execution profile.");
   }
-  const coordinates = await resolveSupervisorCoordinates(supervisedContextSession(), env, options);
+  const coordinates = await resolveSupervisorCoordinates(supervisedContextSession(env), env, options);
   if (!coordinates) throw new Error("The exact supervised daemon coordinates are unavailable.");
   return coordinates;
 }
@@ -166,7 +166,7 @@ export async function borrowCurrentSupervisedWorkerCredential(
   if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
     return { state: "not_supervised" };
   }
-  const seed = supervisedContextSession();
+  const seed = supervisedContextSession(env);
   const coordinates = await resolveSupervisorCoordinates(seed, env, options);
   if (!coordinates?.agentSessionId || !coordinates.roomId) {
     return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
@@ -184,7 +184,7 @@ export async function resolveCurrentSupervisedWorkerSession(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<StoredAgentSessionState> {
-  const seed = supervisedContextSession();
+  const seed = supervisedContextSession(env);
   const coordinates = await resolveSupervisorCoordinates(seed, env, options);
   if (!coordinates?.agentSessionId || !coordinates.roomId) {
     throw new Error("Daemon-supervised bounded turn is missing its exact worker session context.");
@@ -203,12 +203,25 @@ export async function resolveCurrentSupervisedWorkerSession(
   };
 }
 
-function supervisedContextSession(): StoredAgentSessionState {
+function supervisedContextSession(env: NodeJS.ProcessEnv = process.env): StoredAgentSessionState {
   const now = new Date(0).toISOString();
+  // Codex is the only provider that can recover supervisor coordinates from
+  // the worktree context file. Other supervised providers pass their exact
+  // coordinates and provider identity through the daemon-created MCP
+  // environment, so the fallback must remain Codex for existing context-file
+  // sessions rather than inventing a provider that cannot own the file.
+  const provider = env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || "codex";
+  const label = provider === "open-model"
+    ? "Open Model"
+    : provider === "claude-code"
+      ? "Claude Code"
+      : provider === "codex"
+        ? "Codex"
+        : "Supervised agent";
   return {
-    session_id: "", session_token: "", room_id: "", session_kind: "worker", runtime: "codex",
+    session_id: "", session_token: "", room_id: "", session_kind: "worker", runtime: provider,
     actor_label: "Daemon-supervised worker", agent_key: "daemon-supervised-worker",
-    display_name: "Daemon-supervised worker", owner_label: "", ide_label: "Codex",
+    display_name: "Daemon-supervised worker", owner_label: "", ide_label: label,
     created_at: now, updated_at: now, last_seen_at: now,
   };
 }
