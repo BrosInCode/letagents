@@ -194,8 +194,8 @@ export function assertValidOpenModelBaseUrl(baseUrl: string): void {
   }
 
   // Ordinary endpoint selectors (for example `?region=us`) remain valid. Reject
-  // query names conventionally used to transport credentials because base_url
-  // is passed to Codex as a process argument and is visible to process tooling.
+  // query names conventionally used to transport credentials because the
+  // endpoint is runtime configuration and must remain safe to inspect.
   for (const queryName of parsed.searchParams.keys()) {
     if (queryNameContainsCredential(queryName)) {
       throw new Error(

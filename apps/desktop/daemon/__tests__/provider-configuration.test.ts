@@ -77,11 +77,11 @@ test("trusted profile selection replaces only native authority and preserves pro
   });
 
   assert.deepEqual(deriveProviderConfigurationSnapshot({
-    provider: "open-model", model: "gpt-next", reasoningEffort: "high", permissionProfileId: "full_access", configurationRevision: 8,
+    provider: "open-model", model: "qwen-next", reasoningEffort: null, permissionProfileId: "full_access", configurationRevision: 8,
   }, {
-    approvalPolicy: "ask", sandboxPolicy: { type: "workspaceWrite" }, experimental: true,
+    permission: { "*": "ask" }, experimental: true,
   }).launchPolicy, {
-    experimental: true, approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" },
+    experimental: true, permission: { "*": "allow" },
   });
 
   assert.throws(() => deriveProviderConfigurationSnapshot({

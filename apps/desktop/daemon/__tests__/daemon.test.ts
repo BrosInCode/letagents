@@ -3826,6 +3826,127 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
   }
 });
 
+test("Open Model launches with its exact memory-only endpoint credential", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const source = await committedSourceRepository(env.root, "open_model_credential_source");
+  await primeDaemonBareRepository(env.root, source);
+  const providerSecret = "open-model-provider-secret-never-persist";
+  let spawnInput: Parameters<ProviderActionPort["spawn"]>[0] | null = null;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      deliveryModes: ["daemon_inbox"],
+      resume: true,
+      midTurnInjection: false,
+      transcriptAccess: true,
+      permissionPromptBridging: false,
+      survivesRestart: true,
+    }),
+    spawn: async (input) => {
+      spawnInput = input;
+      return {
+        workAttemptId: input.workAttemptId,
+        pid: 9311,
+        providerContinuationId: "opencode-session-1",
+        providerConnection: {
+          kind: "opencode_server",
+          url: "http://127.0.0.1:19311",
+          pid: 9311,
+          processIdentity: "opencode-process-birth",
+          serverAuthPath: join(env.root, "opencode-server-auth.json"),
+        },
+        observedState: "idle",
+      };
+    },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("fresh Open Model launch must not resume"); },
+    poke: async () => {},
+    stop: async (handle) => ({
+      endedAt: new Date().toISOString(),
+      exitCode: 0,
+      signal: null,
+      terminalCause: "stopped",
+      providerContinuationId: handle.providerContinuationId,
+    }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    latest: async () => ({ messages: [] }),
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+  }, {
+    createWorkerSession: async () => ({
+      sessionId: "open-model-worker",
+      bearer: "open-model-worker-bearer",
+      bearerId: "open-model-worker-bearer-id",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  });
+  try {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const id = "open_model_memory_credential";
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id,
+      provider: "open-model",
+      model: "open-model/test",
+      permission_profile_id: "full_access",
+      delivery_mode: "daemon_inbox",
+      observed_state: "absent",
+      source_repo_path: source,
+    } })).ok, true);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const installed = await daemonRequest(paths.socketPath, "supervisor.install_open_model_credential", {
+      entry_id: id,
+      api_key: providerSecret,
+      base_url: "https://models.example.test/v1/",
+      model: "open-model/test",
+      daemon_generation: generation,
+    });
+    assert.equal(installed.ok, true, installed.error);
+    assert.deepEqual(installed.result, { status: "installed" });
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id,
+      room_id: entry.room_id,
+      agent_key: "owner/open-model-agent",
+      grant_id: "grant-open-model",
+      supervisor_grant: "open-model-host-grant",
+      grant_generation: 1,
+      api_url: "https://letagents.example",
+      daemon_generation: generation,
+      host_id: "host-open-model",
+      installation_id: "installation-open-model",
+      grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+      entry_id: id,
+      daemon_generation: generation,
+    })).ok, true);
+    await eventually(async () => spawnInput !== null, "Open Model provider spawn");
+    assert.deepEqual(spawnInput!.providerCredential, {
+      apiKey: providerSecret,
+      baseUrl: "https://models.example.test/v1",
+      model: "open-model/test",
+    });
+    assert.equal(spawnInput!.provider, "open-model");
+    assert.equal(spawnInput!.deliveryMode, "daemon_inbox");
+    assert.deepEqual(spawnInput!.launchPolicy, { permission: { "*": "allow" } });
+    const raw = await readFile(paths.manifestPath);
+    assert.equal(raw.includes(Buffer.from(providerSecret)), false, "the endpoint key is never serialized into daemon state");
+    assert.equal((await readFile(paths.auditPath)).includes(Buffer.from(providerSecret)), false, "the endpoint key is never written to audit");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("string-thrown transient worker mint failures redact credentials and automatically reconverge", async () => {
   const env = await fixture();
   const paths = {

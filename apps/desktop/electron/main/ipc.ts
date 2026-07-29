@@ -931,7 +931,7 @@ export function registerDesktopIpcHandlers(
         if (storage.effectiveMode !== "cloud") {
           throw new LaunchBlockedError("Supervised agents need a cloud room. Publish or join a cloud room, or use the existing local agent path.", "choose_project");
         }
-        if (provider !== "codex" && provider !== "claude-code") {
+        if (provider !== "codex" && provider !== "claude-code" && provider !== "open-model") {
           throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
         }
         if (provider === "claude-code" && input.permissionProfileId === "ask_before_write") {

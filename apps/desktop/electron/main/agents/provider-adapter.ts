@@ -29,7 +29,7 @@ export type ProviderObservedState =
   | "stopped"
   | "failed";
 
-export type ProviderAdapterId = "codex" | "claude-code" | "cursor";
+export type ProviderAdapterId = "codex" | "claude-code" | "cursor" | "open-model";
 
 // Negotiated per adapter; each `true` requires a proven spike cell (v10 §4.8).
 export interface ProviderAdapterCapabilities {
@@ -156,6 +156,17 @@ export type ProviderConnectionRef =
     kind: "cursor_cli";
     pid: number | null;
     processIdentity?: string | null;
+  }
+  | {
+    // Open Model runs through a dedicated loopback-only OpenCode server. The
+    // server credential is a local runtime control secret, not the user's
+    // model-provider API key. It is stored in an owner-only sidecar so a
+    // successor daemon can authenticate to the same verified process.
+    kind: "opencode_server";
+    url: string;
+    pid: number | null;
+    processIdentity?: string | null;
+    serverAuthPath: string;
   };
 
 /**
@@ -174,6 +185,13 @@ export function sameProviderConnectionIdentity(
   if (expected.processIdentity !== actual.processIdentity) return false;
   if (expected.kind === "codex_app_server") {
     return actual.kind === "codex_app_server" && Boolean(expected.url) && expected.url === actual.url;
+  }
+  if (expected.kind === "opencode_server") {
+    return actual.kind === "opencode_server"
+      && Boolean(expected.url)
+      && expected.url === actual.url
+      && Boolean(expected.serverAuthPath)
+      && expected.serverAuthPath === actual.serverAuthPath;
   }
   return true;
 }
@@ -217,6 +235,16 @@ export interface ProviderSpawnRequest {
    * Never place a bearer credential or socket path in this field.
    */
   devMcpServerEntryPath?: string;
+  /**
+   * Ephemeral provider credential delivered Electron → daemon over the
+   * owner-only control socket. It must never be serialized into a manifest,
+   * checkpoint, launch argument, renderer payload, or OpenCode config file.
+   */
+  providerCredential?: {
+    apiKey: string | null;
+    baseUrl: string;
+    model: string;
+  };
 }
 
 export interface ProviderHandle {

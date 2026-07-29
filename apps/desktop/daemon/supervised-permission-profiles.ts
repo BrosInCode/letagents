@@ -71,6 +71,33 @@ const claudeProfiles: readonly SupervisedPermissionProfile[] = [
   },
 ];
 
+const openModelProfiles: readonly SupervisedPermissionProfile[] = [
+  {
+    id: "full_access", label: "Full access",
+    description: "Runs OpenCode with broad local write and shell access in this trusted workspace.",
+    status: "available", risk: "high",
+    detail: "Maps to OpenCode permission=* allow. LetAgents still owns room delivery and credentials.", isDefault: true,
+  },
+  {
+    id: "ask_before_write", label: "Ask before writes",
+    description: "Requires a desktop-mediated OpenCode permission bridge.",
+    status: "gated", risk: "medium",
+    detail: "OpenCode supervised approval bridging is not available yet.", isDefault: false,
+  },
+  {
+    id: "sandboxed_write", label: "Sandboxed writes",
+    description: "Requires a verified supervised OpenCode sandbox profile.",
+    status: "gated", risk: "medium",
+    detail: "OpenCode supervised sandbox presets are not available yet.", isDefault: false,
+  },
+  {
+    id: "read_only", label: "Read-only",
+    description: "Requires a verified supervised OpenCode read-only profile.",
+    status: "gated", risk: "low",
+    detail: "OpenCode supervised read-only mode is not available yet.", isDefault: false,
+  },
+];
+
 const cursorProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "read_only", label: "Read-only", description: "Requires a supported supervised Cursor runtime.",
@@ -94,7 +121,9 @@ export function supervisedPermissionProfilesForProvider(providerId: string): Sup
   const provider = providerId.trim().toLowerCase();
   const profiles = provider === "claude-code" || provider === "claude"
     ? claudeProfiles
-    : provider === "codex" || provider === "open-model"
+    : provider === "open-model"
+      ? openModelProfiles
+      : provider === "codex"
       ? codexProfiles
       : provider === "cursor"
         ? cursorProfiles

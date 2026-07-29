@@ -491,6 +491,25 @@ function createLiveSessionStore<TState extends DesktopManagedLiveSessionBase>(
     return updatedSession;
   }
 
+  function remove(sessionId: string): TState | null {
+    let removed: TState | null = null;
+    updateAgentLocalState((state) => {
+      const existing = sessionsOf(state)[sessionId];
+      if (!existing) return state;
+      removed = existing;
+      const sessions = { ...sessionsOf(state) };
+      delete sessions[sessionId];
+      (state as SharedLetAgentsState)[maps.sessions] = sessions as never;
+      const currentIds = { ...currentIdsOf(state) };
+      for (const [roomId, currentSessionId] of Object.entries(currentIds)) {
+        if (currentSessionId === sessionId) delete currentIds[roomId];
+      }
+      (state as SharedLetAgentsState)[maps.currentIds] = currentIds as never;
+      return state;
+    });
+    return removed;
+  }
+
   return {
     getCurrent,
     getStored,
@@ -499,6 +518,7 @@ function createLiveSessionStore<TState extends DesktopManagedLiveSessionBase>(
     listManaged,
     save,
     update,
+    remove,
   };
 }
 
@@ -544,6 +564,12 @@ export function listDesktopManagedCodexLiveSessionsForProvider(
 ): DesktopCodexLiveSessionState[] {
   return listDesktopManagedCodexLiveSessions(roomId)
     .filter((session) => codexLiveSessionProviderId(session) === providerId);
+}
+
+export function removeStoredCodexLiveSession(
+  sessionId: string,
+): DesktopCodexLiveSessionState | null {
+  return codexLiveSessionStore.remove(sessionId);
 }
 
 export function listCodexDisplayNamesForRoom(roomId: string): string[] {

@@ -273,6 +273,8 @@ async function startWireDaemon(
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {
         result = { status: "installed" };
+      } else if (request.method === "supervisor.install_open_model_credential") {
+        result = { status: "installed" };
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -766,6 +768,51 @@ test("host grant install carries renewal ownership and expiry metadata to the ex
   }
 });
 
+test("Open Model credential handoff is fenced to one daemon generation", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 40);
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    assert.equal(await client.installOpenModelCredential({
+      entryId: "entry-open",
+      apiKey: "provider-secret",
+      baseUrl: "https://models.example.test/v1/",
+      model: "open-model/test",
+      daemonGeneration: 40,
+    }), "installed");
+    assert.deepEqual(wire.requests.find(
+      (request) => request.method === "supervisor.install_open_model_credential",
+    )?.params, {
+      entry_id: "entry-open",
+      api_key: "provider-secret",
+      base_url: "https://models.example.test/v1/",
+      model: "open-model/test",
+      daemon_generation: 40,
+    });
+    assert.equal(await client.installOpenModelCredential({
+      entryId: "entry-open",
+      apiKey: "provider-secret",
+      baseUrl: "https://models.example.test/v1",
+      model: "open-model/test",
+      daemonGeneration: 39,
+    }), "stale");
+    assert.equal(wire.requests.filter(
+      (request) => request.method === "supervisor.install_open_model_credential",
+    ).length, 1, "a stale caller never sends its provider key to the successor daemon");
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("turn control keeps the client socket alive beyond the generic request timeout", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -1042,7 +1089,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.57");
+    assert.equal(status.implementationVersion, "2.0.58");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

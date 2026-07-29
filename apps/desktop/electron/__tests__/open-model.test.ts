@@ -1,20 +1,21 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Buffer } from "node:buffer";
 
-import { codexAppServerLaunchArgs } from "../main/agents/codex-app-server.js";
 import {
   assertManagedAgentPermissionProfileAvailable,
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
 } from "../main/agents/managed-agent-permission-profiles.js";
+import { openCodeConfig } from "../main/agents/opencode-launch-contract.js";
 import {
-  OPEN_MODEL_API_KEY_ENV,
-  openModelCodexLaunch,
-} from "../main/agents/open-model-launch.js";
+  OPENCODE_RUNTIME_VERSION,
+  openCodeInstallCommand,
+  resolveOpenCodeBinary,
+} from "../main/agents/opencode-runtime.js";
 import {
   DEFAULT_OPEN_MODEL_BASE_URL,
   getOpenModelSettingsStatus,
@@ -171,7 +172,7 @@ test("open model settings reject endpoint URLs that expose secrets without echoi
 test("open model settings preserve ordinary non-secret endpoint query options", async () => {
   const settingsPath = await tempSettingsPath();
   const baseUrl =
-    "https://models.example.test/v1?region=us-east-1&compat=responses&design=minimal&author=alice&monkey=capuchin";
+    "https://models.example.test/v1?region=us-east-1&compat=chat&design=minimal&author=alice&monkey=capuchin";
 
   const status = await saveOpenModelSettings(
     { baseUrl, model: "m" },
@@ -179,7 +180,10 @@ test("open model settings preserve ordinary non-secret endpoint query options", 
   );
 
   assert.equal(status.baseUrl, baseUrl);
-  assert.equal((await readOpenModelSettings({ storePath: settingsPath, secretStorage })).baseUrl, baseUrl);
+  assert.equal(
+    (await readOpenModelSettings({ storePath: settingsPath, secretStorage })).baseUrl,
+    baseUrl,
+  );
 });
 
 test("unconfigured open model settings report configured=false", async () => {
@@ -190,11 +194,11 @@ test("unconfigured open model settings report configured=false", async () => {
   assert.equal(status.baseUrl, DEFAULT_OPEN_MODEL_BASE_URL);
 });
 
-test("Open Model preflight accepts a per-agent model when no saved default exists", async () => {
+test("Open Model preflight checks OpenCode and accepts a per-agent model", async () => {
   const settingsPath = await tempSettingsPath();
-  const bin = join(tmpdir(), `letagents-codex-open-model-${Date.now()}`);
+  const bin = join(tmpdir(), `letagents-opencode-${Date.now()}`);
   const previousSettingsPath = process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH;
-  const previousCodexBin = process.env.LETAGENTS_CODEX_BIN;
+  const previousOpenCodeBin = process.env.LETAGENTS_OPENCODE_BIN;
   await saveOpenModelSettings(
     { baseUrl: "http://127.0.0.1:11434/v1", model: null },
     { storePath: settingsPath, secretStorage },
@@ -203,20 +207,15 @@ test("Open Model preflight accepts a per-agent model when no saved default exist
     bin,
     [
       "#!/usr/bin/env node",
-      "if (process.argv[2] === '--version') { console.log('codex test'); process.exit(0); }",
-      "if (process.argv[2] === 'app-server' && process.argv[3] === '--help') { console.log('help'); process.exit(0); }",
+      `if (process.argv[2] === '--version') { console.log('opencode ${OPENCODE_RUNTIME_VERSION}'); process.exit(0); }`,
       "process.exit(2);",
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
   process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH = settingsPath;
-  process.env.LETAGENTS_CODEX_BIN = bin;
+  process.env.LETAGENTS_OPENCODE_BIN = bin;
   try {
-    // The electron suite runs test files as parallel node processes, so
-    // spawning the fake codex child can take arbitrarily long under load.
-    // Disable the per-command wall-clock timeout: the fake binary always exits
-    // on its own, and the timeout itself is not the behavior under test.
     const result = await runDesktopAgentProviderPreflight(
       "open-model",
       {
@@ -228,106 +227,68 @@ test("Open Model preflight accepts a per-agent model when no saved default exist
     );
     assert.equal(result.canStart, true);
     assert.match(result.detail ?? "", /qwen\/custom-session-model/);
-    assert.match(result.version ?? "", /qwen\/custom-session-model/);
+    assert.match(result.version ?? "", new RegExp(OPENCODE_RUNTIME_VERSION.replaceAll(".", "\\.")));
+    assert.match(result.detail ?? "", /No OpenCode account is required/i);
   } finally {
     if (previousSettingsPath === undefined) {
       delete process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH;
     } else {
       process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH = previousSettingsPath;
     }
-    if (previousCodexBin === undefined) {
-      delete process.env.LETAGENTS_CODEX_BIN;
+    if (previousOpenCodeBin === undefined) {
+      delete process.env.LETAGENTS_OPENCODE_BIN;
     } else {
-      process.env.LETAGENTS_CODEX_BIN = previousCodexBin;
+      process.env.LETAGENTS_OPENCODE_BIN = previousOpenCodeBin;
     }
   }
 });
 
-test("openModelCodexLaunch builds provider overrides and passes the key via env only", () => {
-  const launch = openModelCodexLaunch({
-    apiKey: "sk-or-secret",
-    baseUrl: "https://openrouter.ai/api/v1",
+test("OpenCode config exposes product tools without embedding the provider key", () => {
+  const config = openCodeConfig({
     model: "qwen/qwen3-coder",
-    savedAt: null,
+    baseUrl: "https://openrouter.ai/api/v1",
+    pluginUrl: "file:///tmp/credential-boundary.mjs",
+    cwd: "/repo",
+    mcpCommand: ["node", "/app/mcp.js"],
+    mcpEnvironment: {
+      LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      LETAGENTS_SUPERVISOR_PROVIDER: "open-model",
+      OPENCODE_AUTH_CONTENT: "",
+    },
   });
+  const serialized = JSON.stringify(config);
+  const provider = (config.provider as Record<string, Record<string, unknown>>)
+    ["letagents-open-model"];
+  const mcp = (config.mcp as Record<string, Record<string, unknown>>).letagents;
 
-  assert.deepEqual(launch.env, { [OPEN_MODEL_API_KEY_ENV]: "sk-or-secret" });
-  assert.ok(launch.configOverrides.includes('model="qwen/qwen3-coder"'));
-  assert.ok(launch.configOverrides.includes('model_provider="letagents_open_model"'));
-  assert.ok(
-    launch.configOverrides.includes(
-      'model_providers.letagents_open_model.base_url="https://openrouter.ai/api/v1"',
-    ),
+  assert.equal(config.model, "letagents-open-model/qwen/qwen3-coder");
+  assert.equal(config.autoupdate, false);
+  assert.equal(config.share, "disabled");
+  assert.equal(config.formatter, false);
+  assert.equal(config.lsp, false);
+  assert.equal((provider.options as Record<string, unknown>).baseURL, "https://openrouter.ai/api/v1");
+  assert.deepEqual(mcp.command, ["node", "/app/mcp.js"]);
+  assert.equal(
+    (mcp.environment as Record<string, string>).LETAGENTS_EXECUTION_PROFILE,
+    "supervised_room_turn",
   );
-  assert.ok(
-    launch.configOverrides.includes('model_providers.letagents_open_model.wire_api="responses"'),
-  );
-  assert.ok(
-    launch.configOverrides.includes(
-      `model_providers.letagents_open_model.env_key="${OPEN_MODEL_API_KEY_ENV}"`,
-    ),
-  );
-  assert.ok(
-    launch.configOverrides.includes(
-      `shell_environment_policy.exclude=["${OPEN_MODEL_API_KEY_ENV}"]`,
-    ),
-    "the API key env var must be excluded from model-run shell commands",
-  );
-  for (const override of launch.configOverrides) {
-    assert.doesNotMatch(override, /sk-or-secret/);
-  }
+  assert.equal((mcp.environment as Record<string, string>).OPENCODE_AUTH_CONTENT, "");
+  assert.doesNotMatch(serialized, /provider-secret|apiKey|api_key/);
 });
 
-test("openModelCodexLaunch omits env_key for keyless local endpoints", () => {
-  const launch = openModelCodexLaunch({
-    apiKey: null,
-    baseUrl: "http://127.0.0.1:11434/v1",
-    model: "qwen3-coder",
-    savedAt: null,
-  });
-
-  assert.deepEqual(launch.env, {});
-  assert.ok(!launch.configOverrides.some((override) => override.includes("env_key")));
-  assert.ok(
-    launch.configOverrides.includes(
-      `shell_environment_policy.exclude=["${OPEN_MODEL_API_KEY_ENV}"]`,
-    ),
-    "shell exclusion stays on even without a saved key, in case the var is exported in the desktop env",
+test("OpenCode runtime resolution and install command stay pinned", () => {
+  assert.equal(
+    resolveOpenCodeBinary({ LETAGENTS_OPENCODE_BIN: "/custom/opencode" }, ""),
+    "/custom/opencode",
   );
-});
-
-test("openModelCodexLaunch refuses unconfigured settings", () => {
-  assert.throws(
-    () =>
-      openModelCodexLaunch({
-        apiKey: null,
-        baseUrl: DEFAULT_OPEN_MODEL_BASE_URL,
-        model: "",
-        savedAt: null,
-      }),
-    /Configure a model endpoint/,
-  );
-});
-
-test("openModelCodexLaunch rejects unsafe endpoint settings loaded from disk", () => {
-  for (const baseUrl of unsafeOpenModelBaseUrls) {
-    assert.throws(
-      () =>
-        openModelCodexLaunch({
-          apiKey: null,
-          baseUrl,
-          model: "m",
-          savedAt: null,
-        }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /must not contain/);
-        assert.doesNotMatch(error.message, /alice|unsafe-secret/);
-        assert.equal(error.message.includes(baseUrl), false);
-        return true;
-      },
-    );
-  }
+  const install = openCodeInstallCommand();
+  assert.equal(install.command, "npm");
+  assert.deepEqual(install.args, [
+    "install",
+    "--global",
+    `opencode-ai@${OPENCODE_RUNTIME_VERSION}`,
+  ]);
+  assert.match(install.detail, /does not require its own account/i);
 });
 
 test("open-model permission profiles default to honestly-labeled full access", () => {
@@ -342,7 +303,7 @@ test("open-model permission profiles default to honestly-labeled full access", (
   );
 });
 
-test("Open Model remains capability-gated from durable supervision", () => {
+test("Open Model is a daemon-supervised OpenCode provider", () => {
   const providers = listDesktopAgentProviders();
   const codex = providers.find((provider) => provider.id === "codex");
   const claude = providers.find((provider) => provider.id === "claude-code");
@@ -356,28 +317,17 @@ test("Open Model remains capability-gated from durable supervision", () => {
     "the former in-app Claude Agent SDK runtime is no longer selectable",
   );
   assert.ok(openModel?.capabilities.includes("desktop_managed_runtime"));
-  assert.equal(openModel?.capabilities.includes("supervised_runtime"), false);
+  assert.ok(openModel?.capabilities.includes("supervised_runtime"));
+  assert.equal(openModel?.runtimeCommand, "opencode");
+  assert.equal(openModel?.mcpTargetId, null);
 });
 
-test("supervised provider admission declares room delivery without provider-name checks", () => {
+test("supervised provider admission declares provider-neutral daemon delivery", () => {
   assert.equal(supervisedDeliveryModeForProvider("codex"), "daemon_inbox");
+  assert.equal(supervisedDeliveryModeForProvider("open-model"), "daemon_inbox");
   assert.equal(supervisedDeliveryModeForProvider("claude-code"), "daemon_inbox");
-  assert.throws(() => supervisedDeliveryModeForProvider("cursor"), /not available through the supervised engine/);
-});
-
-test("codexAppServerLaunchArgs threads config overrides after the trust override", () => {
-  const args = codexAppServerLaunchArgs("ws://127.0.0.1:4500", {
-    trustedProjectPath: "/repo",
-    configOverrides: ['model="qwen/qwen3-coder"'],
-  });
-
-  assert.deepEqual(args, [
-    "app-server",
-    "-c",
-    'projects."/repo".trust_level="trusted"',
-    "-c",
-    'model="qwen/qwen3-coder"',
-    "--listen",
-    "ws://127.0.0.1:4500",
-  ]);
+  assert.throws(
+    () => supervisedDeliveryModeForProvider("cursor"),
+    /not available through the supervised engine/,
+  );
 });

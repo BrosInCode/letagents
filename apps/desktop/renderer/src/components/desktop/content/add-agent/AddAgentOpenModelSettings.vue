@@ -6,7 +6,7 @@
   >
     <span>Model endpoint</span>
     <label>
-      <small>Endpoint URL (OpenAI Responses-compatible)</small>
+      <small>OpenAI-compatible endpoint URL</small>
       <input
         :value="baseUrl"
         type="url"
@@ -44,6 +44,9 @@
         Clear saved key
       </button>
     </div>
+    <p class="desktop-add-agent-open-model-config-note">
+      OpenCode runs the model on this desktop. No OpenCode account is required.
+    </p>
     <AddAgentFeedback v-if="error" :message="error" tone="error" />
   </section>
 </template>

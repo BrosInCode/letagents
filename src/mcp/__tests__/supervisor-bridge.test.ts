@@ -14,6 +14,7 @@ import {
   bindSupervisedWorkerSessionWithContext,
   checkpointSupervisedWorkerCursor,
   isRetryableSupervisorBridgeError,
+  resolveCurrentSupervisedWorkerSession,
   scheduleSupervisedWorkerCursorCheckpoint,
 } from "../server/runtime/supervisor-bridge.js";
 
@@ -40,6 +41,25 @@ test("supervisor bridge is inert outside a daemon-supervised provider", async ()
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Open Model supervised coordinates resolve without a Codex context file", async () => {
+  const resolved = await resolveCurrentSupervisedWorkerSession(undefined, {
+    LETAGENTS_SUPERVISOR_PROVIDER: "open-model",
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "open_model_exact",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-open-model.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_open_model",
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_open_model",
+    LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session_open_model",
+    LETAGENTS_SUPERVISOR_ROOM_ID: "room_open_model",
+    LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "Local Qwen",
+  });
+
+  assert.equal(resolved.runtime, "open-model");
+  assert.equal(resolved.ide_label, "Open Model");
+  assert.equal(resolved.session_id, "session_open_model");
+  assert.equal(resolved.room_id, "room_open_model");
+  assert.equal(resolved.display_name, "Local Qwen");
 });
 
 test("credential borrowing requires the negotiated daemon generation and defers without desktop delivery", async () => {

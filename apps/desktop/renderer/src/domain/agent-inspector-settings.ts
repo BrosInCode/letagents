@@ -139,7 +139,7 @@ export function agentInspectorProvider(
 }
 
 export function agentInspectorProviderSupportsEffort(providerId: string | null | undefined): boolean {
-  return providerId === "codex" || providerId === "open-model";
+  return providerId === "codex";
 }
 
 export function roomMovePresentation(move: DesktopSupervisorRoomMove): { label: string; detail: string; terminal: boolean } {

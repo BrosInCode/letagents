@@ -62,6 +62,15 @@
   height: 24px;
 }
 
+.desktop-add-agent-provider-icon > svg {
+  width: 22px;
+  height: 22px;
+  stroke: #a78bfa;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .desktop-add-agent-provider strong,
 .desktop-add-agent-provider small {
   display: block;

@@ -258,7 +258,7 @@ export async function registerDesktopManagedWorker(
     displayName: string;
     token: string;
     repoBranch: string | null;
-    /** Optional per-session IDE label override (open-model on the Codex engine). */
+    /** Optional per-session IDE label override supplied by the managed provider. */
     ideLabel?: string;
   },
 ): Promise<StoredAgentSessionState> {

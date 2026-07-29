@@ -9,7 +9,7 @@ import { assertManagedAgentPermissionProfileAvailable } from "./managed-agent-pe
  * real provider policy still carries the selected authority.
  */
 export function attestProviderSpawnPolicy(
-  provider: "codex" | "claude-code" | "cursor",
+  provider: "codex" | "claude-code" | "cursor" | "open-model",
   request: ProviderSpawnRequest,
 ): Record<string, unknown> {
   if (!request.permissionProfileId) return plainPolicy(request.launchPolicy, provider);
@@ -18,6 +18,8 @@ export function attestProviderSpawnPolicy(
   if (provider === "codex") {
     requireMatch(policy, "approvalPolicy", "never", provider);
     requireMatch(policy, "sandboxPolicy", { type: "dangerFullAccess" }, provider);
+  } else if (provider === "open-model") {
+    requireMatch(policy, "permission", { "*": "allow" }, provider);
   } else if (provider === "claude-code") {
     const authority = profile === "read_only"
       ? { permissionMode: "plan", dangerouslySkipPermissions: false }

@@ -27,7 +27,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.57";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.58";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -740,6 +740,35 @@ export class SupervisorDaemonClient {
       execution_generation_id: input.executionGenerationId, agent_session_id: input.agentSessionId,
       agent_session_token: input.credential, daemon_generation: status.generation,
     });
+    return result.status === "installed" ? "installed" : "stale";
+  }
+
+  /**
+   * Main-process-only Open Model credential ingress. The provider key is
+   * decrypted by Electron and crosses only the owner-only daemon socket.
+   */
+  async installOpenModelCredential(input: {
+    entryId: string;
+    apiKey: string | null;
+    baseUrl: string;
+    model: string;
+    daemonGeneration: number;
+  }): Promise<"installed" | "stale"> {
+    if (!input.baseUrl.trim() || !input.model.trim()) {
+      throw new Error("An Open Model endpoint and model are required.");
+    }
+    const status = await this.ensureRunning();
+    if (status.generation !== input.daemonGeneration) return "stale";
+    const result = await this.request<{ status?: unknown }>(
+      "supervisor.install_open_model_credential",
+      {
+        entry_id: input.entryId,
+        api_key: input.apiKey,
+        base_url: input.baseUrl,
+        model: input.model,
+        daemon_generation: input.daemonGeneration,
+      },
+    );
     return result.status === "installed" ? "installed" : "stale";
   }
 

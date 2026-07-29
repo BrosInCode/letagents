@@ -25,6 +25,10 @@ import {
   sensitiveCodexAppServerEnvValues,
 } from "./codex-app-server.js";
 import { codexInstallCommand } from "./codex-install.js";
+import {
+  openCodeInstallCommand,
+  resolveOpenCodeBinary,
+} from "./opencode-runtime.js";
 import { getOpenModelSettingsStatus } from "./open-model-settings.js";
 import { runDesktopCursorProviderPreflight } from "./cursor-provider-preflight.js";
 import {
@@ -128,6 +132,7 @@ function firstOutputLine(result: ExecResult): string | null {
 async function getProviderMcpStatus(
   provider: DesktopAgentProvider,
 ): Promise<DesktopMcpInstallTarget["status"] | null> {
+  if (!provider.mcpTargetId) return null;
   const state = await buildMcpInstallState();
   return state.targets.find((target) => target.id === provider.mcpTargetId)?.status ?? null;
 }
@@ -344,15 +349,15 @@ async function openModelPreflight(
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
+  const command = resolveOpenCodeBinary();
   const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
       status: "missing_runtime",
       canStart: false,
-      message: "The Codex CLI engine is not installed.",
-      detail: "Open Model agents run on the Codex CLI engine pointed at your model endpoint. Install it before starting one.",
+      message: "The OpenCode execution engine is not installed.",
+      detail: "Development builds need OpenCode on PATH. Release builds include a pinned OpenCode runtime.",
       nextAction: "install_runtime",
       version: null,
       mcpStatus,
@@ -363,8 +368,8 @@ async function openModelPreflight(
       providerId: provider.id,
       status: "error",
       canStart: false,
-      message: "The Codex CLI engine could not be checked.",
-      detail: firstOutputLine(versionResult) || "The Codex command failed before returning a version.",
+      message: "The OpenCode execution engine could not be checked.",
+      detail: firstOutputLine(versionResult) || "The OpenCode command failed before returning a version.",
       nextAction: null,
       version: null,
       mcpStatus,
@@ -372,21 +377,6 @@ async function openModelPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const appServerResult = await execFileWithTimeout(command, ["app-server", "--help"], { timeoutMs });
-  if (!appServerResult.ok) {
-    return {
-      providerId: provider.id,
-      status: "error",
-      canStart: false,
-      message: "The Codex app-server could not be checked.",
-      detail: firstOutputLine(appServerResult) ||
-        "Open Model agents need a Codex CLI build with app-server support. Update Codex, then try again.",
-      nextAction: "install_runtime",
-      version,
-      mcpStatus,
-    };
-  }
-
   const settings = await getOpenModelSettingsStatus();
   const effectiveModel = normalizeManagedAgentModel(input.model) || settings.model;
   if (settings.error) {
@@ -407,7 +397,7 @@ async function openModelPreflight(
       status: "config_required",
       canStart: false,
       message: "Configure a model endpoint before starting an Open Model agent.",
-      detail: "Add an endpoint URL that speaks the OpenAI Responses API (OpenRouter, vLLM, ...) and save a default model or choose a per-agent model below. Paste an API key if the endpoint needs one (local endpoints usually do not).",
+      detail: "Add an OpenAI-compatible endpoint URL (OpenRouter, vLLM, Ollama, …) and save a default model or choose one below. Paste a provider API key only when that endpoint requires one; OpenCode itself has no separate login.",
       nextAction: null,
       version,
       mcpStatus,
@@ -432,7 +422,7 @@ async function openModelPreflight(
     status: "ready",
     canStart: true,
     message: "Open Model is ready to start.",
-    detail: `Runs the Codex engine with ${effectiveModel} via your configured endpoint${settings.hasApiKey ? " using your saved API key" : ""}.`,
+    detail: `Runs ${effectiveModel} through OpenCode and your configured endpoint${settings.hasApiKey ? " using your encrypted provider API key" : ""}. No OpenCode account is required.`,
     nextAction: null,
     version: version ? `${version} - ${effectiveModel}` : effectiveModel,
     mcpStatus,
@@ -619,6 +609,39 @@ async function installCodexRuntime(
   };
 }
 
+async function installOpenCodeRuntime(
+  confirmed: boolean | undefined,
+  provider: DesktopAgentProvider,
+): Promise<DesktopAgentProviderSetupResult> {
+  if (!confirmed) {
+    return providerSetupConfirmationResult({ id: provider.id, name: provider.name }, "install_runtime");
+  }
+  if (isDesktopSmokeCheck()) {
+    return {
+      providerId: provider.id,
+      action: "install_runtime",
+      success: true,
+      message: "OpenCode was installed.",
+      detail: "Smoke mode skipped the OpenCode installer.",
+    };
+  }
+  const install = openCodeInstallCommand();
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(install.command, install.args, { stdio: "ignore", detached: false });
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0
+      ? resolve()
+      : reject(new Error(`OpenCode installer exited with code ${code ?? "unknown"}.`)));
+  });
+  return {
+    providerId: provider.id,
+    action: "install_runtime",
+    success: true,
+    message: "OpenCode was installed.",
+    detail: install.detail,
+  };
+}
+
 export async function runDesktopAgentProviderSetup(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderSetupInput,
@@ -627,6 +650,9 @@ export async function runDesktopAgentProviderSetup(
   const provider = findAgentProvider(providerId);
 
   if (input.action === "install_mcp_bridge") {
+    if (!provider.mcpTargetId) {
+      throw new Error(`${provider.name} embeds its LetAgents bridge and has no external MCP installation target.`);
+    }
     if (!input.confirmed) {
       return providerSetupConfirmationResult(provider, input.action);
     }
@@ -643,11 +669,11 @@ export async function runDesktopAgentProviderSetup(
     };
   }
 
-  if (
-    input.action === "install_runtime" &&
-    (provider.id === "codex" || provider.id === "open-model")
-  ) {
+  if (input.action === "install_runtime" && provider.id === "codex") {
     return installCodexRuntime(input.confirmed, provider);
+  }
+  if (input.action === "install_runtime" && provider.id === "open-model") {
+    return installOpenCodeRuntime(input.confirmed, provider);
   }
 
   throw new Error(`${provider.name} does not support ${input.action}.`);

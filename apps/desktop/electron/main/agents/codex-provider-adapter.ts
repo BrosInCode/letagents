@@ -900,6 +900,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
           LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+          LETAGENTS_SUPERVISOR_PROVIDER: "codex",
           ...(req.supervisorWorkerSession ? {
             LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: req.supervisorWorkerSession.agentSessionId,
             LETAGENTS_SUPERVISOR_ROOM_ID: req.roomId,
