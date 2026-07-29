@@ -78,13 +78,13 @@ function readyController() {
     providerLabel: "Codex",
   });
   const conflict = ref({ provider: "codex" });
-  const canAddAnotherCodexAgent = ref(true);
+  const canAddAnotherSupervisedAgent = ref(true);
   let dismissCalls = 0;
   let stopCalls = 0;
   const launch = {
     view,
     conflict,
-    canAddAnotherCodexAgent,
+    canAddAnotherSupervisedAgent,
     stoppingEntryId: ref<string | null>(null),
     recoveryCandidate: ref(null),
     recoveringCandidate: ref(false),
@@ -95,16 +95,16 @@ function readyController() {
     detectRecoverableLaunch: () => undefined,
     dismiss: () => undefined,
     stop: () => { stopCalls += 1; },
-    dismissReadyCodexLaunchForAnother: () => {
+    dismissReadyLaunchForAnother: () => {
       dismissCalls += 1;
       view.value = null as never;
       conflict.value = null as never;
-      canAddAnotherCodexAgent.value = false;
+      canAddAnotherSupervisedAgent.value = false;
     },
   };
   return {
     controller: { launch, recoverableProviderName: computed(() => null) },
-    release: launch.dismissReadyCodexLaunchForAnother,
+    release: launch.dismissReadyLaunchForAnother,
     counts: () => ({ dismissCalls, stopCalls }),
   };
 }
@@ -210,11 +210,11 @@ function findByTestId(node: HostNode, testId: string): HostNode | null {
   return null;
 }
 
-test("mounted ready Codex button dispatches dismiss and restores Start without stopping", async () => {
+test("mounted ready supervised button dispatches dismiss and restores Start without stopping", async () => {
   const ready = readyController();
   const beforeRelease = await renderReadyLaunch(ready.controller);
 
-  assert.match(beforeRelease, /desktop-add-agent-add-another-codex/);
+  assert.match(beforeRelease, /desktop-add-agent-add-another-supervised/);
   assert.match(beforeRelease, /Add another Codex agent/);
   assert.doesNotMatch(beforeRelease, /desktop-add-agent-stop-supervised-runtime/);
   assert.doesNotMatch(beforeRelease, />Start supervised agent</);
@@ -224,9 +224,10 @@ test("mounted ready Codex button dispatches dismiss and restores Start without s
     setup: () => () => ready.controller.launch.view.value
       ? h(AddAgentSupervisedLaunchActions, {
           progress: ready.controller.launch.view.value,
-          canAddAnotherCodexAgent: ready.controller.launch.canAddAnotherCodexAgent.value,
+          canAddAnotherSupervisedAgent: ready.controller.launch.canAddAnotherSupervisedAgent.value,
+          providerName: "Codex",
           hasStopAction: Boolean(ready.controller.launch.conflict.value)
-            && !ready.controller.launch.canAddAnotherCodexAgent.value,
+            && !ready.controller.launch.canAddAnotherSupervisedAgent.value,
           stopping: false,
           onAddAnother: ready.release,
           onStop: ready.controller.launch.stop,
@@ -235,7 +236,7 @@ test("mounted ready Codex button dispatches dismiss and restores Start without s
       : h("div", { "data-testid": "form-restored" }),
   }));
   app.mount(root);
-  const button = findByTestId(root, "desktop-add-agent-add-another-codex");
+  const button = findByTestId(root, "desktop-add-agent-add-another-supervised");
   assert.ok(button, "the mounted eligible branch must contain Add another");
   const actionContainer = button.parent;
   assert.ok(actionContainer);
@@ -253,6 +254,6 @@ test("mounted ready Codex button dispatches dismiss and restores Start without s
   const afterRelease = await renderReadyLaunch(ready.controller);
   assert.equal(ready.counts().dismissCalls, 1);
   assert.equal(ready.counts().stopCalls, 0);
-  assert.doesNotMatch(afterRelease, /desktop-add-agent-add-another-codex/);
+  assert.doesNotMatch(afterRelease, /desktop-add-agent-add-another-supervised/);
   assert.match(afterRelease, />Start supervised agent</);
 });

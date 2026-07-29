@@ -21,7 +21,7 @@ import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
 import { contextualAddAgentError } from "./add-agent-errors";
-import { suggestSupervisedCodexCodename } from "../../../../domain/codenames";
+import { suggestSupervisedAgentCodename } from "../../../../domain/codenames";
 import {
   canStartNewSupervisedLaunch,
   recoveryScanAllowsNewLaunch,
@@ -84,12 +84,13 @@ export async function createSupervisedAgentFromSnapshot(
       .map((entry) => entry.displayName);
   } catch {
     // A recovery scan can legitimately be unavailable while create still
-    // succeeds. The request id still gives this attempt a unique display
-    // suffix; the daemon remains the identity authority.
+    // succeeds. The request id still deterministically selects a friendly
+    // name; the durable entry and server agent key remain identity authority.
   }
-  const displayName = snapshot.providerId === "codex"
-    ? suggestSupervisedCodexCodename(existingDisplayNames, snapshot.creationRequestId)
-    : `${snapshot.providerName} supervised agent`;
+  const displayName = suggestSupervisedAgentCodename(
+    existingDisplayNames,
+    snapshot.creationRequestId,
+  );
   // listAgents is an async gap before the durable boundary. Modal close,
   // provider switch, and request invalidation must all fence createAgent here,
   // not only after a durable agent has already been created.
@@ -239,6 +240,8 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   roomIdentifier: () => props.roomIdentifier,
   roomLabel,
   providerId: selectedProviderId,
+  supportsConcurrentAgents: () =>
+    selectedProvider.value?.capabilities.includes("concurrent_supervised_agents") === true,
   authCommand,
   authCommandForProvider,
   currentVersion: setup.currentVersion,
@@ -387,6 +390,7 @@ async function startManagedAgent(): Promise<void> {
         hasActiveLaunch: Boolean(supervisedLaunchView.value || supervisedConflict.value || launchStarted.value),
         hasRecoveryCandidate: Boolean(supervisedRecoveryCandidate.value),
         recoveringCandidate: recoveringSupervisedCandidate.value,
+        supportsConcurrentAgents: selectedProvider.value?.capabilities.includes("concurrent_supervised_agents") === true,
       })) return;
       if (supervisedPermissionBridgeUnavailable.value) {
         throw new Error("Supervised Claude Code cannot use Ask before writes yet because native permission prompts are not bridged. Choose Read-only or Full access.");

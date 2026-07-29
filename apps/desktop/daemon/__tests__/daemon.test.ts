@@ -5189,6 +5189,76 @@ test("daemon restart quarantines duplicate Claude Code lane owners from older ma
   }
 });
 
+test("Open Model admits multiple isolated supervised agents in one room", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const candidate = (id: string): DaemonManifestEntry => ({
+    ...entry,
+    id,
+    room_id: "open_model_multi_agent_room",
+    provider: "open-model",
+    display_name: id === "open_model_alpha" ? "QuartzCove" : "GardenSignal",
+    desired_state: "paused",
+    observed_state: "paused",
+  });
+  try {
+    await daemon.start();
+    const created = await Promise.all([
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("open_model_alpha") }),
+      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate("open_model_bravo") }),
+    ]);
+    assert.ok(created.every((result) => result.ok));
+    const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    assert.deepEqual(manifest.map((item) => item.id).sort(), ["open_model_alpha", "open_model_bravo"]);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("display-name repair preserves the exact supervised runtime", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const original: DaemonManifestEntry = {
+    ...entry,
+    id: "open_model_identity_repair",
+    provider: "open-model",
+    display_name: "Open Model supervised agent",
+    desired_state: "paused",
+    observed_state: "paused",
+  };
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: original })).ok, true);
+    const renamed = await daemonRequest(paths.socketPath, "manifest.set_display_name", {
+      id: original.id,
+      display_name: "QuartzCove",
+    });
+    assert.equal(renamed.ok, true);
+    const result = renamed.result as DaemonManifestEntry;
+    assert.equal(result.display_name, "QuartzCove");
+    assert.equal(result.id, original.id);
+    assert.equal(result.provider, original.provider);
+    assert.equal(result.work_attempt_id, original.work_attempt_id);
+    assert.deepEqual(result.provider_ref, original.provider_ref);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("a concurrent Claude Code creation race mints one provider generation", async () => {
   const env = await fixture();
   const paths = {

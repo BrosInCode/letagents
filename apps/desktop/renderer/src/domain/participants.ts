@@ -1,6 +1,13 @@
 import type { DesktopParticipantSummary } from "../../../electron/ipc-types";
 
-const AGENT_RUNTIME_PREFIXES = ["antigravity", "claude", "codex", "orchestrator"] as const;
+const AGENT_RUNTIME_PREFIXES = [
+  "antigravity",
+  "claude",
+  "codex",
+  "open-model",
+  "opencode",
+  "orchestrator",
+] as const;
 const EVERYONE_MENTION_CANDIDATE: RoomMentionCandidate = {
   participantKey: "room:everyone",
   kind: "broadcast",
@@ -45,8 +52,11 @@ function agentMentionInsertText(
   duplicateDisplayName: boolean,
 ): string | null {
   const displayName = normalizeDisplayName(participant.displayName);
-  const requiresCanonicalRouting = participant.participantKey.startsWith("desktop-supervisor-agent:");
-  if (!requiresCanonicalRouting && !duplicateDisplayName && isParserCompatibleMentionHandle(displayName)) {
+  // A durable key is the routing fallback, not the product label. A unique,
+  // parser-safe display name is already a server-owned activation alias and
+  // should remain what the human sees in the composer. Only ambiguity or an
+  // unsafe display name requires exposing the canonical handle.
+  if (!duplicateDisplayName && isParserCompatibleMentionHandle(displayName)) {
     return displayName;
   }
   const canonical = participant.agentKey ? `agent:${participant.agentKey.trim()}` : "";

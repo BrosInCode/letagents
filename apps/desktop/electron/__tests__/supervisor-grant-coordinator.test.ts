@@ -178,6 +178,182 @@ test("fresh Open Model launch installs the desktop-held endpoint credential befo
   assert.equal(JSON.stringify(result).includes("provider-key"), false);
 });
 
+test("the ownership boundary repairs generic Open Model labels before identity persistence", async () => {
+  const h = harness();
+  let identityDisplayName: string | null = null;
+  let manifestDisplayName: string | null = null;
+  const coordinator = new SupervisorGrantCoordinator({
+    ...h.daemon,
+    async create(input: { roomIdentifier: string; displayName: string }) {
+      manifestDisplayName = input.displayName;
+      return {
+        ...entry(),
+        displayName: input.displayName,
+        provider: "open-model",
+        roomId: input.roomIdentifier,
+        desiredState: "paused" as const,
+      };
+    },
+    async installOpenModelCredential() {
+      return "installed" as const;
+    },
+  } as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", {
+    ...h.operations,
+    async resolveIdentity(input) {
+      identityDisplayName = input.displayName ?? null;
+      return `owner/${input.entryId}`;
+    },
+  }, async () => "room_1", async () => ({
+    apiKey: "provider-key",
+    baseUrl: "https://models.example.test/v1",
+    model: "qwen/default-model",
+    savedAt: "2026-07-28T00:00:00.000Z",
+  }));
+
+  await coordinator.createPausedAndInstall({
+    creationRequestId: "open_model_1234567",
+    roomIdentifier: "room_1",
+    displayName: "Open Model supervised agent",
+    providerId: "open-model",
+    charter: "help",
+    model: "qwen/default-model",
+    permissionProfileId: "full_access",
+    repoRootPath: "/tmp/repo",
+  });
+
+  assert.ok(identityDisplayName);
+  assert.equal(manifestDisplayName, identityDisplayName);
+  assert.doesNotMatch(identityDisplayName, /open model|supervised agent/i);
+});
+
+test("concurrent generic Open Model launches reserve distinct friendly names within a room", async () => {
+  const h = harness();
+  const entries: DesktopSupervisorManifestEntry[] = [];
+  const daemon = {
+    ...h.daemon,
+    async list() {
+      await Promise.resolve();
+      return [...entries];
+    },
+    async create(input: {
+      creationRequestId: string;
+      roomIdentifier: string;
+      displayName: string;
+    }) {
+      const created = {
+        ...entry(`supervised_${input.creationRequestId}`),
+        provider: "open-model",
+        displayName: input.displayName,
+        roomId: input.roomIdentifier,
+        desiredState: "paused" as const,
+      };
+      entries.push(created);
+      return created;
+    },
+    async installOpenModelCredential() {
+      return "installed" as const;
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+    async () => ({
+      apiKey: "provider-key",
+      baseUrl: "https://models.example.test/v1",
+      model: "qwen/default-model",
+      savedAt: "2026-07-28T00:00:00.000Z",
+    }),
+  );
+  const create = (creationRequestId: string) => coordinator.createPausedAndInstall({
+    creationRequestId,
+    roomIdentifier: "room_1",
+    displayName: "Open Model supervised agent",
+    providerId: "open-model",
+    charter: "help",
+    model: "qwen/default-model",
+    permissionProfileId: "full_access",
+    repoRootPath: "/tmp/repo",
+  });
+
+  const [first, second] = await Promise.all([
+    create("collision_00000005"),
+    create("collision_00000070"),
+  ]);
+
+  assert.notEqual(first.entry.displayName, second.entry.displayName);
+  assert.doesNotMatch(first.entry.displayName, /open model|supervised agent/i);
+  assert.doesNotMatch(second.entry.displayName, /open model|supervised agent/i);
+});
+
+test("reconciliation repairs an existing generic Open Model identity without replacing its runtime", async () => {
+  const h = harness();
+  const original = {
+    ...entry(),
+    provider: "open-model",
+    displayName: "Open Model supervised agent",
+    model: "qwen/agent-model",
+  };
+  const exactAgentKey = `owner/${original.id}`;
+  h.grants.set(exactAgentKey, {
+    metadata: metadata(exactAgentKey),
+    token: "secret_same",
+    entryId: original.id,
+    lastInstalledDaemonGeneration: 7,
+  });
+  const renamedEntries: DesktopSupervisorManifestEntry[] = [];
+  let serverDisplayName: string | null = null;
+  const daemon = {
+    ...h.daemon,
+    async list() {
+      h.events.push("list");
+      return [renamedEntries.at(-1) ?? original];
+    },
+    async setDisplayName(id: string, displayName: string) {
+      assert.equal(id, original.id);
+      const renamed = { ...original, displayName };
+      renamedEntries.push(renamed);
+      h.events.push(`rename:${displayName}`);
+      return renamed;
+    },
+    async installOpenModelCredential() {
+      return "installed" as const;
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    {
+      ...h.operations,
+      async resolveIdentity(input) {
+        serverDisplayName = input.displayName ?? null;
+        return exactAgentKey;
+      },
+    },
+    async () => original.roomId,
+    async () => ({
+      apiKey: "provider-key",
+      baseUrl: "https://models.example.test/v1",
+      model: original.model!,
+      savedAt: "2026-07-29T00:00:00.000Z",
+    }),
+  );
+
+  await coordinator.reconcileDesiredRunning();
+
+  const renamed = renamedEntries[0];
+  assert.ok(renamed);
+  assert.equal(renamed.id, original.id);
+  assert.equal(renamed.providerPid, original.providerPid);
+  assert.equal(renamed.executionGenerationId, original.executionGenerationId);
+  assert.equal(renamed.providerContinuationId, original.providerContinuationId);
+  assert.equal(serverDisplayName, renamed.displayName);
+  assert.doesNotMatch(renamed.displayName, /open model|supervised agent/i);
+});
+
 test("Claude daemon-inbox launch provisions its own exact host grant before activation", async () => {
   const h = harness();
   const result = await h.coordinator.createPausedAndInstall({

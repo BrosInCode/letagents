@@ -24,10 +24,14 @@ export function canStartNewSupervisedLaunch(input: {
   hasActiveLaunch: boolean;
   hasRecoveryCandidate: boolean;
   recoveringCandidate: boolean;
+  supportsConcurrentAgents: boolean;
 }): boolean {
   return recoveryScanAllowsNewLaunch(input.scanStatus)
     && !input.hasActiveLaunch
-    && (!input.hasRecoveryCandidate || input.providerId === "codex")
+    // A recoverable entry is optional only when this provider gives every
+    // durable agent an independently addressable runtime. Providers that
+    // still own one shared lane must resolve that entry before another launch.
+    && (!input.hasRecoveryCandidate || input.supportsConcurrentAgents)
     && !input.recoveringCandidate;
 }
 

@@ -3,7 +3,7 @@ import test from "node:test";
 import { nextTick, ref } from "vue";
 import type { DesktopLaunchEvent, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
 import {
-  canAddAnotherCodexAgent,
+  canAddAnotherSupervisedAgent,
   useSupervisedAgentLaunch,
 } from "../src/components/desktop/content/add-agent/useSupervisedAgentLaunch";
 import { createSupervisedAgentFromSnapshot } from "../src/components/desktop/content/add-agent/useAddAgentController";
@@ -99,6 +99,7 @@ test("supervised polling serializes reads and unsubscribes at terminal state", a
     roomIdentifier: () => "room-1",
     roomLabel: () => "Room one",
     providerId: () => "codex",
+    supportsConcurrentAgents: () => true,
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
@@ -481,10 +482,16 @@ test("the shared supervised start policy preserves authoritative live fences", (
     hasActiveLaunch: false,
     hasRecoveryCandidate: false,
     recoveringCandidate: false,
+    supportsConcurrentAgents: false,
   };
   assert.equal(canStartNewSupervisedLaunch(base), true);
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasRecoveryCandidate: true }), false);
-  assert.equal(canStartNewSupervisedLaunch({ ...base, providerId: "codex", hasRecoveryCandidate: true }), true);
+  assert.equal(canStartNewSupervisedLaunch({
+    ...base,
+    providerId: "open-model",
+    supportsConcurrentAgents: true,
+    hasRecoveryCandidate: true,
+  }), true);
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasActiveLaunch: true }), false);
   assert.equal(canStartNewSupervisedLaunch({ ...base, recoveringCandidate: true }), false);
 });
@@ -1991,6 +1998,7 @@ test("a ready Codex card can be released for another request without stopping it
     roomIdentifier: () => "room-1",
     roomLabel: () => "Room one",
     providerId: () => "codex",
+    supportsConcurrentAgents: () => true,
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
@@ -2012,14 +2020,14 @@ test("a ready Codex card can be released for another request without stopping it
   }));
 
   assert.equal(launch.view.value?.ready, true);
-  launch.dismissReadyCodexLaunchForAnother();
+  launch.dismissReadyLaunchForAnother();
   assert.equal(launch.view.value, null);
   assert.equal(stopCalls, 0, "Add another only clears local attachment state");
   assert.equal(launch.begin(), "codex-request-two");
   launch.cleanup();
 });
 
-test("only a ready Codex entry can offer Add another", () => {
+test("only providers with isolated supervised runtimes offer Add another", () => {
   const ready = entry({
     observedState: "working",
     workspacePath: "/tmp/worktree",
@@ -2028,9 +2036,18 @@ test("only a ready Codex entry can offer Add another", () => {
     agentSessionBindingState: "active",
     workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
   });
-  assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: ready }), true);
-  assert.equal(canAddAnotherCodexAgent({ providerId: "claude-code", entry: { ...ready, provider: "claude-code" } }), false);
-  assert.equal(canAddAnotherCodexAgent({ providerId: "codex", entry: entry() }), false);
+  assert.equal(canAddAnotherSupervisedAgent({
+    providerId: "codex", entry: ready, supportsConcurrentAgents: true,
+  }), true);
+  assert.equal(canAddAnotherSupervisedAgent({
+    providerId: "claude-code", entry: { ...ready, provider: "claude-code" }, supportsConcurrentAgents: false,
+  }), false);
+  assert.equal(canAddAnotherSupervisedAgent({
+    providerId: "open-model", entry: { ...ready, provider: "open-model" }, supportsConcurrentAgents: true,
+  }), true);
+  assert.equal(canAddAnotherSupervisedAgent({
+    providerId: "codex", entry: entry(), supportsConcurrentAgents: true,
+  }), false);
 });
 
 test("a deferred name lookup persists the complete Start-click snapshot", async () => {
@@ -2085,6 +2102,36 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
   assert.equal(createdInput?.model, "gpt-5.6");
 });
 
+test("Open Model creation uses the same friendly codename contract as Codex", async () => {
+  let createdInput: Record<string, unknown> | null = null;
+  await createSupervisedAgentFromSnapshot({
+    listAgents: async () => [entry({ displayName: "GardenSignal" })],
+    createAgent: async (input: Record<string, unknown>) => {
+      createdInput = input;
+      return entry({
+        id: "supervised_open_model",
+        displayName: String(input.displayName),
+        provider: String(input.providerId),
+      });
+    },
+  } as never, {
+    creationRequestId: "open-model-request",
+    providerId: "open-model",
+    providerName: "Open Model",
+    roomIdentifier: "room-1",
+    repoRootPath: "/repo",
+    charter: "Investigate the task.",
+    permissionProfileId: "full_access",
+    launchPolicy: null,
+    model: "qwen/agent-model",
+  }, () => true);
+
+  assert.equal(createdInput?.providerId, "open-model");
+  assert.match(String(createdInput?.displayName), /^[A-Z][A-Za-z]+$/);
+  assert.doesNotMatch(String(createdInput?.displayName), /open model|supervised agent/i);
+  assert.notEqual(createdInput?.displayName, "GardenSignal");
+});
+
 test("modal close or provider invalidation during name lookup fences durable creation", async () => {
   for (const invalidation of ["modal close", "provider switch"]) {
     const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
@@ -2136,6 +2183,7 @@ test("switching away from Codex revokes the shared Add-another eligibility and h
     roomIdentifier: () => "room-1",
     roomLabel: () => "Room one",
     providerId: selectedProviderId,
+    supportsConcurrentAgents: () => selectedProviderId.value === "codex",
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
@@ -2154,12 +2202,12 @@ test("switching away from Codex revokes the shared Add-another eligibility and h
     agentSessionBindingState: "active",
     workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
   }));
-  assert.equal(launch.canAddAnotherCodexAgent.value, true);
+  assert.equal(launch.canAddAnotherSupervisedAgent.value, true);
 
   selectedProviderId.value = "claude-code";
   await nextTick();
-  assert.equal(launch.canAddAnotherCodexAgent.value, false);
-  launch.dismissReadyCodexLaunchForAnother();
+  assert.equal(launch.canAddAnotherSupervisedAgent.value, false);
+  launch.dismissReadyLaunchForAnother();
   assert.equal(launch.view.value?.ready, true, "revoked handler must preserve the Codex card");
   launch.cleanup();
 });

@@ -27,7 +27,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.58";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.59";
 const REQUEST_TIMEOUT_MS = 3_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
@@ -478,6 +478,21 @@ export class SupervisorDaemonClient {
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
+  }
+
+  async setDisplayName(id: string, displayName: string): Promise<DesktopSupervisorManifestEntry> {
+    const normalized = displayName.trim();
+    if (!nonEmptyString(id) || !normalized || normalized.length > 120) {
+      throw new Error("Agent naming requires an exact identity and display name.");
+    }
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) {
+      throw new Error("This supervisor is too old for durable agent naming; rebuild the desktop daemon.");
+    }
+    return mapEntry(await this.request<WireEntry>("manifest.set_display_name", {
+      id,
+      display_name: normalized,
+    }));
   }
 
   /** This call deliberately accepts only a renderer-safe exact identity tuple. */
