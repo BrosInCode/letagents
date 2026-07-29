@@ -135,7 +135,6 @@ import {
   clearAllDesktopManagedAgentReplyChangeState,
   clearDesktopManagedAgentReplyChangeState,
 } from "./managed-agent-reply-changes.js";
-import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
 import { createDesktopCursorRuntime } from "./cursor-runtime.js";
 import {
   createManagedAgentEventTurnEngine,
@@ -210,7 +209,6 @@ desktopManagedAgentRuntimes.register({
   retry: async () => null,
   dispatchRoomStreamEvent: () => {},
 });
-desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
 desktopManagedAgentRuntimes.register(createDesktopCursorRuntime());
 
 type ReasoningSessionCreateResponse = {

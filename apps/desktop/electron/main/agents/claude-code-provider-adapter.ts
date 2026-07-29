@@ -1,16 +1,10 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-import {
-  buildCodexStartPrompt,
-  DEFAULT_CODEX_STOP_PHRASE,
-  looksLikeInviteCode,
-  makeCodexStopToken,
-} from "./codex-start-prompt.js";
 import {
   synthesizeTerminalPayload,
   type ProviderActivityEvent,
@@ -21,6 +15,10 @@ import {
   type ProviderContinuationRef,
   type ProviderHandle,
   type ProviderObservedState,
+  type ProviderRoomTurnOptions,
+  type ProviderRoomTurnRecoveryRequest,
+  type ProviderRoomTurnRequest,
+  type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
   type ProviderTurnControlResult,
@@ -45,22 +43,24 @@ import {
   type ProviderProcessExit,
 } from "./provider-evidence.js";
 import {
+  CLAUDE_NO_ROOM_REPLY_SENTINEL,
+  exactClaudeStreamTerminal,
+  recoverExactClaudeTurnFromSession,
+  type ClaudeEvidenceRecord,
+  type ClaudeExactTurnFailure,
+  type ClaudeExactTurnResult,
+} from "./claude-room-turn-evidence.js";
+import {
   getJsonLetAgentsMcpServerFromRaw,
   LETAGENTS_NPX_ARGS,
 } from "../mcp-config.js";
 import { requireSupportedClaudeCodeVersion } from "./claude-code-version.js";
 
-// P2a (plan v10 §4.8/§6): Claude Code through its NATIVE harness. The legacy
-// managed-Claude engine runs the Agent SDK in-process inside Electron — no OS
-// child, no independent exit observation, no survival past the app — and it
-// blocks the LetAgents MCP room tools because Electron owns coordination. This
-// adapter inverts both: the headless `claude` CLI runs as a real supervised OS
-// child (birth identity, observable exit, fenced control loss, exactly the
-// #765 evidence rules) and the worker drives the room itself through the
-// LetAgents MCP workplace it inherits from the user's own CLI configuration.
-// Nothing here touches permissions or credentials: the Add Agent launch policy
-// is forwarded to the CLI verbatim and the child sees the user's real HOME,
-// auth, and MCP config (v10 §3 — the workplace, not the runtime).
+// Claude Code through its native headless CLI. The daemon owns room ingress,
+// exact-turn dispatch, retry, credentials, and publication; this adapter owns
+// only the native process/session boundary. The Add Agent launch policy is
+// forwarded verbatim, while LetAgents MCP effects borrow the daemon's exact
+// generation grant instead of inheriting desktop owner authority.
 
 const INIT_TIMEOUT_MS = 30_000;
 const VERSION_TIMEOUT_MS = 8_000;
@@ -91,6 +91,7 @@ export interface ClaudeCodeProviderAdapterDependencies {
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<ProviderProcessExit>;
+  readSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]>;
   now(): string;
 }
 
@@ -106,7 +107,7 @@ export interface ClaudeCodeProviderAdapterOptions {
 }
 
 const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
-  deliveryModes: ["mcp_polling"],
+  deliveryModes: ["daemon_inbox"],
   // Empirically proven by the task_36 acceptance spike (msg_1382): `--resume
   // <session_id>` continues the SAME session id. The adapter asserts that
   // identity on every resume and the regression suite pins it.
@@ -245,22 +246,59 @@ function assistantTextOf(message: ClaudeStreamMessage): string | null {
   return text || null;
 }
 
-function userStreamJsonLine(text: string): string {
+function userStreamJsonLine(text: string, uuid?: string): string {
   return JSON.stringify({
     type: "user",
+    ...(uuid ? { uuid } : {}),
     message: { role: "user", content: [{ type: "text", text }] },
   });
 }
+
+export function boundedClaudeRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
+  return [
+    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
+    `Your durable charter: ${request.charter?.trim() || "Help thoughtfully within the room."}`,
+    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
+    "Answer the activating message in your final response; do not send that same reply with a message tool.",
+    `If no response should be published, return exactly ${CLAUDE_NO_ROOM_REPLY_SENTINEL} with no other text.`,
+    `Inbox item: ${request.inboxItemId}`,
+    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
+    `Source message: ${JSON.stringify(request.sourceMessage)}`,
+    `Activation: ${JSON.stringify(request.activation)}`,
+  ].join("\n");
+}
+
+const CLAUDE_DAEMON_BOOTSTRAP_PROMPT = [
+  "Initialize this supervised Claude Code continuation.",
+  "Do not call tools, inspect the room, or perform work.",
+  "Reply exactly LETAGENTS_CLAUDE_DAEMON_READY.",
+].join("\n");
+
+type ClaudeRoomTurnTerminal = ClaudeExactTurnResult | ClaudeExactTurnFailure;
+
+class ClaudeRoomTurnRecoveryError extends Error {
+  readonly roomTurnRecoveryOutcome = "ambiguous" as const;
+}
+
+class ClaudeRoomTurnObservationDetachedError extends Error {}
 
 /**
  * The child's environment is the user's own, minus exactly one carve-out the
  * task_36 acceptance spike proved necessary (msg_1382): the CLI refuses to
  * start when CLAUDECODE is set ("cannot be launched inside another Claude Code
  * session"), so a supervisor that itself runs under Claude Code must not leak
- * that marker into the worker. Nothing else is scrubbed or curated.
+ * that marker into the worker. Daemon-owned turns borrow exact-generation
+ * authority, so ambient owner and fixed worker credentials are also removed
+ * before Claude or provider-started shell commands can inherit them.
  */
 export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const { CLAUDECODE: _omitted, ...env } = { ...base, ...overrides };
+  const {
+    CLAUDECODE: _omitted,
+    LETAGENTS_TOKEN: _ownerToken,
+    LETAGENTS_AGENT_SESSION_BEARER: _fixedWorkerBearer,
+    ...env
+  } = { ...base, ...overrides };
   return env;
 }
 
@@ -290,8 +328,8 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     // targets -pid first) reaps the CLI's descendants too, and the child is not
     // torn down as a side effect of the supervisor's own stdio going away.
     detached: process.platform !== "win32",
-    // Inherits the user's configured LetAgents MCP workplace and adds only
-    // the daemon generation bridge consumed by that MCP process.
+    // The strict launch config supplies the API endpoint; these coordinates
+    // make every LetAgents MCP effect borrow the exact daemon generation.
     env: claudeCliEnv(process.env, input.env),
   });
 
@@ -352,7 +390,10 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
       return () => disconnectListeners.delete(listener);
     },
     writeLine(json) {
-      child.stdin?.write(`${json}\n`);
+      if (!child.stdin || !child.stdin.writable || child.stdin.writableEnded || child.stdin.destroyed) {
+        throw new Error("Claude CLI stdin is unavailable.");
+      }
+      child.stdin.write(`${json}\n`);
     },
     endInput() {
       try {
@@ -405,14 +446,47 @@ async function defaultCreateLetAgentsMcpConfig(): Promise<{ path: string; dispos
       const apiUrl = env?.LETAGENTS_API_URL?.trim();
       if (!apiUrl) continue;
       const mcpEnv: Record<string, string> = { LETAGENTS_API_URL: apiUrl };
-      const token = env?.LETAGENTS_TOKEN?.trim();
-      if (token) mcpEnv.LETAGENTS_TOKEN = token;
       return createEphemeralClaudeMcpConfig(mcpEnv);
     } catch {
       // A malformed/missing secondary Claude config does not hide a valid one.
     }
   }
   throw new Error("Claude's repaired LetAgents MCP environment is unavailable.");
+}
+
+export function claudeSessionTranscriptCandidates(entries: string[], sessionId: string): string[] {
+  const suffix = `${sessionId}.jsonl`;
+  return entries.filter((entry) => entry.split(/[\\/]/).at(-1) === suffix);
+}
+
+async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]> {
+  const projectsRoot = join(homedir(), ".claude", "projects");
+  let entries: string[];
+  try {
+    entries = await readdir(projectsRoot, { recursive: true });
+  } catch {
+    return [];
+  }
+  const matches = claudeSessionTranscriptCandidates(entries, sessionId);
+  if (matches.length > 1) {
+    throw new ClaudeRoomTurnRecoveryError(
+      "Claude room-turn recovery found more than one transcript for the exact continuation.",
+    );
+  }
+  if (!matches[0]) return [];
+  const text = await readFile(join(projectsRoot, matches[0]), "utf8");
+  return text.split(/\r?\n/).flatMap((line) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) return [];
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? [parsed as ClaudeEvidenceRecord]
+        : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
@@ -422,6 +496,7 @@ const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
+  readSessionRows: defaultReadSessionRows,
   now: () => new Date().toISOString(),
 };
 
@@ -435,6 +510,13 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
   streamSequence = 0;
   readonly turnResultWaiters = new Set<(message: ClaudeStreamMessage) => void>();
+  readonly roomTurnWaiters = new Map<string, Set<{
+    resolve: (result: ClaudeRoomTurnTerminal) => void;
+    reject: (error: Error) => void;
+  }>>();
+  readonly roomTurnResults = new Map<string, ClaudeRoomTurnTerminal>();
+  activeRoomTurnId: string | null = null;
+  roomTurnOperationId: string | null = null;
 
   constructor(
     readonly workAttemptId: string,
@@ -521,7 +603,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
   async poke(_handle: ProviderHandle, _message: string): Promise<void> {
     throw new Error(
-      "Claude mid-turn injection is not enabled: stream-json input is the candidate but no spike cell has proven it.",
+      "Claude mid-turn message injection is not supported; only native interruption is available.",
     );
   }
 
@@ -533,11 +615,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const handle = this.requireHandle(providerHandle);
     if (handle.terminal) throw new Error("Claude continuation is terminal; no turn can be controlled.");
     const text = correction?.trim() || null;
-    const active = handle.state === "working";
+    if (text) {
+      throw new ProviderTurnControlError(
+        "Claude daemon-inbox turn control can stop the active bounded turn, but cannot start an unjournaled correction turn.",
+        "not_applied",
+      );
+    }
+    const activeTurnId = handle.activeRoomTurnId;
+    const active = Boolean(activeTurnId);
     if (active) {
       const resultBoundary = this.waitForNextTurnResult(handle);
       await options.markDispatched?.();
-      if (handle.state !== "working") {
+      if (handle.activeRoomTurnId !== activeTurnId) {
         const result = await resultBoundary;
         throw new ProviderTurnControlError(
           `Claude returned ${streamMethod(result)} before the interrupt was dispatched.`,
@@ -554,7 +643,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       // actually reached an interrupted boundary.
       const result = await resultBoundary;
       const subtype = typeof result.subtype === "string" ? result.subtype.toLowerCase() : "";
-      if (subtype !== "interrupted" || sessionIdOf(result) !== handle.providerContinuationId) {
+      const resultTurnId = typeof result.user_message_uuid === "string"
+        ? result.user_message_uuid.trim()
+        : "";
+      if (
+        subtype !== "interrupted"
+        || sessionIdOf(result) !== handle.providerContinuationId
+        || resultTurnId !== activeTurnId
+      ) {
         const exactSessionTerminal = sessionIdOf(result) === handle.providerContinuationId;
         throw new ProviderTurnControlError(
           `Claude returned ${streamMethod(result)} instead of an exact-session interrupted boundary.`,
@@ -563,17 +659,102 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       handle.state = "idle";
     }
-    if (text) {
-      if (!active) await options.markDispatched?.();
-      handle.child.writeLine(userStreamJsonLine(text));
-      handle.state = "working";
-    }
     return {
       capability: "native_interrupt",
       interrupted: active,
-      resumed: Boolean(text),
-      state: text ? "working" : "idle",
+      resumed: false,
+      state: "idle",
     };
+  }
+
+  async runRoomTurn(
+    providerHandle: ProviderHandle,
+    request: ProviderRoomTurnRequest,
+    options: ProviderRoomTurnOptions = {},
+  ): Promise<ProviderRoomTurnResult> {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.terminal) throw new Error("Claude continuation is terminal; no bounded room turn can run.");
+    if (handle.state === "failed") throw new Error("Claude continuation has failed; no bounded room turn can run.");
+    if (handle.roomTurnOperationId || handle.activeRoomTurnId) {
+      throw new Error("Claude continuation already has a bounded room turn in progress.");
+    }
+    if (!request.inboxItemId.trim() || !request.actionId.trim()) {
+      throw new Error("Bounded Claude room turn requires durable inbox and action ids.");
+    }
+
+    const turnId = randomUUID();
+    handle.roomTurnOperationId = turnId;
+    let terminalPromise: Promise<ClaudeRoomTurnTerminal> | null = null;
+    try {
+      await options.beforeNativeDispatch?.();
+      // Claude accepts a caller-supplied UUID, so durability can record the
+      // exact native identity before the stdin write that starts the turn.
+      await options.checkpointTurnStarted?.(turnId);
+      terminalPromise = this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
+      handle.activeRoomTurnId = turnId;
+      handle.state = "working";
+      try {
+        handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request), turnId));
+      } catch (error) {
+        // The exact id is durable, but the native write did not occur. Release
+        // the local waiter and fail this continuation so recovery/reconcile can
+        // proceed without leaving a permanent "turn in progress" fence.
+        handle.activeRoomTurnId = null;
+        handle.state = "failed";
+        handle.protocolError = true;
+        throw error;
+      }
+      const terminal = await terminalPromise;
+      const result = this.providerRoomTurnResult(terminal);
+      await options.checkpointTerminalResult?.(result);
+      handle.roomTurnResults.delete(turnId);
+      return result;
+    } catch (error) {
+      if (terminalPromise && handle.activeRoomTurnId !== turnId) {
+        this.removeExactRoomTurnWaiters(handle, turnId, error);
+        await terminalPromise.catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      if (handle.roomTurnOperationId === turnId) handle.roomTurnOperationId = null;
+      if (handle.activeRoomTurnId === turnId && handle.roomTurnResults.has(turnId)) {
+        handle.activeRoomTurnId = null;
+      }
+    }
+  }
+
+  async recoverRoomTurn(
+    providerHandle: ProviderHandle,
+    request: ProviderRoomTurnRecoveryRequest,
+    options: {
+      detachSignal?: AbortSignal;
+      checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+    } = {},
+  ): Promise<ProviderRoomTurnResult> {
+    const handle = this.requireHandle(providerHandle);
+    const turnId = request.providerTurnId.trim();
+    if (!turnId) {
+      throw new ClaudeRoomTurnRecoveryError("Claude room-turn recovery requires an exact persisted turn id.");
+    }
+
+    let terminal = handle.roomTurnResults.get(turnId) ?? null;
+    if (!terminal && handle.activeRoomTurnId === turnId) {
+      terminal = await this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
+    }
+    if (!terminal) {
+      const rows = await this.deps.readSessionRows(handle.providerContinuationId);
+      terminal = recoverExactClaudeTurnFromSession(rows, turnId, handle.providerContinuationId);
+    }
+    if (!terminal) {
+      throw new ClaudeRoomTurnRecoveryError(
+        "Claude room-turn recovery cannot prove the persisted exact turn reached a terminal boundary.",
+      );
+    }
+
+    const result = this.providerRoomTurnResult(terminal);
+    await options.checkpointTerminalResult?.(result);
+    handle.roomTurnResults.delete(turnId);
+    return result;
   }
 
   async stop(
@@ -649,6 +830,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!req.agentDisplayName?.trim()) {
       throw new Error("Claude spawn requires the durable agent display name from the manifest.");
     }
+    if (req.deliveryMode !== "daemon_inbox") {
+      throw new Error("Claude room agents require daemon_inbox delivery.");
+    }
     const versionOutput = await this.deps.readVersion(this.claudeBin);
     requireSupportedClaudeCodeVersion(versionOutput);
 
@@ -662,6 +846,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     // honored verbatim on fresh spawns, and --resume continues the SAME session
     // id. Either way the continuation is asserted against init below.
     const expectedSessionId = resumeRef ? resumeRef.providerContinuationId : randomUUID();
+    const bootstrapTurnId = randomUUID();
     const args = [
       "--print",
       "--verbose",
@@ -679,6 +864,13 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
         LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
         LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
+        ...(req.supervisorWorkerSession ? {
+          LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: req.supervisorWorkerSession.agentSessionId,
+          LETAGENTS_SUPERVISOR_ROOM_ID: req.roomId,
+          LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: req.agentDisplayName.trim(),
+        } : {}),
+        LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+        LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
         ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
         ...(req.reasoningEffort ? { LETAGENTS_REASONING_EFFORT: req.reasoningEffort } : {}),
       }
@@ -741,26 +933,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       initTimer = setTimeout(() => resolve(null), this.initTimeoutMs);
     });
     try {
-      // Spike finding (msg_1382): the CLI does NOT emit init until it receives
-      // the first stdin user frame — awaiting init before writing would hang
-      // forever. So the start prompt goes first, and init is the acknowledgement.
-      const prompt = buildCodexStartPrompt({
-        roomIdentifier: req.roomId,
-        joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
-        cwd: req.cwd,
-        deliveryMode: "mcp_polling",
-        stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
-        token: makeCodexStopToken(),
-        suggestedDisplayName: req.agentDisplayName.trim(),
-        deadlineUtc: null,
-        maxMinutes: 0,
-        providerLabel: "Claude Code",
-        runtimeKey: "claude-code",
-        ...(resumeRef && req.supervisorWorkerSession
-          ? { resumeWorker: req.supervisorWorkerSession }
-          : {}),
-      });
-      child.writeLine(userStreamJsonLine(prompt));
+      // Claude does not emit init until it receives one stdin user frame. This
+      // bootstrap establishes the continuation but deliberately does no room
+      // work; every real message is claimed and dispatched by the daemon.
+      child.writeLine(userStreamJsonLine(CLAUDE_DAEMON_BOOTSTRAP_PROMPT, bootstrapTurnId));
 
       const observedInit = await Promise.race([
         initPromise,
@@ -807,10 +983,20 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.exitPromises.set(handle, exitPromise);
 
       this.publishStream(handle, streamMethod(observedInit), observedInit, "provider_event");
+      const bootstrapResult = this.waitForExactRoomTurn(handle, bootstrapTurnId);
       for (const line of pendingLines.splice(0)) {
         this.consumeLine(handle, line);
       }
-      handle.state = "working";
+      const bootstrapTerminal = await Promise.race([
+        bootstrapResult,
+        child.exited.then(() => null),
+        initTimeout,
+      ]);
+      if (!bootstrapTerminal || "error" in bootstrapTerminal) {
+        throw new Error("Claude CLI did not complete its daemon-safe bootstrap turn.");
+      }
+      handle.roomTurnResults.delete(bootstrapTurnId);
+      handle.state = "idle";
       return handle;
     } catch (error) {
       if (handle) {
@@ -846,6 +1032,26 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) {
       // The recorded child is verifiably gone (a recycled pid is NOT it and is
       // never signalled). Proven absent — bounded recovery may proceed.
+      return this.attachTerminal(providerContinuationId, null, "crashed");
+    }
+    // A previous daemon's stdin disappearing normally gives Claude EOF. Let
+    // that exact orphan finish and flush its JSONL terminal boundary before
+    // fencing it; recovery can then prove the already-started turn without a
+    // duplicate dispatch.
+    const exitedNaturally = await Promise.race([
+      this.deps.observeProcessExit(connection.pid, connection.processIdentity).then(() => true),
+      delay(this.stopGraceMs).then(() => false),
+    ]);
+    if (exitedNaturally) {
+      return this.attachTerminal(providerContinuationId, null, "crashed");
+    }
+    const identityBeforeTerm = this.deps.getProcessIdentity(connection.pid);
+    if (identityBeforeTerm === undefined) {
+      throw new Error(
+        "Claude CLI attach is ambiguous; the orphaned child's identity cannot be verified.",
+      );
+    }
+    if (identityBeforeTerm === null || !sameProcessBirthIdentity(identityBeforeTerm, connection.processIdentity)) {
       return this.attachTerminal(providerContinuationId, null, "crashed");
     }
     // The exact recorded child is still alive but unreachable (its stdio died
@@ -894,6 +1100,22 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
+      const exactTurnId = typeof message.user_message_uuid === "string"
+        ? message.user_message_uuid.trim()
+        : "";
+      if (exactTurnId) {
+        const terminal = exactClaudeStreamTerminal(
+          message,
+          exactTurnId,
+          handle.providerContinuationId,
+        );
+        if (terminal) {
+          handle.roomTurnResults.set(exactTurnId, terminal);
+          if (handle.activeRoomTurnId === exactTurnId) handle.activeRoomTurnId = null;
+          const exactWaiters = [...(handle.roomTurnWaiters.get(exactTurnId) ?? [])];
+          for (const waiter of exactWaiters) waiter.resolve(terminal);
+        }
+      }
       const exactInterrupted = typeof message.subtype === "string"
         && message.subtype.toLowerCase() === "interrupted"
         && sessionIdOf(message) === handle.providerContinuationId;
@@ -963,6 +1185,82 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       };
       handle.turnResultWaiters.add(done);
     });
+  }
+
+  private waitForExactRoomTurn(
+    handle: ClaudeProviderHandle,
+    turnId: string,
+    detachSignal?: AbortSignal,
+  ): Promise<ClaudeRoomTurnTerminal> {
+    const cached = handle.roomTurnResults.get(turnId);
+    if (cached) return Promise.resolve(cached);
+    if (detachSignal?.aborted) {
+      return Promise.reject(new ClaudeRoomTurnObservationDetachedError("Claude room-turn observation detached."));
+    }
+    return new Promise<ClaudeRoomTurnTerminal>((resolve, reject) => {
+      const waiters = handle.roomTurnWaiters.get(turnId) ?? new Set();
+      let entry: {
+        resolve: (result: ClaudeRoomTurnTerminal) => void;
+        reject: (error: Error) => void;
+      };
+      const cleanup = () => {
+        detachSignal?.removeEventListener("abort", detached);
+        const current = handle.roomTurnWaiters.get(turnId);
+        current?.delete(entry);
+        if (current?.size === 0) handle.roomTurnWaiters.delete(turnId);
+      };
+      const detached = () => {
+        cleanup();
+        reject(new ClaudeRoomTurnObservationDetachedError("Claude room-turn observation detached."));
+      };
+      entry = {
+        resolve: (result) => {
+          cleanup();
+          resolve(result);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
+      };
+      waiters.add(entry);
+      handle.roomTurnWaiters.set(turnId, waiters);
+      detachSignal?.addEventListener("abort", detached, { once: true });
+    });
+  }
+
+  private removeExactRoomTurnWaiters(
+    handle: ClaudeProviderHandle,
+    turnId: string,
+    error: unknown,
+  ): void {
+    const waiters = [...(handle.roomTurnWaiters.get(turnId) ?? [])];
+    for (const waiter of waiters) {
+      waiter.reject(error instanceof Error ? error : new Error(errorMessage(error)));
+    }
+  }
+
+  private providerRoomTurnResult(terminal: ClaudeRoomTurnTerminal): ProviderRoomTurnResult {
+    if ("error" in terminal) {
+      throw new Error(`Claude bounded room turn ${terminal.turnId} failed: ${terminal.error}`);
+    }
+    if (terminal.outcome === "reply") {
+      return {
+        turnId: terminal.turnId,
+        outcome: "reply",
+        text: terminal.text,
+        evidence: terminal.evidence,
+      };
+    }
+    if (terminal.outcome === "no_reply") {
+      return {
+        turnId: terminal.turnId,
+        outcome: "no_reply",
+        text: null,
+        evidence: terminal.evidence,
+      };
+    }
+    return { turnId: terminal.turnId, outcome: "unreadable", text: null, evidence: "none" };
   }
 
   private publishStream(
@@ -1043,6 +1341,13 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     handle.child.markIntentionalClose();
     if (this.handles.get(handle.workAttemptId) === handle) {
       this.handles.delete(handle.workAttemptId);
+    }
+    for (const turnId of [...handle.roomTurnWaiters.keys()]) {
+      this.removeExactRoomTurnWaiters(
+        handle,
+        turnId,
+        new Error(`Claude exited before bounded room turn ${turnId} reached a terminal boundary.`),
+      );
     }
     for (const listener of handle.exitListeners) listener(terminal);
     handle.exitListeners.clear();

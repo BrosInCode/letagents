@@ -37,8 +37,6 @@ const STATE_LOCK_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 export type DesktopCodexJoinedVia = "join_code" | "join_room";
 
-export type DesktopClaudeCodeJoinedVia = "join_code" | "join_room";
-
 export type DesktopCursorJoinedVia = "join_code" | "join_room";
 
 
@@ -89,14 +87,6 @@ export interface DesktopCodexLiveSessionState extends DesktopManagedLiveSessionB
   reasoning_session_id?: string | null;
 }
 
-export interface DesktopClaudeCodeLiveSessionState extends DesktopManagedLiveSessionBase {
-  joined_via: DesktopClaudeCodeJoinedVia;
-  claude_session_id?: string | null;
-  claude_bin: string;
-  recent_items?: Array<Record<string, unknown>>;
-  pending_permission_requests?: DesktopManagedAgentPermissionRequest[];
-}
-
 export interface DesktopCursorLiveSessionState extends DesktopManagedLiveSessionBase {
   joined_via: DesktopCursorJoinedVia;
   cursor_mcp_policy?: DesktopCursorMcpPolicy | null;
@@ -114,8 +104,6 @@ export interface SharedLetAgentsState {
   current_agent_session_ids?: Record<string, string>;
   current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, DesktopCodexLiveSessionState>;
-  current_claude_code_live_session_ids?: Record<string, string>;
-  claude_code_live_sessions?: Record<string, DesktopClaudeCodeLiveSessionState>;
   current_cursor_live_session_ids?: Record<string, string>;
   cursor_live_sessions?: Record<string, DesktopCursorLiveSessionState>;
 }
@@ -169,8 +157,20 @@ function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(statePath, "utf-8")) as SharedLetAgentsState;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    const parsed = JSON.parse(readFileSync(statePath, "utf-8")) as SharedLetAgentsState & {
+      current_claude_code_live_session_ids?: unknown;
+      claude_code_live_sessions?: unknown;
+    };
+    if (!parsed || typeof parsed !== "object") return {};
+    // The Electron-owned Claude runtime no longer exists. Drop its private
+    // session cache whenever local state is loaded so the next state write
+    // cannot preserve or revive that legacy execution path.
+    const {
+      current_claude_code_live_session_ids: _legacyCurrentClaudeSessionIds,
+      claude_code_live_sessions: _legacyClaudeSessions,
+      ...current
+    } = parsed;
+    return current;
   } catch {
     return {};
   }
@@ -352,8 +352,8 @@ export function normalizeRoomId(value: string | null | undefined): string {
 
 
 type LiveSessionMapKey = {
-  sessions: "codex_live_sessions" | "claude_code_live_sessions" | "cursor_live_sessions";
-  currentIds: "current_codex_live_session_ids" | "current_claude_code_live_session_ids" | "current_cursor_live_session_ids";
+  sessions: "codex_live_sessions" | "cursor_live_sessions";
+  currentIds: "current_codex_live_session_ids" | "current_cursor_live_session_ids";
 };
 
 type LiveSessionCurrentLookup = "normalize-entries" | "direct-or-raw";
@@ -505,11 +505,6 @@ function createLiveSessionStore<TState extends DesktopManagedLiveSessionBase>(
 const codexLiveSessionStore = createLiveSessionStore<DesktopCodexLiveSessionState>({
   sessions: "codex_live_sessions",
   currentIds: "current_codex_live_session_ids",
-});
-
-const claudeCodeLiveSessionStore = createLiveSessionStore<DesktopClaudeCodeLiveSessionState>({
-  sessions: "claude_code_live_sessions",
-  currentIds: "current_claude_code_live_session_ids",
 });
 
 const cursorLiveSessionStore = createLiveSessionStore<DesktopCursorLiveSessionState>({
@@ -715,53 +710,6 @@ export function updateCodexLiveSession(
   return codexLiveSessionStore.update(sessionId, updater);
 }
 
-export function getCurrentClaudeCodeLiveSession(roomId?: string | null): DesktopClaudeCodeLiveSessionState | null {
-  return claudeCodeLiveSessionStore.getCurrent(roomId);
-}
-
-export function getStoredClaudeCodeLiveSession(sessionId: string): DesktopClaudeCodeLiveSessionState | null {
-  return claudeCodeLiveSessionStore.getStored(sessionId);
-}
-
-export function listStoredClaudeCodeLiveSessions(roomId?: string | null): DesktopClaudeCodeLiveSessionState[] {
-  return claudeCodeLiveSessionStore.listStored(roomId);
-}
-
-export function isDesktopManagedClaudeCodeLiveSession(session: DesktopClaudeCodeLiveSessionState): boolean {
-  return claudeCodeLiveSessionStore.isManaged(session);
-}
-
-export function listDesktopManagedClaudeCodeLiveSessions(roomId?: string | null): DesktopClaudeCodeLiveSessionState[] {
-  return claudeCodeLiveSessionStore.listManaged(roomId);
-}
-
-export function listClaudeCodeDisplayNamesForRoom(roomId: string): string[] {
-  const normalizedRoom = normalizeRoomId(roomId);
-  if (!normalizedRoom) {
-    return [];
-  }
-
-  const state = readAgentLocalState();
-  const liveSessionNames = Object.values(state.claude_code_live_sessions ?? {})
-    .filter((session) =>
-      normalizeRoomId(session.room_id) === normalizedRoom ||
-      normalizeRoomId(session.room_identifier) === normalizedRoom
-    )
-    .map((session) => session.display_name);
-  const workerNames = Object.values(state.agent_sessions ?? {})
-    .filter((session) =>
-      normalizeRoomId(session.room_id) === normalizedRoom &&
-      session.session_kind === "worker" &&
-      !session.ended_at &&
-      isClaudeCodeAgentSession(session)
-    )
-    .flatMap((session) => [session.display_name, session.actor_label]);
-
-  return [...liveSessionNames, ...workerNames]
-    .map((name) => String(name ?? "").trim())
-    .filter(Boolean);
-}
-
 export function getCurrentCursorLiveSession(roomId?: string | null): DesktopCursorLiveSessionState | null {
   return cursorLiveSessionStore.getCurrent(roomId);
 }
@@ -809,19 +757,6 @@ export function listCursorDisplayNamesForRoom(roomId: string): string[] {
     .filter(Boolean);
 }
 
-function isClaudeCodeAgentSession(session: StoredAgentSessionState): boolean {
-  const runtime = String(session.runtime ?? "").trim().toLowerCase();
-  const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
-  const livenessCapability = String(session.liveness_capability ?? "").trim().toLowerCase();
-  const toolBridgeId = String(session.tool_bridge_id ?? "").trim().toLowerCase();
-
-  return runtime === "claude-code" ||
-    runtime.startsWith("claude-code:") ||
-    ideLabel === "claude code" ||
-    livenessCapability.includes("claude") ||
-    /(^|:)claude-code(:|$)/.test(toolBridgeId);
-}
-
 function isCursorAgentSession(session: StoredAgentSessionState): boolean {
   const runtime = String(session.runtime ?? "").trim().toLowerCase();
   const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
@@ -833,20 +768,6 @@ function isCursorAgentSession(session: StoredAgentSessionState): boolean {
     ideLabel === "cursor" ||
     livenessCapability.includes("cursor") ||
     /(^|:)cursor(:|$)/.test(toolBridgeId);
-}
-
-export function saveClaudeCodeLiveSession(
-  session: DesktopClaudeCodeLiveSessionState,
-  makeCurrent = true,
-): DesktopClaudeCodeLiveSessionState {
-  return claudeCodeLiveSessionStore.save(session, makeCurrent);
-}
-
-export function updateClaudeCodeLiveSession(
-  sessionId: string,
-  updater: (session: DesktopClaudeCodeLiveSessionState) => DesktopClaudeCodeLiveSessionState,
-): DesktopClaudeCodeLiveSessionState | null {
-  return claudeCodeLiveSessionStore.update(sessionId, updater);
 }
 
 export function saveCursorLiveSession(
@@ -936,120 +857,6 @@ export function toPublicManagedAgentSession(
       }
       : null,
     pendingPermissionRequests: [],
-    startedAt: session.started_at,
-    updatedAt: session.updated_at,
-    lastError: session.last_error ?? null,
-    failure: session.failure ?? null,
-    supervisorEntryId: session.supervisor_entry_id ?? null,
-  };
-}
-
-function nonGenericClaudeCodeName(value: string | null | undefined): string | null {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed || /^claude(?:\s+code)?(?:\s+\d+)?$/i.test(trimmed)) {
-    return null;
-  }
-  return trimmed;
-}
-
-function workerHasExactClaudeCodeMarker(
-  worker: StoredAgentSessionState,
-  session: DesktopClaudeCodeLiveSessionState,
-): boolean {
-  const token = String(session.token ?? "").trim();
-  if (!token) {
-    return false;
-  }
-  const runtimeMarker = `claude-code:${token}`;
-  const instanceMarker = `desktop-claude-code:${token}`;
-  return String(worker.runtime ?? "").trim() === runtimeMarker ||
-    String(worker.agent_instance_id ?? "").trim() === instanceMarker ||
-    String(worker.tool_bridge_id ?? "").includes(runtimeMarker) ||
-    String(worker.tool_bridge_id ?? "").includes(instanceMarker);
-}
-
-function workerCanRepresentClaudeCodeSession(
-  worker: StoredAgentSessionState,
-  session: DesktopClaudeCodeLiveSessionState,
-): boolean {
-  if (
-    normalizeRoomId(worker.room_id) !== normalizeRoomId(session.room_id) ||
-    worker.session_kind !== "worker" ||
-    worker.ended_at ||
-    !isClaudeCodeAgentSession(worker)
-  ) {
-    return false;
-  }
-  return worker.session_id === session.agent_session_id ||
-    workerHasExactClaudeCodeMarker(worker, session) ||
-    sameSessionText(worker.display_name, session.display_name) ||
-    sameSessionText(worker.actor_label, session.display_name);
-}
-
-function publicDisplayNameForClaudeCodeSession(
-  session: DesktopClaudeCodeLiveSessionState,
-  workerSession: StoredAgentSessionState | null,
-): string {
-  return nonGenericClaudeCodeName(workerSession?.display_name) ||
-    nonGenericClaudeCodeName(session.display_name) ||
-    nonGenericClaudeCodeName(workerSession?.actor_label) ||
-    suggestLetAgentsCodename(listClaudeCodeDisplayNamesForRoom(session.room_id), session.token || session.session_id);
-}
-
-export function toPublicClaudeCodeManagedAgentSession(
-  session: DesktopClaudeCodeLiveSessionState,
-): DesktopManagedAgentSession {
-  const state = readAgentLocalState();
-  const persistedWorker = session.agent_session_id
-    ? state.agent_sessions?.[session.agent_session_id] ?? null
-    : null;
-  const persistedWorkerActive = Boolean(
-    persistedWorker &&
-    workerCanRepresentClaudeCodeSession(persistedWorker, session),
-  );
-  const activeWorkerSessionId = persistedWorkerActive ? session.agent_session_id ?? null : null;
-  const workerSession = persistedWorkerActive ? persistedWorker : null;
-  const displayName = publicDisplayNameForClaudeCodeSession(session, workerSession);
-  const deliveryMode = session.delivery_mode || "desktop_events";
-  const permissionProfile = managedAgentPermissionProfileForProvider("claude-code", session.permission_profile_id);
-  return {
-    id: session.session_id,
-    providerId: "claude-code",
-    runtime: "claude-code",
-    roomIdentifier: session.room_identifier || session.room_id,
-    roomDisplayName: session.room_display_name ?? null,
-    repoRootPath: session.cwd,
-    repoBranch: session.repo_branch ?? null,
-    status: session.status,
-    deliveryMode,
-    permissionProfileId: permissionProfile.id,
-    permissionProfile,
-    canStop: Boolean(activeWorkerSessionId) &&
-      (
-        session.status === "starting" ||
-        session.status === "running" ||
-        session.status === "blocked" ||
-        session.status === "unknown" ||
-        (deliveryMode === "desktop_events" && session.status === "completed")
-      ),
-    agentSessionId: activeWorkerSessionId,
-    actorLabel: nonGenericClaudeCodeName(workerSession?.actor_label) ?? displayName,
-    agentKey: workerSession?.agent_key ?? "claude-code",
-    displayName,
-    ownerLabel: workerSession?.owner_label ?? "Local desktop",
-    ideLabel: workerSession?.ide_label ?? "Claude Code",
-    model: session.model ?? null,
-    effort: session.effort ?? null,
-    reasoningSessionId: session.claude_session_id ?? null,
-    activeWork: session.active_work
-      ? {
-        kind: session.active_work.kind,
-        eventId: session.active_work.event_id ?? null,
-        startedAt: session.active_work.started_at,
-        summary: session.active_work.summary ?? null,
-      }
-      : null,
-    pendingPermissionRequests: session.pending_permission_requests ?? [],
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,

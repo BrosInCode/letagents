@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   ClaudeCodeProviderAdapter,
+  claudeSessionTranscriptCandidates,
   claudeCliEnv,
   claudeLaunchPolicyArgs,
   createEphemeralClaudeMcpConfig,
@@ -98,6 +99,7 @@ interface HarnessOptions {
   /** Defaults to true (a well-behaved CLI); fence tests opt out to exercise escalation. */
   dieOnSigterm?: boolean;
   versionOutput?: string;
+  sessionRows?: Array<Record<string, unknown>>;
 }
 
 function argValue(args: string[], flag: string): string | null {
@@ -159,6 +161,15 @@ function createHarness(options: HarnessOptions = {}) {
             cwd: input.cwd,
             mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: "connected" }],
           });
+          const frame = JSON.parse(json) as { uuid?: string };
+          child.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            session_id: initSessionId,
+            user_message_uuid: frame.uuid,
+            result: "LETAGENTS_CLAUDE_DAEMON_READY",
+          });
         });
       };
       return child;
@@ -190,6 +201,9 @@ function createHarness(options: HarnessOptions = {}) {
         poll();
       });
     },
+    async readSessionRows() {
+      return options.sessionRows ?? [];
+    },
     now: () => new Date(1_700_000_000_000).toISOString(),
   };
 
@@ -211,6 +225,7 @@ function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRe
     agentDisplayName: "LanternRook",
     cwd: "/tmp/wa-claude-1",
     launchPolicy: { permissionMode: "acceptEdits" },
+    deliveryMode: "daemon_inbox",
     ...over,
   };
 }
@@ -252,7 +267,7 @@ async function withLoopAlive<T>(work: Promise<T>): Promise<T> {
   }
 }
 
-test("spawn launches the headless CLI with verbatim policy flags, verifies the workplace, and sends the room start prompt", async () => {
+test("spawn launches the headless CLI with verbatim policy flags and establishes an idle daemon continuation", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
   const adapter = new ClaudeCodeProviderAdapter({
@@ -282,17 +297,17 @@ test("spawn launches the headless CLI with verbatim policy flags, verifies the w
     pid: 4100,
     processIdentity: birthIdentity(4100),
   });
-  assert.equal(handle.observedState(), "working");
+  assert.equal(handle.observedState(), "idle");
   assert.equal(harness.versionReads, 1, "the installed CLI is checked immediately before launch");
 
   const child = harness.children[0]!;
-  assert.equal(child.written.length, 1, "exactly one start-prompt user message");
-  const startMessage = JSON.parse(child.written[0]!) as { type: string; message: { content: Array<{ text: string }> } };
+  assert.equal(child.written.length, 1, "exactly one daemon-safe bootstrap message");
+  const startMessage = JSON.parse(child.written[0]!) as { type: string; uuid?: string; message: { content: Array<{ text: string }> } };
   assert.equal(startMessage.type, "user");
+  assert.ok(startMessage.uuid, "bootstrap uses an exact caller-supplied turn id");
   const prompt = startMessage.message.content[0]!.text;
-  assert.ok(prompt.includes("Claude Code worker"), "prompt is provider-labelled");
-  assert.ok(prompt.includes('"claude-code:'), "register_agent_session runtime uses the claude-code key");
-  assert.ok(!/Never call yourself Codex/.test(prompt), "codename guard names this provider, not Codex");
+  assert.match(prompt, /Do not call tools, inspect the room, or perform work/);
+  assert.doesNotMatch(prompt, /register_agent_session|wait_for_messages|join_room/);
 
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
 });
@@ -318,12 +333,21 @@ test("Claude supervised launch passes the exact daemon generation bridge to its 
     supervisorEntryId: "manifest_exact",
     supervisorSocketPath: "/tmp/daemon.sock",
     supervisorExecutionGenerationId: "execution_exact",
+    supervisorWorkerSession: {
+      agentSessionId: "agent_session_exact",
+      roomCursor: "msg_2819",
+    },
   }));
   assert.deepEqual(harness.launches[0]?.env, {
     LETAGENTS_SUPERVISOR_ENTRY_ID: "manifest_exact",
     LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/daemon.sock",
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: spawnRequest().workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "execution_exact",
+    LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent_session_exact",
+    LETAGENTS_SUPERVISOR_ROOM_ID: spawnRequest().roomId,
+    LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: spawnRequest().agentDisplayName,
+    LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
   });
   const args = harness.launches[0]!.args;
   assert.equal(args.includes("--strict-mcp-config"), true);
@@ -404,11 +428,32 @@ test("claudeLaunchPolicyArgs maps keys mechanically without reinterpretation", (
   );
 });
 
-test("claudeCliEnv passes the user's environment through minus exactly the CLAUDECODE carve-out", () => {
-  const env = claudeCliEnv({ CLAUDECODE: "1", HOME: "/Users/someone", ANTHROPIC_LOG: "debug" });
+test("claudeCliEnv strips launch blockers and ambient LetAgents credentials from bounded workers", () => {
+  const env = claudeCliEnv({
+    CLAUDECODE: "1",
+    LETAGENTS_TOKEN: "owner-secret",
+    LETAGENTS_AGENT_SESSION_BEARER: "fixed-worker-secret",
+    HOME: "/Users/someone",
+    ANTHROPIC_LOG: "debug",
+  });
   assert.equal("CLAUDECODE" in env, false, "the spike-proven launch blocker is removed");
+  assert.equal("LETAGENTS_TOKEN" in env, false, "owner authority cannot bypass the daemon generation");
+  assert.equal("LETAGENTS_AGENT_SESSION_BEARER" in env, false, "fixed worker authority cannot bypass the daemon generation");
   assert.equal(env.HOME, "/Users/someone");
   assert.equal(env.ANTHROPIC_LOG, "debug");
+});
+
+test("Claude transcript discovery accepts native Windows and POSIX recursive paths", () => {
+  assert.deepEqual(claudeSessionTranscriptCandidates([
+    "project-a/session-exact.jsonl",
+    "project-b\\session-exact.jsonl",
+    "session-exact.jsonl",
+    "project-c/session-other.jsonl",
+  ], "session-exact"), [
+    "project-a/session-exact.jsonl",
+    "project-b\\session-exact.jsonl",
+    "session-exact.jsonl",
+  ]);
 });
 
 test("a CLI without the LetAgents workplace is terminated with no orphan", async () => {
@@ -525,7 +570,7 @@ test("stdio loss on a verified-live child fences the exact child instead of synt
   assert.equal(terminals[0]!.terminalCause, "crashed");
 });
 
-test("a quiet child stays working: no signals, no terminal, no state decay", async () => {
+test("a quiet daemon-owned Claude continuation stays idle between turns", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
@@ -535,7 +580,7 @@ test("a quiet child stays working: no signals, no terminal, no state decay", asy
   await flush();
   await flush();
 
-  assert.equal(handle.observedState(), "working");
+  assert.equal(handle.observedState(), "idle");
   assert.deepEqual(harness.signals, []);
   assert.deepEqual(terminals, []);
 });
@@ -595,7 +640,7 @@ test("attach to a live unreachable orphan fences it (TERM, identity recheck, KIL
     providerConnection: {
       kind: "claude_cli",
       pid: 4100,
-      processIdentity: `${stableBirth} /opt/homebrew/bin/claude --print --verbose --session-id old`,
+      processIdentity: stableBirth,
     },
   }));
 
@@ -612,7 +657,7 @@ test("resume presents the recorded continuation and asserts the spike-proven sam
   // Codex's exact-thread resume.
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  assert.deepEqual(adapter.capabilities().deliveryModes, ["mcp_polling"]);
+  assert.deepEqual(adapter.capabilities().deliveryModes, ["daemon_inbox"]);
   assert.equal(adapter.capabilities().resume, true);
   assert.equal(adapter.capabilities().survivesRestart, false, "bounded recovery, not survival");
   const handle = await adapter.resume(
@@ -629,10 +674,9 @@ test("resume presents the recorded continuation and asserts the spike-proven sam
   assert.equal(args.includes("--session-id"), false, "resume does not mint a competing identity");
   assert.equal(handle.providerContinuationId, "sess-old", "the SAME session id continues");
   const resumePrompt = (JSON.parse(harness.children[0]!.written[0]!) as { message: { content: Array<{ text: string }> } }).message.content[0]!.text;
-  assert.match(resumePrompt, /agent_session_exact/);
-  assert.match(resumePrompt, /msg_2819/);
-  assert.match(resumePrompt, /Do not call register_agent_session/);
-  assert.doesNotMatch(resumePrompt, /Suggested codename|Call set_agent_name/);
+  assert.match(resumePrompt, /Initialize this supervised Claude Code continuation/);
+  assert.match(resumePrompt, /Do not call tools, inspect the room, or perform work/);
+  assert.doesNotMatch(resumePrompt, /agent_session_exact|msg_2819|register_agent_session/);
 
   // A CLI that resumes a DIFFERENT session is refused and the fresh child is
   // terminated — a stranger conversation must never become this work attempt's
@@ -699,77 +743,301 @@ test("result messages settle the observed state to idle and publish activity evi
   assert.equal(handle.observedState(), "idle");
 });
 
-test("Claude turn control waits for the interrupted result before applying a correction on the same session", async () => {
+test("daemon-owned Claude runs one exact bounded room turn and checkpoints before publication", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
   const child = harness.children[0]!;
-  let settled = false;
-  const controlled = adapter.controlTurn!(handle, "Follow the revised user direction.")
-    .then((result) => { settled = true; return result; });
-  await Promise.resolve();
-  const request = JSON.parse(child.written.at(-1)!) as Record<string, unknown>;
-  assert.equal(request.type, "control_request");
-  assert.deepEqual(request.request, { subtype: "interrupt" });
+  const calls: string[] = [];
 
-  child.emit({ type: "control_response", request_id: request.request_id, response: { subtype: "success" } });
-  await Promise.resolve();
-  assert.equal(settled, false, "an acknowledgement before the result cannot prove interruption");
-
-  child.emit({ type: "result", subtype: "interrupted", is_error: true, session_id: handle.providerContinuationId });
-  assert.deepEqual(await controlled, {
-    capability: "native_interrupt",
-    interrupted: true,
-    resumed: true,
-    state: "working",
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-claude-1",
+    actionId: "action-claude-1",
+    charter: "Fix the requested code and report clearly.",
+    observedContext: [{ id: "msg-before", text: "Earlier context" }],
+    sourceMessage: { id: "msg-source", text: "Please fix it" },
+    activation: { kind: "mention" },
+  }, {
+    beforeNativeDispatch: async () => { calls.push("intent"); },
+    checkpointTurnStarted: async (turnId) => { calls.push(`turn:${turnId}`); },
+    checkpointTerminalResult: async (result) => { calls.push(`terminal:${result.turnId}`); },
   });
-  const redirected = JSON.parse(child.written.at(-1)!) as { message?: { content?: Array<{ text?: string }> } };
-  assert.equal(redirected.message?.content?.[0]?.text, "Follow the revised user direction.");
-  assert.equal(handle.observedState(), "working");
-});
+  await flush();
 
-test("Claude turn control does not misclassify a racing success result as interruption", async () => {
-  const harness = createHarness();
-  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-  const child = harness.children[0]!;
-  const controlled = adapter.controlTurn!(handle, "This correction must not be sent.");
-  const writesAfterRequest = child.written.length;
-
-  child.emit({ type: "result", subtype: "success", session_id: handle.providerContinuationId, result: "natural completion" });
-
-  await assert.rejects(controlled, (error: unknown) => {
-    assert.match(String(error), /result\/success before the interrupt was dispatched/);
-    assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "not_applied");
-    return true;
-  });
-  assert.equal(child.written.length, writesAfterRequest, "a natural completion never receives the correction");
-  assert.equal(handle.observedState(), "idle");
-});
-
-test("Claude turn control preserves a racing provider error instead of swallowing it", async () => {
-  const harness = createHarness();
-  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest());
-  const child = harness.children[0]!;
-  const controlled = adapter.controlTurn!(handle, "This correction must not be sent.");
-  const writesAfterRequest = child.written.length;
+  const frame = JSON.parse(child.written.at(-1)!) as {
+    uuid: string;
+    message: { content: Array<{ text: string }> };
+  };
+  assert.ok(frame.uuid);
+  assert.deepEqual(calls, ["intent", `turn:${frame.uuid}`], "durable intent and exact id precede native completion");
+  const prompt = frame.message.content[0]!.text;
+  assert.match(prompt, /daemon owns observation, credentials, retries, and publication/i);
+  assert.match(prompt, /Do not register a session, authenticate, poll/);
+  assert.match(prompt, /Inbox item: inbox-claude-1/);
+  assert.match(prompt, /Source message: .*Please fix it/);
 
   child.emit({
     type: "result",
-    subtype: "error_during_execution",
+    subtype: "success",
+    is_error: false,
     session_id: handle.providerContinuationId,
-    is_error: true,
-    result: "provider failed before interruption",
+    user_message_uuid: frame.uuid,
+    result: "Fixed and verified.",
+  });
+  assert.deepEqual(await pending, {
+    turnId: frame.uuid,
+    outcome: "reply",
+    text: "Fixed and verified.",
+    evidence: "stream",
+  });
+  assert.deepEqual(calls, ["intent", `turn:${frame.uuid}`, `terminal:${frame.uuid}`]);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Claude bounded turns use the exact no-reply sentinel and never infer it from extra text", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+
+  const exact = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-no-reply",
+    actionId: "action-no-reply",
+    sourceMessage: {},
+    activation: {},
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async () => {},
+  });
+  await flush();
+  const exactFrame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+  child.emit({
+    type: "result", subtype: "success", is_error: false,
+    session_id: handle.providerContinuationId,
+    user_message_uuid: exactFrame.uuid,
+    result: "LETAGENTS_NO_ROOM_REPLY",
+  });
+  assert.deepEqual(await exact, {
+    turnId: exactFrame.uuid,
+    outcome: "no_reply",
+    text: null,
+    evidence: "stream",
   });
 
-  await assert.rejects(controlled, (error: unknown) => {
-    assert.match(String(error), /result\/error_during_execution before the interrupt was dispatched/);
-    assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "not_applied");
-    return true;
+  const extra = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-sentinel-extra",
+    actionId: "action-sentinel-extra",
+    sourceMessage: {},
+    activation: {},
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async () => {},
   });
-  assert.equal(child.written.length, writesAfterRequest, "a failed turn never receives the correction");
+  await flush();
+  const extraFrame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+  child.emit({
+    type: "result", subtype: "success", is_error: false,
+    session_id: handle.providerContinuationId,
+    user_message_uuid: extraFrame.uuid,
+    result: "LETAGENTS_NO_ROOM_REPLY because this was informational.",
+  });
+  assert.deepEqual(await extra, {
+    turnId: extraFrame.uuid,
+    outcome: "reply",
+    text: "LETAGENTS_NO_ROOM_REPLY because this was informational.",
+    evidence: "stream",
+  });
+});
+
+test("Claude exact-turn recovery reads only the durable transcript and never dispatches again", async () => {
+  const turnId = "turn-recover-exact";
+  const sessionId = "sess-old";
+  const harness = createHarness({
+    sessionRows: [
+      {
+        type: "user",
+        uuid: turnId,
+        sessionId,
+        message: { content: [{ type: "text", text: "source" }] },
+      },
+      {
+        type: "assistant",
+        sessionId,
+        message: {
+          id: "assistant-recover",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "Recovered once." }],
+        },
+      },
+    ],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.resume(
+    { workAttemptId: "wa-claude-1", providerContinuationId: sessionId },
+    spawnRequest(),
+  );
+  const writesBeforeRecovery = harness.children[0]!.written.length;
+  let checkpointed = false;
+  assert.deepEqual(await adapter.recoverRoomTurn!(handle, {
+    inboxItemId: "inbox-recover",
+    providerTurnId: turnId,
+  }, {
+    checkpointTerminalResult: async () => { checkpointed = true; },
+  }), {
+    turnId,
+    outcome: "reply",
+    text: "Recovered once.",
+    evidence: "transcript",
+  });
+  assert.equal(checkpointed, true);
+  assert.equal(harness.children[0]!.written.length, writesBeforeRecovery, "recovery never starts another native turn");
+});
+
+test("Claude keeps an exact stream result when terminal checkpointing fails so recovery cannot redispatch", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+
+  const running = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-checkpoint-failure",
+    actionId: "action-checkpoint-failure",
+    sourceMessage: {},
+    activation: {},
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async () => {},
+    checkpointTerminalResult: async () => {
+      throw new Error("durable terminal checkpoint unavailable");
+    },
+  });
+  await flush();
+  const turnFrame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+  child.emit({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    session_id: handle.providerContinuationId,
+    user_message_uuid: turnFrame.uuid,
+    result: "Completed before the checkpoint failed.",
+  });
+  await assert.rejects(running, /durable terminal checkpoint unavailable/);
+
+  const writesBeforeRecovery = child.written.length;
+  assert.deepEqual(await adapter.recoverRoomTurn!(handle, {
+    inboxItemId: "inbox-checkpoint-failure",
+    providerTurnId: turnFrame.uuid,
+  }, {
+    checkpointTerminalResult: async () => {},
+  }), {
+    turnId: turnFrame.uuid,
+    outcome: "reply",
+    text: "Completed before the checkpoint failed.",
+    evidence: "stream",
+  });
+  assert.equal(child.written.length, writesBeforeRecovery, "recovery consumes cached exact evidence without another native turn");
+});
+
+test("Claude clears exact-turn observation and fails the continuation when stdin dispatch throws", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  child.writeLine = () => {
+    throw new Error("Claude CLI stdin is unavailable.");
+  };
+
+  let persistedTurnId = "";
+  await assert.rejects(adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-dead-stdin",
+    actionId: "action-dead-stdin",
+    sourceMessage: {},
+    activation: {},
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async (turnId) => { persistedTurnId = turnId; },
+  }), /stdin is unavailable/);
+  assert.ok(persistedTurnId, "the exact turn id remains available for durable recovery");
   assert.equal(handle.observedState(), "failed");
+  await assert.rejects(adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-after-dead-stdin",
+    actionId: "action-after-dead-stdin",
+    sourceMessage: {},
+    activation: {},
+  }), /continuation has failed/);
+});
+
+test("Claude recovery fails closed when the exact terminal boundary is absent", async () => {
+  const harness = createHarness({
+    sessionRows: [{
+      type: "user",
+      uuid: "turn-partial",
+      sessionId: "sess-old",
+      message: { content: [{ type: "text", text: "source" }] },
+    }],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.resume(
+    { workAttemptId: "wa-claude-1", providerContinuationId: "sess-old" },
+    spawnRequest(),
+  );
+  await assert.rejects(
+    adapter.recoverRoomTurn!(handle, {
+      inboxItemId: "inbox-partial",
+      providerTurnId: "turn-partial",
+    }),
+    (error: unknown) => {
+      assert.match(String(error), /cannot prove.*terminal boundary/);
+      assert.equal((error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome, "ambiguous");
+      return true;
+    },
+  );
+});
+
+test("Claude turn control interrupts only the active bounded turn and refuses correction side turns", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const running = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-interrupt",
+    actionId: "action-interrupt",
+    sourceMessage: {},
+    activation: {},
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async () => {},
+  });
+  await flush();
+  const turnFrame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+
+  const controlled = adapter.controlTurn!(handle, null, {
+    markDispatched: async () => {},
+  });
+  await Promise.resolve();
+  const controlFrame = JSON.parse(child.written.at(-1)!) as Record<string, unknown>;
+  assert.equal(controlFrame.type, "control_request");
+
+  child.emit({
+    type: "result",
+    subtype: "interrupted",
+    is_error: true,
+    session_id: handle.providerContinuationId,
+    user_message_uuid: turnFrame.uuid,
+  });
+  assert.deepEqual(await controlled, {
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: false,
+    state: "idle",
+  });
+  await assert.rejects(running, /failed.*interrupted/i);
+  const writesAfterInterrupt = child.written.length;
+  await assert.rejects(
+    adapter.controlTurn!(handle, "Start another untracked turn."),
+    /cannot start an unjournaled correction turn/,
+  );
+  assert.equal(child.written.length, writesAfterInterrupt);
 });
 
 test("error result messages settle the observed state to failed", async () => {
