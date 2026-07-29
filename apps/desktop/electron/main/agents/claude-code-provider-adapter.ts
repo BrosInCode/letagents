@@ -50,10 +50,8 @@ import {
   type ClaudeExactTurnFailure,
   type ClaudeExactTurnResult,
 } from "./claude-room-turn-evidence.js";
-import {
-  getJsonLetAgentsMcpServerFromRaw,
-  LETAGENTS_NPX_ARGS,
-} from "../mcp-config.js";
+import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
+import { apiUrl as desktopApiUrl } from "../paths.js";
 import { requireSupportedClaudeCodeVersion } from "./claude-code-version.js";
 
 // Claude Code through its native headless CLI. The daemon owns room ingress,
@@ -434,24 +432,18 @@ export async function createEphemeralClaudeMcpConfig(
   };
 }
 
-async function defaultCreateLetAgentsMcpConfig(): Promise<{ path: string; dispose(): Promise<void> }> {
-  const candidates = [
-    join(homedir(), ".claude", "settings.json"),
-    join(homedir(), ".claude.json"),
-  ];
-  for (const path of candidates) {
-    try {
-      const server = getJsonLetAgentsMcpServerFromRaw(await readFile(path, "utf8"));
-      const env = server?.env;
-      const apiUrl = env?.LETAGENTS_API_URL?.trim();
-      if (!apiUrl) continue;
-      const mcpEnv: Record<string, string> = { LETAGENTS_API_URL: apiUrl };
-      return createEphemeralClaudeMcpConfig(mcpEnv);
-    } catch {
-      // A malformed/missing secondary Claude config does not hide a valid one.
-    }
+export function createManagedClaudeMcpConfig(
+  apiBaseUrl = desktopApiUrl,
+  temporaryRoot = tmpdir(),
+): Promise<{ path: string; dispose(): Promise<void> }> {
+  const normalizedApiUrl = apiBaseUrl.trim();
+  if (!normalizedApiUrl) {
+    throw new Error("Claude's managed LetAgents endpoint is unavailable.");
   }
-  throw new Error("Claude's repaired LetAgents MCP environment is unavailable.");
+  return createEphemeralClaudeMcpConfig(
+    { LETAGENTS_API_URL: normalizedApiUrl },
+    temporaryRoot,
+  );
 }
 
 export function claudeSessionTranscriptCandidates(entries: string[], sessionId: string): string[] {
@@ -492,7 +484,7 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
-  createLetAgentsMcpConfig: defaultCreateLetAgentsMcpConfig,
+  createLetAgentsMcpConfig: createManagedClaudeMcpConfig,
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
@@ -872,7 +864,6 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
         LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
         ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
-        ...(req.reasoningEffort ? { LETAGENTS_REASONING_EFFORT: req.reasoningEffort } : {}),
       }
       : undefined;
     let child: ClaudeCliChild;

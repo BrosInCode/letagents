@@ -511,7 +511,8 @@ test("desktop Codex runtime reasoning summaries accumulate readable app-server d
 
 test("managed agent permission profiles map provider-specific available and gated modes", () => {
   const claudeProfiles = listManagedAgentPermissionProfiles("claude-code");
-  assert.equal(claudeProfiles.find((profile) => profile.id === "ask_before_write")?.status, "available");
+  assert.equal(claudeProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.equal(claudeProfiles.find((profile) => profile.id === "read_only")?.status, "available");
   assert.equal(claudeProfiles.find((profile) => profile.id === "full_access")?.status, "available");
 
   const cursorProfiles = listManagedAgentPermissionProfiles("cursor");
@@ -524,7 +525,7 @@ test("managed agent permission profiles map provider-specific available and gate
   assert.equal(codexProfiles.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(codexProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
 
-  assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "ask_before_write");
+  assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "read_only");
   assert.equal(assertManagedAgentPermissionProfileAvailable("cursor", "full_access").id, "full_access");
   assert.throws(
     () => assertManagedAgentPermissionProfileAvailable("cursor", "unknown_profile"),
@@ -4265,5 +4266,10 @@ test("listDesktopAgentProviders excludes antigravity", () => {
   assert.ok(
     !providers.some((p) => p.id === "antigravity"),
     "antigravity should not appear in the Add Agent UI provider list",
+  );
+  assert.ok(
+    providers.find((provider) => provider.id === "claude-code")
+      ?.capabilities.includes("concurrent_supervised_agents"),
+    "Claude owns an isolated CLI process and continuation per supervised entry",
   );
 });

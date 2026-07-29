@@ -724,20 +724,53 @@ describe("room chat helpers", () => {
     assert.deepEqual(unaddressable, [], "the UI never inserts a label the activation parser would truncate");
   });
 
-  it("shows a friendly supervised codename while routing through its canonical identity", () => {
+  it("shows and inserts a unique friendly Open Model codename", () => {
     const candidates = roomMentionCandidates([participant({
       participantKey: "desktop-supervisor-agent:supervised_1",
       kind: "agent",
       displayName: "GardenWinter",
-      actorLabel: "GardenWinter · 6697e364-62d0-4027-b02d-ee71a8fbf579",
-      agentKey: "EmmyMay/desktop-codex-4d8fe3",
+      actorLabel: "GardenWinter | EmmyMay's agent | Open Model",
+      agentKey: "EmmyMay/desktop-open-model-4d8fe3",
       githubLogin: null,
       activityState: "active",
       sourceFlags: ["delivery", "presence"],
     })], "garden");
 
     assert.equal(candidates[0]?.displayName, "GardenWinter");
-    assert.equal(candidates[0]?.insertText, "agent:EmmyMay/desktop-codex-4d8fe3");
+    assert.equal(candidates[0]?.insertText, "GardenWinter");
+  });
+
+  it("falls back to exact durable handles when friendly supervised names collide", () => {
+    const candidates = roomMentionCandidates([
+      participant({
+        participantKey: "desktop-supervisor-agent:supervised_1",
+        kind: "agent",
+        displayName: "GardenWinter",
+        actorLabel: "GardenWinter | EmmyMay's agent | Open Model",
+        agentKey: "EmmyMay/desktop-open-model-first",
+        githubLogin: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+      participant({
+        participantKey: "desktop-supervisor-agent:supervised_2",
+        kind: "agent",
+        displayName: "GardenWinter",
+        actorLabel: "GardenWinter | EmmyMay's agent | Open Model",
+        agentKey: "EmmyMay/desktop-open-model-second",
+        githubLogin: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+    ], "garden");
+
+    assert.deepEqual(
+      candidates.map((candidate) => candidate.insertText),
+      [
+        "agent:EmmyMay/desktop-open-model-first",
+        "agent:EmmyMay/desktop-open-model-second",
+      ],
+    );
   });
 
   it("maps GitHub room messages to desktop event cards", () => {

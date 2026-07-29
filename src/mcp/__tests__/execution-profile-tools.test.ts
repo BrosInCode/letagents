@@ -3,8 +3,9 @@ import test from "node:test";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTools } from "../server/register-tools.js";
+import type { LetAgentsExecutionProfile } from "../server/runtime/execution-profile.js";
 
-function discovered(profile: "supervised_room_turn" | "autonomous_mcp_worker"): Set<string> {
+function discovered(profile: LetAgentsExecutionProfile): Set<string> {
   const names = new Set<string>();
   const server = {
     tool(name: string) { names.add(name); return {}; },
@@ -33,11 +34,32 @@ test("supervised room turns retain product tools but do not discover execution m
   ]) {
     assert.equal(names.has(engineTool), false, `${engineTool} is supervisor-owned`);
   }
+  assert.deepEqual(
+    [...names].filter((name) => name.startsWith("rental_")),
+    [],
+    "rental authority is not part of an ordinary supervised room turn",
+  );
 });
 
 test("autonomous MCP workers retain the established full tool registry", () => {
   const names = discovered("autonomous_mcp_worker");
-  for (const tool of ["wait_for_messages", "register_agent_session", "start_device_auth", "send_message", "join_room"]) {
+  for (const tool of [
+    "wait_for_messages",
+    "register_agent_session",
+    "start_device_auth",
+    "send_message",
+    "join_room",
+    "rental_list_requests",
+    "rental_accept",
+    "rental_read_file",
+    "rental_complete",
+  ]) {
     assert.equal(names.has(tool), true);
   }
+});
+
+test("interactive desktop sessions retain rental tools", () => {
+  const names = discovered("interactive_desktop");
+  assert.equal(names.has("rental_list_requests"), true);
+  assert.equal(names.has("rental_read_file"), true);
 });

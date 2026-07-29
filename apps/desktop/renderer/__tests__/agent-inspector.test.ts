@@ -324,6 +324,14 @@ test("turn control is available only for the exact responding provider turn", ()
   assert.equal(control.canCorrect, true);
   assert.equal(projectAgentInspector(responding, { roomId: "focus_1" })?.actions.find((action) => action.kind === "stop_turn")?.available, true);
 
+  const openModelControl = projectAgentInspectorTurnControl({
+    ...responding,
+    provider: "open-model",
+  });
+  assert.equal(openModelControl?.capability, "native_interrupt");
+  assert.equal(openModelControl?.canStop, true);
+  assert.equal(openModelControl?.canCorrect, true);
+
   const uncheckpointed = projectAgentInspectorTurnControl(entry({
     roomAgentState: {
       ...entry().roomAgentState!,

@@ -875,9 +875,13 @@ const agentMentionInsertTextByEntryId = computed(() => {
       && candidate.participantKey === `desktop-supervisor-agent:${entry.id}`
       && candidate.agentKey === expectedAgentKey);
     const candidate = participant
-      ? roomMentionCandidates([participant], participant.displayName, 1)[0]
+      ? roomMentionCandidates(
+          roomParticipants.value,
+          participant.displayName,
+          roomParticipants.value.length + 1,
+        ).find((mention) => mention.participantKey === participant.participantKey)
       : null;
-    if (candidate?.kind === "agent" && candidate.insertText === `agent:${expectedAgentKey}`) {
+    if (candidate?.kind === "agent") {
       result.set(entry.id, candidate.insertText);
     }
   }
@@ -2883,9 +2887,16 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       && Boolean(projection.agentKey)
       && candidate.agentKey === projection.agentKey);
     const mention = participant
-      ? roomMentionCandidates([participant], participant.displayName, 1).find((candidate) => candidate.kind === "agent")
+      ? roomMentionCandidates(
+          roomParticipants.value,
+          participant.displayName,
+          roomParticipants.value.length + 1,
+        ).find((candidate) => (
+          candidate.kind === "agent"
+          && candidate.participantKey === participant.participantKey
+        ))
       : null;
-    if (!mention || mention.insertText !== projection.mentionInsertText || mention.insertText !== `agent:${projection.agentKey}`) {
+    if (!mention || mention.insertText !== projection.mentionInsertText) {
       agentInspectorActionState.value = {
         operationId: globalThis.crypto.randomUUID(),
         entryId: intent.entryId,

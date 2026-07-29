@@ -59,3 +59,41 @@ test("Claude Code preflight gives an update message before auth or launch", asyn
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Claude Code preflight truthfully includes the managed LetAgents connection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-claude-ready-"));
+  const bin = join(root, "claude");
+  const priorBin = process.env.LETAGENTS_CLAUDE_CODE_BIN;
+  await writeFile(
+    bin,
+    [
+      "#!/usr/bin/env node",
+      "if (process.argv[2] === '--version') { console.log('2.1.220 (Claude Code)'); process.exit(0); }",
+      "if (process.argv[2] === 'auth' && process.argv[3] === 'status') { console.log('signed in'); process.exit(0); }",
+      "process.exit(9);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.LETAGENTS_CLAUDE_CODE_BIN = bin;
+  try {
+    const result = await runDesktopAgentProviderPreflight(
+      "claude-code",
+      { repoRootPath: root },
+      { commandTimeoutMs: 0 },
+    );
+    assert.equal(result.status, "ready");
+    assert.equal(result.canStart, true);
+    assert.equal(
+      result.detail,
+      "This desktop supplies the managed LetAgents connection and can start and monitor a local Claude Code agent.",
+    );
+  } finally {
+    if (priorBin === undefined) {
+      delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
+    } else {
+      process.env.LETAGENTS_CLAUDE_CODE_BIN = priorBin;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});

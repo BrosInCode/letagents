@@ -15,10 +15,11 @@
       <SupervisedLaunchProgress :progress="progress" @recover="controller.launch.handleRecover($event)" />
       <AddAgentSupervisedLaunchActions
         :progress="progress"
-        :can-add-another-codex-agent="canAddAnotherCodexAgent"
+        :can-add-another-supervised-agent="canAddAnotherSupervisedAgent"
+        :provider-name="progress.providerLabel"
         :has-stop-action="hasStopAction"
         :stopping="stopping"
-        @add-another="controller.launch.dismissReadyCodexLaunchForAnother"
+        @add-another="controller.launch.dismissReadyLaunchForAnother"
         @stop="controller.launch.stop"
         @dismiss="controller.launch.dismiss"
       />
@@ -48,9 +49,9 @@ const props = defineProps<{
 }>();
 const progress = computed(() => props.controller.launch.view.value);
 const stopping = computed(() => Boolean(props.controller.launch.stoppingEntryId.value));
-const canAddAnotherCodexAgent = computed(() => props.controller.launch.canAddAnotherCodexAgent.value);
+const canAddAnotherSupervisedAgent = computed(() => props.controller.launch.canAddAnotherSupervisedAgent.value);
 const hasStopAction = computed(() => Boolean(props.controller.launch.conflict.value)
-  && !canAddAnotherCodexAgent.value);
+  && !canAddAnotherSupervisedAgent.value);
 const recoveryCandidate = computed(() => props.controller.launch.recoveryCandidate.value);
 const recoverableProviderName = computed(() => props.controller.recoverableProviderName.value);
 const recoveryAnnouncement = computed(() => recoveryCandidate.value && recoverableProviderName.value

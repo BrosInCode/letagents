@@ -12,7 +12,11 @@ import {
 } from "./supervisor-grant.js";
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
 import { getJoinedRoomInfo } from "./rooms/room-info.js";
-import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
+import {
+  getDesktopAgentProvider,
+  supervisedDeliveryModeForProvider,
+} from "./agents/provider-registry.js";
+import { suggestLetAgentsCodename } from "./agents/codenames.js";
 import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
@@ -61,6 +65,19 @@ const defaultOperations: SupervisorGrantCoordinatorOperations = {
   replaceGrant: replaceDesktopSupervisorGrantForAgent,
 };
 
+function hasGenericSupervisedDisplayName(
+  displayName: string,
+  providerId: DesktopSupervisorCreateInput["providerId"],
+): boolean {
+  const normalized = displayName.trim().toLocaleLowerCase();
+  if (!normalized) return true;
+  const provider = getDesktopAgentProvider(providerId);
+  return new Set([
+    `${providerId} supervised agent`,
+    `${provider?.name ?? providerId} supervised agent`,
+  ].map((candidate) => candidate.toLocaleLowerCase())).has(normalized);
+}
+
 /**
  * Electron is the durable custodian for a host-grant bearer. The daemon owns
  * live provider processes and dynamic worker bearer rotation. This coordinator
@@ -68,6 +85,7 @@ const defaultOperations: SupervisorGrantCoordinatorOperations = {
  */
 export class SupervisorGrantCoordinator {
   private readonly entryTails = new Map<string, Promise<void>>();
+  private readonly displayNameTails = new Map<string, Promise<void>>();
   private reconciliation: Promise<void> | null = null;
   private requestedDaemonGeneration: number | null = null;
   private lastReconciledDaemonGeneration: number | null = null;
@@ -103,6 +121,27 @@ export class SupervisorGrantCoordinator {
   }
 
   /**
+   * Friendly names are unique within one room, so repairs must observe names
+   * committed by earlier repairs even when entry reconciliation runs in
+   * parallel. This tail covers only the short identity/profile mutation.
+   */
+  private async serializeDisplayNameMutation<T>(roomId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.displayNameTails.get(roomId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const current = previous.catch(() => undefined).then(() => gate);
+    this.displayNameTails.set(roomId, current);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      await current;
+      if (this.displayNameTails.get(roomId) === current) this.displayNameTails.delete(roomId);
+    }
+  }
+
+  /**
    * Fresh launch ordering is deliberate: resolve identity, provision and
    * encrypt a per-entry grant, persist a paused manifest, install to the exact
    * daemon generation, and only then allow the caller to activate ownership.
@@ -121,23 +160,38 @@ export class SupervisorGrantCoordinator {
       // invite code, or mixed-case Git identifier. Persist the canonical value
       // in the daemon manifest too so restart reuse compares like for like.
       const roomId = await this.resolveRoomId(input.roomIdentifier);
-      const agentKey = await this.operations.resolveIdentity({
-        entryId,
-        displayName: input.displayName,
-        providerId: input.providerId,
-      }, { apiFetch: this.request });
-      // Failure here occurs before the durable claim, hence cannot activate a
-      // daemon-inbox worker without its scoped authority.
-      const grant = await this.operations.provision({
-        hostId: this.hostId(), entryId, agentKey,
-        roomScopes: [{ requestedRoomId: input.roomIdentifier, canonicalRoomId: roomId }],
-      }, { apiFetch: this.request });
-      const entry = await this.daemon.create({ ...input, roomIdentifier: roomId });
+      const prepared = await this.serializeDisplayNameMutation(roomId, async () => {
+        const displayName = hasGenericSupervisedDisplayName(input.displayName, input.providerId)
+          ? suggestLetAgentsCodename(
+              (await this.daemon.list(roomId)).map((entry) => entry.displayName),
+              input.creationRequestId ?? entryId,
+            )
+          : input.displayName.trim();
+        const normalizedInput = { ...input, displayName };
+        const agentKey = await this.operations.resolveIdentity({
+          entryId,
+          displayName,
+          providerId: input.providerId,
+        }, { apiFetch: this.request });
+        // Failure here occurs before the durable claim, hence cannot activate a
+        // daemon-inbox worker without its scoped authority.
+        const grant = await this.operations.provision({
+          hostId: this.hostId(), entryId, agentKey,
+          roomScopes: [{ requestedRoomId: input.roomIdentifier, canonicalRoomId: roomId }],
+        }, { apiFetch: this.request });
+        const entry = await this.daemon.create({ ...normalizedInput, roomIdentifier: roomId });
+        return { entry, agentKey, grant };
+      });
       // Re-read after the durable manifest write: a daemon successor may have
       // appeared while owner authority was being provisioned. No predecessor
       // received this fresh grant, so install directly into that successor.
-      await this.install(entry, agentKey, grant, (await this.daemon.ensureRunning()).generation);
-      return { entry, agentKey };
+      await this.install(
+        prepared.entry,
+        prepared.agentKey,
+        prepared.grant,
+        (await this.daemon.ensureRunning()).generation,
+      );
+      return { entry: prepared.entry, agentKey: prepared.agentKey };
     });
   }
 
@@ -261,6 +315,7 @@ export class SupervisorGrantCoordinator {
     discoverPendingRoomMove = false,
   ): Promise<void> {
     await this.serialize(entry.id, async () => {
+      entry = await this.repairGenericDisplayName(entry);
       // A room-move journal owns both membership and credential convergence.
       // In particular, a restart can expose destination membership while the
       // encrypted grant is still source-scoped. Generic scope repair would
@@ -309,6 +364,39 @@ export class SupervisorGrantCoordinator {
       // Exact same daemon generation: reinstalling is safe/idempotent and
       // lets Electron recover from a lost in-memory daemon grant.
       await this.install(entry, agentKey, stored, daemonGeneration, credentialOnly);
+    });
+  }
+
+  /**
+   * Builds that predated provider-neutral identity persisted labels such as
+   * "Open Model supervised agent". Repair both the server-owned participant
+   * and the daemon profile while preserving the durable entry and runtime.
+   */
+  private async repairGenericDisplayName(
+    entry: DesktopSupervisorManifestEntry,
+  ): Promise<DesktopSupervisorManifestEntry> {
+    if (!hasGenericSupervisedDisplayName(entry.displayName, entry.provider)) return entry;
+    return this.serializeDisplayNameMutation(entry.roomId, async () => {
+      // Another reconciliation may have completed while this call waited.
+      const currentEntries = await this.daemon.list(entry.roomId);
+      const current = currentEntries.find((candidate) => candidate.id === entry.id) ?? entry;
+      if (!hasGenericSupervisedDisplayName(current.displayName, current.provider)) return current;
+      const displayName = suggestLetAgentsCodename(
+        currentEntries
+          .filter((candidate) => candidate.id !== current.id)
+          .map((candidate) => candidate.displayName),
+        current.id,
+      );
+      const previousAgentKey = await this.operations.readEntryAgentKey(current.id);
+      const resolvedAgentKey = await this.operations.resolveIdentity({
+        entryId: current.id,
+        displayName,
+        providerId: current.provider,
+      }, { apiFetch: this.request });
+      if (previousAgentKey && previousAgentKey !== resolvedAgentKey) {
+        throw new Error("Agent naming repair resolved a different durable server identity.");
+      }
+      return this.daemon.setDisplayName(current.id, displayName);
     });
   }
 

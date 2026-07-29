@@ -12,6 +12,7 @@ import {
   claudeCliEnv,
   claudeLaunchPolicyArgs,
   createEphemeralClaudeMcpConfig,
+  createManagedClaudeMcpConfig,
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
 } from "../main/agents/claude-code-provider-adapter.js";
@@ -379,6 +380,21 @@ test("managed Claude MCP config is private, official-runtime-only, and ephemeral
     assert.equal((await stat(config.path)).mode & 0o777, 0o600);
     await config.dispose();
     await assert.rejects(access(config.path));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supervised Claude builds its MCP workplace from the desktop endpoint without a user Claude config", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-claude-managed-endpoint-"));
+  try {
+    const config = await createManagedClaudeMcpConfig("https://desktop.letagents.example", root);
+    const parsed = JSON.parse(await readFile(config.path, "utf8"));
+    assert.deepEqual(parsed.mcpServers.letagents.env, {
+      LETAGENTS_API_URL: "https://desktop.letagents.example",
+    });
+    assert.equal(JSON.stringify(parsed).includes("LETAGENTS_TOKEN"), false);
+    await config.dispose();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

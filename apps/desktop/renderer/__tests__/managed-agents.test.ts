@@ -1715,7 +1715,7 @@ test("managed desktop agents become mentionable room participants", () => {
   assert.deepEqual(participants[0].sourceFlags, ["delivery", "presence"]);
 });
 
-test("live daemon-inbox agents become canonical mentionable room participants", () => {
+test("live daemon-inbox agents become friendly mentionable room participants", () => {
   const participants = mergeDesktopSupervisorAgentParticipants([], [supervisorEntry({
     id: "supervised_6697e364-62d0-4027-b02d-ee71a8fbf579",
     roomId: "room_1",
@@ -1742,7 +1742,7 @@ test("live daemon-inbox agents become canonical mentionable room participants", 
   assert.equal(isMentionableRoomParticipant(participants[0]!), true);
   const mention = roomMentionCandidates(participants, "garden")[0];
   assert.equal(mention?.label, "EmmyMay's agent");
-  assert.equal(mention?.insertText, "agent:EmmyMay/desktop-codex-4d8fe3");
+  assert.equal(mention?.insertText, "GardenWinter");
 });
 
 test("supervisor reachability preserves server-owned attribution while replacing a generic provider label", () => {
@@ -1782,6 +1782,24 @@ test("supervisor reachability preserves server-owned attribution while replacing
   assert.equal(participants[0]?.ideLabel, "Codex");
   assert.equal(participants[0]?.activityState, "active");
   assert.deepEqual(participants[0]?.sourceFlags, ["messages", "delivery", "presence"]);
+});
+
+test("Open Model supervisor participants use the product provider label", () => {
+  const participants = mergeDesktopSupervisorAgentParticipants([], [supervisorEntry({
+    id: "supervised_open_model",
+    provider: "open-model",
+    displayName: "QuartzCove",
+    agentKey: "EmmyMay/desktop-open-model-4d8fe3",
+    roomAgentState: {
+      connection: { state: "connected", detail: null },
+      inbox: { state: "idle", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      task: { state: "none", taskId: null, title: null },
+    },
+  })], "room_1");
+
+  assert.equal(participants[0]?.displayName, "QuartzCove");
+  assert.equal(participants[0]?.ideLabel, "Open Model");
 });
 
 test("supervisor mention projection excludes disconnected, stopped, and other-room agents", () => {

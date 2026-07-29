@@ -17,7 +17,11 @@ import { advanceReconciliationState, beginReconciliationAction, completeReconcil
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
-import { deriveProviderConfigurationSnapshot, type ProviderReasoningEffort } from "./provider-configuration.js";
+import {
+  deriveProviderConfigurationSnapshot,
+  providerSupportsConcurrentSupervisedAgents,
+  type ProviderReasoningEffort,
+} from "./provider-configuration.js";
 import { assertSupervisedPermissionProfileAvailable, supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
@@ -960,6 +964,15 @@ export class SupervisorDaemon {
         const updated = await this.setDesiredState(
           this.requiredStringParam(params, "id", error),
           this.desiredStateParam(params, "desired_state", error),
+        );
+        return this.entryWithDerivedLiveness(updated);
+      }
+      if (request.method === "manifest.set_display_name") {
+        const params = this.paramsRecord(request.params);
+        const error = "Agent naming requires an exact identity and display name.";
+        const updated = await this.setDisplayName(
+          this.requiredStringParam(params, "id", error),
+          this.requiredStringParam(params, "display_name", error),
         );
         return this.entryWithDerivedLiveness(updated);
       }
@@ -2540,19 +2553,16 @@ export class SupervisorDaemon {
   }
 
   /**
-   * Codex runs have independently addressable app-server threads and work
-   * attempts, so more than one supervised Codex agent may participate in a
-   * room. Other providers retain the conservative one-supervised-owner lane
-   * until their runtimes can prove the same isolation.
-   *
-   * This only relaxes supervised-vs-supervised admission. A live supervised
-   * Codex entry still fences an Electron-owned legacy Codex runtime below.
+   * Providers whose entries own independently addressable runtimes may have
+   * multiple supervised participants in one room. This only relaxes
+   * supervised-vs-supervised admission; a live supervised entry still fences
+   * an Electron-owned legacy runtime for that provider below.
    */
   private competingSupervisedLaneOwner(
     entries: readonly DaemonManifestEntry[],
     entry: DaemonManifestEntry,
   ): DaemonManifestEntry | undefined {
-    if (entry.provider === "codex") return undefined;
+    if (providerSupportsConcurrentSupervisedAgents(entry.provider)) return undefined;
     return entries.find((candidate) =>
       candidate.id !== entry.id
       && candidate.room_id === entry.room_id
@@ -2565,7 +2575,7 @@ export class SupervisorDaemon {
       const manifest = await this.store.load();
       const ownersByLane = new Map<string, DaemonManifestEntry[]>();
       for (const entry of manifest.entries) {
-        if (entry.provider === "codex") continue;
+        if (providerSupportsConcurrentSupervisedAgents(entry.provider)) continue;
         if (!this.isSupervisedLaneOwner(entry)) continue;
         const key = `${entry.room_id}\u0000${entry.provider}`;
         const owners = ownersByLane.get(key) ?? [];
@@ -2841,6 +2851,32 @@ export class SupervisorDaemon {
     }
     this.requestConvergence(id);
     return updated;
+  }
+
+  /**
+   * Repair mutable product identity without touching provider execution,
+   * delivery cursors, credentials, or lifecycle authority.
+   */
+  private async setDisplayName(id: string, displayName: string): Promise<DaemonManifestEntry> {
+    const normalized = displayName.trim();
+    if (!id || !normalized || normalized.length > 120) {
+      throw new Error("Agent naming requires an exact identity and display name.");
+    }
+    return this.serializeManifestMutation(async () => {
+      await this.singleton.assertCurrent();
+      const manifest = await this.store.load();
+      const entry = manifest.entries.find((candidate) => candidate.id === id);
+      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
+      if (entry.display_name === normalized) return entry;
+      const updated = { ...entry, display_name: normalized };
+      const next = await this.writeManifest(
+        this.manifestGeneration,
+        manifest.entries.map((candidate) => candidate.id === id ? updated : candidate),
+        this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []),
+      );
+      this.manifestGeneration = next.generation;
+      return updated;
+    });
   }
 
   private async compareAndSetDesiredState(

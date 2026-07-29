@@ -35,16 +35,6 @@ interface AddAgentPresentationProps {
   repoStatus: RepoStatus | null;
 }
 
-export function supervisedPermissionBridgeIsUnavailable(
-  launchMode: "legacy" | "supervised",
-  providerId: DesktopAgentProviderId | null,
-  permissionProfileId: string | null,
-): boolean {
-  return launchMode === "supervised"
-    && providerId === "claude-code"
-    && permissionProfileId === "ask_before_write";
-}
-
 export function useAddAgentPresentation(
   props: AddAgentPresentationProps,
   setup: ReturnType<typeof useAddAgentSetup>,
@@ -94,12 +84,7 @@ export function useAddAgentPresentation(
         !selectedPermissionProfiles.value.length ||
         selectedPermissionProfile.value?.status === "available"
       ) &&
-      (launchMode.value === "legacy" || Boolean(supervisedCharter.value.trim())) &&
-      !supervisedPermissionBridgeIsUnavailable(
-        launchMode.value,
-        selectedProviderId.value,
-        selectedPermissionProfile.value?.id ?? null,
-      )
+      (launchMode.value === "legacy" || Boolean(supervisedCharter.value.trim()))
     )
   );
   const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
@@ -162,6 +147,10 @@ export function useAddAgentPresentation(
     return "External app";
   });
   const bridgeLabel = computed(() => {
+    if (
+      selectedProviderId.value === "claude-code" &&
+      launchMode.value === "supervised"
+    ) return "Managed at launch";
     if (preflight.value?.mcpStatus === "installed") return "Installed";
     if (preflight.value?.mcpStatus === "needs_attention") return "Needs repair";
     if (preflight.value?.mcpStatus === "not_installed") return "Not installed";
@@ -177,14 +166,6 @@ export function useAddAgentPresentation(
     }
     return props.repoRootPath || "Required before local agents can start";
   });
-  const supervisedPermissionBridgeUnavailable = computed(() =>
-    supervisedPermissionBridgeIsUnavailable(
-      launchMode.value,
-      selectedProviderId.value,
-      selectedPermissionProfile.value?.id ?? null,
-    )
-  );
-
   const expectedWorktreeBranch = computed(() =>
     preflight.value?.branchMismatch?.expectedBranch ||
     branchScopedGitRoomExpectedBranch(props.roomGitRoom, props.repoStatus)
@@ -231,7 +212,7 @@ export function useAddAgentPresentation(
   const showOpenModelConfig = computed(() => shouldShowOpenModelConfig(selectedProvider.value));
   const showModelSelector = computed(() => shouldShowManagedModelSelector(selectedProvider.value));
   const showEffortSelector = computed(() =>
-    selectedProviderId.value === "codex" || selectedProviderId.value === "claude-code"
+    selectedProviderId.value === "codex"
   );
 
   const providerModelOptions = computed(() => providerModels.value?.models ?? []);
@@ -345,7 +326,6 @@ export function useAddAgentPresentation(
     runtimeLabel,
     bridgeLabel,
     repoLabel,
-    supervisedPermissionBridgeUnavailable,
     expectedWorktreeBranch,
     matchingWorktrees,
     showWorktreePicker,

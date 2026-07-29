@@ -15,8 +15,12 @@ export const AddAgentSupervisedLaunchActions = defineComponent({
       type: Object as PropType<LaunchJourneyView>,
       required: true,
     },
-    canAddAnotherCodexAgent: {
+    canAddAnotherSupervisedAgent: {
       type: Boolean,
+      required: true,
+    },
+    providerName: {
+      type: String,
       required: true,
     },
     hasStopAction: {
@@ -35,13 +39,13 @@ export const AddAgentSupervisedLaunchActions = defineComponent({
   },
   setup(props, { emit }) {
     return () => h("div", { class: styles.actions }, [
-      props.canAddAnotherCodexAgent
+      props.canAddAnotherSupervisedAgent
         ? h("button", {
             type: "button",
             class: styles.button,
-            "data-testid": "desktop-add-agent-add-another-codex",
+            "data-testid": "desktop-add-agent-add-another-supervised",
             onClick: () => emit("add-another"),
-          }, "Add another Codex agent")
+          }, `Add another ${props.providerName} agent`)
         : props.hasStopAction
           ? h("button", {
               type: "button",

@@ -1279,7 +1279,7 @@ function desktopSupervisorEntryToParticipant(
     // identities. They are a truthful fallback while the room participant
     // snapshot catches up; "Local desktop" describes a host, not an owner.
     ownerLabel: supervisorOwnerLabelFromAgentKey(entry.agentKey),
-    ideLabel: entry.provider === "codex" ? "Codex" : entry.provider,
+    ideLabel: managedAgentProviderLabel(entry.provider),
     hiddenAt: null,
     activityState: "active",
     lastSeenAt: timestamp,
@@ -1604,6 +1604,7 @@ function managedAgentSessionAgentKey(session: DesktopManagedAgentSession): strin
 function managedAgentSessionIdeLabel(session: Pick<DesktopManagedAgentSession, "providerId" | "runtime">): string {
   if (session.providerId === "codex") return "Codex";
   if (session.providerId === "claude-code") return "Claude Code";
+  if (session.providerId === "open-model") return "Open Model";
   return session.runtime || session.providerId;
 }
 

@@ -237,7 +237,7 @@ const busy = computed(() => Boolean(props.busy || activeOperation.value));
 const inspecting = computed(() => props.projection.kind === "local_managed" && activeOperation.value === `inspect:${props.projection.session.id}`);
 const tracksWorkingTree = computed(() =>
   props.projection.kind === "local_managed"
-  && props.projection.session.providerId === "codex"
+  && ["codex", "open-model"].includes(props.projection.session.providerId)
   && Boolean(props.projection.session.repoRootPath.trim())
 );
 const actionFenceKey = computed(() => JSON.stringify([

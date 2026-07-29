@@ -1,7 +1,8 @@
 /**
- * Browser-safe codename selection for a newly requested supervised Codex
- * agent. The daemon owns identity; this only supplies a friendly, mutable
- * display name before the durable create claim is made.
+ * Browser-safe codename selection for a newly requested supervised agent.
+ * The daemon owns identity; this only supplies a friendly, mutable display
+ * name before the durable create claim is made. Provider names are runtime
+ * metadata and must never become product identity.
  */
 const CODENAME_PREFIXES = [
   "Maple", "Cedar", "Dawn", "Garden", "Silver", "North", "Copper", "Quartz",
@@ -44,7 +45,7 @@ const CANDIDATES = CODENAME_PREFIXES.flatMap((prefix) =>
  * room. Durable entry ids resolve the authoritative collision, so the normal
  * product label remains the friendly codename alone.
  */
-export function suggestSupervisedCodexCodename(
+export function suggestSupervisedAgentCodename(
   existingNames: Iterable<string | null | undefined>,
   creationRequestId: string,
 ): string {

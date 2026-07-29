@@ -334,9 +334,7 @@ async function claudeCodePreflight(
     status: "ready",
     canStart: true,
     message: "Claude Code is ready to start.",
-    detail: mcpStatus === "installed"
-      ? "This desktop can start and monitor a local Claude Code agent."
-      : "This desktop can start Claude Code directly; install the LetAgents connection only for manual Claude Code joins.",
+    detail: "This desktop supplies the managed LetAgents connection and can start and monitor a local Claude Code agent.",
     nextAction: null,
     version,
     mcpStatus,

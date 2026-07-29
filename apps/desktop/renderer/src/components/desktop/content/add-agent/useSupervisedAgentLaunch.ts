@@ -16,12 +16,14 @@ import { useSupervisedLaunchEventStream } from "./useSupervisedLaunchEventStream
 import { useSupervisedRuntimePolling } from "./useSupervisedRuntimePolling";
 import { useSupervisedLaunchRecovery } from "./useSupervisedLaunchRecovery";
 
-export function canAddAnotherCodexAgent(input: {
+export function canAddAnotherSupervisedAgent(input: {
   providerId: DesktopAgentProviderId | null;
   entry: DesktopSupervisorManifestEntry | null;
+  supportsConcurrentAgents: boolean;
 }): boolean {
-  return input.providerId === "codex"
-    && input.entry?.provider === "codex"
+  return Boolean(input.providerId)
+    && input.entry?.provider === input.providerId
+    && input.supportsConcurrentAgents
     && supervisedLaunchProgress(input.entry).ready;
 }
 
@@ -30,6 +32,7 @@ export function useSupervisedAgentLaunch(options: {
   roomIdentifier: MaybeRefOrGetter<string>;
   roomLabel: MaybeRefOrGetter<string>;
   providerId: MaybeRefOrGetter<DesktopAgentProviderId | null>;
+  supportsConcurrentAgents?: MaybeRefOrGetter<boolean>;
   authCommand: MaybeRefOrGetter<string | null>;
   authCommandForProvider: (providerId: string | null) => string | null;
   isCurrentRequest: (version: number) => boolean;
@@ -60,9 +63,12 @@ export function useSupervisedAgentLaunch(options: {
   const stoppingEntryId = ref<string | null>(null);
   const creationRequestId = ref<string | null>(null);
   const signInCommandCopiedForEntryId = ref<string | null>(null);
-  const canAddAnotherCodexAgentState = computed(() => canAddAnotherCodexAgent({
+  const canAddAnotherSupervisedAgentState = computed(() => canAddAnotherSupervisedAgent({
     providerId: toValue(options.providerId),
     entry: conflict.value,
+    supportsConcurrentAgents: options.supportsConcurrentAgents === undefined
+      ? false
+      : toValue(options.supportsConcurrentAgents),
   }));
 
   const view = computed(() =>
@@ -270,11 +276,11 @@ export function useSupervisedAgentLaunch(options: {
 
   /**
    * Releases only this modal's completed-launch attachment. The durable agent
-   * remains running; `stop` is deliberately not involved. Non-Codex providers
-   * retain their existing singleton lane behaviour.
+   * remains running; `stop` is deliberately not involved. Supervised provider
+   * identity and lifecycle are per durable entry, never per provider singleton.
    */
-  function dismissReadyCodexLaunchForAnother(): void {
-    if (!canAddAnotherCodexAgentState.value) return;
+  function dismissReadyLaunchForAnother(): void {
+    if (!canAddAnotherSupervisedAgentState.value) return;
     dismiss();
   }
 
@@ -360,7 +366,7 @@ export function useSupervisedAgentLaunch(options: {
     conflictLookupTone,
     stoppingEntryId,
     creationRequestId,
-    canAddAnotherCodexAgent: canAddAnotherCodexAgentState,
+    canAddAnotherSupervisedAgent: canAddAnotherSupervisedAgentState,
     view,
     begin,
     complete,
@@ -371,7 +377,7 @@ export function useSupervisedAgentLaunch(options: {
     offerAmbiguousCreationCandidate,
     stop,
     dismiss,
-    dismissReadyCodexLaunchForAnother,
+    dismissReadyLaunchForAnother,
     resetActiveLaunch,
     handleRecover,
     cleanup,
