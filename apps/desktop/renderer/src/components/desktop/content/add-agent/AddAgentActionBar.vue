@@ -55,7 +55,7 @@
       {{ matchingWorktreeCount ? "Choose a worktree above" : "No matching worktree found" }}
     </button>
     <button
-      v-else-if="hasDesktopManagedRuntime(provider)"
+      v-else-if="hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider)"
       type="button"
       class="desktop-add-agent-primary"
       :disabled="!canStart || startingAgent"
@@ -111,7 +111,7 @@
       Each start creates a separate local agent session.
     </span>
     <span
-      v-else-if="preflight?.status === 'ready' && hasDesktopManagedRuntime(provider)"
+      v-else-if="preflight?.status === 'ready' && (hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider))"
       class="desktop-add-agent-confirmation"
     >
       Starts a {{ provider?.name || "local" }} agent for this room.
@@ -129,7 +129,7 @@ import type {
   DesktopAgentProviderSetupAction,
   DesktopManagedAgentPermissionProfile,
 } from "../../../../../../electron/ipc-types";
-import { hasDesktopManagedRuntime } from "../../../../domain/managed-agents";
+import { hasDesktopManagedRuntime, hasSupervisedRuntime } from "../../../../domain/managed-agents";
 import { useStableManagedAgentSessionViews } from "./managed-agent-sessions-context";
 import type { AddAgentSupervisedUi } from "./useAddAgentController";
 import { canStartNewSupervisedLaunch } from "./useSupervisedLaunchRecovery";

@@ -305,8 +305,17 @@ test("open-model permission profiles default to honestly-labeled full access", (
 
 test("Open Model is a daemon-supervised OpenCode provider", () => {
   const providers = listDesktopAgentProviders();
+  const codex = providers.find((provider) => provider.id === "codex");
+  const claude = providers.find((provider) => provider.id === "claude-code");
   const openModel = providers.find((provider) => provider.id === "open-model");
 
+  assert.ok(codex?.capabilities.includes("supervised_runtime"));
+  assert.ok(claude?.capabilities.includes("supervised_runtime"));
+  assert.equal(
+    claude?.capabilities.includes("desktop_managed_runtime"),
+    false,
+    "the former in-app Claude Agent SDK runtime is no longer selectable",
+  );
   assert.ok(openModel?.capabilities.includes("desktop_managed_runtime"));
   assert.ok(openModel?.capabilities.includes("supervised_runtime"));
   assert.equal(openModel?.runtimeCommand, "opencode");
@@ -316,7 +325,7 @@ test("Open Model is a daemon-supervised OpenCode provider", () => {
 test("supervised provider admission declares provider-neutral daemon delivery", () => {
   assert.equal(supervisedDeliveryModeForProvider("codex"), "daemon_inbox");
   assert.equal(supervisedDeliveryModeForProvider("open-model"), "daemon_inbox");
-  assert.equal(supervisedDeliveryModeForProvider("claude-code"), "mcp_polling");
+  assert.equal(supervisedDeliveryModeForProvider("claude-code"), "daemon_inbox");
   assert.throws(
     () => supervisedDeliveryModeForProvider("cursor"),
     /not available through the supervised engine/,

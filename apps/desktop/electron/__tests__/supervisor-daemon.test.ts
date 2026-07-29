@@ -953,7 +953,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
       repoRootPath: "/tmp/claude-work",
       launchPolicy: { permissionMode: "acceptEdits", model: "sonnet" },
     });
-    assert.equal(claude.deliveryMode, "mcp_polling");
+    assert.equal(claude.deliveryMode, "daemon_inbox");
     assert.deepEqual(
       wire.entries.find((candidate) => candidate.provider === "claude-code")?.provider_launch_policy,
       { permissionMode: "acceptEdits", model: "sonnet" },

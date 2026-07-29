@@ -178,14 +178,17 @@ test("fresh Open Model launch installs the desktop-held endpoint credential befo
   assert.equal(JSON.stringify(result).includes("provider-key"), false);
 });
 
-test("provider-owned polling creates a paused entry without provisioning a host grant", async () => {
+test("Claude daemon-inbox launch provisions its own exact host grant before activation", async () => {
   const h = harness();
   const result = await h.coordinator.createPausedAndInstall({
     creationRequestId: "launch_1234567", roomIdentifier: "room_alias", displayName: "Claude",
     providerId: "claude-code", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
   });
-  assert.equal(result.agentKey, "");
-  assert.deepEqual(h.events, ["create:room_alias"]);
+  assert.equal(result.agentKey, "owner/supervised_launch_1234567");
+  assert.deepEqual(h.events, [
+    "ensure", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false",
+    "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
+  ]);
 });
 
 test("grant failure occurs before the paused manifest can be activated", async () => {

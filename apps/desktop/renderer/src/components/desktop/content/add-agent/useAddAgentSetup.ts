@@ -20,6 +20,7 @@ import type {
 import {
   agentSetupActionButtonLabel,
   agentSetupConfirmationMessage,
+  hasDesktopManagedRuntime,
   hasSupervisedRuntime,
   isAgentSetupConfirmationActive,
   visibleDesktopAgentProviders,
@@ -187,6 +188,12 @@ export function useAddAgentSetup() {
           && nextProviders.some((provider) => provider.id === selectedProviderId.value)
           ? selectedProviderId.value
           : nextProviders.find((provider) => provider.id === "codex")?.id || nextProviders[0]?.id || null;
+        if (
+          hasSupervisedRuntime(bindings.selectedProvider.value)
+          && !hasDesktopManagedRuntime(bindings.selectedProvider.value)
+        ) {
+          bindings.launchMode.value = "supervised";
+        }
         bindings.syncPermissionProfileSelection();
         bindings.syncDeliveryModeSelection();
         if (selectedProviderId.value && selectedProviderId.value === previousProviderId) {
@@ -219,7 +226,14 @@ export function useAddAgentSetup() {
       worktreeRequestId += 1;
       clearScheduledModelPreflight();
       selectedProviderId.value = providerId;
-      if (!hasSupervisedRuntime(bindings.selectedProvider.value)) bindings.launchMode.value = "legacy";
+      if (
+        hasSupervisedRuntime(bindings.selectedProvider.value)
+        && !hasDesktopManagedRuntime(bindings.selectedProvider.value)
+      ) {
+        bindings.launchMode.value = "supervised";
+      } else if (!hasSupervisedRuntime(bindings.selectedProvider.value)) {
+        bindings.launchMode.value = "legacy";
+      }
       bindings.resetConfigurationModelSelection();
       bindings.syncPermissionProfileSelection();
       bindings.syncDeliveryModeSelection();

@@ -14,12 +14,11 @@ const agentProviders: DesktopAgentProvider[] = [
     description: "Start a Claude Code agent here.",
     capabilities: [
       "external_mcp",
-      "desktop_managed_runtime",
       "supervised_runtime",
       "auth_preflight",
       "turn_control",
     ],
-    supervisedDeliveryMode: "mcp_polling",
+    supervisedDeliveryMode: "daemon_inbox",
     runtimeCommand: "claude",
     mcpTargetId: "claude-code",
     permissionProfiles: listManagedAgentPermissionProfiles("claude-code"),

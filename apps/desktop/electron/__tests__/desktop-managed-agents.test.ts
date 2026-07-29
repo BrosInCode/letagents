@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
 
-const { tempDir, resetState } = createElectronTestEnv({
+const { tempDir, statePath, resetState } = createElectronTestEnv({
   prefix: "letagents-desktop-managed-agents-",
   paths: ["state", "chatStorage", "localChatDb"],
 });
@@ -23,10 +23,10 @@ const {
   listCodexDisplayNamesForRoom,
   listStoredCodexLiveSessions,
   managedAgentDeliveryMode,
+  readAgentLocalState,
   saveAgentSession,
   saveCodexLiveSession,
   saveStoredAgentIdentity,
-  toPublicClaudeCodeManagedAgentSession,
   toPublicCursorManagedAgentSession,
   toPublicManagedAgentSession,
 } = await import("../main/agents/state.js");
@@ -136,12 +136,10 @@ const {
   isManagedRoomStreamEvent,
   listDeliverableCodexSessionsForRoomStreamEvent,
 } = await import("../main/agents/codex-managed-agent-dispatch.js");
-const { buildClaudeCodeDesktopEventPrompt } = await import("../main/agents/claude-code-event-prompt.js");
 const { buildCursorDesktopEventPrompt } = await import("../main/agents/cursor-event-prompt.js");
 
 import type { DesktopManagedAgentSession, DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
 import type {
-  DesktopClaudeCodeLiveSessionState,
   DesktopCodexLiveSessionState,
   DesktopCursorLiveSessionState,
   StoredAgentSessionState,
@@ -554,24 +552,31 @@ test("public Codex managed session projects the selected permission profile", ()
   })).effort, "high");
 });
 
-test("public Claude managed session preserves its durable supervisor entry id", () => {
-  const publicSession = toPublicClaudeCodeManagedAgentSession({
-    session_id: "managed_claude",
-    room_id: "room_1",
-    room_identifier: "room_1",
-    cwd: "/tmp/repo",
-    stop_phrase: "/stop",
-    max_minutes: 0,
-    token: "token",
-    status: "running",
-    started_at: "2026-06-14T12:00:00.000Z",
-    updated_at: "2026-06-14T12:00:00.000Z",
-    joined_via: "join_room",
-    claude_bin: "claude",
-    supervisor_entry_id: "supervised_claude",
+test("loading local state drops the removed in-app Claude session cache permanently", () => {
+  resetState({
+    local_host_id: "host_keep",
+    current_claude_code_live_session_ids: { room_1: "legacy_claude" },
+    claude_code_live_sessions: {
+      legacy_claude: {
+        session_id: "legacy_claude",
+        room_id: "room_1",
+        delivery_mode: "desktop_events",
+      },
+    },
   });
 
-  assert.equal(publicSession.supervisorEntryId, "supervised_claude");
+  assert.deepEqual(readAgentLocalState(), { local_host_id: "host_keep" });
+  saveStoredAgentIdentity({
+    name: "state-cleanup",
+    display_name: "State cleanup",
+    owner_label: "Local desktop",
+    actor_label: "State cleanup",
+    resolved_at: "2026-07-29T00:00:00.000Z",
+  });
+  const persisted = JSON.parse(readFileSync(statePath!, "utf8")) as Record<string, unknown>;
+  assert.equal("current_claude_code_live_session_ids" in persisted, false);
+  assert.equal("claude_code_live_sessions" in persisted, false);
+  assert.equal(persisted.local_host_id, "host_keep");
 });
 
 test("public Cursor managed session preserves its durable supervisor entry id", () => {
@@ -2410,32 +2415,6 @@ test("desktop-delivered event prompts keep top-level messages free of thread con
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
-function claudeCodeLiveSession(
-  overrides: Partial<DesktopClaudeCodeLiveSessionState> = {},
-): DesktopClaudeCodeLiveSessionState {
-  return {
-    session_id: "claude_session_1",
-    room_id: "room_1",
-    room_identifier: "room_1",
-    room_display_name: "Room One",
-    joined_via: "join_room",
-    cwd: "/tmp/repo",
-    stop_phrase: "/stop-claude-room",
-    max_minutes: 0,
-    delivery_mode: "desktop_events",
-    deadline_utc: null,
-    token: "LOCAL_CLAUDE_ROOM_test",
-    claude_session_id: null,
-    claude_bin: "claude",
-    agent_session_id: null,
-    status: "running",
-    last_error: null,
-    started_at: "2026-06-14T12:00:00.000Z",
-    updated_at: "2026-06-14T12:00:00.000Z",
-    ...overrides,
-  };
-}
-
 function cursorLiveSession(
   overrides: Partial<DesktopCursorLiveSessionState> = {},
 ): DesktopCursorLiveSessionState {
@@ -2510,33 +2489,6 @@ function humanThreadReplyEvent(): Extract<DesktopRoomStreamEvent, { type: "messa
     },
   };
 }
-
-test("Claude Code desktop event prompts include thread metadata for human thread replies", () => {
-  const prompt = buildClaudeCodeDesktopEventPrompt(
-    claudeCodeLiveSession({ display_name: "CedarVista" }),
-    humanThreadReplyEvent(),
-  );
-
-  assert.match(prompt, /Reply to: msg_root from EmmyMay/);
-  assert.match(prompt, /Thread root: msg_root from EmmyMay/);
-  assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
-  assert.match(prompt, /human reply inside a thread you are participating in/);
-  assert.match(prompt, /desktop will keep it in the same thread/);
-  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
-  assert.match(prompt, /NO_ROOM_REPLY/);
-});
-
-test("Claude Code desktop event prompts keep top-level messages free of thread context", () => {
-  const prompt = buildClaudeCodeDesktopEventPrompt(
-    claudeCodeLiveSession({ display_name: "CedarVista" }),
-    messageEvent(),
-  );
-
-  assert.doesNotMatch(prompt, /Thread root:/);
-  assert.doesNotMatch(prompt, /Thread context:/);
-  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
-  assert.match(prompt, /NO_ROOM_REPLY/);
-});
 
 test("Cursor desktop event prompts include thread metadata for human thread replies", () => {
   const prompt = buildCursorDesktopEventPrompt(
