@@ -9,14 +9,17 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const release = join(root, "release", "LetAgents-darwin");
 const bundle = join(release, "LetAgents.app");
 const app = join(bundle, "Contents", "Resources", "app");
-const openCodeVersion = "1.18.9";
+const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+const openCodeVersion = packageJson.letagentsRuntime?.openCodeVersion;
+if (typeof openCodeVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(openCodeVersion)) {
+  throw new Error("package.json must declare letagentsRuntime.openCodeVersion.");
+}
 await rm(release, { recursive: true, force: true });
 await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, { recursive: true });
 await mkdir(app, { recursive: true });
 for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
 }
-const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 await writeFile(join(app, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
 await cp(join(root, "package-lock.json"), join(app, "package-lock.json"));
 await promisify(execFile)("npm", ["ci", "--omit=dev", "--ignore-scripts", "--prefer-offline"], { cwd: app, maxBuffer: 8 * 1024 * 1024 });

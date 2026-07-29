@@ -34,12 +34,17 @@ function createHarness() {
   const launches: LaunchRecord[] = [];
   const promptBodies: Array<Record<string, unknown>> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const aborts: string[] = [];
   const sessions = new Set(["session-open-model-1"]);
   let nextSession = 1;
   let assistantText = "OpenCode bounded reply.";
   let includeAssistantText = true;
+  let holdTurnOpen = false;
+  let observedProcessExit: Promise<ProviderProcessExit>;
+  let messageReads = 0;
 
   const neverExits = new Promise<ProviderProcessExit>(() => {});
+  observedProcessExit = neverExits;
   const dependencies: OpenModelProviderAdapterDependencies = {
     launch(input) {
       launches.push(input);
@@ -51,7 +56,7 @@ function createHarness() {
       return pid === 6101 ? "opencode-birth-6101" : null;
     },
     observeProcessExit() {
-      return neverExits;
+      return observedProcessExit;
     },
     signalProcess(pid, signal) {
       signals.push({ pid, signal });
@@ -62,6 +67,22 @@ function createHarness() {
       const authorization = new Headers(init?.headers).get("authorization");
       assert.match(authorization ?? "", /^Basic /);
       if (url.pathname === "/global/health") return json({ healthy: true });
+      if (url.pathname === "/event") {
+        const encoder = new TextEncoder();
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              'data: {"type":"server.connected","properties":{}}\n\n',
+            ));
+            init?.signal?.addEventListener("abort", () => controller.close(), {
+              once: true,
+            });
+          },
+        }), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
       if (url.pathname === "/config") {
         return json({ model: "letagents-open-model/qwen/qwen3-coder" });
       }
@@ -81,6 +102,8 @@ function createHarness() {
       }
       const messageMatch = url.pathname.match(/^\/session\/([^/]+)\/message$/);
       if (messageMatch) {
+        messageReads += 1;
+        if (holdTurnOpen) return json([]);
         const turnId = String(promptBodies.at(-1)?.messageID ?? "turn-recovery");
         return json([{
           info: {
@@ -97,8 +120,13 @@ function createHarness() {
           ],
         }]);
       }
-      if (url.pathname === "/session/status") return json({});
-      if (url.pathname.endsWith("/abort") && init?.method === "POST") return json(true);
+      if (url.pathname === "/session/status") {
+        return json(holdTurnOpen ? { "session-open-model-1": { type: "busy" } } : {});
+      }
+      if (url.pathname.endsWith("/abort") && init?.method === "POST") {
+        aborts.push(decodeURIComponent(url.pathname.split("/")[2] ?? ""));
+        return json(true);
+      }
       assert.fail(`Unexpected OpenCode request: ${init?.method ?? "GET"} ${url.pathname}`);
     },
     now: () => "2026-07-28T00:00:00.000Z",
@@ -109,12 +137,22 @@ function createHarness() {
     launches,
     promptBodies,
     signals,
+    aborts,
+    get messageReads() {
+      return messageReads;
+    },
     setAssistantText(value: string) {
       assistantText = value;
       includeAssistantText = true;
     },
     omitAssistantText() {
       includeAssistantText = false;
+    },
+    holdTurnOpen() {
+      holdTurnOpen = true;
+    },
+    completeObservedProcessExit(exit: ProviderProcessExit) {
+      observedProcessExit = Promise.resolve(exit);
     },
   };
 }
@@ -300,4 +338,107 @@ test("Open Model refuses to launch without an exact in-memory endpoint credentia
     /waiting for its desktop-held endpoint credential/,
   );
   assert.equal(harness.launches.length, 0);
+});
+
+test("Open Model refuses a fresh spawn without exact supervisor coordinates", async () => {
+  const harness = createHarness();
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-no-session-")),
+    dependencies: harness.dependencies,
+  });
+
+  await assert.rejects(
+    adapter.spawn(spawnRequest({ supervisorWorkerSession: undefined })),
+    /missing LETAGENTS_SUPERVISOR_AGENT_SESSION_ID/,
+  );
+  assert.equal(harness.launches.length, 0);
+});
+
+test("Open Model interrupts the exact active session through the native abort endpoint", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+
+  const result = await adapter.controlTurn(handle);
+
+  assert.deepEqual(result, {
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: false,
+    state: "idle",
+  });
+  assert.deepEqual(harness.aborts, ["session-open-model-1"]);
+});
+
+test("Open Model repairs a continuation on the same verified process", async () => {
+  const { adapter, handle } = await spawnAdapter();
+  const checkpointed: string[] = [];
+
+  const rematerialized = await adapter.repairContinuation(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "session-open-model-1",
+    cwd: "/tmp/open-model-worktree",
+    launchPolicy: {},
+  }, {
+    checkpointReplacement: async (id) => { checkpointed.push(id); },
+  });
+  assert.equal(rematerialized.outcome, "rematerialized");
+  assert.equal(rematerialized.handle.pid, handle.pid);
+  assert.equal(rematerialized.replacementProviderContinuationId, "session-open-model-1");
+  assert.equal(checkpointed.length, 0);
+
+  const replaced = await adapter.repairContinuation(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "session-open-model-1",
+    forceReplacement: true,
+    cwd: "/tmp/open-model-worktree",
+    launchPolicy: {},
+  }, {
+    checkpointReplacement: async (id) => { checkpointed.push(id); },
+  });
+  assert.equal(replaced.outcome, "replaced");
+  assert.equal(replaced.handle.pid, handle.pid);
+  assert.equal(replaced.replacementProviderContinuationId, "session-open-model-2");
+  assert.deepEqual(checkpointed, ["session-open-model-2"]);
+});
+
+test("Open Model stop escalates the exact process from TERM to KILL", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.completeObservedProcessExit({ type: "exit", code: null, signal: "SIGKILL" });
+  const keepAlive = setInterval(() => undefined, 25);
+
+  const terminal = await adapter.stop(handle, { graceMs: 1 }).finally(() => {
+    clearInterval(keepAlive);
+  });
+
+  assert.deepEqual(harness.signals, [
+    { pid: 6101, signal: "SIGTERM" },
+    { pid: 6101, signal: "SIGKILL" },
+  ]);
+  assert.equal(terminal.terminalCause, "killed");
+  assert.equal(terminal.signal, "SIGKILL");
+});
+
+test("Open Model bounded turns time out without polling transcript history", async () => {
+  const harness = createHarness();
+  harness.holdTurnOpen();
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-timeout-")),
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 10,
+  });
+  const handle = await adapter.spawn(spawnRequest());
+
+  await assert.rejects(
+    adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-timeout",
+      sourceMessage: { text: "stay busy" },
+      activation: { decision: "activate" },
+      actionId: "timeout",
+    }),
+    /bounded turn timed out/,
+  );
+  assert.equal(harness.promptBodies.length, 1);
+  assert.equal(harness.messageReads, 1, "one bounded snapshot replaces transcript polling");
 });

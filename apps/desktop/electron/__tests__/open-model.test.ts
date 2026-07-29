@@ -10,7 +10,7 @@ import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
 } from "../main/agents/managed-agent-permission-profiles.js";
-import { openCodeConfig } from "../main/agents/open-model-provider-adapter.js";
+import { openCodeConfig } from "../main/agents/opencode-launch-contract.js";
 import {
   OPENCODE_RUNTIME_VERSION,
   openCodeInstallCommand,

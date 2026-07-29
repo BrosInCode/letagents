@@ -1,5 +1,8 @@
 import { app, protocol } from "electron";
 
+import {
+  retireLegacyCodexBackedOpenModelSessions,
+} from "./main/agents/legacy-open-model-retirement.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
@@ -27,6 +30,11 @@ protocol.registerSchemesAsPrivileged([
 registerDesktopIpcHandlers();
 
 app.whenReady().then(async () => {
+  await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
+    console.warn(
+      `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
   if (process.platform === "darwin") {
     await supervisorDaemonClient.ensureRunning().catch((error) => {
       console.warn(`Supervisor daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);

@@ -1,7 +1,23 @@
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 
-export const OPENCODE_RUNTIME_VERSION = "1.18.9";
+type DesktopPackageMetadata = {
+  letagentsRuntime?: {
+    openCodeVersion?: unknown;
+  };
+};
+
+const desktopPackage = createRequire(import.meta.url)(
+  "../../../package.json",
+) as DesktopPackageMetadata;
+const configuredVersion = desktopPackage.letagentsRuntime?.openCodeVersion;
+if (typeof configuredVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(configuredVersion)) {
+  throw new Error("apps/desktop/package.json must declare letagentsRuntime.openCodeVersion.");
+}
+
+/** Single runtime contract version shared by development, packaging, and tests. */
+export const OPENCODE_RUNTIME_VERSION = configuredVersion;
 
 export function resolveOpenCodeBinary(
   env: NodeJS.ProcessEnv = process.env,

@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
+  "letagentsRuntime": {
+    "openCodeVersion": "1.18.9"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:watch:electron\" \"npm:watch:daemon\" \"npm:serve:electron\"",
@@ -19,6 +22,7 @@
     "screenshot:agent-detail": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT=/tmp/letagents-agent-detail-responsive.png electron .",
     "smoke:packaged-supervisor": "npm run package:artifact && node electron/scripts/packaged-supervisor-smoke.mjs",
     "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
+    "smoke:opencode-contract": "npm run build:electron && node electron/scripts/opencode-runtime-contract-smoke.mjs",
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon",
     "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
     "test:electron": "node --import tsx --test --experimental-test-module-mocks electron/__tests__/*.test.ts",
