@@ -350,13 +350,18 @@ test("Open Model remains capability-gated from durable supervision", () => {
 
   assert.ok(codex?.capabilities.includes("supervised_runtime"));
   assert.ok(claude?.capabilities.includes("supervised_runtime"));
+  assert.equal(
+    claude?.capabilities.includes("desktop_managed_runtime"),
+    false,
+    "the former in-app Claude Agent SDK runtime is no longer selectable",
+  );
   assert.ok(openModel?.capabilities.includes("desktop_managed_runtime"));
   assert.equal(openModel?.capabilities.includes("supervised_runtime"), false);
 });
 
 test("supervised provider admission declares room delivery without provider-name checks", () => {
   assert.equal(supervisedDeliveryModeForProvider("codex"), "daemon_inbox");
-  assert.equal(supervisedDeliveryModeForProvider("claude-code"), "mcp_polling");
+  assert.equal(supervisedDeliveryModeForProvider("claude-code"), "daemon_inbox");
   assert.throws(() => supervisedDeliveryModeForProvider("cursor"), /not available through the supervised engine/);
 });
 
