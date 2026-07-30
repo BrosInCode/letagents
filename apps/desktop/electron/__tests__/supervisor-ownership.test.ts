@@ -32,6 +32,16 @@ test("paused launch recovery reuses guarded ownership without requiring a user C
   assert.doesNotMatch(resumeHandler, /refreshInstalledLetAgentsMcpServerAuth/);
 });
 
+test("explicit provider recovery prepares authority without entering activation semantics", () => {
+  const recoveryHandler = ipcSource.slice(
+    ipcSource.indexOf('"desktop:supervisor:recover-agent-runtime"'),
+    ipcSource.indexOf('"desktop:supervisor:control-turn"'),
+  );
+  assert.match(recoveryHandler, /prepareEntryForRuntimeRecovery\(entry\)/);
+  assert.doesNotMatch(recoveryHandler, /prepareEntryForActivation\(entry\)/);
+  assert.match(recoveryHandler, /recoverAgentRuntime\(entry\.id\)/);
+});
+
 test("supervisor ownership claims before legacy teardown and activates last", async () => {
   const order: string[] = [];
   const result = await transferSupervisorOwnership({

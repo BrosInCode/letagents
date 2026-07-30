@@ -62,6 +62,8 @@ export interface LaunchJourneyView {
   phases: LaunchJourneyPhase[];
   currentPhaseId: LaunchJourneyPhaseId;
   status: LaunchJourneyStatus;
+  /** True once the background supervisor has durably saved this agent. */
+  durable: boolean;
   /** Terminal success. */
   ready: boolean;
   /** Needs the owner's attention (blocked) or the attempt ended (failed). */
@@ -76,6 +78,10 @@ export interface LaunchJourneyView {
   headline: string;
   /** Plain-language problem for the failed/blocked step; null otherwise. */
   failureDetail: string | null;
+  /** What the failure did (or did not) change for the user. */
+  failureImpact: string | null;
+  /** Redacted implementation detail, progressively disclosed from the UI. */
+  failureDiagnostic: string | null;
   /** Single primary recovery action for the failed/blocked step; null otherwise. */
   recovery: DesktopLaunchRecoveryAction | null;
   /** Reassuring "you can close this window" copy while still progressing. */
@@ -122,7 +128,10 @@ function phaseCopy(
 ): { label: string; detail: string } {
   switch (id) {
     case "connecting_supervisor":
-      return { label: "Connecting to LetAgents", detail: "Making sure background agent management is available." };
+      return {
+        label: "Starting the background service",
+        detail: "Opening the local service that keeps room agents running.",
+      };
     case "saving_agent":
       return { label: "Saving your agent", detail: "Recording this agent so setup can continue if you close the app." };
     case "preparing_workspace":
@@ -296,6 +305,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       phases,
       currentPhaseId: phases[Math.min(activeIndex, phases.length - 1)]!.id,
       status,
+      durable: true,
       ready: manifest.ready,
       failed: manifest.failed,
       stopped: manifest.stopped,
@@ -306,6 +316,8 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
         ? manifest.headline
         : headlineFor(status, ctx, { stoppedAfterReady: everReady }),
       failureDetail: manifest.failed ? manifest.failureDetail : null,
+      failureImpact: null,
+      failureDiagnostic: null,
       recovery: manifest.failed && !manifest.recoverableBlocked && !manifest.stopFailed && !manifest.ownershipPaused
         ? manifestRecovery(entry, input.hasSignInCommand ?? false)
         : null,
@@ -327,18 +339,47 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       { activeIndex: boundaryIndex, failedIndex: cancelled ? null : boundaryIndex, ready: false, settled: cancelled },
       ctx,
     );
+    // The first boundary can also contain validation failures emitted before
+    // Electron contacts the daemon (for example, a missing project). Only the
+    // explicit reconnect recovery identifies an actual background-service
+    // startup failure; preserve every other actionable message verbatim.
+    const connectionFailed = (
+      !cancelled
+      && boundaryIndex === CONNECTING
+      && terminal.recovery === "reconnect"
+    );
+    const savingFailed = !cancelled && boundaryIndex === SAVING;
+    const failureDetail = connectionFailed
+      ? "LetAgents couldn’t start the local service that manages room agents."
+      : savingFailed
+        ? "LetAgents reached its background service but couldn’t save this agent."
+        : terminal.detail;
+    const failureDiagnostic = (
+      !cancelled
+      && terminal.detail
+      && terminal.detail.trim() !== failureDetail?.trim()
+    ) ? terminal.detail : null;
     return {
       phases,
       currentPhaseId: JOURNEY_PHASE_ORDER[boundaryIndex]!,
       status,
+      durable: false,
       ready: false,
       failed: status === "blocked" || status === "failed",
       stopped: cancelled,
       stopFailed: false,
       agentName: null,
       providerLabel,
-      headline: headlineFor(status, ctx),
-      failureDetail: terminal.detail,
+      headline: connectionFailed
+        ? "Background service didn’t start"
+        : savingFailed
+          ? "Agent setup stopped before it was saved"
+          : headlineFor(status, ctx),
+      failureDetail,
+      failureImpact: cancelled
+        ? null
+        : "No agent was created. Your room and project are unchanged.",
+      failureDiagnostic,
       recovery: terminal.recovery,
       joinHint: null,
     };
@@ -351,6 +392,7 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     phases,
     currentPhaseId: JOURNEY_PHASE_ORDER[Math.min(activeIndex, phases.length - 1)]!,
     status: "in_progress",
+    durable: false,
     ready: false,
     failed: false,
     stopped: false,
@@ -359,6 +401,8 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     providerLabel,
     headline: headlineFor("in_progress", ctx),
     failureDetail: null,
+    failureImpact: null,
+    failureDiagnostic: null,
     recovery: null,
     joinHint: JOIN_HINT,
   };

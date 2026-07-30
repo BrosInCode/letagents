@@ -27,8 +27,9 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.60";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.69";
 const REQUEST_TIMEOUT_MS = 3_000;
+const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
 const NATURAL_EXIT_TIMEOUT_MS = 2_000;
@@ -349,7 +350,15 @@ export class SupervisorDaemonClient {
 
   async list(roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> {
     await this.ensureRunning();
-    const entries = await this.request<WireEntry[]>("manifest.list");
+    // Rich manifest projections open several durable stores and can be slower
+    // on their first read. This must not share the tight timeout used by small
+    // control requests or a healthy cold daemon is misreported as unavailable.
+    const entries = await this.request<WireEntry[]>(
+      "manifest.list",
+      undefined,
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      MANIFEST_LIST_REQUEST_TIMEOUT_MS,
+    );
     return entries.map(mapEntry).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
   }
 
@@ -478,6 +487,23 @@ export class SupervisorDaemonClient {
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
+  }
+
+  async recoverAgentRuntime(id: string): Promise<DesktopSupervisorManifestEntry> {
+    if (!nonEmptyString(id) || id !== id.trim()) {
+      throw new Error("Agent runtime recovery requires an exact identity.");
+    }
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRuntimeRecovery) {
+      throw new Error("This supervisor is too old for safe provider runtime recovery; rebuild the desktop daemon.");
+    }
+    const result = await this.request<{ outcome: "recovering"; entry: WireEntry }>(
+      "supervisor.recover_agent_runtime",
+      { entry_id: id, daemon_generation: status.generation },
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      this.turnControlRequestTimeoutMs,
+    );
+    return mapEntry(result.entry);
   }
 
   async setDisplayName(id: string, displayName: string): Promise<DesktopSupervisorManifestEntry> {
@@ -806,7 +832,12 @@ export class SupervisorDaemonClient {
     apiUrl?: string;
     /** Rebind only an already-live exact provider generation; never converge. */
     credentialOnly?: boolean;
+    /** Install owner authority for explicit runtime replacement; never attach or converge. */
+    recoveryOnly?: boolean;
   }): Promise<"installed" | "stale" | "provider_unavailable"> {
+    if (input.credentialOnly && input.recoveryOnly) {
+      throw new Error("Host grant installation cannot be both reconnect-only and recovery-only.");
+    }
     if (!input.supervisorGrant.trim()) throw new Error("A supervised host grant is required.");
     const status = await this.ensureRunning();
     // Never let a request started against an old process install into its
@@ -825,6 +856,7 @@ export class SupervisorDaemonClient {
       api_url: input.apiUrl ?? apiUrl,
       daemon_generation: input.daemonGeneration,
       credential_only: Boolean(input.credentialOnly),
+      ...(input.recoveryOnly ? { recovery_only: true } : {}),
     });
     if (result.status === "installed" || result.status === "provider_unavailable") return result.status;
     return "stale";
@@ -1133,6 +1165,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
       agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1"),
       agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1"),
       agentLifecycle: booleanField(value.capabilities, "agent_lifecycle_v1"),
+      agentRuntimeRecovery: booleanField(value.capabilities, "agent_runtime_recovery_v1"),
       agentStateSubscription: booleanField(value.capabilities, "agent_state_subscription_v1"),
     },
     generation: Number(value.generation ?? 0),

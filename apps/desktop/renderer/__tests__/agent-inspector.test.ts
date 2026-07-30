@@ -149,6 +149,90 @@ test("truthful state requires all listening authorities and preserves reconnecti
   })), "reconnecting");
 });
 
+test("a stopped provider with retained historical coordinates offers recovery instead of false reconnect or delivery retry", () => {
+  const stoppedProvider = entry({
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: The saved OpenCode process is no longer running.",
+    nativeLiveness: {
+      state: "unknown",
+      observedAt: "2026-07-29T10:00:00.000Z",
+      detail: "Awaiting native provider launch.",
+    },
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: {
+        state: "disconnected",
+        observedAt: "2026-07-29T10:00:00.000Z",
+        detail: "The saved OpenCode process is no longer running.",
+      },
+      ingress: {
+        state: "stopped",
+        observedAt: "2026-07-29T10:00:00.000Z",
+        detail: "Room observation stopped with the provider.",
+      },
+      inbox: {
+        state: "waiting_for_desktop_credentials",
+        pendingCount: 1,
+        blockedByMessageId: "message_1",
+        detail: "Waiting for desktop credential handoff.",
+      },
+      turn: {
+        state: "failed",
+        inboxItemId: "inbox_1",
+        sourceMessageId: "message_1",
+        providerTurnId: null,
+        detail: "The previous provider stopped.",
+      },
+    },
+    deliveryReceipts: [receipt("message_1", "blocked", { providerTurnId: null })],
+  });
+  const projection = projectAgentInspector(stoppedProvider, {
+    roomId: "focus_1",
+    deliveryRetryAvailable: true,
+  });
+  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Stopped");
+  assert.match(projection?.now?.summary ?? "", /Recover the agent/);
+  assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, false);
+  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.available, true);
+  assert.equal(projection?.actions.find((action) => action.kind === "recover")?.label, "Recover agent");
+  assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+});
+
+test("a reconnecting room keeps provider connectivity separate from delivery authority", () => {
+  const reconnecting = entry({
+    observedState: "recovering",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: {
+        state: "reconnecting",
+        observedAt: "2026-07-29T10:00:00.000Z",
+        detail: "Restoring the provider and exact worker binding.",
+      },
+      inbox: {
+        state: "blocked",
+        pendingCount: 1,
+        blockedByMessageId: "message_1",
+        detail: "Delivery is blocked.",
+      },
+      turn: {
+        state: "failed",
+        inboxItemId: "inbox_1",
+        sourceMessageId: "message_1",
+        providerTurnId: null,
+        detail: "Delivery is blocked.",
+      },
+    },
+    deliveryReceipts: [receipt("message_1", "blocked", { providerTurnId: null })],
+  });
+  const projection = projectAgentInspector(reconnecting, {
+    roomId: "focus_1",
+    deliveryRetryAvailable: true,
+  });
+  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Connected");
+  assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+});
+
 test("overall state follows the complete product precedence table", () => {
   const withRoom = (overrides: Partial<NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>>) => {
     const current = entry().roomAgentState!;
@@ -249,6 +333,7 @@ test("delivery progress follows durable turn phases without duplicating the thin
   }), { roomId: "focus_1" });
 
   assert.deepEqual(withTurn("dispatching")?.deliveryProgress, {
+    kind: "delivery",
     phase: "starting",
     label: "Starting delivery",
     detail: "Handing the room message to the agent.",
@@ -302,12 +387,49 @@ test("a pending retry remains projectable after the Inspector closes and reopens
 
   assert.deepEqual(afterReopen?.deliveryProgress, beforeClose?.deliveryProgress);
   assert.deepEqual(afterReopen?.deliveryProgress, {
+    kind: "delivery",
     phase: "starting",
     label: "Retrying delivery",
     detail: "Checking the blocked message and safely resuming its delivery.",
     sourceMessageId: "message_1",
     requestedLocally: true,
   });
+});
+
+test("runtime recovery shows the live replacement and durable room-access phase", () => {
+  const recovering = entry({
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "Restoring room access (attempt 2 of 3) failed: temporary bind failure. Retrying automatically.",
+    agentSessionId: null,
+    agentSessionBindingState: "none",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "reconnecting", observedAt: "2026-07-29T22:11:54.000Z", detail: "Restoring the exact worker binding." },
+      ingress: { state: "stopped", observedAt: "2026-07-29T22:11:54.000Z", detail: "Waiting for room access." },
+      inbox: {
+        state: "waiting_for_desktop_credentials",
+        pendingCount: 3,
+        blockedByMessageId: "message_1",
+        detail: "A current worker binding is required before delivery can continue.",
+      },
+    },
+  });
+  const projection = projectAgentInspector(recovering, { roomId: "focus_1" });
+
+  assert.equal(projection?.overallState, "recovering");
+  assert.equal(projection?.overallLabel, "Recovering agent");
+  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Connected");
+  assert.deepEqual(projection?.deliveryProgress, {
+    kind: "runtime_recovery",
+    phase: "recovering",
+    label: "Restoring room access",
+    detail: "The provider is running. Reconnecting room access · attempt 2 of 3.",
+    sourceMessageId: null,
+    requestedLocally: false,
+  });
+  assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, false,
+    "automatic recovery owns the binding while its bounded retries remain active");
 });
 
 test("turn control is available only for the exact responding provider turn", () => {

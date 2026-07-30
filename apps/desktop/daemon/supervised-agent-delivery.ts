@@ -632,7 +632,9 @@ export class SupervisedAgentDelivery {
         }
         return;
       }
-      if ((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome === "ambiguous") {
+      if (["ambiguous", "terminal_failure"].includes(
+        String((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome ?? ""),
+      )) {
         await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
         return;
       }

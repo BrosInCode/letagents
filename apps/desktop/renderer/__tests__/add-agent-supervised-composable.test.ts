@@ -2094,6 +2094,35 @@ test("a deferred name lookup persists the complete Start-click snapshot", async 
   assert.equal(createdInput?.model, "gpt-5.6");
 });
 
+test("a stalled optional name lookup cannot prevent durable agent creation", async () => {
+  const nameLookup = deferred<DesktopSupervisorManifestEntry[]>();
+  let createCalls = 0;
+  const created = await createSupervisedAgentFromSnapshot({
+    listAgents: () => nameLookup.promise,
+    createAgent: async (input: Record<string, unknown>) => {
+      createCalls += 1;
+      return entry({
+        id: "supervised_after-timeout",
+        displayName: String(input.displayName),
+      });
+    },
+  } as never, {
+    creationRequestId: "request-after-timeout",
+    providerId: "open-model",
+    providerName: "Open Model",
+    roomIdentifier: "room-1",
+    repoRootPath: "/repo",
+    charter: "Investigate the task.",
+    permissionProfileId: "full_access",
+    launchPolicy: null,
+    model: "moonshotai/kimi-k3",
+  }, () => true, 1);
+
+  assert.equal(createCalls, 1);
+  assert.equal(created?.id, "supervised_after-timeout");
+  assert.match(created?.displayName ?? "", /^[A-Z][A-Za-z]+$/);
+});
+
 test("Claude and Open Model creation use the same friendly codename contract as Codex", async () => {
   for (const provider of [
     { id: "claude-code", name: "Claude Code", model: "claude-sonnet", permissionProfileId: "read_only" },

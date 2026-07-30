@@ -143,7 +143,8 @@ export class ManifestStore {
         d.workspace_path_present, d.workspace_path,
         d.work_attempt_id_present, d.work_attempt_id,
         d.provider_ref_present, d.provider_work_attempt_id, d.provider_continuation_id,
-        d.provider_connection_kind, d.provider_connection_url, d.provider_connection_pid,
+        d.provider_connection_kind, d.provider_connection_url, d.provider_server_auth_path,
+        d.provider_connection_pid,
         d.provider_process_identity_present,
         d.provider_process_identity, d.provider_execution_generation_id,
         d.workplace_liveness_present, d.workplace_liveness_state,
@@ -601,7 +602,8 @@ export class ManifestStore {
         d.workspace_path_present, d.workspace_path,
         d.work_attempt_id_present, d.work_attempt_id,
         d.provider_ref_present, d.provider_work_attempt_id, d.provider_continuation_id,
-        d.provider_connection_kind, d.provider_connection_url, d.provider_connection_pid,
+        d.provider_connection_kind, d.provider_connection_url, d.provider_server_auth_path,
+        d.provider_connection_pid,
         d.provider_process_identity_present, d.provider_process_identity, d.provider_execution_generation_id,
         d.workplace_liveness_present, d.workplace_liveness_state,
         d.workplace_liveness_observed_at, d.workplace_liveness_detail,
@@ -1007,18 +1009,23 @@ export class ManifestStore {
         agent_id, deployment_id, run_id, observed_state,
         workspace_path_present, workspace_path, work_attempt_id_present, work_attempt_id,
         provider_ref_present, provider_work_attempt_id, provider_continuation_id,
-        provider_connection_kind, provider_connection_url, provider_connection_pid,
+        provider_connection_kind, provider_connection_url, provider_server_auth_path,
+        provider_connection_pid,
         provider_process_identity_present, provider_process_identity, provider_execution_generation_id,
         workplace_liveness_present, workplace_liveness_state, workplace_liveness_observed_at, workplace_liveness_detail,
         native_liveness_present, native_liveness_state, native_liveness_observed_at, native_liveness_detail,
         activity_present
-      ) VALUES (${Array.from({ length: 26 }, () => "?").join(", ")})
+      ) VALUES (${Array.from({ length: 27 }, () => "?").join(", ")})
     `),
       identity.agent_id, runtime.deployment_id, runtime.run_id, runtime.observed_state,
       Number(workspacePresent), workspacePresent ? runtime.workspace_path ?? null : null,
       Number(attemptPresent), attemptPresent ? runtime.work_attempt_id ?? null : null,
       Number(providerPresent), providerRef?.work_attempt_id ?? null, providerRef?.provider_continuation_id ?? null,
-      connection?.kind ?? null, connection?.kind === "codex_app_server" ? connection.url : null,
+      connection?.kind ?? null,
+      connection?.kind === "codex_app_server" || connection?.kind === "opencode_server"
+        ? connection.url
+        : null,
+      connection?.kind === "opencode_server" ? connection.serverAuthPath : null,
       connection?.pid ?? null, Number(processIdentityPresent), connection?.processIdentity ?? null,
       providerRef?.execution_generation_id ?? null,
       Number(workplacePresent), runtime.workplace_liveness?.state ?? null,
@@ -1108,6 +1115,15 @@ export class ManifestStore {
         if (row.provider_connection_kind === "codex_app_server") providerConnection = { kind: "codex_app_server", url: String(row.provider_connection_url), pid: nullableNumber(row.provider_connection_pid), ...(bool(row.provider_process_identity_present) ? { processIdentity: nullableString(row.provider_process_identity) } : {}) };
         else if (row.provider_connection_kind === "claude_cli") providerConnection = { kind: "claude_cli", pid: nullableNumber(row.provider_connection_pid), ...(bool(row.provider_process_identity_present) ? { processIdentity: nullableString(row.provider_process_identity) } : {}) };
         else if (row.provider_connection_kind === "cursor_cli") providerConnection = { kind: "cursor_cli", pid: nullableNumber(row.provider_connection_pid), ...(bool(row.provider_process_identity_present) ? { processIdentity: nullableString(row.provider_process_identity) } : {}) };
+        else if (row.provider_connection_kind === "opencode_server") providerConnection = {
+          kind: "opencode_server",
+          url: String(row.provider_connection_url),
+          pid: nullableNumber(row.provider_connection_pid),
+          ...(bool(row.provider_process_identity_present)
+            ? { processIdentity: nullableString(row.provider_process_identity) }
+            : {}),
+          serverAuthPath: String(row.provider_server_auth_path),
+        };
         providerRef = {
           work_attempt_id: String(row.provider_work_attempt_id),
           provider_continuation_id: String(row.provider_continuation_id),

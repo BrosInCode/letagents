@@ -67,6 +67,28 @@ export interface SupervisedLaunchCreateSnapshot {
 }
 
 type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "listAgents" | "createAgent">;
+const SUPERVISED_NAME_LOOKUP_TIMEOUT_MS = 1_000;
+
+async function lookupExistingDisplayNames(
+  client: SupervisedCreateClient,
+  roomIdentifier: string,
+  timeoutMs: number,
+): Promise<string[]> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const entries = await Promise.race([
+      client.listAgents(roomIdentifier),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(resolve, Math.max(0, timeoutMs), null);
+      }),
+    ]);
+    return entries?.map((entry) => entry.displayName) ?? [];
+  } catch {
+    return [];
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
 
 /**
  * The click-time snapshot is intentionally complete: controls remain editable
@@ -77,16 +99,15 @@ export async function createSupervisedAgentFromSnapshot(
   client: SupervisedCreateClient,
   snapshot: SupervisedLaunchCreateSnapshot,
   isCurrent: () => boolean,
+  nameLookupTimeoutMs = SUPERVISED_NAME_LOOKUP_TIMEOUT_MS,
 ): Promise<DesktopSupervisorManifestEntry | null> {
-  let existingDisplayNames: string[] = [];
-  try {
-    existingDisplayNames = (await client.listAgents(snapshot.roomIdentifier))
-      .map((entry) => entry.displayName);
-  } catch {
-    // A recovery scan can legitimately be unavailable while create still
-    // succeeds. The request id still deterministically selects a friendly
-    // name; the durable entry and server agent key remain identity authority.
-  }
+  // Friendly-name collision avoidance is optional. A slow recovery scan must
+  // never prevent the durable create request from crossing its boundary.
+  const existingDisplayNames = await lookupExistingDisplayNames(
+    client,
+    snapshot.roomIdentifier,
+    nameLookupTimeoutMs,
+  );
   const displayName = suggestSupervisedAgentCodename(
     existingDisplayNames,
     snapshot.creationRequestId,
@@ -247,7 +268,7 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   isCurrentRequest: (version) => props.open && version === setup.currentVersion(),
   onChooseRepo: () => emit("choose-repo"),
   onCopyAuthCommand: (command) => void setupActions.copyAgentAuthCommand(command),
-  onRetry: () => void retrySupervisedLaunch(),
+  onRetry: () => retrySupervisedLaunch(),
   onMessage: setSetupMessage,
 });
 const launchStarted = supervisedLaunch.launchStarted;
@@ -327,7 +348,8 @@ async function retrySupervisedLaunch(): Promise<void> {
   if (startOperationInFlight) return;
   const entry = supervisedLaunch.conflict.value;
   if (!entry) {
-    await startManagedAgent();
+    if (!supervisedLaunch.view.value?.failed || supervisedLaunch.view.value.durable) return;
+    await startManagedAgent({ retryingPreDurableLaunch: true });
     return;
   }
   startOperationInFlight = true;
@@ -350,7 +372,9 @@ async function retrySupervisedLaunch(): Promise<void> {
   }
 }
 
-async function startManagedAgent(): Promise<void> {
+async function startManagedAgent(
+  options: { retryingPreDurableLaunch?: boolean } = {},
+): Promise<void> {
   if (!selectedProviderId.value || !props.repoRootPath || startOperationInFlight) return;
   if (
     !hasDesktopManagedRuntime(selectedProvider.value)
@@ -383,10 +407,21 @@ async function startManagedAgent(): Promise<void> {
       if (!scanAllowsNewLaunch) {
         throw new Error("Check for previous supervised agents before starting a new one.");
       }
+      const retryingSamePreDurableLaunch = (
+        options.retryingPreDurableLaunch === true
+        && supervisedLaunchView.value?.failed === true
+        && supervisedLaunchView.value.durable === false
+        && !supervisedConflict.value
+      );
       if (!canStartNewSupervisedLaunch({
         providerId: requestProviderId,
         scanStatus: supervisedRecoveryScanStatus.value,
-        hasActiveLaunch: Boolean(supervisedLaunchView.value || supervisedConflict.value || launchStarted.value),
+        // A failed pre-durable attempt may reuse its own launch id. Never let
+        // that exception hide a durable conflict that appeared meanwhile.
+        hasActiveLaunch: Boolean(
+          supervisedConflict.value
+          || (!retryingSamePreDurableLaunch && (supervisedLaunchView.value || launchStarted.value))
+        ),
         hasRecoveryCandidate: Boolean(supervisedRecoveryCandidate.value),
         recoveringCandidate: recoveringSupervisedCandidate.value,
         supportsConcurrentAgents: selectedProvider.value?.capabilities.includes("concurrent_supervised_agents") === true,

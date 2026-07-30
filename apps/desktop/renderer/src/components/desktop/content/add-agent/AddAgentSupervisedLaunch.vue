@@ -12,8 +12,15 @@
     tabindex="-1"
   >
     <article class="desktop-add-agent-managed-session" :data-state="state">
-      <SupervisedLaunchProgress :progress="progress" @recover="controller.launch.handleRecover($event)" />
+      <SupervisedLaunchProgress
+        :progress="progress"
+        :recovering="controller.launch.recoveryPending.value"
+        :inline-dismiss="inlineFailureActions"
+        @recover="controller.launch.handleRecover($event)"
+        @dismiss="controller.launch.dismiss"
+      />
       <AddAgentSupervisedLaunchActions
+        v-if="!inlineFailureActions"
         :progress="progress"
         :can-add-another-supervised-agent="canAddAnotherSupervisedAgent"
         :provider-name="progress.providerLabel"
@@ -52,6 +59,7 @@ const stopping = computed(() => Boolean(props.controller.launch.stoppingEntryId.
 const canAddAnotherSupervisedAgent = computed(() => props.controller.launch.canAddAnotherSupervisedAgent.value);
 const hasStopAction = computed(() => Boolean(props.controller.launch.conflict.value)
   && !canAddAnotherSupervisedAgent.value);
+const inlineFailureActions = computed(() => Boolean(progress.value?.failed) && !hasStopAction.value);
 const recoveryCandidate = computed(() => props.controller.launch.recoveryCandidate.value);
 const recoverableProviderName = computed(() => props.controller.recoverableProviderName.value);
 const recoveryAnnouncement = computed(() => recoveryCandidate.value && recoverableProviderName.value
@@ -64,7 +72,7 @@ const state = computed(() => {
   if (!progress.value) return "idle";
   if (progress.value.status === "stopping") return "stopping";
   if (progress.value.ready) return "ready";
-  if (progress.value.failed) return "blocked";
+  if (progress.value.failed) return progress.value.recovery ? "recoverable" : "blocked";
   if (progress.value.stopped) return "stopped";
   return "starting";
 });

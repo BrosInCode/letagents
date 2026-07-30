@@ -2929,8 +2929,10 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
     let updated: DesktopSupervisorManifestEntry | null = null;
     if (intent.kind === "pause") {
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "paused");
-    } else if (intent.kind === "resume" || intent.kind === "recover") {
+    } else if (intent.kind === "resume") {
       updated = await desktopIpc.supervisor.setDesiredState(intent.entryId, "running");
+    } else if (intent.kind === "recover") {
+      updated = await desktopIpc.supervisor.recoverAgentRuntime({ entryId: intent.entryId });
     } else if (intent.kind === "retire_agent") {
       const status = await refreshSupervisorStatus();
       if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
@@ -3105,9 +3107,26 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       message: intent.kind === "retire_agent"
         && (isStaleDaemonGenerationError(error) || (operationDaemonGeneration !== null && refreshed?.generation !== operationDaemonGeneration))
         ? supervisorGenerationChangedMessage
-        : error instanceof Error ? error.message : "The agent action could not be completed.",
+        : agentInspectorActionErrorMessage(intent.kind, error),
     };
   }
+}
+
+function agentInspectorActionErrorMessage(
+  kind: AgentInspectorActionIntent["kind"],
+  error: unknown,
+): string {
+  const detail = error instanceof Error ? error.message : "";
+  if (kind === "reconnect" && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
+    return "This provider process has stopped. Recover the agent to continue with the same identity and workspace.";
+  }
+  if (kind === "recover" && /cannot prove that the previous provider process stopped/i.test(detail)) {
+    return "LetAgents could not safely prove the old provider stopped. No replacement was started.";
+  }
+  if (kind === "recover" && /desktop credentials are required/i.test(detail)) {
+    return "LetAgents could not restore this agent’s room credentials. Try recovery again.";
+  }
+  return detail || "The agent action could not be completed.";
 }
 
 function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string {
@@ -3116,7 +3135,7 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
     pause: "Pausing this agent…",
     resume: "Resuming this agent…",
     reconnect: "Restoring the existing agent connection…",
-    recover: "Recovering this saved agent…",
+    recover: "Starting a replacement provider for this agent…",
     stop_turn: "Stopping the current turn…",
     steer_turn: "Applying correction to this session…",
     resolve_turn_control: "Recording the verified turn outcome…",
@@ -3136,7 +3155,7 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     pause: "Agent paused.",
     resume: "Agent resumed.",
     reconnect: "Connection handoff requested.",
-    recover: "Recovery started.",
+    recover: "Provider recovery started. The agent identity and workspace were preserved.",
     stop_turn: "Current turn stopped.",
     steer_turn: "Correction applied to the same agent session.",
     resolve_turn_control: "Turn-control outcome recorded.",

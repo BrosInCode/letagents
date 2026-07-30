@@ -2,6 +2,11 @@ import type { ProviderSpawnRequest } from "./provider-adapter.js";
 
 export const OPEN_MODEL_OPENCODE_PROVIDER_ID = "letagents-open-model";
 export const OPENCODE_SERVER_USERNAME = "opencode";
+// A supervised room turn needs enough room for tool work and a useful final
+// response, but it must not reserve the very large generation budgets exposed
+// by arbitrary OpenRouter models. Providers commonly authorize or bill against
+// the requested maximum before generating the first token.
+export const SUPERVISED_OPEN_MODEL_OUTPUT_TOKEN_LIMIT = 8_192;
 
 export type OpenCodeConfig = Record<string, unknown>;
 
@@ -118,7 +123,10 @@ export function openCodeConfig(input: {
             temperature: true,
             tool_call: true,
             release_date: "2025-01-01",
-            limit: { context: 1_000_000, output: 100_000 },
+            limit: {
+              context: 1_000_000,
+              output: SUPERVISED_OPEN_MODEL_OUTPUT_TOKEN_LIMIT,
+            },
             cost: { input: 0, output: 0 },
             options: {},
           },

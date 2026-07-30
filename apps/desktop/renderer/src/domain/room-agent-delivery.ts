@@ -146,16 +146,22 @@ export function roomAgentDeliverySummary(
  */
 export function canReconnectRoomAgent(
   agent: Pick<DesktopSupervisorManifestEntry,
-    "deliveryMode" | "desiredState" | "roomAgentState" | "workAttemptId"
+    "deliveryMode" | "desiredState" | "observedState" | "nativeLiveness" | "roomAgentState" | "workAttemptId"
     | "agentSessionId" | "agentSessionBindingState" | "executionGenerationId"
-    | "providerContinuationId">,
+    | "providerContinuationId" | "providerPid" | "lastError">,
 ): boolean {
+  const automaticRecoveryIsActive = /retrying automatically/i.test(agent.lastError ?? "");
+  const providerIsKnownStopped = /saved OpenCode process is no longer running|previous provider runtime is unavailable/i
+    .test(agent.lastError ?? "");
   return agent.deliveryMode === "daemon_inbox"
     && agent.desiredState === "running"
+    && agent.observedState !== "failed"
+    && agent.nativeLiveness?.state !== "terminal"
+    && !providerIsKnownStopped
     && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials"
-    && agent.agentSessionBindingState === "active"
+    && !automaticRecoveryIsActive
+    && Boolean(agent.providerPid)
     && Boolean(agent.workAttemptId)
-    && Boolean(agent.agentSessionId)
     && Boolean(agent.executionGenerationId)
     && Boolean(agent.providerContinuationId);
 }
@@ -164,13 +170,18 @@ export function canReconnectRoomAgent(
 export function canRecoverSavedRoomAgent(
   agent: Pick<DesktopSupervisorManifestEntry,
     "deliveryMode" | "desiredState" | "observedState" | "condition"
-    | "executionGenerationId" | "providerContinuationId">,
+    | "nativeLiveness" | "roomAgentState" | "executionGenerationId" | "providerContinuationId">,
 ): boolean {
   const recoveryState = ["absent", "paused", "failed", "recovering"].includes(agent.observedState)
     || agent.condition === "coordination_blocked"
     || agent.condition === "auth_blocked";
+  const runtimeAbsent = !agent.executionGenerationId
+    || !agent.providerContinuationId
+    || agent.observedState === "failed"
+    || agent.nativeLiveness?.state === "terminal"
+    || agent.roomAgentState?.connection?.state === "disconnected";
   return agent.deliveryMode === "daemon_inbox"
     && agent.desiredState !== "stopped"
     && recoveryState
-    && (!agent.executionGenerationId || !agent.providerContinuationId);
+    && runtimeAbsent;
 }

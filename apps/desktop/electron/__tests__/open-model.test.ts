@@ -259,6 +259,9 @@ test("OpenCode config exposes product tools without embedding the provider key",
   const serialized = JSON.stringify(config);
   const provider = (config.provider as Record<string, Record<string, unknown>>)
     ["letagents-open-model"];
+  const configuredModel = (
+    provider.models as Record<string, Record<string, unknown>>
+  )["qwen/qwen3-coder"];
   const mcp = (config.mcp as Record<string, Record<string, unknown>>).letagents;
 
   assert.equal(config.model, "letagents-open-model/qwen/qwen3-coder");
@@ -267,6 +270,10 @@ test("OpenCode config exposes product tools without embedding the provider key",
   assert.equal(config.formatter, false);
   assert.equal(config.lsp, false);
   assert.equal((provider.options as Record<string, unknown>).baseURL, "https://openrouter.ai/api/v1");
+  assert.equal(
+    (configuredModel.limit as Record<string, unknown>).output,
+    8_192,
+  );
   assert.deepEqual(mcp.command, ["node", "/app/mcp.js"]);
   assert.equal(
     (mcp.environment as Record<string, string>).LETAGENTS_EXECUTION_PROFILE,

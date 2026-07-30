@@ -1105,6 +1105,19 @@ export function registerDesktopIpcHandlers(
     },
   );
   targetIpcMain.handle(
+    "desktop:supervisor:recover-agent-runtime",
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorRuntimeRecoveryInput): Promise<DesktopSupervisorManifestEntry> => {
+      if (isDesktopSmokeCheck()) throw new Error("Agent runtime recovery is unavailable in the desktop smoke environment.");
+      const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+      if (!entry) throw new Error(`Unknown supervised agent: ${input.entryId}`);
+      // Electron restores secret custody first. The daemon then proves the
+      // saved provider absent, retires the exact old worker session, and only
+      // afterwards permits convergence to create a successor runtime.
+      await supervisorGrantCoordinator.prepareEntryForRuntimeRecovery(entry);
+      return supervisorDaemonClient.recoverAgentRuntime(entry.id);
+    },
+  );
+  targetIpcMain.handle(
     "desktop:supervisor:control-turn",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlInput) =>
       isDesktopSmokeCheck() ? desktopSmokeControlTurn(input) : supervisorDaemonClient.controlTurn(input),

@@ -1,11 +1,55 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../client.js";
 import { toRoomAgentLivenessObservation, toRoomAgentPresence } from "../mappers.js";
-import { room_agent_liveness_observations, room_agent_presence, task_leases } from "../schema.js";
+import {
+  room_agent_liveness_observations,
+  room_agent_presence,
+  room_agent_sessions,
+  task_leases,
+} from "../schema.js";
 import type { RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow } from "../types.js";
 import type { AgentPresenceStatus } from "../../../shared/agent-presence.js";
 
 class StaleNativePresenceOwnerError extends Error {}
+
+/**
+ * Rendered presence outlives a worker session so room history does not blink
+ * away during recovery. A successor may inherit that projection only when it
+ * is the exact active worker for the same durable agent and the prior owner is
+ * no longer active. Keeping this as one SQL predicate makes the handoff atomic:
+ * a concurrent predecessor cannot become active between a read and the write.
+ */
+function nativePresenceOwnerFence(input: {
+  room_id: string;
+  agent_session_id: string;
+  agent_key: string;
+}) {
+  return sql`
+    ${room_agent_presence.agent_session_id} IS NULL
+    OR ${room_agent_presence.agent_session_id} = ${input.agent_session_id}
+    OR (
+      ${room_agent_presence.agent_key} = ${input.agent_key}
+      AND EXISTS (
+        SELECT 1
+        FROM ${room_agent_sessions} AS successor_session
+        WHERE successor_session.session_id = ${input.agent_session_id}
+          AND successor_session.room_id = ${input.room_id}
+          AND successor_session.agent_key = ${input.agent_key}
+          AND successor_session.session_kind = 'worker'
+          AND successor_session.ended_at IS NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM ${room_agent_sessions} AS predecessor_session
+        WHERE predecessor_session.session_id = ${room_agent_presence.agent_session_id}
+          AND predecessor_session.room_id = ${input.room_id}
+          AND predecessor_session.agent_key = ${input.agent_key}
+          AND predecessor_session.session_kind = 'worker'
+          AND predecessor_session.ended_at IS NULL
+      )
+    )
+  `;
+}
 
 /**
  * A native activity heartbeat proves that the provider connection is alive;
@@ -249,7 +293,7 @@ export async function recordNativeHarnessActivity(input: {
         last_heartbeat_at: serverNow,
         updated_at: serverNow,
       },
-      setWhere: sql`${room_agent_presence.agent_session_id} IS NULL OR ${room_agent_presence.agent_session_id} = ${input.agent_session_id}`,
+      setWhere: nativePresenceOwnerFence(input),
     }).returning();
     if (!presenceRow) throw new StaleNativePresenceOwnerError("A newer worker session owns this actor's rendered presence.");
 

@@ -36,6 +36,7 @@ const task_leases = schemaModule?.task_leases;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const endRoomAgentSession = dbModule?.endRoomAgentSession;
+const recordNativeHarnessActivity = dbModule?.recordNativeHarnessActivity;
 const revokeRoomAgentSessionBearer = dbModule?.revokeRoomAgentSessionBearer;
 const rotateRoomAgentSessionBearer = dbModule?.rotateRoomAgentSessionBearer;
 const createTask = dbModule?.createTask;
@@ -291,6 +292,57 @@ test("native activity accepts the scoped worker bearer without a legacy session 
   assert.equal(accepted.statusCode, 200);
   assert.equal((accepted.body as { presence: { status: string } }).presence.status, "idle");
   assert.equal((await invoke("agent_session_other")).statusCode, 403, "a bearer remains scoped to its own session");
+});
+
+test("native activity transfers rendered presence from an ended same-agent predecessor", { skip: requiresDatabase }, async () => {
+  if (!recordNativeHarnessActivity || !endRoomAgentSession || !createRoomAgentSession || !room_agent_presence || !db) {
+    throw new Error("missing DB harness");
+  }
+  const { room, session: predecessor } = await seed();
+  const activity = (session: typeof predecessor, sequence: number) => recordNativeHarnessActivity({
+    room_id: room.id,
+    agent_session_id: session.session_id,
+    actor_label: session.actor_label,
+    agent_key: session.agent_key,
+    session_kind: "worker",
+    runtime: session.runtime,
+    display_name: session.display_name,
+    owner_label: session.owner_label,
+    ide_label: session.ide_label,
+    repo_branch: session.repo_branch,
+    provider_observed_at: new Date().toISOString(),
+    sequence,
+    method: "native_harness.bound",
+    status: "idle",
+  });
+
+  assert.equal((await activity(predecessor, 1)).accepted, true);
+  await endRoomAgentSession({ session_id: predecessor.session_id });
+  const [retainedPresence] = await db.select().from(room_agent_presence)
+    .where(eq(room_agent_presence.agent_session_id, predecessor.session_id));
+  assert.ok(retainedPresence, "ending a session retains its last rendered presence for history");
+
+  const successor = await createRoomAgentSession({
+    room_id: room.id,
+    session_kind: "worker",
+    runtime: predecessor.runtime,
+    actor_label: predecessor.actor_label,
+    agent_key: predecessor.agent_key,
+    agent_instance_id: `${predecessor.agent_instance_id}-successor`,
+    display_name: predecessor.display_name,
+    owner_account_id: predecessor.owner_account_id,
+    owner_label: predecessor.owner_label,
+    ide_label: predecessor.ide_label,
+  });
+  assert.notEqual(successor.session_id, predecessor.session_id);
+
+  const accepted = await activity(successor, 1);
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.presence?.agent_session_id, successor.session_id);
+  const [currentPresence] = await db.select().from(room_agent_presence)
+    .where(eq(room_agent_presence.actor_label, predecessor.actor_label));
+  assert.equal(currentPresence?.agent_session_id, successor.session_id);
+  assert.equal(currentPresence?.agent_key, predecessor.agent_key);
 });
 
 test("native harness session-token self-auth survives flag-off/expired bearers and CAS-heartbeats the exact worker lease", { skip: requiresDatabase }, async () => {

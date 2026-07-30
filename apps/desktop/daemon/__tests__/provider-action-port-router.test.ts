@@ -213,7 +213,7 @@ test("provider router selects the native adapter by manifest provider and fences
   assert.equal(cursor.providerContinuationId, "continuation:cursor-attempt");
 });
 
-test("provider router only returns a cached handle for an exact durable connection identity", async () => {
+test("provider router accepts a missing legacy connection only for the exact remembered work attempt and continuation", async () => {
   const calls: string[] = [];
   const adapter = fakeAdapter("codex", calls);
   const router = new ProviderActionPortRouter({ codex: async () => adapter });
@@ -233,7 +233,11 @@ test("provider router only returns a cached handle for an exact durable connecti
   assert.deepEqual(await router.attach(alphaRef), alpha);
   assert.equal(await router.attach({ ...alphaRef, providerContinuationId: bravo.providerContinuationId! }), null);
   assert.equal(await router.attach({ ...alphaRef, providerConnection: bravo.providerConnection }), null);
-  assert.equal(await router.attach({ ...alphaRef, providerConnection: null }), null);
+  assert.deepEqual(
+    await router.attach({ ...alphaRef, providerConnection: null }),
+    alpha,
+    "the exact Electron-owned handle repairs a predecessor daemon's missing connection evidence",
+  );
   assert.ok(alpha.providerConnection?.kind === "codex_app_server");
   const mismatchedConnections: ProviderActionConnectionRef[] = [
     { ...alpha.providerConnection, url: "ws://127.0.0.1:9999" },

@@ -768,6 +768,40 @@ test("terminal receipts and observed context are bounded while prepared effects 
   } finally { await env.cleanup(); }
 });
 
+test("receipt projections retain only the newest timeline events for a noisy inbox item", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "noisy",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+
+    const database = new DatabaseSync(env.database);
+    const insert = database.prepare(`INSERT INTO supervised_agent_inbox_events(
+      inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail
+    ) VALUES (?,?,?,?,?,?)`);
+    for (let index = 0; index < 80; index += 1) {
+      insert.run(
+        item!.inbox_item_id,
+        index + 3,
+        `noise-${index}`,
+        "conversation_restoring",
+        "2026-07-22T12:00:00.000Z",
+        `event-${index}`,
+      );
+    }
+    database.close();
+
+    const [receipt] = await store.receipts("noisy");
+    assert.equal(receipt?.timeline.length, 64);
+    assert.equal(receipt?.timeline[0]?.detail, "event-16");
+    assert.equal(receipt?.timeline.at(-1)?.detail, "event-79");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("inspector detail checkpoints canonical publication and records a monotonic prune boundary", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-23T12:00:00.000Z");

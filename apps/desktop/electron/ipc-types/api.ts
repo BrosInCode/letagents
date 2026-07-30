@@ -322,6 +322,7 @@ export interface DesktopApi {
     resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
     reconnectAgent: (input: import("./agents.js").DesktopSupervisorReconnectInput) => Promise<DesktopSupervisorManifestEntry>;
+    recoverAgentRuntime: (input: import("./agents.js").DesktopSupervisorRuntimeRecoveryInput) => Promise<DesktopSupervisorManifestEntry>;
     retryRoomDelivery: (input: import("./agents.js").DesktopSupervisorRoomDeliveryRetryInput) => Promise<void>;
     restoreAgentConversation: (input: import("./agents.js").DesktopSupervisorConversationRestoreInput) => Promise<void>;
     skipRoomDelivery: (input: import("./agents.js").DesktopSupervisorRoomDeliverySkipInput) => Promise<void>;

@@ -47,6 +47,12 @@
   box-shadow: inset 3px 0 0 rgba(248, 113, 113, 0.7), 0 14px 36px rgba(0, 0, 0, 0.18);
 }
 
+.desktop-add-agent-managed-session[data-state="recoverable"] {
+  --launch-accent: #f4bd62;
+  border-color: rgba(244, 189, 98, 0.22);
+  box-shadow: inset 3px 0 0 rgba(244, 189, 98, 0.72), 0 14px 36px rgba(0, 0, 0, 0.18);
+}
+
 .desktop-add-agent-managed-session[data-state="stopped"] {
   --launch-accent: #9297a3;
   border-color: rgba(255, 255, 255, 0.12);
