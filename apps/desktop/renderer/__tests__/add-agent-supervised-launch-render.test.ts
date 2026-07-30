@@ -69,13 +69,22 @@ after(async () => {
 
 function readyController() {
   const view = ref({
+    phases: [],
+    currentPhaseId: "ready",
     ready: true,
     failed: false,
     stopped: false,
     stopFailed: false,
     status: "ready",
+    durable: true,
     agentName: "MapleRidge · request-ready",
     providerLabel: "Codex",
+    headline: "MapleRidge joined the room",
+    failureDetail: null,
+    failureImpact: null,
+    failureDiagnostic: null,
+    recovery: null,
+    joinHint: null,
   });
   const conflict = ref({ provider: "codex" });
   const canAddAnotherSupervisedAgent = ref(true);
@@ -89,6 +98,7 @@ function readyController() {
     recoveryCandidate: ref(null),
     recoveringCandidate: ref(false),
     recoveryScanStatus: ref<"idle" | "checking" | "ready" | "error">("ready"),
+    recoveryPending: ref(false),
     conflictLookupError: ref(null),
     conflictLookupTone: ref<"error" | "warning">("error"),
     handleRecover: () => undefined,
@@ -106,6 +116,62 @@ function readyController() {
     controller: { launch, recoverableProviderName: computed(() => null) },
     release: launch.dismissReadyLaunchForAnother,
     counts: () => ({ dismissCalls, stopCalls }),
+  };
+}
+
+function failedController() {
+  const recoverCalls: string[] = [];
+  let dismissCalls = 0;
+  const launch = {
+    view: ref({
+      phases: [
+        {
+          id: "connecting_supervisor",
+          label: "Starting the background service",
+          detail: "Opening the local service that keeps room agents running.",
+          state: "failed",
+        },
+        {
+          id: "saving_agent",
+          label: "Saving your agent",
+          detail: "Recording this agent so setup can continue if you close the app.",
+          state: "pending",
+        },
+      ],
+      currentPhaseId: "connecting_supervisor",
+      status: "blocked",
+      durable: false,
+      ready: false,
+      failed: true,
+      stopped: false,
+      stopFailed: false,
+      agentName: null,
+      providerLabel: "Open Model",
+      headline: "Background service didn’t start",
+      failureDetail: "LetAgents couldn’t start the local service that manages room agents.",
+      failureImpact: "No agent was created. Your room and project are unchanged.",
+      failureDiagnostic: "The local supervisor socket did not answer.",
+      recovery: "reconnect",
+      joinHint: null,
+    }),
+    conflict: ref(null),
+    canAddAnotherSupervisedAgent: ref(false),
+    stoppingEntryId: ref<string | null>(null),
+    recoveryCandidate: ref(null),
+    recoveringCandidate: ref(false),
+    recoveryPending: ref(false),
+    recoveryScanStatus: ref<"idle" | "checking" | "ready" | "error">("ready"),
+    conflictLookupError: ref(null),
+    conflictLookupTone: ref<"error" | "warning">("error"),
+    handleRecover: (action: string) => { recoverCalls.push(action); },
+    detectRecoverableLaunch: () => undefined,
+    dismiss: () => { dismissCalls += 1; },
+    stop: () => undefined,
+    dismissReadyLaunchForAnother: () => undefined,
+  };
+  return {
+    controller: { launch, recoverableProviderName: computed(() => null) },
+    counts: () => ({ recoverCalls, dismissCalls }),
   };
 }
 
@@ -255,4 +321,19 @@ test("mounted ready supervised button dispatches dismiss and restores Start with
   assert.equal(ready.counts().stopCalls, 0);
   assert.doesNotMatch(afterRelease, /desktop-add-agent-add-another-supervised/);
   assert.match(afterRelease, />Start supervised agent</);
+});
+
+test("pre-durable failures are compact, actionable, and explicit that nothing changed", async () => {
+  const failed = failedController();
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSupervisedLaunch, { controller: failed.controller }),
+  }));
+
+  assert.match(html, /Background service didn’t start/);
+  assert.match(html, /No agent was created\. Your room and project are unchanged\./);
+  assert.match(html, /supervised-launch-recovery/);
+  assert.match(html, /Try again<\/button>/);
+  assert.match(html, /desktop-add-agent-dismiss-launch/);
+  assert.doesNotMatch(html, /Saving your agent/, "unreachable future steps should not remain in a terminal card");
+  assert.match(html, /<summary[^>]*>Details<\/summary>/);
 });

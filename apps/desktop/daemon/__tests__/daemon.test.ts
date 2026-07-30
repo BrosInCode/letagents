@@ -14,6 +14,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
+import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
@@ -1166,7 +1167,7 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
   }
 });
 
-test("worker mint crash windows stay unknown until exact public identity precedes manifest binding", async () => {
+test("post-launch worker binding retries the exact provider and preserves the real failure", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -1224,7 +1225,12 @@ test("worker mint crash windows stay unknown until exact public identity precede
     const internals = daemon as unknown as { workerBindings: WorkerBindingStore; publishNativeActivity: () => Promise<boolean> };
     const originalBind = internals.workerBindings.bind.bind(internals.workerBindings);
     internals.publishNativeActivity = async () => true;
-    internals.workerBindings.bind = async () => { throw new Error("simulated binding write failure"); };
+    let bindAttempts = 0;
+    internals.workerBindings.bind = async (input) => {
+      bindAttempts += 1;
+      if (bindAttempts === 1) throw new Error("simulated binding write failure");
+      return originalBind(input);
+    };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "host_grant_bind_retry", provider: "claude-code", delivery_mode: "daemon_inbox", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id, last_worker_binding: null,
@@ -1238,6 +1244,9 @@ test("worker mint crash windows stay unknown until exact public identity precede
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "coordination_blocked", "post-spawn binding failure");
     assert.equal(spawns, 1);
     assert.equal(stops, 0, "credential failure must never stop the spawned provider");
+    const recoveringProjection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.match(recoveringProjection.last_error ?? "", /simulated binding write failure/);
+    assert.match(recoveringProjection.last_error ?? "", /retrying automatically/i);
     const exactMintState = await internals.workerBindings.supervisedWorkerMintState("host_grant_bind_retry");
     assert.deepEqual(exactMintState, {
       agent_id: "host_grant_bind_retry",
@@ -1259,11 +1268,16 @@ test("worker mint crash windows stay unknown until exact public identity precede
     } finally { await exactEvidence.close(); }
     const beforeRetry = await daemonRequest(paths.socketPath, "attempt.read", { id: "host_grant_bind_retry" });
     assert.equal((beforeRetry.result as { execution_generations: Array<{ terminal: unknown }> }).execution_generations[0]?.terminal, null);
-    internals.workerBindings.bind = originalBind;
-    const retryInstall = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", install);
-    assert.equal(retryInstall.ok, true, retryInstall.error);
-    await eventually(async () => Boolean(await internals.workerBindings.get("host_grant_bind_retry")), "host worker binding retry");
-    assert.equal(spawns, 1, "retry rebinds the exact provider rather than spawning a replacement");
+    await eventually(async () => Boolean(await internals.workerBindings.get("host_grant_bind_retry")), "automatic host worker binding retry", 5_000);
+    assert.equal(bindAttempts, 2);
+    assert.equal(spawns, 1, "automatic retry rebinds the exact provider rather than spawning a replacement");
+    await eventually(
+      async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.condition === "none",
+      "successful room binding clears the recovery projection",
+    );
+    const recoveredProjection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    assert.equal(recoveredProjection.condition, "none");
+    assert.equal(recoveredProjection.last_error, null);
     assert.equal(remoteLiveSessionId, "session-host", "lost-response recovery retains one remote live session id");
     assert.equal(mintCalls.every((call) => call.grantGeneration === 7 && call.agentInstanceId === "daemon:host_grant_bind_retry"), true);
     const raw = await readFile(paths.manifestPath);
@@ -3695,6 +3709,331 @@ test("credential-only reconnect rejects a missing exact provider without retaini
   }
 });
 
+test("recovery-only authority install retains the grant without touching the dead provider or converging", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  const calls = { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0 };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { calls.spawn += 1; throw new Error("authority preparation must not spawn"); },
+    attach: async () => { calls.attach += 1; throw new Error("authority preparation must not attach"); },
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { calls.resume += 1; throw new Error("authority preparation must not resume"); },
+    poke: async () => {},
+    stop: async () => { calls.stop += 1; throw new Error("authority preparation must not stop"); },
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      hostGrants: Map<string, unknown>;
+      requestConvergence: (entryId: string) => void;
+    };
+    internals.requestConvergence = () => { calls.converge += 1; };
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "recovery_authority_dead_provider", provider: "open-model", delivery_mode: "daemon_inbox",
+      desired_state: "running", observed_state: "failed",
+    } });
+    calls.converge = 0;
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const result = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: "recovery_authority_dead_provider", room_id: entry.room_id, agent_key: "owner/agent",
+      grant_id: "grant-recovery", supervisor_grant: "recovery-secret", grant_generation: 1,
+      api_url: "https://letagents.example", host_id: "host-1", installation_id: "installation-1",
+      grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation, recovery_only: true,
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.result, { status: "installed" });
+    assert.equal(internals.hostGrants.has("recovery_authority_dead_provider"), true);
+    assert.deepEqual(calls, { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0 });
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("explicit runtime recovery retires a proven-dead provider generation without replacing the durable agent", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const id = "recover_dead_opencode_runtime";
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(
+    paths.attemptsPath,
+    paths.attemptsRoot,
+    undefined,
+    join(env.root, "worktrees"),
+    undefined,
+    fakeGit(env.root),
+    undefined,
+    TEST_SUPERVISOR,
+  );
+  const attempt = await durability.createAttempt({
+    taskId: id,
+    leaseId: id,
+    leaseEpoch: 0,
+    workspacePath: workspace.path,
+    workAttemptId: workspace.id,
+  });
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  await durability.close();
+  const calls = { attach: 0, spawn: 0, resume: 0, converge: 0 };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      deliveryModes: ["daemon_inbox"],
+      resume: true,
+      midTurnInjection: false,
+      transcriptAccess: true,
+      permissionPromptBridging: false,
+      survivesRestart: true,
+    }),
+    spawn: async () => { calls.spawn += 1; throw new Error("recovery converges only after the RPC returns"); },
+    attach: async (ref) => {
+      calls.attach += 1;
+      assert.equal(ref.workAttemptId, attempt.work_attempt_id);
+      assert.equal(ref.providerContinuationId, "ses_dead_opencode");
+      return {
+        state: "terminal",
+        terminal: {
+          endedAt: "2099-07-29T12:00:00.000Z",
+          exitCode: 1,
+          signal: null,
+          terminalCause: "crashed",
+          providerContinuationId: "ses_dead_opencode",
+        },
+      };
+    },
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { calls.resume += 1; throw new Error("recovery must not resume the dead provider"); },
+    poke: async () => {},
+    stop: async () => ({
+      endedAt: "2099-07-29T12:00:00.000Z",
+      exitCode: 1,
+      signal: null,
+      terminalCause: "crashed",
+      providerContinuationId: "ses_dead_opencode",
+    }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { requestConvergence: (entryId: string) => void };
+    internals.requestConvergence = (entryId) => {
+      assert.equal(entryId, id);
+      calls.converge += 1;
+    };
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id,
+      provider: "open-model",
+      delivery_mode: "daemon_inbox",
+      desired_state: "running",
+      observed_state: "recovering",
+      condition: "coordination_blocked",
+      last_error: "convergence scheduler failure: The saved OpenCode process is no longer running.",
+      workspace_path: attempt.workspace_path,
+      work_attempt_id: attempt.work_attempt_id,
+      run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id,
+        provider_continuation_id: "ses_dead_opencode",
+        provider_connection: {
+          kind: "opencode_server",
+          url: "http://127.0.0.1:52486",
+          pid: 45_550,
+          processIdentity: "opencode-birth-45550",
+          serverAuthPath: join(env.root, "opencode", "server-auth.json"),
+        },
+        execution_generation_id: execution.execution_generation_id,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+    calls.converge = 0;
+    const blockedProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(
+      blockedProjection.room_agent_state?.connection.state,
+      "disconnected",
+      "a blocked recovery with no live provider handle cannot masquerade as reconnecting authority",
+    );
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const result = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", {
+      entry_id: id,
+      daemon_generation: generation,
+    });
+    assert.equal(result.ok, true, result.error);
+    const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
+    assert.equal(recovered.id, id);
+    assert.equal(recovered.workspace_path, attempt.workspace_path);
+    assert.equal(recovered.work_attempt_id, attempt.work_attempt_id);
+    assert.equal(recovered.provider_ref, null);
+    assert.equal(recovered.observed_state, "starting");
+    assert.equal(recovered.condition, "none");
+    assert.deepEqual(calls, { attach: 1, spawn: 0, resume: 0, converge: 1 });
+
+    const durable = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as {
+      execution_generations: Array<{ execution_generation_id: string; terminal: unknown }>;
+    };
+    assert.equal(durable.execution_generations.length, 1, "recovery does not start a provider generation inline");
+    assert.equal(durable.execution_generations[0]?.execution_generation_id, execution.execution_generation_id);
+    assert.ok(durable.execution_generations[0]?.terminal, "exact terminal evidence is persisted before replacement");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("credential-only reconnect reattaches the exact OpenCode runtime and checkpoints recovered connection evidence", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const id = "credential_only_opencode_attach";
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(
+    paths.attemptsPath,
+    paths.attemptsRoot,
+    undefined,
+    join(env.root, "worktrees"),
+    undefined,
+    fakeGit(env.root),
+    undefined,
+    TEST_SUPERVISOR,
+  );
+  const attempt = await durability.createAttempt({
+    taskId: id,
+    leaseId: id,
+    leaseEpoch: 0,
+    workspacePath: workspace.path,
+    workAttemptId: workspace.id,
+  });
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  await durability.close();
+  const recoveredConnection = {
+    kind: "opencode_server" as const,
+    url: "http://127.0.0.1:52486",
+    pid: 45_550,
+    processIdentity: "opencode-birth-45550",
+    serverAuthPath: join(env.root, "opencode", "server-auth.json"),
+  };
+  const handle = {
+    workAttemptId: attempt.work_attempt_id,
+    pid: recoveredConnection.pid,
+    providerContinuationId: "ses_exact_opencode",
+    providerConnection: recoveredConnection,
+    observedState: "idle" as const,
+  };
+  const calls = { attach: 0, spawn: 0, resume: 0, stop: 0, mint: 0 };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      deliveryModes: ["daemon_inbox"],
+      resume: true,
+      midTurnInjection: false,
+      transcriptAccess: true,
+      permissionPromptBridging: false,
+      survivesRestart: true,
+    }),
+    spawn: async () => { calls.spawn += 1; throw new Error("reconnect must not spawn"); },
+    attach: async (ref) => {
+      calls.attach += 1;
+      assert.equal(ref.workAttemptId, attempt.work_attempt_id);
+      assert.equal(ref.providerContinuationId, handle.providerContinuationId);
+      assert.equal(ref.providerConnection, null, "the adapter owns legacy connection recovery");
+      return handle;
+    },
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { calls.resume += 1; throw new Error("reconnect must not resume"); },
+    poke: async () => {},
+    stop: async () => { calls.stop += 1; throw new Error("reconnect must not stop"); },
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+  }, {
+    createWorkerSession: async () => {
+      calls.mint += 1;
+      return {
+        sessionId: "session-opencode-reconnect",
+        bearer: "opencode-reconnect-bearer",
+        bearerId: "bearer-opencode-reconnect",
+        expiresAt: null,
+      };
+    },
+  });
+  try {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id,
+      provider: "open-model",
+      delivery_mode: "daemon_inbox",
+      observed_state: "recovering",
+      condition: "coordination_blocked",
+      last_error: "durable execution generation remains live without an attachable provider handle",
+      workspace_path: attempt.workspace_path,
+      work_attempt_id: attempt.work_attempt_id,
+      run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id,
+        provider_continuation_id: handle.providerContinuationId,
+        provider_connection: null,
+        execution_generation_id: execution.execution_generation_id,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const result = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id,
+      room_id: entry.room_id,
+      agent_key: "owner/opencode-agent",
+      grant_id: "grant-opencode-reconnect",
+      supervisor_grant: "opencode-reconnect-secret",
+      grant_generation: 1,
+      api_url: "https://letagents.example",
+      host_id: "host-1",
+      installation_id: "installation-1",
+      grant_expires_at: "2099-01-01T00:00:00.000Z",
+      daemon_generation: generation,
+      credential_only: true,
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.result, {
+      status: "installed",
+      agent_session_id: "session-opencode-reconnect",
+    });
+    assert.deepEqual(calls, { attach: 1, spawn: 0, resume: 0, stop: 0, mint: 1 });
+    const restored = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+      .find((candidate) => candidate.id === id);
+    assert.deepEqual(restored?.provider_ref?.provider_connection, recoveredConnection);
+    assert.equal(restored?.provider_ref?.execution_generation_id, execution.execution_generation_id);
+    assert.equal(restored?.provider_ref?.provider_continuation_id, handle.providerContinuationId);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("cursor admission repairs pre-upgrade running and stopped daemon-inbox entries without provider lifecycle work", async () => {
   for (const desiredState of ["running", "stopped"] as const) {
     const env = await fixture();
@@ -6047,6 +6386,23 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(latchedProjection.last_worker_binding?.agent_session_id, "agent_session_exact");
     assert.equal(latchedProjection.condition, "coordination_blocked");
     assert.equal(latchedProjection.reconciliation?.pending_action, null);
+
+    // Room access is restored only when the bound observation is accepted
+    // remotely. A rejected publication must fail the bind, keep the
+    // coordination latch, and never project the agent as working — otherwise
+    // the bounded room-access retry resets and flickers on every cycle.
+    const rejectedBind = await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {
+      entry_id: "supervised_handoff", room_id: "focus_37", agent_session_id: "agent_session_exact",
+      work_attempt_id: workAttemptId, execution_generation_id: executionGenerationId,
+      agent_session_token: "session-secret", api_url: apiUrl,
+    });
+    assert.equal(rejectedBind.ok, false, "a bind whose native publication is rejected must not report success");
+    assert.match(String(rejectedBind.error), /stale daemon observation/);
+    const stillLatchedProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(stillLatchedProjection.condition, "coordination_blocked",
+      "a rejected room publication cannot clear the coordination latch");
+    assert.notEqual(stillLatchedProjection.observed_state, "working",
+      "a rejected room publication cannot project the agent as working");
 
     rejectNativeActivity = false;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.bind_worker_session", {

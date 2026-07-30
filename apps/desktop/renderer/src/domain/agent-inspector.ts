@@ -18,6 +18,7 @@ export type AgentInspectorOverallState =
   | "paused"
   | "needs_attention"
   | "restoring_conversation"
+  | "recovering"
   | "reconnecting"
   | "responding"
   | "listening"
@@ -54,6 +55,7 @@ export interface AgentInspectorNowProjection {
 }
 
 export interface AgentInspectorDeliveryProgressProjection {
+  kind: "delivery" | "runtime_recovery";
   phase: "starting" | "responding" | "recovering" | "publishing";
   label: string;
   detail: string;
@@ -239,14 +241,59 @@ function ownerAttribution(createdBy: string): string | null {
 }
 
 function hasLiveProvider(entry: DesktopSupervisorManifestEntry): boolean {
-  return Boolean(entry.providerPid)
+  return providerRuntimePresent(entry)
+    && entry.nativeLiveness.state !== "terminal"
+    && entry.roomAgentState?.connection.state === "connected"
+    && entry.observedState !== "failed"
     && entry.agentSessionBindingState === "active"
     && Boolean(entry.workAttemptId && entry.executionGenerationId && entry.providerContinuationId);
+}
+
+function providerRuntimePresent(entry: DesktopSupervisorManifestEntry): boolean {
+  return Boolean(entry.providerPid)
+    && entry.nativeLiveness.state !== "terminal"
+    && entry.observedState !== "failed"
+    && !providerRuntimeStopped(entry)
+    && Boolean(entry.workAttemptId && entry.executionGenerationId && entry.providerContinuationId);
+}
+
+function roomAccessRecoveryIsActive(entry: DesktopSupervisorManifestEntry): boolean {
+  return entry.desiredState === "running"
+    && entry.observedState === "recovering"
+    && providerRuntimePresent(entry)
+    && entry.roomAgentState?.inbox.state === "waiting_for_desktop_credentials"
+    && /retrying automatically/i.test(entry.lastError ?? "");
+}
+
+function providerRuntimeStopped(entry: DesktopSupervisorManifestEntry): boolean {
+  return entry.nativeLiveness.state === "terminal"
+    || Boolean(entry.lastError && /saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(entry.lastError));
 }
 
 function hasValidCredential(entry: DesktopSupervisorManifestEntry): boolean {
   return entry.condition !== "auth_blocked"
     && entry.roomAgentState?.inbox.state !== "waiting_for_desktop_credentials";
+}
+
+function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
+  const detail = entry.lastError?.trim() || null;
+  if (!detail) return null;
+  if (/saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(detail)) {
+    return "The provider process stopped. Recover the agent to continue with the same identity and workspace.";
+  }
+  if (/durable execution generation remains live without an attachable provider handle/i.test(detail)) {
+    return "LetAgents is verifying whether the previous provider process is still running.";
+  }
+  if (/waiting for desktop credential handoff/i.test(detail)) {
+    return "Waiting for the desktop app to restore this agent’s room access.";
+  }
+  if (/restoring room access .*retrying automatically/i.test(detail)) {
+    return "The provider is running. LetAgents is restoring its room access automatically.";
+  }
+  if (/room access could not be restored after/i.test(detail)) {
+    return "The provider is running, but its room access could not be restored. Reconnect to try the room handoff again.";
+  }
+  return detail;
 }
 
 export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry): AgentInspectorOverallState {
@@ -258,6 +305,7 @@ export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry
     return "paused";
   }
   if (room?.inbox.state === "restoring_conversation") return "restoring_conversation";
+  if (roomAccessRecoveryIsActive(entry)) return "recovering";
   if (
     entry.condition !== "none"
     || entry.observedState === "failed"
@@ -288,6 +336,7 @@ function overallPresentation(state: AgentInspectorOverallState): { label: string
     case "paused": return { label: "Paused", detail: "Room work is held until you resume the agent." };
     case "needs_attention": return { label: "Needs attention", detail: "A blocked runtime or delivery step needs your input." };
     case "restoring_conversation": return { label: "Restoring conversation", detail: "Recovering the agent’s private Codex conversation without restarting its provider." };
+    case "recovering": return { label: "Recovering agent", detail: "The provider is running while LetAgents restores its room access." };
     case "reconnecting": return { label: "Reconnecting", detail: "Restoring the room observation path." };
     case "responding": return { label: "Responding", detail: "A bounded room turn is in progress." };
     case "listening": return { label: "Listening", detail: "Connected and ready for a routed room message." };
@@ -299,8 +348,12 @@ function overallPresentation(state: AgentInspectorOverallState): { label: string
 function readiness(entry: DesktopSupervisorManifestEntry): AgentInspectorReadinessFact[] {
   const room = entry.roomAgentState;
   const providerLive = hasLiveProvider(entry);
-  const providerTone: AgentInspectorReadinessTone = providerLive
+  const providerPresent = providerRuntimePresent(entry);
+  const providerStopped = providerRuntimeStopped(entry);
+  const providerTone: AgentInspectorReadinessTone = providerLive || providerPresent
     ? "ready"
+    : providerStopped
+      ? "offline"
     : entry.observedState === "starting" || entry.observedState === "recovering"
       ? "waiting"
       : entry.observedState === "failed" ? "blocked" : "offline";
@@ -320,8 +373,11 @@ function readiness(entry: DesktopSupervisorManifestEntry): AgentInspectorReadine
     {
       key: "provider",
       label: "Provider",
-      value: providerLive ? "Connected" : titleCase(entry.observedState),
-      detail: entry.lastError ?? entry.workplaceLiveness.detail,
+      value: providerLive
+        ? "Connected"
+        : providerPresent ? "Connected"
+        : providerStopped ? "Stopped" : titleCase(entry.observedState),
+      detail: lifecycleDetail(entry) ?? entry.workplaceLiveness.detail,
       tone: providerTone,
     },
     {
@@ -392,7 +448,7 @@ function nowProjection(
     return {
       kind: "attention",
       label: overallState === "reconnecting" ? "Reconnecting" : "Needs attention",
-      summary: entry.lastError
+      summary: lifecycleDetail(entry)
         || entry.roomAgentState?.inbox.detail
         || entry.roomAgentState?.ingress.detail
         || entry.roomAgentState?.connection.detail
@@ -405,6 +461,14 @@ function nowProjection(
       kind: "progress",
       label: "Restoring conversation",
       summary: "Checking the saved conversation, then safely creating a replacement only if it is truly missing.",
+      observedAt: entry.roomAgentState?.connection.observedAt ?? entry.bindingUpdatedAt,
+    };
+  }
+  if (overallState === "recovering") {
+    return {
+      kind: "progress",
+      label: "Restoring room access",
+      summary: "The replacement provider is running. LetAgents is reconnecting it to this room.",
       observedAt: entry.roomAgentState?.connection.observedAt ?? entry.bindingUpdatedAt,
     };
   }
@@ -423,8 +487,22 @@ function deliveryProgress(
   const requestedLocally = Boolean(localRetrySourceMessageId);
   const sourceMessageId = turn?.sourceMessageId ?? localRetrySourceMessageId;
 
+  if (roomAccessRecoveryIsActive(entry)) {
+    const attempt = entry.lastError?.match(/attempt (\d+) of (\d+)/i);
+    return {
+      kind: "runtime_recovery",
+      phase: "recovering",
+      label: "Restoring room access",
+      detail: attempt
+        ? `The provider is running. Reconnecting room access · attempt ${attempt[1]} of ${attempt[2]}.`
+        : "The provider is running. Reconnecting its room access without starting another process.",
+      sourceMessageId: null,
+      requestedLocally: false,
+    };
+  }
   if (turn?.state === "publishing") {
     return {
+      kind: "delivery",
       phase: "publishing",
       label: "Publishing response",
       detail: "The response is ready and is being added to the room.",
@@ -434,6 +512,7 @@ function deliveryProgress(
   }
   if (turn?.state === "retrying") {
     return {
+      kind: "delivery",
       phase: "recovering",
       label: "Recovering response",
       detail: turn.detail?.trim() || "Resuming the failed delivery step without repeating completed work.",
@@ -443,6 +522,7 @@ function deliveryProgress(
   }
   if (turn?.state === "dispatching") {
     return {
+      kind: "delivery",
       phase: "starting",
       label: "Starting delivery",
       detail: turn.detail?.trim() || "Handing the room message to the agent.",
@@ -452,6 +532,7 @@ function deliveryProgress(
   }
   if (turn?.state === "responding" && !hasLiveNow) {
     return {
+      kind: "delivery",
       phase: "responding",
       label: "Agent is responding",
       detail: turn.detail?.trim() || "Working on the routed room message.",
@@ -461,6 +542,7 @@ function deliveryProgress(
   }
   if (localRetrySourceMessageId) {
     return {
+      kind: "delivery",
       phase: "starting",
       label: "Retrying delivery",
       detail: "Checking the blocked message and safely resuming its delivery.",
@@ -695,12 +777,18 @@ function actionAvailability(
     { kind: "pause", label: "Pause", available: stateDependentActionsAvailable && entry.desiredState === "running" },
     { kind: "resume", label: "Resume", available: stateDependentActionsAvailable && entry.desiredState === "paused" },
     { kind: "reconnect", label: "Reconnect", available: stateDependentActionsAvailable && canReconnectRoomAgent(entry) },
-    { kind: "recover", label: "Recover", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
+    { kind: "recover", label: "Recover agent", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
     { kind: "stop_turn", label: "Stop current turn", available: stateDependentActionsAvailable && canStopTurn },
     {
       kind: "retry_delivery",
       label: "Retry delivery",
-      available: Boolean(stateDependentActionsAvailable && deliveryRetryAvailable && blockedReceipt),
+      available: Boolean(
+        stateDependentActionsAvailable
+        && deliveryRetryAvailable
+        && blockedReceipt
+        && hasLiveProvider(entry)
+        && hasValidCredential(entry)
+      ),
       sourceMessageId: blockedReceipt?.sourceMessageId,
     },
     {

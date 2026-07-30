@@ -15,7 +15,7 @@
 
     <ol class="supervised-launch-phases" aria-label="Launch progress">
       <li
-        v-for="phase in progress.phases"
+        v-for="phase in visiblePhases"
         :key="phase.id"
         class="supervised-launch-phase"
         :data-state="phase.state"
@@ -56,27 +56,67 @@
       data-testid="supervised-launch-failure"
       role="alert"
     >
-      <p>{{ progress.failureDetail }}</p>
-      <button
-        v-if="progress.recovery"
-        type="button"
-        class="supervised-launch-recovery"
-        data-testid="supervised-launch-recovery"
-        @click="emit('recover', progress.recovery)"
-      >{{ recoveryLabel(progress.recovery) }}</button>
+      <span class="supervised-launch-failure-icon" aria-hidden="true">
+        <CircleAlert :size="17" :stroke-width="1.9" />
+      </span>
+      <div class="supervised-launch-failure-copy">
+        <p>{{ progress.failureDetail }}</p>
+        <small
+          v-if="progress.failureImpact"
+          data-testid="supervised-launch-failure-impact"
+        >{{ progress.failureImpact }}</small>
+      </div>
+      <div class="supervised-launch-failure-actions">
+        <button
+          v-if="progress.recovery"
+          type="button"
+          class="supervised-launch-recovery"
+          data-testid="supervised-launch-recovery"
+          :disabled="recovering"
+          @click="emit('recover', progress.recovery)"
+        >
+          <span v-if="recovering" class="supervised-launch-button-spinner" aria-hidden="true" />
+          {{ recovering ? "Trying again…" : recoveryLabel(progress.recovery, progress.durable) }}
+        </button>
+        <button
+          v-if="inlineDismiss"
+          type="button"
+          class="supervised-launch-dismiss"
+          data-testid="desktop-add-agent-dismiss-launch"
+          :disabled="recovering"
+          @click="emit('dismiss')"
+        >Dismiss</button>
+      </div>
+      <details
+        v-if="progress.failureDiagnostic"
+        class="supervised-launch-failure-details"
+      >
+        <summary>Details</summary>
+        <p>{{ progress.failureDiagnostic }}</p>
+      </details>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { Check, Minus, X } from "@lucide/vue";
+import { Check, CircleAlert, Minus, X } from "@lucide/vue";
 import type { DesktopLaunchRecoveryAction } from "../../../../../electron/ipc-types";
 import type { LaunchJourneyPhaseState, LaunchJourneyView } from "../../../domain/launch-journey";
 
-const props = defineProps<{ progress: LaunchJourneyView }>();
+const props = withDefaults(defineProps<{
+  progress: LaunchJourneyView;
+  recovering?: boolean;
+  inlineDismiss?: boolean;
+}>(), {
+  recovering: false,
+  inlineDismiss: false,
+});
 
-const emit = defineEmits<{ recover: [action: DesktopLaunchRecoveryAction] }>();
+const emit = defineEmits<{
+  recover: [action: DesktopLaunchRecoveryAction];
+  dismiss: [];
+}>();
 
 // Product-grammar state vocabulary (msg_5190).
 function phaseStatusText(state: LaunchJourneyPhaseState): string {
@@ -90,7 +130,8 @@ function phaseStatusText(state: LaunchJourneyPhaseState): string {
   }
 }
 
-function recoveryLabel(action: DesktopLaunchRecoveryAction): string {
+function recoveryLabel(action: DesktopLaunchRecoveryAction, durable: boolean): string {
+  if (!durable && (action === "retry" || action === "reconnect")) return "Try again";
   switch (action) {
     case "retry": return "Try again";
     case "reconnect": return "Reconnect";
@@ -98,6 +139,14 @@ function recoveryLabel(action: DesktopLaunchRecoveryAction): string {
     case "choose_project": return "Choose project";
   }
 }
+
+const visiblePhases = computed(() => {
+  if (!props.progress.failed) return props.progress.phases;
+  const boundary = props.progress.phases.findIndex((phase) => phase.state === "failed");
+  return boundary >= 0
+    ? props.progress.phases.slice(0, boundary + 1)
+    : props.progress.phases;
+});
 
 const liveAnnouncement = computed(() => {
   const p = props.progress;

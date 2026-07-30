@@ -12,7 +12,7 @@
         <span></span>
       </span>
       <div>
-        <p>Delivery</p>
+        <p>{{ progress.kind === "runtime_recovery" ? "Recovery" : "Delivery" }}</p>
         <strong>{{ progress.label }}</strong>
         <span>{{ progress.detail }}</span>
       </div>

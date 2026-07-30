@@ -810,6 +810,73 @@ test("SQLite manifest round-trips the flat wire projection from relational domai
   }
 });
 
+test("SQLite manifest preserves the complete OpenCode server identity across reopen", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const openModel: DaemonManifestEntry = {
+    ...entry,
+    id: "agent_open_model",
+    provider: "open-model",
+    model: "moonshotai/kimi-k3",
+    provider_ref: {
+      work_attempt_id: "attempt_open_model",
+      provider_continuation_id: "session_open_model",
+      execution_generation_id: "generation_open_model",
+      provider_connection: {
+        kind: "opencode_server",
+        url: "http://127.0.0.1:52486",
+        pid: 45550,
+        processIdentity: "opencode-birth-45550",
+        serverAuthPath: "/runtime/attempt_open_model/server-auth.json",
+      },
+    },
+  };
+  try {
+    await store.write(0, [openModel]);
+    await store.close();
+    const reopened = new ManifestStore(env.databasePath);
+    assert.deepEqual((await reopened.getEntry(openModel.id))?.provider_ref, openModel.provider_ref);
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("v13 state adds the OpenCode control reference before advancing version markers", async () => {
+  const env = await fixture();
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    await initialized.write(0, [entry]);
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec(`
+      ALTER TABLE runtime_deployments DROP COLUMN provider_server_auth_path;
+      UPDATE manifest_metadata SET schema_version=13 WHERE singleton=1;
+      PRAGMA user_version=13;
+    `);
+    historical.close();
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    await migrated.close();
+    const inspection = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(
+        (inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+        DAEMON_STATE_SCHEMA_VERSION,
+      );
+      assert.ok((inspection.prepare("PRAGMA table_info(runtime_deployments)").all() as Array<{ name: string }>)
+        .some((column) => column.name === "provider_server_auth_path"));
+    } finally {
+      inspection.close();
+    }
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("SQLite manifest generation CAS serializes independent connections without losing agents", async () => {
   const env = await fixture();
   const first = new ManifestStore(env.databasePath);

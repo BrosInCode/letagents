@@ -248,6 +248,7 @@ const api: DesktopApi = {
     resumeOwnershipTransfer: (id) => ipcRenderer.invoke("desktop:supervisor:resume-ownership-transfer", id),
     setDesiredState: (id, desiredState) => ipcRenderer.invoke("desktop:supervisor:set-desired-state", id, desiredState),
     reconnectAgent: (input) => ipcRenderer.invoke("desktop:supervisor:reconnect-agent", input),
+    recoverAgentRuntime: (input) => ipcRenderer.invoke("desktop:supervisor:recover-agent-runtime", input),
     retryRoomDelivery: (input) => ipcRenderer.invoke("desktop:supervisor:retry-room-delivery", input),
     restoreAgentConversation: (input) => ipcRenderer.invoke("desktop:supervisor:restore-agent-conversation", input),
     skipRoomDelivery: (input) => ipcRenderer.invoke("desktop:supervisor:skip-room-delivery", input),

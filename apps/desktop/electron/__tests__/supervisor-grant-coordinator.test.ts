@@ -445,6 +445,51 @@ test("Reconnect refuses a paused entry with no current provider or worker bindin
   assert.equal(h.events.some((event) => event === "ensure"), false);
 });
 
+test("runtime recovery installs owner authority without activating or reconnecting the dead provider", async () => {
+  const h = harness();
+  h.grants.set("owner/supervised_launch_1234567", {
+    metadata: metadata("owner/supervised_launch_1234567"),
+    token: "secret_same",
+    entryId: "supervised_launch_1234567",
+    lastInstalledDaemonGeneration: 7,
+  });
+  const installs: Array<{
+    credentialOnly?: boolean;
+    recoveryOnly?: boolean;
+  }> = [];
+  const daemon = {
+    ...h.daemon,
+    async installHostGrant(input: {
+      supervisorGrant: string;
+      credentialOnly?: boolean;
+      recoveryOnly?: boolean;
+    }) {
+      installs.push(input);
+      return "installed" as const;
+    },
+    async bootstrapRoomIngress() {
+      throw new Error("runtime recovery authority preparation must not bootstrap or converge");
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+  );
+
+  await coordinator.prepareEntryForRuntimeRecovery({
+    ...entry(),
+    observedState: "failed",
+    nativeLiveness: { state: "terminal", observedAt: "2026-07-29T00:00:00.000Z", detail: "stopped" },
+  });
+
+  assert.equal(installs.length, 1);
+  assert.equal(installs[0]?.credentialOnly, false);
+  assert.equal(installs[0]?.recoveryOnly, true);
+});
+
 test("restart recovery repairs a lowercase mapping before provisioning and installing", async () => {
   const h = harness();
   const exactKey = "EmmyMay/desktop-codex-canonical";

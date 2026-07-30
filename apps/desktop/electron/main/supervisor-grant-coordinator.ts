@@ -262,6 +262,25 @@ export class SupervisorGrantCoordinator {
   }
 
   /**
+   * Restore owner authority without touching the saved provider generation.
+   * The daemon's explicit recovery operation owns terminal proof, worker
+   * session retirement, and successor convergence.
+   */
+  async prepareEntryForRuntimeRecovery(entry: DesktopSupervisorManifestEntry): Promise<void> {
+    if (entry.deliveryMode !== "daemon_inbox") {
+      throw new Error("This supervised provider does not support runtime recovery.");
+    }
+    const status = await this.daemon.ensureRunning();
+    await this.reconcileEntry(
+      entry,
+      status.generation,
+      false,
+      status.capabilities?.agentRoomMove === true,
+      true,
+    );
+  }
+
+  /**
    * Human-triggered credential repair. It deliberately reuses the existing
    * manifest entry and provider process: this operation only restores the
    * Electron-held grant and exact-generation daemon binding. Starting a new
@@ -313,6 +332,7 @@ export class SupervisorGrantCoordinator {
     daemonGeneration: number,
     credentialOnly = false,
     discoverPendingRoomMove = false,
+    recoveryOnly = false,
   ): Promise<void> {
     await this.serialize(entry.id, async () => {
       entry = await this.repairGenericDisplayName(entry);
@@ -332,7 +352,7 @@ export class SupervisorGrantCoordinator {
           displayName: entry.displayName,
           providerId: entry.provider,
         }, { apiFetch: this.request });
-        await this.provisionAndInstall(entry, created, daemonGeneration, true, credentialOnly);
+        await this.provisionAndInstall(entry, created, daemonGeneration, true, credentialOnly, recoveryOnly);
         return;
       }
       const stored = await this.operations.readGrant(agentKey);
@@ -345,7 +365,7 @@ export class SupervisorGrantCoordinator {
           { entryId: entry.id, displayName: entry.displayName, providerId: entry.provider },
           { apiFetch: this.request },
         );
-        await this.provisionAndInstall(entry, resolved, daemonGeneration, true, credentialOnly);
+        await this.provisionAndInstall(entry, resolved, daemonGeneration, true, credentialOnly, recoveryOnly);
         return;
       }
       if (!Number.isFinite(new Date(stored.metadata.expiresAt).getTime())
@@ -353,17 +373,17 @@ export class SupervisorGrantCoordinator {
         // A daemon can rotate its short-lived worker bearer on its own while
         // this host grant remains current. Once host authority expires, only
         // Electron may recover it, before the next worker rotation wedges.
-        await this.provisionAndInstall(entry, agentKey, daemonGeneration, true, credentialOnly);
+        await this.provisionAndInstall(entry, agentKey, daemonGeneration, true, credentialOnly, recoveryOnly);
         return;
       }
       if (stored.lastInstalledDaemonGeneration !== daemonGeneration) {
         const replacement = await this.handoffOrReprovision(entry, agentKey, stored, daemonGeneration);
-        await this.install(entry, agentKey, replacement, daemonGeneration, credentialOnly);
+        await this.install(entry, agentKey, replacement, daemonGeneration, credentialOnly, recoveryOnly);
         return;
       }
       // Exact same daemon generation: reinstalling is safe/idempotent and
       // lets Electron recover from a lost in-memory daemon grant.
-      await this.install(entry, agentKey, stored, daemonGeneration, credentialOnly);
+      await this.install(entry, agentKey, stored, daemonGeneration, credentialOnly, recoveryOnly);
     });
   }
 
@@ -496,13 +516,20 @@ export class SupervisorGrantCoordinator {
     await this.install(entry, agentKey, grant, status.generation, true);
   }
 
-  private async provisionAndInstall(entry: DesktopSupervisorManifestEntry, agentKey: string, daemonGeneration: number, forceReprovision: boolean, credentialOnly = false) {
+  private async provisionAndInstall(
+    entry: DesktopSupervisorManifestEntry,
+    agentKey: string,
+    daemonGeneration: number,
+    forceReprovision: boolean,
+    credentialOnly = false,
+    recoveryOnly = false,
+  ) {
     const canonicalRoomId = await this.resolveRoomId(entry.roomId);
     const grant = await this.operations.provision({
       hostId: this.hostId(), entryId: entry.id, agentKey,
       roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision,
     }, { apiFetch: this.request });
-    await this.install(entry, agentKey, grant, daemonGeneration, credentialOnly);
+    await this.install(entry, agentKey, grant, daemonGeneration, credentialOnly, recoveryOnly);
   }
 
   private grantExactlyScopes(
@@ -599,7 +626,11 @@ export class SupervisorGrantCoordinator {
     grant: { metadata: DesktopSupervisorGrantMetadata; token: string; entryId: string | null; lastInstalledDaemonGeneration: number | null },
     daemonGeneration: number,
     credentialOnly = false,
+    recoveryOnly = false,
   ): Promise<void> {
+    if (credentialOnly && recoveryOnly) {
+      throw new Error("Grant installation cannot be both reconnect-only and recovery-only.");
+    }
     if (entry.provider === "open-model") {
       const settings = await this.resolveOpenModelSettings();
       const model = entry.model?.trim() || settings.model.trim();
@@ -624,6 +655,7 @@ export class SupervisorGrantCoordinator {
       hostId: grant.metadata.hostId, installationId: grant.metadata.installationId,
       expiresAt: grant.metadata.expiresAt,
       credentialOnly,
+      recoveryOnly,
     });
     if (installed === "provider_unavailable") {
       throw new Error("The previous provider runtime is unavailable. Reconnect cannot start a replacement; create a new agent or explicitly recover it.");
@@ -635,7 +667,7 @@ export class SupervisorGrantCoordinator {
     // For an existing/recovered cursor this is a no-op and cannot move it
     // forward. Bootstrap admits the cursor before any running convergence and
     // never converges a stopped provider.
-    if (entry.deliveryMode === "daemon_inbox") {
+    if (entry.deliveryMode === "daemon_inbox" && !recoveryOnly) {
       const bootstrapped = await this.daemon.bootstrapRoomIngress(entry.id, daemonGeneration);
       if (bootstrapped === "stale") throw new Error("Background agent management changed generation before room delivery could be initialized.");
     }
@@ -651,9 +683,11 @@ export class SupervisorGrantCoordinator {
 
 function hasExactReconnectTarget(entry: DesktopSupervisorManifestEntry): boolean {
   return entry.desiredState === "running"
-    && entry.agentSessionBindingState === "active"
+    && entry.observedState !== "failed"
+    && entry.nativeLiveness.state !== "terminal"
+    && !/saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(entry.lastError ?? "")
+    && Boolean(entry.providerPid)
     && Boolean(entry.workAttemptId)
-    && Boolean(entry.agentSessionId)
     && Boolean(entry.executionGenerationId)
     && Boolean(entry.providerContinuationId);
 }

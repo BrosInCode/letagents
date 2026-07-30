@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import { ProviderContinuationMissingError } from "./provider-adapter.js";
 
 export type JsonRecord = Record<string, unknown>;
@@ -11,6 +13,11 @@ export type OpenCodePart = JsonRecord & {
 export type OpenCodeMessage = {
   info?: JsonRecord;
   parts?: OpenCodePart[];
+};
+export type OpenCodeMessageError = {
+  name: string | null;
+  message: string | null;
+  statusCode: number | null;
 };
 export type OpenCodeEvent = {
   id?: unknown;
@@ -33,14 +40,67 @@ export function record(value: unknown): JsonRecord | null {
     : null;
 }
 
-export function assistantFor(
+/**
+ * OpenCode orders messages by raw string comparison of their IDs, and its
+ * agentic loop only exits once the newest user message sorts BELOW the newest
+ * assistant message. It accepts caller-supplied user message IDs verbatim, so
+ * a caller ID outside its ascending scheme ("msg_" + 12 lowercase-hex chars of
+ * unix-ms * 0x1000 + 14 base62 chars) permanently reads as "an unanswered user
+ * message newer than every reply" and the model is re-invoked until an
+ * external bound aborts the turn.
+ */
+const NATIVE_ASCENDING_MESSAGE_ID = /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+
+export function nativelyOrderedMessageId(value: unknown): boolean {
+  return typeof value === "string" && NATIVE_ASCENDING_MESSAGE_ID.test(value);
+}
+
+export function mintNativeUserMessageId(timestampMs: number): string {
+  // Counter component 0 keeps this ID below every ID OpenCode itself mints in
+  // the same millisecond (its internal counter starts at 1), so the assistant
+  // replies that follow always sort after the user message that caused them.
+  let encoded = BigInt(timestampMs) * BigInt(0x1000);
+  const timeBytes = Buffer.alloc(6);
+  for (let index = 5; index >= 0; index -= 1) {
+    timeBytes[index] = Number(encoded & BigInt(0xff));
+    encoded >>= BigInt(8);
+  }
+  const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  const entropy = randomBytes(14);
+  let suffix = "";
+  for (const byte of entropy) suffix += alphabet[byte % 62];
+  return `msg_${timeBytes.toString("hex")}${suffix}`;
+}
+
+function messageTimestamp(message: OpenCodeMessage): number | null {
+  const info = record(message.info);
+  const time = record(info?.time);
+  if (typeof time?.created === "number") return time.created;
+  if (typeof time?.completed === "number") return time.completed;
+  return null;
+}
+
+export function assistantsFor(
   messages: OpenCodeMessage[],
   userMessageId: string,
-): OpenCodeMessage | null {
-  return messages.find((message) => {
-    const info = record(message.info);
-    return info?.role === "assistant" && info.parentID === userMessageId;
-  }) ?? null;
+): OpenCodeMessage[] {
+  return messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => {
+      const info = record(message.info);
+      return info?.role === "assistant" && info.parentID === userMessageId;
+    })
+    .sort((left, right) => {
+      const leftTimestamp = messageTimestamp(left.message);
+      const rightTimestamp = messageTimestamp(right.message);
+      if (leftTimestamp !== null && rightTimestamp !== null && leftTimestamp !== rightTimestamp) {
+        return leftTimestamp - rightTimestamp;
+      }
+      if (leftTimestamp !== null && rightTimestamp === null) return -1;
+      if (leftTimestamp === null && rightTimestamp !== null) return 1;
+      return left.index - right.index;
+    })
+    .map(({ message }) => message);
 }
 
 export function messageText(message: OpenCodeMessage | null): string | null {
@@ -57,6 +117,48 @@ export function messageCompleted(message: OpenCodeMessage | null): boolean {
   const info = record(message?.info);
   const time = record(info?.time);
   return typeof time?.completed === "number" || Boolean(info?.error);
+}
+
+export function messageError(message: OpenCodeMessage | null): OpenCodeMessageError | null {
+  const info = record(message?.info);
+  const error = record(info?.error);
+  if (!error) return null;
+  const data = record(error.data);
+  return {
+    name: typeof error.name === "string" ? error.name : null,
+    message: typeof data?.message === "string"
+      ? data.message
+      : typeof error.message === "string"
+        ? error.message
+        : null,
+    statusCode: typeof data?.statusCode === "number" && Number.isSafeInteger(data.statusCode)
+      ? data.statusCode
+      : null,
+  };
+}
+
+export function messageFinishReason(message: OpenCodeMessage | null): string | null {
+  if (!message) return null;
+  const finish = [...(message.parts ?? [])].reverse().find((part) =>
+    part.type === "step-finish" && typeof part.reason === "string");
+  return finish && typeof finish.reason === "string" ? finish.reason : null;
+}
+
+/**
+ * OpenCode can emit several assistant children for one user prompt (for
+ * example a tool-call step followed by the actual answer). The room result is
+ * the latest completed, non-tool-call assistant child at the session boundary.
+ */
+export function finalAssistantFor(
+  messages: OpenCodeMessage[],
+  userMessageId: string,
+): OpenCodeMessage | null {
+  const completed = assistantsFor(messages, userMessageId).filter(messageCompleted);
+  return completed
+    .filter((message) => messageFinishReason(message) !== "tool-calls")
+    .at(-1)
+    ?? completed.at(-1)
+    ?? null;
 }
 
 export function eventReferencesSession(

@@ -379,6 +379,7 @@ export interface DesktopSupervisorDaemonStatus {
     agentInspectorSettings: boolean;
     agentRoomMove: boolean;
     agentLifecycle: boolean;
+    agentRuntimeRecovery?: boolean;
     agentStateSubscription: boolean;
   };
 }
@@ -631,6 +632,11 @@ export type DesktopSupervisorRoomDeliverySkipInput = DesktopSupervisorRoomDelive
 
 /** Reinstall Electron-held credentials without touching the provider runtime. */
 export interface DesktopSupervisorReconnectInput {
+  entryId: string;
+}
+
+/** Replace only a provider runtime that the daemon has durably proved absent. */
+export interface DesktopSupervisorRuntimeRecoveryInput {
   entryId: string;
 }
 

@@ -81,7 +81,7 @@ test("Add Agent modal renders the phased launch row from real supervisor state",
   assert.match(launchComponentSource, /import SupervisedLaunchProgress from "\.\.\/SupervisedLaunchProgress\.vue"/);
   assert.match(launchSource, /import \{ supervisedLaunchProgress \}/);
   assert.match(launchSource, /import \{ foldLaunchJourney \}/);
-  assert.match(launchComponentSource, /<SupervisedLaunchProgress :progress="progress" @recover="controller\.launch\.handleRecover\(\$event\)" \/>/);
+  assert.match(launchComponentSource, /<SupervisedLaunchProgress[\s\S]*?:progress="progress"[\s\S]*?:recovering="controller\.launch\.recoveryPending\.value"[\s\S]*?@recover="controller\.launch\.handleRecover\(\$event\)"/);
   assert.match(launchSource, /const view = computed\(/);
   assert.match(launchSource, /foldLaunchJourney\(\{/);
 });
@@ -114,16 +114,18 @@ test("the sign-in recovery performs a real provider-auth action and does not sta
 });
 
 test("Try again converges a durable launch entry instead of creating a second agent", () => {
-  assert.match(controllerSource, /onRetry: \(\) => void retrySupervisedLaunch\(\)/);
+  assert.match(controllerSource, /onRetry: \(\) => retrySupervisedLaunch\(\)/);
   const retryBody = controllerSource.slice(
     controllerSource.indexOf("async function retrySupervisedLaunch"),
     controllerSource.indexOf("async function startManagedAgent"),
   );
   assert.match(retryBody, /const entry = supervisedLaunch\.conflict\.value/);
-  assert.match(retryBody, /if \(!entry\) \{[\s\S]*?await startManagedAgent\(\)/);
+  assert.match(retryBody, /if \(!entry\) \{[\s\S]*?view\.value\?\.failed[\s\S]*?await startManagedAgent\(\{ retryingPreDurableLaunch: true \}\)/);
   assert.match(retryBody, /supervisor\.setDesiredState\(entry\.id, "running"\)/);
   assert.match(retryBody, /supervisedLaunch\.complete\(updated\)/);
   assert.match(retryBody, /managedSessionsContext\.refresh\(\)/);
+  assert.match(controllerSource, /const retryingSamePreDurableLaunch = \([\s\S]*?supervisedLaunchView\.value\.durable === false[\s\S]*?!supervisedConflict\.value/);
+  assert.match(controllerSource, /hasActiveLaunch: Boolean\([\s\S]*?supervisedConflict\.value[\s\S]*?!retryingSamePreDurableLaunch/);
 });
 
 test("Add Agent modal safely contextualizes supervised lookup errors outside the product card", () => {
@@ -263,6 +265,11 @@ test("the launch progress component exposes phased, accessible, honest UI hooks"
   assert.match(progressSource, /data-testid="supervised-launch-progress"/);
   assert.match(progressSource, /data-testid="supervised-launch-join-hint"/);
   assert.match(progressSource, /data-testid="supervised-launch-failure"/);
+  assert.match(progressSource, /data-testid="supervised-launch-failure-impact"/);
+  assert.match(progressSource, /v-for="phase in visiblePhases"/);
+  assert.match(progressSource, /progress\.failureDiagnostic/);
+  assert.match(progressSource, /recovering \? "Trying again…"/);
+  assert.match(progressSource, /progress\.durable/);
   assert.match(progressSource, /data-testid="supervised-launch-ready-name"/);
   assert.doesNotMatch(recoveryNoticeSource, /aria-live=/);
   assert.match(launchComponentSource, /class="sr-only" aria-live="polite" aria-atomic="true"/);

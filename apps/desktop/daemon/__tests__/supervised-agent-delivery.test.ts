@@ -1606,6 +1606,47 @@ test("startup recovery reattaches only a persisted exact provider turn and block
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a terminal provider rejection blocks once without result recovery or model rerun", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-terminal-provider-failure-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await ingest(store);
+    let turns = 0;
+    const delivery = new SupervisedAgentDelivery(
+      store,
+      provider(async (_handle, _request, options) => {
+        turns += 1;
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.("turn-provider-rejected");
+        throw Object.assign(
+          new Error("Open Model request was rejected because the provider account has insufficient credit."),
+          { roomTurnRecoveryOutcome: "terminal_failure" as const },
+        );
+      }),
+      {
+        poll: async () => ({}),
+        publish: async () => { throw new Error("must not publish"); },
+      },
+      currentAuthority,
+      0,
+    );
+
+    await delivery.pump(agent);
+
+    const receipt = (await store.receipts(agent.agentId))[0];
+    assert.equal(turns, 1);
+    assert.equal(receipt?.state, "blocked");
+    assert.match(receipt?.last_error ?? "", /insufficient credit/);
+    assert.equal(
+      receipt?.timeline.some((event) => event.phase === "retry_scheduled"),
+      false,
+    );
+    await store.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a typed pre-turn missing conversation restores the same inbox item before one real turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-continuation-restore-"));
   try {

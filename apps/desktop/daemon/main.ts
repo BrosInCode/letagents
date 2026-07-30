@@ -102,6 +102,8 @@ const WORKER_MINT_TIMEOUT_MS = 2_000;
 const WORKER_MINT_MAX_ATTEMPTS = 3;
 const WORKER_MINT_RETRY_DELAY_MS = 100;
 const WORKER_MINT_FALLBACK_FRESH_MS = 2 * 60_000;
+const WORKER_BIND_MAX_ATTEMPTS = 3;
+const WORKER_BIND_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 export const CONTINUATION_REPAIR_EXHAUSTED_ERROR =
   "The replacement conversation also became unavailable before a model turn started. Automatic recovery stopped to prevent a retry loop.";
 
@@ -677,6 +679,16 @@ export class SupervisorDaemon {
   private readonly openModelCredentials = new Map<string, InstalledOpenModelCredential>();
   /** Latest successful bootstrap/launch mint, fenced to one effective grant and attempt. */
   private readonly cachedWorkerAuthorizations = new Map<string, CachedWorkerAuthorization>();
+  /**
+   * Post-launch room binding is retried against one exact provider generation.
+   * This state is deliberately process-only: durable manifest copy exposes the
+   * current attempt and failure, while a successor safely starts a fresh
+   * bounded retry series after reattaching the same persisted provider.
+   */
+  private readonly workerBindingRecoveryAttempts = new Map<string, {
+    executionGenerationId: string;
+    attempts: number;
+  }>();
   /** Initial-tail reads are authority-bearing admission operations. */
   private readonly bootstrapOperations = new Set<BootstrapOperation>();
   private readonly nowMs: () => number;
@@ -931,6 +943,14 @@ export class SupervisorDaemon {
           daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
         });
       }
+      if (request.method === "supervisor.recover_agent_runtime") {
+        const params = this.paramsRecord(request.params);
+        const error = "Agent runtime recovery requires exact typed coordinates.";
+        return this.recoverAgentRuntime(
+          this.requiredStringParam(params, "entry_id", error),
+          this.positiveIntegerParam(params, "daemon_generation", error),
+        );
+      }
       if (request.method === "supervisor.retire_agent") {
         const params = this.paramsRecord(request.params);
         const error = "Retire requires exact typed coordinates.";
@@ -1085,6 +1105,7 @@ export class SupervisorDaemon {
           grant_expires_at: String(params.grant_expires_at ?? ""),
           daemon_generation: Number(params.daemon_generation ?? NaN),
           credential_only: params.credential_only === true,
+          recovery_only: params.recovery_only === true,
         });
       }
       if (request.method === "supervisor.install_open_model_credential") {
@@ -2462,6 +2483,7 @@ export class SupervisorDaemon {
         agent_inspector_settings_v1: true,
         agent_room_move_v1: true,
         agent_lifecycle_v1: true,
+        agent_runtime_recovery_v1: true,
         agent_state_subscription_v1: true,
       },
       generation: this.singleton.currentGeneration,
@@ -2653,6 +2675,126 @@ export class SupervisorDaemon {
     } catch (error) {
       return { outcome: "invalid", error: schedulerErrorDetail(error) };
     }
+  }
+
+  /**
+   * Explicitly replace a provider runtime that is durably proven absent.
+   *
+   * Reconnect is intentionally credential-only and may never create a second
+   * writer. Recovery crosses that boundary only after the saved execution is
+   * terminal (or an attach returns exact terminal evidence), ends the prior
+   * worker session, and retires every stale runtime/binding coordinate. The
+   * durable agent, room, work attempt, workspace, configuration, inbox, and
+   * cursor remain untouched; ordinary convergence then creates one successor
+   * provider generation.
+   */
+  private async recoverAgentRuntime(entryId: string, daemonGeneration: number) {
+    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) {
+      throw new Error("Agent runtime recovery is fenced by a stale daemon generation.");
+    }
+    this.bumpEntryControlEpoch(entryId);
+    this.clearRecoveryConvergence(entryId);
+    const updated = await this.serializeEntryTick(entryId, async () => {
+      await this.singleton.assertCurrent();
+      if (daemonGeneration !== this.singleton.currentGeneration || this.handoffScheduled) {
+        throw new Error("Agent runtime recovery lost daemon authority.");
+      }
+      let entry = await this.store.getEntry(entryId);
+      if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+      if (entry.desired_state === "stopped") {
+        throw new Error("A stopped agent must be resumed before its runtime can be recovered.");
+      }
+      if (this.liveHandles.has(entryId)) {
+        throw new Error("The provider runtime is still connected. Reconnect its credentials instead.");
+      }
+
+      const ref = entry.provider_ref ?? null;
+      if (ref) {
+        if (!entry.work_attempt_id || ref.work_attempt_id !== entry.work_attempt_id) {
+          throw new Error("The saved provider runtime no longer matches this agent’s durable work attempt.");
+        }
+        const attempt = await this.durability.getAttempt(ref.work_attempt_id);
+        const execution = attempt.execution_generations.find((candidate) =>
+          candidate.execution_generation_id === ref.execution_generation_id);
+        if (!execution) {
+          throw new Error("The saved provider runtime has no matching durable execution generation.");
+        }
+        if (!execution.terminal) {
+          if (!this.providerPort) throw new Error("Provider recovery is unavailable.");
+          const attachment = await this.providerPort.attach(this.providerRef(entry));
+          if (!attachment) {
+            throw new Error("LetAgents cannot prove that the previous provider process stopped. Recovery was not started.");
+          }
+          if (!this.isAttachTerminal(attachment)) {
+            throw new Error("The provider runtime is still reachable. Reconnect its credentials instead.");
+          }
+          if (attachment.terminal.providerContinuationId
+            && attachment.terminal.providerContinuationId !== ref.provider_continuation_id) {
+            throw new Error("Provider recovery returned terminal evidence for a different continuation.");
+          }
+          await this.durability.recordTerminal(ref.work_attempt_id, ref.execution_generation_id, {
+            ...this.terminalPayload(attachment.terminal, execution.actor),
+            actor: execution.actor,
+            generation: execution.generation,
+          });
+          await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
+        }
+      }
+
+      await this.supervisedDelivery?.stop(entryId).catch(() => undefined);
+      const binding = await this.workerBindings.get(entryId);
+      const retainedSessionId = binding?.agent_session_id
+        ?? entry.last_worker_binding?.agent_session_id
+        ?? null;
+      if (retainedSessionId) {
+        const grant = this.currentHostGrant(entry);
+        if (!grant || !this.supervisorGrantHttp.endWorkerSession) {
+          throw new Error("Desktop credentials are required before this provider can be safely recovered.");
+        }
+        await this.supervisorGrantHttp.endWorkerSession({
+          apiUrl: grant.apiUrl,
+          grantId: grant.grantId,
+          supervisorGrant: grant.supervisorGrant,
+          grantGeneration: grant.grantGeneration,
+          sessionId: retainedSessionId,
+        });
+      }
+      if (binding) {
+        await this.workerBindings.unbind(
+          entryId,
+          binding.agent_session_id,
+          binding.execution_generation_id,
+        );
+      }
+      this.liveBindingIdentities.delete(entryId);
+      this.pendingResumeBindings.delete(entryId);
+      this.cachedWorkerAuthorizations.delete(entryId);
+
+      entry = await this.updateManifestEntry(entryId, (current) => ({
+        ...current,
+        desired_state: "running",
+        observed_state: "starting",
+        condition: "none",
+        last_error: null,
+        run_id: null,
+        deployment_id: null,
+        provider_ref: null,
+        last_worker_binding: null,
+        workplace_liveness: {
+          state: "unknown",
+          observed_at: new Date(this.nowMs()).toISOString(),
+          detail: "Preparing a replacement provider and exact worker binding.",
+        },
+        native_liveness: {
+          state: "unknown",
+          observed_at: new Date(this.nowMs()).toISOString(),
+          detail: "The previous provider process stopped; a replacement is starting.",
+        },
+      }));
+      return entry;
+    });
+    this.requestConvergence(entryId);
+    return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(updated) };
   }
 
   /** Retire preserves the identity, durable receipts, and on-disk worktree. */
@@ -3580,7 +3722,9 @@ export class SupervisorDaemon {
     );
     const connection = hasLiveDeliveryOwner
       ? { state: "connected" as const, observed_at: binding!.updated_at, detail: "Live provider and exact worker binding are available." }
-      : entry.desired_state === "running" && ["starting", "recovering"].includes(entry.observed_state)
+      : entry.desired_state === "running"
+        && ["starting", "recovering"].includes(entry.observed_state)
+        && (Boolean(liveHandle) || entry.condition === "none")
         ? { state: "reconnecting" as const, observed_at: entry.workplace_liveness?.observed_at ?? null, detail: waitingForDesktopGrant ? "Waiting for desktop credential handoff." : "Restoring the provider and exact worker binding." }
         : { state: "disconnected" as const, observed_at: entry.native_liveness?.observed_at ?? null, detail: liveHandle ? "The current worker binding or credential is unavailable." : "No live provider handle." };
     const persistedIngress = await this.supervisedInbox.ingressHealth(entry.id);
@@ -3876,14 +4020,29 @@ export class SupervisorDaemon {
           const supervisedSession = binding ? await this.workerBindings.supervisedWorkerSession(entry.id) : null;
           const expiring = binding ? await this.hostWorkerBearerNeedsRotation(entry, binding) : false;
           if ((!credential || expiring) && entry.provider_ref?.execution_generation_id) {
+            const executionGenerationId = entry.provider_ref.execution_generation_id;
             try {
-              const minted = await this.mintHostWorkerSession(entry, entry.provider_ref.execution_generation_id);
-              if (minted) await this.bindMintedHostWorkerSession(entry.id, minted);
+              const minted = await this.mintHostWorkerSession(entry, executionGenerationId);
+              if (minted) {
+                await this.bindMintedHostWorkerSession(entry.id, minted);
+                // Binding clears a coordination/auth latch in the durable
+                // manifest. Refresh before the generic handle-state
+                // reconciliation below so its stale copy cannot restore the
+                // just-cleared condition.
+                entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId) ?? entry;
+              }
             } catch (error) {
               // A still-live bearer remains usable until its deadline. Keep
               // the exact provider and let the next heartbeat retry rotation.
               const bearerExpiry = supervisedSession?.expires_at ? Date.parse(supervisedSession.expires_at) : Number.NaN;
-              if (!credential) throw error;
+              if (!credential) {
+                await this.recordWorkerBindingRecoveryFailure(
+                  entry.id,
+                  executionGenerationId,
+                  error,
+                );
+                return;
+              }
               if (Number.isFinite(bearerExpiry) && bearerExpiry <= this.nowMs()) {
                 await this.blockExpiredWorkerAuthority(entry, `Worker bearer rotation failed after expiry: ${error instanceof Error ? error.message : "unknown error"}`);
                 return;
@@ -4111,12 +4270,10 @@ export class SupervisorDaemon {
                   entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
                 );
                 if (control === "handoff" || control === "fenced") return;
-                await this.transition(
+                await this.recordWorkerBindingRecoveryFailure(
                   entry.id,
-                  "recovering",
-                  "coordination_blocked",
-                  "Provider is running; waiting for desktop credential handoff.",
-                  "daemon-convergence",
+                  execution.execution_generation_id,
+                  error,
                 );
                 return;
               }
@@ -4159,12 +4316,10 @@ export class SupervisorDaemon {
         // The exact provider remains the recovery target; no stop, restart,
         // migration, or second spawn is permitted here.
         if (providerPersisted) {
-          await this.transition(
+          await this.recordWorkerBindingRecoveryFailure(
             entry.id,
-            "recovering",
-            "coordination_blocked",
-            "Provider is running; waiting for desktop credential handoff.",
-            "daemon-convergence",
+            execution.execution_generation_id,
+            error,
           );
           return;
         }
@@ -4268,7 +4423,10 @@ export class SupervisorDaemon {
    * authority to resurrect the terminal generation. A later desired=running
    * transition must instead mint a successor generation and use resume/spawn.
    */
-  private async attachLiveProvider(entry: DaemonManifestEntry): Promise<ProviderActionHandle | null> {
+  private async attachLiveProvider(
+    entry: DaemonManifestEntry,
+    mayStartDelivery: () => boolean = () => true,
+  ): Promise<ProviderActionHandle | null> {
     const ref = entry.provider_ref;
     if (!ref) return null;
     const attempt = await this.durability.getAttempt(ref.work_attempt_id);
@@ -4298,14 +4456,45 @@ export class SupervisorDaemon {
       return null;
     }
     const handle = attachment;
+    let authoritativeEntry = entry;
+    if (handle.providerConnection && ref.provider_connection
+      && !sameProviderActionConnectionIdentity(ref.provider_connection, handle.providerConnection)) {
+      throw new Error("Attached provider returned connection evidence that conflicts with the durable manifest.");
+    }
+    if (handle.providerConnection && !ref.provider_connection) {
+      authoritativeEntry = await this.updateManifestEntry(entry.id, (current) => {
+        if (current.work_attempt_id !== ref.work_attempt_id
+          || current.provider_ref?.execution_generation_id !== ref.execution_generation_id
+          || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id) {
+          throw new Error("Provider authority changed before recovered connection evidence could be persisted.");
+        }
+        return {
+          ...current,
+          provider_ref: {
+            ...current.provider_ref,
+            provider_connection: handle.providerConnection ?? null,
+          },
+        };
+      });
+    }
     await this.durability.recoverExecutionFence(ref.work_attempt_id);
-    await this.installProviderHandle(entry.id, handle, ref.execution_generation_id);
-    const binding = await this.workerBindings.get(entry.id);
+    await this.installProviderHandle(
+      authoritativeEntry.id,
+      handle,
+      ref.execution_generation_id,
+      mayStartDelivery,
+    );
+    const binding = await this.workerBindings.get(authoritativeEntry.id);
     if (binding && binding.execution_generation_id !== ref.execution_generation_id) {
       try {
-        await this.stageWorkerBindingAfterResume(entry, binding, ref.execution_generation_id, handle);
+        await this.stageWorkerBindingAfterResume(
+          authoritativeEntry,
+          binding,
+          ref.execution_generation_id,
+          handle,
+        );
         await this.transition(
-          entry.id,
+          authoritativeEntry.id,
           "recovering",
           "coordination_blocked",
           "reattached resumed provider awaits exact worker wait evidence",
@@ -4313,7 +4502,7 @@ export class SupervisorDaemon {
         );
       } catch (error) {
         await this.transition(
-          entry.id,
+          authoritativeEntry.id,
           "recovering",
           "coordination_blocked",
           `reattached provider worker binding could not be staged: ${error instanceof Error ? error.message : "unknown binding recovery failure"}`,
@@ -4888,6 +5077,17 @@ export class SupervisorDaemon {
       updatedAt: binding.updated_at,
     });
     this.pendingResumeBindings.delete(input.entry_id);
+    // The native-activity publication is part of restoring room access: a
+    // server that rejects the bound observation proves the room is NOT
+    // reachable yet. Verify it before clearing the bounded recovery ledger
+    // and before projecting the entry as working, so a deterministic remote
+    // rejection exhausts its bounded retries instead of resetting the count
+    // (and flickering working/recovering) on every convergence cycle.
+    if (mayPublish() && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
+      await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
+    }
+    this.workerBindingRecoveryAttempts.delete(input.entry_id);
+    this.clearRecoveryConvergence(input.entry_id);
     await this.updateManifestEntry(input.entry_id, (current) => {
       const clearsCoordinationLatch = current.desired_state === "running"
         && (current.condition === "coordination_blocked" || current.condition === "auth_blocked");
@@ -4928,9 +5128,6 @@ export class SupervisorDaemon {
         },
       };
     });
-    if (mayPublish() && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
-      await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
-    }
     if (mayPublish()) void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
@@ -5274,6 +5471,52 @@ export class SupervisorDaemon {
     }, mayPublish);
   }
 
+  /**
+   * A provider that already crossed the durable native boundary must never be
+   * restarted merely because its room credential could not be bound. Retry
+   * only that exact generation, expose the real safe error, and stop after a
+   * bounded number of attempts so the user eventually receives an action.
+   */
+  private async recordWorkerBindingRecoveryFailure(
+    entryId: string,
+    executionGenerationId: string,
+    error: unknown,
+  ): Promise<void> {
+    const entry = await this.store.getEntry(entryId);
+    const handle = this.liveHandles.get(entryId);
+    if (!entry
+      || entry.desired_state !== "running"
+      || entry.provider_ref?.execution_generation_id !== executionGenerationId
+      || !handle
+      || handle.workAttemptId !== entry.work_attempt_id
+      || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id) return;
+
+    const previous = this.workerBindingRecoveryAttempts.get(entryId);
+    const attempts = previous?.executionGenerationId === executionGenerationId
+      ? previous.attempts + 1
+      : 1;
+    this.workerBindingRecoveryAttempts.set(entryId, { executionGenerationId, attempts });
+    const safeError = schedulerErrorDetail(error);
+    const retrying = attempts < WORKER_BIND_MAX_ATTEMPTS;
+    const detail = retrying
+      ? `Restoring room access (attempt ${attempts} of ${WORKER_BIND_MAX_ATTEMPTS}) failed: ${safeError}. Retrying automatically.`
+      : `The provider is running, but room access could not be restored after ${WORKER_BIND_MAX_ATTEMPTS} attempts: ${safeError}. Use Reconnect to try the room handoff again.`;
+    await this.transition(
+      entryId,
+      "recovering",
+      "coordination_blocked",
+      detail,
+      "daemon-convergence",
+    );
+    if (retrying) {
+      this.clearRecoveryConvergence(entryId);
+      this.scheduleRecoveryConvergence(
+        entryId,
+        WORKER_BIND_RETRY_DELAYS_MS[Math.min(attempts - 1, WORKER_BIND_RETRY_DELAYS_MS.length - 1)]!,
+      );
+    }
+  }
+
   /** Desktop-only local RPC. Provider endpoint authority remains process-memory-only. */
   private async installOpenModelCredential(input: {
     entry_id: string;
@@ -5319,8 +5562,12 @@ export class SupervisorDaemon {
     entry_id: string; room_id: string; agent_key: string; grant_id: string; supervisor_grant: string;
     grant_generation: number; api_url: string; daemon_generation: number;
     host_id: string; installation_id: string; grant_expires_at: string; credential_only?: boolean;
+    recovery_only?: boolean;
   }): Promise<{ status: "installed" | "stale" | "provider_unavailable"; agent_session_id?: string }> {
     return this.serializeEntryTick(input.entry_id, async () => {
+      if (input.credential_only && input.recovery_only) {
+        throw new Error("Host grant installation cannot be both reconnect-only and recovery-only.");
+      }
       for (const field of ["entry_id", "room_id", "agent_key", "grant_id", "supervisor_grant", "api_url", "host_id", "installation_id", "grant_expires_at"] as const) {
         if (!input[field].trim()) throw new Error(`Host grant ${field} is required.`);
       }
@@ -5330,7 +5577,7 @@ export class SupervisorDaemon {
       if (!Number.isFinite(inputExpiry) || inputExpiry <= this.nowMs()) return { status: "stale" };
       let apiUrl: string;
       try { apiUrl = hostGrantApiOrigin(input.api_url); } catch { throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP."); }
-      const entry = await this.store.getEntry(input.entry_id);
+      let entry = await this.store.getEntry(input.entry_id);
       if (!entry || !this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
       const currentGrant = this.currentHostGrant(entry);
@@ -5338,7 +5585,7 @@ export class SupervisorDaemon {
         && (currentGrant.grantGeneration > input.grant_generation
           || (currentGrant.grantGeneration === input.grant_generation
             && Date.parse(currentGrant.expiresAt) >= inputExpiry)));
-      if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only) {
+      if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only && !input.recovery_only) {
         // Electron may still hold the pre-renewal safeStorage value. It may
         // confirm installation, but must never roll the daemon's newer
         // memory-only token/expiry backwards in the same generation.
@@ -5367,12 +5614,28 @@ export class SupervisorDaemon {
         || currentGrant.grantGeneration !== grant.grantGeneration)) {
         this.cachedWorkerAuthorizations.delete(entry.id);
       }
+      // Explicit runtime recovery needs current owner authority so it can end
+      // the retained worker session before replacing a proven-dead provider.
+      // Installing that authority must not attach, mint, start delivery, or
+      // request convergence against the old runtime.
+      if (input.recovery_only) {
+        if (this.hostGrants.get(entry.id) !== grant) this.hostGrants.set(entry.id, grant);
+        return { status: "installed" };
+      }
       // Recovery must not signal, restart, or migrate a live provider. It only
       // rotates the worker bearer against the persisted exact generation.
-      const live = this.liveHandles.get(entry.id);
-      const hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
+      let live: ProviderActionHandle | null | undefined = this.liveHandles.get(entry.id);
+      let hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
         && live.workAttemptId === entry.work_attempt_id
         && live.providerContinuationId === entry.provider_ref.provider_continuation_id);
+      if (input.credential_only && !hasExactLiveProvider && entry.provider_ref) {
+        live = await this.attachLiveProvider(entry, () => false);
+        entry = await this.store.getEntry(input.entry_id);
+        if (!entry) return { status: "stale" };
+        hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
+          && live.workAttemptId === entry.work_attempt_id
+          && live.providerContinuationId === entry.provider_ref.provider_continuation_id);
+      }
       if (input.credential_only && !hasExactLiveProvider) {
         // Do not retain a new reconnect grant when there is nothing exact to
         // bind it to. A later unrelated reconciliation must not turn this
@@ -5395,6 +5658,7 @@ export class SupervisorDaemon {
               this.revokeHostGrantIfCurrent(entry.id, grant);
               return { status: "stale" };
             }
+            if (input.credential_only) await this.startSupervisedDelivery(entry.id);
             return { status: "installed", agent_session_id: minted.agentSessionId };
           }
         }
