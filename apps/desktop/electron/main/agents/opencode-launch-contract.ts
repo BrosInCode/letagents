@@ -161,7 +161,14 @@ export function minimalOpenCodeEnvironment(
   for (const key of INHERITED_ENVIRONMENT_KEYS) {
     if (source[key] !== undefined) environment[key] = source[key];
   }
-  return { ...environment, ...extra };
+  return {
+    ...environment,
+    // The supervised provider is fully declared in OPENCODE_CONFIG_CONTENT,
+    // so OpenCode's models.dev catalog refresh is dead weight: on degraded
+    // networks it stalls startup and floods the log with fetch timeouts.
+    OPENCODE_DISABLE_MODELS_FETCH: "1",
+    ...extra,
+  };
 }
 
 export function parseConfiguredOpenModel(config: OpenCodeConfig): string | null {

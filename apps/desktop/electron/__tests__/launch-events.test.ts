@@ -97,6 +97,18 @@ test("classifyLaunchFailure maps unexpected errors to a safe generic failure", (
   assert.equal(failure.type, "launch.failed");
   assert.equal(failure.recovery, "retry");
   assert.doesNotMatch(failure.detail, /secret|EACCES/);
+  // The redacted cause must survive as the progressive-disclosure diagnostic
+  // instead of being discarded to the console — it is the only record of a
+  // failure thrown between the durable claim and activation.
+  assert.match(String(failure.diagnostic), /EACCES/);
+});
+
+test("classifyLaunchFailure keeps credentials out of the diagnostic", () => {
+  const failure = classifyLaunchFailure(
+    new Error("mint rejected: Bearer sk-proj-1234567890abcdef1234567890abcdef"),
+  );
+  assert.doesNotMatch(String(failure.diagnostic), /sk-proj-1234567890abcdef1234567890abcdef/);
+  assert.match(String(failure.diagnostic), /mint rejected/);
 });
 
 test("supervisedLaunchEverReady uses the durable ready stamp, not instantaneous state", () => {
