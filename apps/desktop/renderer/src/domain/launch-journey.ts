@@ -317,7 +317,11 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
         : headlineFor(status, ctx, { stoppedAfterReady: everReady }),
       failureDetail: manifest.failed ? manifest.failureDetail : null,
       failureImpact: null,
-      failureDiagnostic: null,
+      // The durable entry cannot store why a pre-activation step threw — the
+      // daemon never hears about it. The terminal launch event from this
+      // session can; surface it as the progressively disclosed diagnostic
+      // instead of leaving only the generic ownership-transfer copy.
+      failureDiagnostic: manifest.failed ? terminal?.diagnostic ?? null : null,
       recovery: manifest.failed && !manifest.recoverableBlocked && !manifest.stopFailed && !manifest.ownershipPaused
         ? manifestRecovery(entry, input.hasSignInCommand ?? false)
         : null,
@@ -354,11 +358,12 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       : savingFailed
         ? "LetAgents reached its background service but couldn’t save this agent."
         : terminal.detail;
-    const failureDiagnostic = (
-      !cancelled
-      && terminal.detail
-      && terminal.detail.trim() !== failureDetail?.trim()
-    ) ? terminal.detail : null;
+    const failureDiagnostic = !cancelled
+      ? terminal.diagnostic
+        ?? ((terminal.detail && terminal.detail.trim() !== failureDetail?.trim())
+          ? terminal.detail
+          : null)
+      : null;
     return {
       phases,
       currentPhaseId: JOURNEY_PHASE_ORDER[boundaryIndex]!,

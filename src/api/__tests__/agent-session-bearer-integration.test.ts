@@ -120,6 +120,32 @@ test("worker bearer route registry is default-deny and semantic", () => {
   ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
 });
 
+test("worker bearer routes authorize multi-segment room ids exactly like the room routes parse them", () => {
+  // Git rooms are `github.com/<org>/<repo>` — three path segments. The room
+  // routes match them greedily (e.g. /^\/rooms\/(.+)\/messages$/), and the
+  // capability registry must authorize the same shapes: with a single-segment
+  // room pattern, every supervised worker call in a Git room failed 403,
+  // starting with the ingress bootstrap's room tail read.
+  const gitRoom = "github.com/brosincode/letagents";
+  const allowed: Array<[string, string, string]> = [
+    ["GET", `/rooms/${gitRoom}/messages`, "messages.read"],
+    ["GET", `/rooms/${gitRoom}/messages/poll`, "messages.read"],
+    ["POST", `/rooms/${gitRoom}/messages`, "messages.write"],
+    ["GET", `/rooms/${gitRoom}/presence`, "coordination.read"],
+    ["POST", `/rooms/${gitRoom}/agent-sessions/agent_session_9/native-activity`, "coordination.self_write"],
+    ["PUT", `/rooms/${gitRoom}/agents/self/observation`, "coordination.self_write"],
+    ["POST", `/rooms/${gitRoom}/tasks`, "coordination.propose"],
+  ];
+  for (const [method, route, capability] of allowed) {
+    assert.equal(requiredAgentSessionRouteCapability(method, route), capability, `${method} ${route}`);
+  }
+  for (const [method, route] of [
+    ["PATCH", `/rooms/${gitRoom}`],
+    ["POST", `/rooms/${gitRoom}/board-intents`],
+    ["POST", `/rooms/${gitRoom}/participants/clear-disconnected`],
+  ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
+});
+
 test("HTTP middleware denies unknown routes and missing semantic capabilities", async () => {
   const handlers: Array<(...args: any[]) => unknown> = [];
   const app = { use(handler: (...args: any[]) => unknown) { handlers.push(handler); }, options() {} };
