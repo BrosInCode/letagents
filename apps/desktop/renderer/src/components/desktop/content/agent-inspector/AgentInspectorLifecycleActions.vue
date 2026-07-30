@@ -42,17 +42,6 @@
         >
           {{ action.label }}
         </button>
-        <p v-if="confirmDanger">{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
-        <button
-          v-if="dangerAction"
-          type="button"
-          class="danger"
-          :disabled="busy"
-          role="menuitem"
-          @click="handleDanger"
-        >
-          {{ confirmDanger ? "Confirm retire agent" : dangerAction.label }}
-        </button>
       </div>
     </div>
   </div>
@@ -64,7 +53,6 @@ import type {
   AgentInspectorActionAvailability,
   AgentInspectorActionIntent,
 } from "../../../../domain/agent-inspector";
-import { AGENT_INSPECTOR_RETIRE_CONFIRMATION } from "../../../../domain/agent-inspector-settings";
 
 const props = withDefaults(defineProps<{
   entryId: string;
@@ -82,7 +70,6 @@ const overflowOpen = ref(false);
 const overflowRoot = ref<HTMLElement | null>(null);
 const overflowMenu = ref<HTMLElement | null>(null);
 const overflowTrigger = ref<HTMLButtonElement | null>(null);
-const confirmDanger = ref(false);
 // Turn control belongs beside the live "Now" state. Keeping it out of the
 // generic lifecycle bar prevents a destructive-looking stop control from
 // competing with routine agent actions.
@@ -115,12 +102,13 @@ const orderedCompactActions = computed(() => availableActions.value
   .map(({ action }) => action));
 const primaryActions = computed(() => props.compact ? orderedCompactActions.value.slice(0, 2) : availableActions.value);
 const secondaryActions = computed(() => props.compact ? orderedCompactActions.value.slice(2) : []);
-const dangerAction = computed(() => props.actions.find((action) => action.available && action.danger) ?? null);
-const hasOverflow = computed(() => Boolean(secondaryActions.value.length || dangerAction.value));
+const hasOverflow = computed(() => Boolean(secondaryActions.value.length));
 
-watch(() => [props.entryId, props.compact, props.actions] as const, () => {
+// Reset only when the inspected agent or presentation changes. The actions
+// array is rebuilt by every live-facts refresh; keying the reset on it closed
+// the open menu under the pointer every poll tick.
+watch(() => [props.entryId, props.compact] as const, () => {
   overflowOpen.value = false;
-  confirmDanger.value = false;
 });
 
 function emitIntent(action: AgentInspectorActionAvailability): void {
@@ -140,13 +128,11 @@ function progressLabel(action: AgentInspectorActionAvailability): string {
 function emitOverflowIntent(action: AgentInspectorActionAvailability): void {
   emitIntent(action);
   overflowOpen.value = false;
-  confirmDanger.value = false;
 }
 
 function closeOverflow(returnFocus = true): void {
   if (!overflowOpen.value) return;
   overflowOpen.value = false;
-  confirmDanger.value = false;
   if (returnFocus) void nextTick(() => overflowTrigger.value?.focus());
 }
 function toggleOverflow(): void {
@@ -185,16 +171,6 @@ function handleOverflowFocusOut(event: FocusEvent): void {
   void nextTick(() => {
     if (!overflowRoot.value?.contains(document.activeElement)) closeOverflow(false);
   });
-}
-
-function handleDanger(): void {
-  if (!dangerAction.value) return;
-  if (!confirmDanger.value) {
-    confirmDanger.value = true;
-    return;
-  }
-  emitIntent(dangerAction.value);
-  closeOverflow();
 }
 
 onMounted(() => document.addEventListener("pointerdown", handleDocumentPointerDown));

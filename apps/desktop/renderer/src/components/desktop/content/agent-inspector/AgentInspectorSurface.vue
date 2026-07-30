@@ -93,6 +93,34 @@
         :work-resource="workResource"
       />
     </div>
+
+    <!-- Retiring an agent is a deliberate lifecycle decision, not a routine
+         action: it lives as an always-visible destructive footer instead of
+         inside the overflow menu, whose contents re-render on every live-facts
+         refresh and closed under the pointer. The confirm state resets only
+         when the inspected agent changes, so a poll tick cannot cancel it. -->
+    <footer v-if="retireAction" class="agent-inspector-danger-footer">
+      <p v-if="confirmRetire" role="alert">{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
+      <div class="agent-inspector-danger-footer-actions">
+        <button
+          v-if="confirmRetire"
+          type="button"
+          :disabled="lifecycleActionBusy"
+          @click="confirmRetire = false"
+        >
+          Keep agent
+        </button>
+        <button
+          type="button"
+          class="danger"
+          :disabled="lifecycleActionBusy"
+          data-action="retire_agent"
+          @click="handleRetire"
+        >
+          {{ confirmRetire ? "Confirm retire agent" : retireAction.label }}
+        </button>
+      </div>
+    </footer>
   </aside>
 </template>
 
@@ -107,6 +135,7 @@ import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspec
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
+import { AGENT_INSPECTOR_RETIRE_CONFIRMATION } from "../../../../domain/agent-inspector-settings";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
@@ -162,6 +191,26 @@ const visibleActionMessage = computed(() => {
   if (props.actionState.kind === "retry_delivery" && props.actionState.status !== "error") return null;
   return props.actionState.message;
 });
+const retireAction = computed(() =>
+  props.projection.actions.find((action) => action.available && action.danger) ?? null);
+const confirmRetire = ref(false);
+watch(() => props.projection.entryId, () => { confirmRetire.value = false; });
+
+function handleRetire(): void {
+  const action = retireAction.value;
+  if (!action) return;
+  if (!confirmRetire.value) {
+    confirmRetire.value = true;
+    return;
+  }
+  confirmRetire.value = false;
+  emit("action", {
+    entryId: props.projection.entryId,
+    roomId: props.projection.roomId,
+    kind: action.kind,
+    ...(action.sourceMessageId ? { sourceMessageId: action.sourceMessageId } : {}),
+  });
+}
 
 function focusInitial(): void {
   closeButton.value?.focus({ preventScroll: true });
