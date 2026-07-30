@@ -94,11 +94,17 @@ const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const WORKER_BEARER_ROTATION_LEAD_MS = 60_000;
 const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
 const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
-// Electron's ordinary control-socket request times out at 3s. Keep the
-// admission boundary inside that window: after Electron gives up, a late
+// Electron calls the bootstrap admission with a dedicated 45s deadline. Keep
+// the admission boundary inside that window: after Electron gives up, a late
 // first-tail write would be both surprising and hard to surface to the user.
-const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 2_500;
-const WORKER_MINT_TIMEOUT_MS = 2_000;
+// The envelope must hold two sequential cloud round-trips (worker mint with
+// retries, then the first room-tail read); its 2.5s predecessor aborted real
+// launches on mobile networks and orphaned their durable claims as paused.
+const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 40_000;
+// One HTTPS round-trip on a degraded network routinely exceeds 2s; a mint
+// attempt that times out burns a server-side session, so give each attempt a
+// realistic budget instead of retrying a deadline that cannot be met.
+const WORKER_MINT_TIMEOUT_MS = 10_000;
 const WORKER_MINT_MAX_ATTEMPTS = 3;
 const WORKER_MINT_RETRY_DELAY_MS = 100;
 const WORKER_MINT_FALLBACK_FRESH_MS = 2 * 60_000;
@@ -174,6 +180,20 @@ function exhaustedTransientWorkerMint(error: unknown): boolean {
   return false;
 }
 
+const PROVIDER_START_RETRY_LIMIT = 3;
+const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
+
+/** Provider adapters mark launch timeouts that a fresh attempt may resolve. */
+function transientProviderStartFailure(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if ((current as { transientProviderStart?: unknown } | null)?.transientProviderStart === true) return true;
+    if (!(current instanceof Error)) return false;
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 function supervisedRoomPath(roomId: string): string {
   return roomId.split("/").map(encodeURIComponent).join("/");
 }
@@ -195,6 +215,20 @@ function lastRoomMessageId(messages: readonly Record<string, unknown>[]): string
   return null;
 }
 
+// Cloud requests hold daemon serialization locks while they run, and a fetch
+// with no deadline waits ~300s for headers by default. On a degraded network
+// (observed live: six hung HTTPS connections wedging every convergence tick
+// and starving local RPCs mid-launch) that freezes the whole daemon. Every
+// cloud request therefore carries a bounded deadline composed with whatever
+// caller signal already exists; the room long-poll gets its designed window
+// plus a grace buffer.
+const CLOUD_REQUEST_TIMEOUT_MS = 20_000;
+
+function boundedCloudSignal(signal?: AbortSignal, timeoutMs = CLOUD_REQUEST_TIMEOUT_MS): AbortSignal {
+  const deadline = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
+
 /** The daemon talks to the room API only through the live worker bearer. */
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
@@ -202,21 +236,22 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     const query = new URLSearchParams({ timeout: String(DEFAULT_ROOM_POLL_MAX_MS) });
     if (input.afterMessageId) query.set("after", input.afterMessageId);
     const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
-      headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
+      headers: { authorization: `Bearer ${input.bearer}` },
+      signal: boundedCloudSignal(input.signal, DEFAULT_ROOM_POLL_MAX_MS + 20_000),
     });
     if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
     return await response.json() as { messages?: Array<Record<string, unknown>>; has_more?: boolean };
   },
   async latest(input) {
     const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?limit=1&before=latest`, {
-      headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
+      headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new Error(`Supervised room tail read failed with HTTP ${response.status}.`);
     return await response.json() as { messages?: Array<Record<string, unknown>> };
   },
   async joinRoom(input) {
     const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/join`, {
-      method: "POST", headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" }, body: "{}", signal: input.signal,
+      method: "POST", headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" }, body: "{}", signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Destination room join");
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
@@ -229,7 +264,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       method: "POST",
       headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
       body: JSON.stringify({ sender: "supervised-daemon", text: input.text, client_message_id: input.clientMessageId }),
-      signal: input.signal,
+      signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
     const message = await response.json() as Record<string, unknown>;
@@ -256,7 +291,7 @@ const productionSupervisorGrantHttp: SupervisorGrantHttp = {
         runtime: input.provider,
         ide_label: ideLabel,
       }),
-      signal: input.signal,
+      signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session mint");
     const body = await response.json() as Record<string, unknown>;
@@ -275,6 +310,7 @@ const productionSupervisorGrantHttp: SupervisorGrantHttp = {
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
       body: JSON.stringify({ generation: input.grantGeneration }),
+      signal: boundedCloudSignal(),
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session end");
   },
@@ -286,6 +322,7 @@ const productionSupervisorGrantHttp: SupervisorGrantHttp = {
         generation: input.grantGeneration, host_id: input.hostId,
         installation_id: input.installationId, ttl_ms: input.ttlMs,
       }),
+      signal: boundedCloudSignal(),
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor host grant renewal");
     const body = await response.json() as Record<string, unknown>;
@@ -689,6 +726,14 @@ export class SupervisorDaemon {
     executionGenerationId: string;
     attempts: number;
   }>();
+  /**
+   * Consecutive transient provider-start failures per entry. A launch that
+   * times out is retried automatically a bounded number of times instead of
+   * parking the entry in "starting" until the next unrelated RPC arrives.
+   */
+  private readonly providerStartRetryAttempts = new Map<string, number>();
+  /** Consecutive worker-mint recovery retries per entry; bounded, reset on success. */
+  private readonly workerMintRecoveryRetryAttempts = new Map<string, number>();
   /** Initial-tail reads are authority-bearing admission operations. */
   private readonly bootstrapOperations = new Set<BootstrapOperation>();
   private readonly nowMs: () => number;
@@ -4389,6 +4434,8 @@ export class SupervisorDaemon {
         );
         return;
       }
+      this.providerStartRetryAttempts.delete(entry.id);
+      this.workerMintRecoveryRetryAttempts.delete(entry.id);
       await this.transition(entry.id, handle.observedState, "none", resumed ? "provider resumed under daemon authority" : "provider launched under daemon authority", "daemon-convergence");
       return;
     }
@@ -5087,6 +5134,7 @@ export class SupervisorDaemon {
       await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
     }
     this.workerBindingRecoveryAttempts.delete(input.entry_id);
+    this.workerMintRecoveryRetryAttempts.delete(input.entry_id);
     this.clearRecoveryConvergence(input.entry_id);
     await this.updateManifestEntry(input.entry_id, (current) => {
       const clearsCoordinationLatch = current.desired_state === "running"
@@ -6387,9 +6435,26 @@ export class SupervisorDaemon {
       await this.transitionOnce(entryId, observedState, condition, `convergence scheduler failure: ${message}`, actor, undefined, "coordination_escalation");
     }));
     // A transient mint failure must converge again without waiting for another
-    // Electron RPC. The per-entry timer coalesces this into one bounded retry.
+    // Electron RPC — but only a bounded number of times: each retry re-runs up
+    // to three 10s cloud mints, so an endpoint that stays unreachable must
+    // rest at the blocked state instead of looping every heartbeat forever.
     if (exhaustedTransientWorkerMint(error)) {
-      this.scheduleRecoveryConvergence(entryId, this.nativeHeartbeatIntervalMs);
+      const attempts = (this.workerMintRecoveryRetryAttempts.get(entryId) ?? 0) + 1;
+      this.workerMintRecoveryRetryAttempts.set(entryId, attempts);
+      if (attempts <= WORKER_MINT_RECOVERY_RETRY_LIMIT) {
+        this.scheduleRecoveryConvergence(entryId, this.nativeHeartbeatIntervalMs);
+      }
+      return;
+    }
+    // A launch that timed out left nothing durable behind; retry it a bounded
+    // number of times instead of parking the entry in "starting" until an
+    // unrelated RPC happens to converge it again.
+    if (transientProviderStartFailure(error)) {
+      const attempts = (this.providerStartRetryAttempts.get(entryId) ?? 0) + 1;
+      this.providerStartRetryAttempts.set(entryId, attempts);
+      if (attempts <= PROVIDER_START_RETRY_LIMIT) {
+        this.scheduleRecoveryConvergence(entryId, this.nativeHeartbeatIntervalMs);
+      }
     }
   }
 }

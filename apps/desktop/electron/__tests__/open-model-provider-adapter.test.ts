@@ -806,6 +806,62 @@ test("Open Model stop escalates the exact process from TERM to KILL", async () =
   assert.equal(terminal.signal, "SIGKILL");
 });
 
+test("Open Model launch honors its startup budget even when a health request hangs forever", async () => {
+  const harness = createHarness();
+  const hangingFetch = harness.dependencies.fetch;
+  let exitLaunch!: (exit: ProviderProcessExit) => void;
+  const launchExited = new Promise<ProviderProcessExit>((resolve) => { exitLaunch = resolve; });
+  const signals: Array<NodeJS.Signals> = [];
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-hung-health-")),
+    dependencies: {
+      ...harness.dependencies,
+      launch(input) {
+        void hangingFetch;
+        void input;
+        const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+        Object.assign(child, { pid: 6102, unref() {} });
+        return { child, exited: launchExited };
+      },
+      getProcessIdentity: (pid) => (pid === 6102 ? "opencode-birth-6102" : null),
+      signalProcess(_pid, signal) {
+        signals.push(signal);
+        if (signal === "SIGKILL" || signal === "SIGTERM") {
+          exitLaunch({ type: "exit", code: null, signal });
+        }
+      },
+      // OpenCode can accept a startup-era connection and never answer it. A
+      // hung request must not stretch the 100ms launch budget to minutes.
+      fetch: () => new Promise<Response>(() => undefined),
+    },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  const startedAt = Date.now();
+  const keepAlive = setInterval(() => undefined, 25);
+  await assert.rejects(
+    adapter.spawn(spawnRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Timed out waiting for the supervised OpenCode server/);
+      assert.equal(
+        (error as Error & { transientProviderStart?: boolean }).transientProviderStart,
+        true,
+        "a launch timeout must be marked transient so the daemon can retry it",
+      );
+      return true;
+    },
+  ).finally(() => clearInterval(keepAlive));
+  assert.ok(
+    Date.now() - startedAt < 5_000,
+    "the launch budget stays authoritative despite the hung health request",
+  );
+  assert.ok(signals.length > 0, "the unhealthy launch is terminated");
+});
+
 test("Open Model bounded turns time out without polling transcript history", async () => {
   const harness = createHarness();
   harness.holdTurnOpen();

@@ -253,6 +253,20 @@ class OpenCodeBoundedTurnError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
 
+/**
+ * The fresh OpenCode server did not answer health checks inside the launch
+ * budget. The launch was terminated, nothing durable changed, and another
+ * attempt is expected to succeed — the daemon may retry automatically.
+ */
+export class OpenCodeStartTimeoutError extends Error {
+  readonly transientProviderStart = true;
+
+  constructor() {
+    super("Timed out waiting for the supervised OpenCode server.");
+    this.name = "OpenCodeStartTimeoutError";
+  }
+}
+
 class OpenCodeTerminalTurnError extends Error {
   // A provider-declared terminal error is authoritative evidence that this
   // exact turn produced no publishable answer. Block it without rerunning the
@@ -388,15 +402,23 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;
+    // Sessions, config, and auth stay isolated per runtime; the cache does
+    // not. OpenCode installs the provider npm package (~61MB of node_modules)
+    // on first start, and a cold per-agent cache re-downloads it on every
+    // launch — minutes on a slow network, spent inside the startup window
+    // where health connections can be accepted but never answered.
+    const sharedCacheRoot = join(this.runtimeRoot, "shared-cache");
+    await mkdir(sharedCacheRoot, { recursive: true, mode: 0o700 });
     const env = minimalOpenCodeEnvironment(process.env, {
       OPENCODE_SERVER_USERNAME: auth.username,
       OPENCODE_SERVER_PASSWORD: auth.password,
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
       OPENCODE_AUTH_CONTENT: openCodeAuthContent(credential.apiKey),
       XDG_DATA_HOME: join(runtimeRoot, "data"),
-      XDG_CACHE_HOME: join(runtimeRoot, "cache"),
+      XDG_CACHE_HOME: sharedCacheRoot,
       XDG_CONFIG_HOME: join(runtimeRoot, "config"),
       XDG_STATE_HOME: join(runtimeRoot, "state"),
+      BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
     });
     const launch = this.deps.launch({
       binary: this.binary,
@@ -418,7 +440,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const ready = await this.waitForHealth(client, launch.exited);
     if (!ready) {
       await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
-      throw new Error("Timed out waiting for the supervised OpenCode server.");
+      throw new OpenCodeStartTimeoutError();
     }
     const session = await client.createSession(
       req.agentDisplayName?.trim() || "LetAgents Open Model",
@@ -1076,7 +1098,16 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     let terminal = false;
     void exited.then(() => { terminal = true; });
     while (!terminal && Date.now() < deadline) {
-      if (await client.health()) return true;
+      // The launch budget stays authoritative even if one health request
+      // hangs: OpenCode can accept a startup-era connection it never answers,
+      // and an unbounded await here once stretched a 30s budget to five
+      // minutes of silent "Starting Open Model".
+      const healthy = await Promise.race([
+        client.health(),
+        delay(Math.max(1, deadline - Date.now())).then(() => false),
+      ]);
+      if (healthy) return true;
+      if (Date.now() >= deadline) return false;
       await delay(100);
     }
     return false;

@@ -920,7 +920,7 @@ export function registerDesktopIpcHandlers(
       const roomIdentifier = input.roomIdentifier;
       const launchFact = (
         type: Parameters<typeof emitLaunchEvent>[0]["type"],
-        extra: { entryId?: string | null; detail?: string | null; recovery?: import("./launch-events.js").EmitLaunchEventInput["recovery"]; durable?: boolean } = {},
+        extra: { entryId?: string | null; detail?: string | null; diagnostic?: string | null; recovery?: import("./launch-events.js").EmitLaunchEventInput["recovery"]; durable?: boolean } = {},
       ): void => {
         emitLaunchEvent({ launchId, roomIdentifier, provider, type, ...extra });
       };
@@ -972,7 +972,7 @@ export function registerDesktopIpcHandlers(
         const diagnostic = redactCredentialText(error instanceof Error ? error.message : String(error));
         console.error(`[supervised-launch:${entryId}] ${diagnostic.value}`);
         const failure = classifyLaunchFailure(error);
-        launchFact(failure.type, { entryId, detail: failure.detail, recovery: failure.recovery });
+        launchFact(failure.type, { entryId, detail: failure.detail, diagnostic: failure.diagnostic, recovery: failure.recovery });
         throw error;
       }
     },

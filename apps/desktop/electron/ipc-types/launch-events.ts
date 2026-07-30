@@ -67,6 +67,11 @@ export interface DesktopLaunchEvent {
   at: string;
   /** Safe structured diagnostic detail; never secrets, never raw error dumps. */
   detail: string | null;
+  /**
+   * Credential-redacted technical cause for terminal facts, shown only under
+   * progressive disclosure. May contain paths and error jargon; never secrets.
+   */
+  diagnostic?: string | null;
   /** Recovery affordance for blocked/failed/cancelled facts; null otherwise. */
   recovery: DesktopLaunchRecoveryAction | null;
   /** True when the fact is persisted by the daemon; false for transient desktop observations. */

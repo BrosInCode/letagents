@@ -192,6 +192,16 @@ function eventData(block: string): string | null {
   return data || null;
 }
 
+// OpenCode can accept a TCP connection during startup and never answer it,
+// and Node's fetch waits ~300s for headers by default. Every control request
+// therefore carries its own bounded deadline; callers that poll (health) get
+// a short one so their own budget stays authoritative. The event stream is
+// intentionally excluded — it is long-lived and caller-aborted.
+const HEALTH_REQUEST_TIMEOUT_MS = 2_000;
+const CONTROL_REQUEST_TIMEOUT_MS = 15_000;
+const ABORT_REQUEST_TIMEOUT_MS = 10_000;
+const EVENT_STREAM_HEADER_TIMEOUT_MS = 10_000;
+
 /**
  * Typed control client for one authenticated OpenCode server.
  *
@@ -209,7 +219,7 @@ export class OpenCodeServerClient {
     try {
       const response = await this.fetchImpl(
         `${this.url}/global/health`,
-        this.authInit({}),
+        this.authInit({ signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS) }),
       );
       return response.ok;
     } catch {
@@ -256,6 +266,7 @@ export class OpenCodeServerClient {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS),
       }),
     );
     if (!response.ok) {
@@ -266,7 +277,7 @@ export class OpenCodeServerClient {
   async abort(sessionId: string): Promise<void> {
     const response = await this.fetchImpl(
       `${this.url}/session/${encodeURIComponent(sessionId)}/abort`,
-      this.authInit({ method: "POST" }),
+      this.authInit({ method: "POST", signal: AbortSignal.timeout(ABORT_REQUEST_TIMEOUT_MS) }),
     );
     if (!response.ok) {
       throw new Error(`OpenCode turn abort failed with HTTP ${response.status}.`);
@@ -279,14 +290,35 @@ export class OpenCodeServerClient {
    * that raced before the stream became authoritative.
    */
   async *events(signal?: AbortSignal): AsyncGenerator<OpenCodeEvent> {
-    const response = await this.fetchImpl(
-      `${this.url}/event`,
-      this.authInit({
-        headers: { accept: "text/event-stream" },
-        signal,
-      }),
+    // Only the header phase gets a deadline of its own: a connection the
+    // server accepts but never answers must not consume the caller's entire
+    // turn budget. Once headers arrive the stream is long-lived and ends only
+    // on caller abort or server close.
+    const streamController = new AbortController();
+    const abortForCaller = (): void => streamController.abort();
+    signal?.addEventListener("abort", abortForCaller, { once: true });
+    if (signal?.aborted) streamController.abort();
+    const headerTimer = setTimeout(
+      () => streamController.abort(new Error("OpenCode event stream did not answer in time.")),
+      EVENT_STREAM_HEADER_TIMEOUT_MS,
     );
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        `${this.url}/event`,
+        this.authInit({
+          headers: { accept: "text/event-stream" },
+          signal: streamController.signal,
+        }),
+      );
+    } catch (error) {
+      signal?.removeEventListener("abort", abortForCaller);
+      throw error;
+    } finally {
+      clearTimeout(headerTimer);
+    }
     if (!response.ok || !response.body) {
+      signal?.removeEventListener("abort", abortForCaller);
       throw new Error(`OpenCode event stream failed with HTTP ${response.status}.`);
     }
     const reader = response.body.getReader();
@@ -310,6 +342,7 @@ export class OpenCodeServerClient {
         }
       }
     } finally {
+      signal?.removeEventListener("abort", abortForCaller);
       await reader.cancel().catch(() => undefined);
     }
   }
@@ -322,6 +355,9 @@ export class OpenCodeServerClient {
       `${this.url}${path}`,
       this.authInit({
         ...init,
+        // After the caller's init so an explicit init.signal cannot silently
+        // erase the default deadline; callers wanting a custom bound pass one.
+        signal: init.signal ?? AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS),
         headers: {
           "content-type": "application/json",
           ...(init.headers ?? {}),

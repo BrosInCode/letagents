@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 
+import { redactCredentialText } from "./agents/provider-evidence.js";
 import type {
   DesktopLaunchEvent,
   DesktopLaunchEventType,
@@ -42,6 +43,7 @@ export interface EmitLaunchEventInput {
   type: DesktopLaunchEventType;
   entryId?: string | null;
   detail?: string | null;
+  diagnostic?: string | null;
   recovery?: DesktopLaunchRecoveryAction | null;
   durable?: boolean;
 }
@@ -64,6 +66,7 @@ export function emitLaunchEvent(input: EmitLaunchEventInput): DesktopLaunchEvent
     type: input.type,
     at: new Date().toISOString(),
     detail: input.detail ?? null,
+    diagnostic: input.diagnostic ?? null,
     recovery: input.recovery ?? null,
     durable: input.durable ?? false,
   };
@@ -146,13 +149,22 @@ export function classifyLaunchFailure(error: unknown): {
   type: Extract<DesktopLaunchEventType, "launch.blocked" | "launch.failed">;
   recovery: DesktopLaunchRecoveryAction;
   detail: string;
+  diagnostic: string | null;
 } {
   if (error instanceof LaunchBlockedError) {
-    return { type: "launch.blocked", recovery: error.recovery, detail: error.message };
+    return { type: "launch.blocked", recovery: error.recovery, detail: error.message, diagnostic: null };
   }
+  // The daemon never hears about failures thrown between the durable claim
+  // and activation, so this event is the only record the wizard can show.
+  // `detail` stays product-safe; the redacted cause rides in `diagnostic`
+  // for progressive disclosure instead of being discarded to the console.
+  const cause = redactCredentialText(
+    error instanceof Error ? error.message : String(error ?? ""),
+  ).value.replace(/\s+/g, " ").trim().slice(0, 320);
   return {
     type: "launch.failed",
     recovery: "retry",
     detail: "The launch could not be completed. You can try again.",
+    diagnostic: cause || null,
   };
 }

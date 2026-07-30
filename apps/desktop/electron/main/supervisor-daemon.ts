@@ -27,9 +27,24 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.69";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.73";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
+// Room-ingress bootstrap is an authority-bearing admission that mints a
+// worker session and reads the initial room tail against the cloud. Each of
+// those daemon-side requests is bounded at 20s, so the client deadline must
+// cover both plus overhead — the tight control-request timeout aborted real
+// launches on slow networks and orphaned their durable claims as paused.
+const BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS = 45_000;
+// Host-grant installation attaches to the live provider (up to ~32s of
+// bounded probes) and mints a worker session (3 cloud attempts x 10s) inside
+// the entry lock; the tight control timeout aborted real launches while the
+// daemon was still doing legitimate bounded work.
+const INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS = 60_000;
+// Runtime recovery attaches to the provider and drains delivery; conversation
+// restoration probes provider continuations at 0/1/3/7s offsets. Both exceed
+// the 3s control budget by design.
+const RECOVERY_REQUEST_TIMEOUT_MS = 30_000;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
 const NATURAL_EXIT_TIMEOUT_MS = 2_000;
@@ -501,7 +516,7 @@ export class SupervisorDaemonClient {
       "supervisor.recover_agent_runtime",
       { entry_id: id, daemon_generation: status.generation },
       SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-      this.turnControlRequestTimeoutMs,
+      RECOVERY_REQUEST_TIMEOUT_MS,
     );
     return mapEntry(result.entry);
   }
@@ -610,7 +625,7 @@ export class SupervisorDaemonClient {
 
   async readAttempt(id: string): Promise<DesktopSupervisorAttemptDetail> {
     await this.ensureRunning();
-    const detail = await this.request<Record<string, unknown>>("attempt.read", { id });
+    const detail = await this.request<Record<string, unknown>>("attempt.read", { id }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
     return {
       entryId: String(detail.entry_id ?? id),
       workAttemptId: typeof detail.work_attempt_id === "string" ? detail.work_attempt_id : null,
@@ -624,7 +639,7 @@ export class SupervisorDaemonClient {
     if (!nonEmptyString(input.entryId) || !nonEmptyString(input.roomId) || (input.sourceMessageId !== undefined && input.sourceMessageId !== null && !nonEmptyString(input.sourceMessageId))) throw new Error("Agent inspector detail requires exact non-empty entry, room, and optional source identities.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorDetail) throw new Error("This supervisor does not support agent inspector detail history.");
-    const detail = await this.request<Record<string, unknown>>("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null });
+    const detail = await this.request<Record<string, unknown>>("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
     return mapAgentInspectorDetail(detail, input);
   }
 
@@ -632,7 +647,7 @@ export class SupervisorDaemonClient {
     if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Agent configuration requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
-    const value = await this.request<Record<string, unknown>>("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration });
+    const value = await this.request<Record<string, unknown>>("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
     return mapAgentConfiguration(value, entryId, daemonGeneration);
   }
 
@@ -857,7 +872,7 @@ export class SupervisorDaemonClient {
       daemon_generation: input.daemonGeneration,
       credential_only: Boolean(input.credentialOnly),
       ...(input.recoveryOnly ? { recovery_only: true } : {}),
-    });
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS);
     if (result.status === "installed" || result.status === "provider_unavailable") return result.status;
     return "stale";
   }
@@ -869,7 +884,7 @@ export class SupervisorDaemonClient {
     const result = await this.request<{ status?: unknown }>("supervisor.bootstrap_room_ingress", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
-    });
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
     return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
   }
 
@@ -885,7 +900,10 @@ export class SupervisorDaemonClient {
       ) return mapStatus(negotiated);
       const retired = this.captureRetiredDaemon(negotiated);
       retiredGeneration = Number(negotiated.generation);
-      await this.request("daemon.prepare_handoff", undefined, daemonVersion);
+      // Handoff drains in-flight provider dispatch reservations, which can
+      // span a full provider launch; the tight control timeout aborted real
+      // upgrades attempted while any agent was mid-launch.
+      await this.request("daemon.prepare_handoff", undefined, daemonVersion, RECOVERY_REQUEST_TIMEOUT_MS);
       await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
