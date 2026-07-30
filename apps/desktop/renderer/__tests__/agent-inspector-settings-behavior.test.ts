@@ -378,7 +378,7 @@ test("mounted Settings honors exact supervised profile gates instead of generic 
   mounted.app.unmount();
 });
 
-test("mounted Settings and overflow use the same two-step retirement confirmation", async () => {
+test("mounted Settings keeps its two-step retirement confirmation", async () => {
   let settingsRetires = 0;
   const settings = mount(AgentInspectorSettings, settingsProps({ onRetire: () => { settingsRetires += 1; } }));
   (buttonByText(settings.root, "Retire agent").props.onClick as () => void)();
@@ -388,7 +388,12 @@ test("mounted Settings and overflow use the same two-step retirement confirmatio
   (buttonByText(settings.root, "Confirm retire agent").props.onClick as () => void)();
   assert.equal(settingsRetires, 1);
   settings.app.unmount();
+});
 
+test("the lifecycle overflow never contains the destructive retire action and survives action refreshes", async () => {
+  // Retire lives in the surface's always-visible destructive footer. Burying
+  // it in the overflow made it a moving target: the menu closed on every
+  // live-facts refresh because its reset watched the rebuilt actions array.
   const emitted: string[] = [];
   const lifecycle = mount(AgentInspectorLifecycleActions, {
     entryId: "agent_a",
@@ -405,13 +410,24 @@ test("mounted Settings and overflow use the same two-step retirement confirmatio
   });
   (nodeByProp(lifecycle.root, "aria-label", "More agent actions").props.onClick as () => void)();
   await nextTick();
-  (buttonByText(lifecycle.root, "Retire agent").props.onClick as () => void)();
-  await nextTick();
+  assert.doesNotMatch(textContent(lifecycle.root), /Retire agent/);
   assert.deepEqual(emitted, []);
-  assert.match(textContent(lifecycle.root), /history and worktree stay available/);
-  (buttonByText(lifecycle.root, "Confirm retire agent").props.onClick as () => void)();
-  assert.deepEqual(emitted, ["retire_agent"]);
   lifecycle.app.unmount();
+});
+
+test("the inspector surface renders retire as an entryId-keyed destructive footer", async () => {
+  const source = await readFile(
+    fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)),
+    "utf8",
+  );
+  assert.match(source, /agent-inspector-danger-footer/, "the surface owns the destructive footer");
+  assert.match(source, /Confirm retire agent/, "retiring stays a two-step confirmation");
+  assert.match(source, /AGENT_INSPECTOR_RETIRE_CONFIRMATION/, "the confirmation copy is the shared retire warning");
+  assert.match(
+    source,
+    /watch\(\(\) => props\.projection\.entryId, \(\) => \{ confirmRetire\.value = false; \}\)/,
+    "the confirm state resets only when the inspected agent changes, not on live-facts refreshes",
+  );
 });
 
 test("mounted room-move recovery survives an inspector remount without an in-memory operation id", () => {

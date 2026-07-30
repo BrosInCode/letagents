@@ -527,3 +527,46 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
   .agent-inspector-continuation-recovery,
   .agent-inspector-overview-section { border-color: rgba(255, 255, 255, 0.28); }
 }
+
+/* Destructive lifecycle footer: retire is always visible at the bottom of the
+   inspector instead of buried in the overflow menu, whose re-rendering made it
+   a moving target. Pinned below the scroll region on every tab. */
+.agent-inspector-danger-footer {
+  flex-shrink: 0;
+  padding: 12px 18px 14px;
+  border-top: 1px solid rgba(251, 113, 133, 0.22);
+  background: rgba(251, 113, 133, 0.05);
+}
+.agent-inspector-danger-footer p {
+  margin: 0 0 9px;
+  color: #fecaca;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.agent-inspector-danger-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.agent-inspector-danger-footer button {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.73rem;
+  font-weight: 670;
+  cursor: pointer;
+}
+.agent-inspector-danger-footer button:disabled { cursor: default; opacity: 0.5; }
+.agent-inspector-danger-footer button.danger {
+  border-color: rgba(251, 113, 133, 0.5);
+  background: rgba(251, 113, 133, 0.12);
+  color: #fecaca;
+}
+.agent-inspector-danger-footer button.danger:hover:not(:disabled) {
+  background: rgba(251, 113, 133, 0.2);
+}
