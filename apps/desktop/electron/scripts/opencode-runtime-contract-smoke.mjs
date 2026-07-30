@@ -19,7 +19,7 @@ const {
 const { OPENCODE_RUNTIME_VERSION } = await import(
   "../../dist-electron/main/agents/opencode-runtime.js"
 );
-const { OpenCodeServerClient, eventReferencesSession } = await import(
+const { OpenCodeServerClient, eventReferencesSession, mintNativeUserMessageId } = await import(
   "../../dist-electron/main/agents/opencode-server-client.js"
 );
 
@@ -314,7 +314,10 @@ try {
   const eventTypes = new Set();
   const controller = new AbortController();
   const turn = waitForTurn(client, sessionId, controller.signal, eventTypes);
-  const messageId = `msg_contract_${randomUUID()}`;
+  // The adapter dispatches user message IDs in OpenCode's own ascending
+  // scheme; anything else breaks the native loop-exit ordering invariant.
+  // The contract smoke must prove that exact discipline round-trips.
+  const messageId = mintNativeUserMessageId(Date.now());
   await client.promptAsync(sessionId, {
     messageID: messageId,
     model: {

@@ -62,6 +62,7 @@ describe("durable room delivery UI contracts", () => {
       roomAgentState: { inbox: { state: "waiting_for_desktop_credentials" } },
       workAttemptId: "attempt_1", agentSessionId: "session_1", agentSessionBindingState: "active",
       executionGenerationId: "generation_1", providerContinuationId: "continuation_1",
+      providerPid: 72_414, lastError: null, nativeLiveness: { state: "healthy" },
     };
     const gone = {
       ...exact, desiredState: "paused", observedState: "paused", workAttemptId: null, agentSessionId: null,
@@ -70,12 +71,42 @@ describe("durable room delivery UI contracts", () => {
     const starting = {
       ...gone, desiredState: "running", observedState: "starting", condition: "none",
     };
+    const stoppedRuntimeWithRetainedCoordinates = {
+      ...exact,
+      observedState: "failed",
+      condition: "coordination_blocked",
+      nativeLiveness: { state: "terminal" },
+      roomAgentState: {
+        connection: { state: "disconnected" },
+        inbox: { state: "waiting_for_desktop_credentials" },
+      },
+    };
+    const liveRuntimeWaitingForBinding = {
+      ...exact,
+      observedState: "recovering",
+      condition: "coordination_blocked",
+      providerPid: 72414,
+      agentSessionId: null,
+      agentSessionBindingState: "none",
+      lastError: "The provider is running, but room access could not be restored after 3 attempts.",
+      nativeLiveness: { state: "healthy" },
+      roomAgentState: {
+        connection: { state: "reconnecting" },
+        inbox: { state: "waiting_for_desktop_credentials" },
+      },
+    };
     assert.equal(canReconnectRoomAgent(exact as never), true);
     assert.equal(canRecoverSavedRoomAgent(exact as never), false);
     assert.equal(canReconnectRoomAgent(gone as never), false);
     assert.equal(canRecoverSavedRoomAgent(gone as never), true);
     assert.equal(canRecoverSavedRoomAgent(starting as never), false,
       "a normal pre-runtime launch must not be presented as a recovery");
+    assert.equal(canReconnectRoomAgent(stoppedRuntimeWithRetainedCoordinates as never), false,
+      "retained provider coordinates do not make a stopped runtime reconnectable");
+    assert.equal(canRecoverSavedRoomAgent(stoppedRuntimeWithRetainedCoordinates as never), true,
+      "a durably stopped runtime is recoverable even while its historical coordinates remain");
+    assert.equal(canReconnectRoomAgent(liveRuntimeWaitingForBinding as never), true,
+      "a live exact provider can retry its room binding even before the replacement session is active");
 
     const [activity, shell, inspectorDomain] = await Promise.all([
       source("src/components/desktop/content/RoomActivityTabView.vue"),

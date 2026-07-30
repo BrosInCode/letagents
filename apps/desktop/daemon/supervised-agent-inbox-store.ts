@@ -64,6 +64,7 @@ export type ProviderContinuationRepair = {
 };
 const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"]);
 const RETAINED_TERMINAL_RECEIPTS_PER_AGENT = 200;
+const RETAINED_TIMELINE_EVENTS_PER_RECEIPT = 64;
 const RETAINED_OBSERVED_MESSAGES_PER_AGENT = 500;
 const RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT = 2_000;
 const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInboxState[]>> = {
@@ -860,8 +861,8 @@ export class SupervisedAgentInboxStore {
   }
   /**
    * Return every actionable receipt plus a bounded terminal history. Timeline
-   * events are loaded in one joined query so status polling is O(rows), not an
-   * ever-growing N+1 query fan-out.
+   * events are loaded in one joined query and capped per selected receipt so a
+   * noisy historical incident cannot make every manifest projection unbounded.
    */
   async receipts(agentId: string, terminalLimit = RETAINED_TERMINAL_RECEIPTS_PER_AGENT): Promise<SupervisedInboxReceiptWithTimeline[]> {
     return this.read(async (database) => {
@@ -877,14 +878,37 @@ export class SupervisedAgentInboxStore {
             ORDER BY fifo_sequence DESC LIMIT ?
           )
         ) ORDER BY i.fifo_sequence`).all(agentId, agentId, limit) as Row[];
-      const selected = new Set(rows.map((row) => String(row.inbox_item_id)));
       const timelines = new Map<string, SupervisedInboxEvent[]>();
-      for (const event of database.prepare(`SELECT e.inbox_item_id,e.phase,e.observed_at,e.detail
-        FROM supervised_agent_inbox_events e
-        JOIN supervised_agent_inbox i ON i.inbox_item_id=e.inbox_item_id
-        WHERE i.agent_id=? ORDER BY i.fifo_sequence,e.event_sequence`).all(agentId) as Row[]) {
+      for (const event of database.prepare(`WITH selected_inbox AS (
+          SELECT inbox_item_id,fifo_sequence
+          FROM supervised_agent_inbox
+          WHERE agent_id=? AND (
+            state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+            OR inbox_item_id IN (
+              SELECT inbox_item_id FROM supervised_agent_inbox
+              WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+              ORDER BY fifo_sequence DESC LIMIT ?
+            )
+          )
+        )
+        SELECT e.inbox_item_id,e.phase,e.observed_at,e.detail
+        FROM selected_inbox s
+        JOIN supervised_agent_inbox_events e
+          ON e.inbox_item_id=s.inbox_item_id
+          AND e.event_sequence > COALESCE((
+            SELECT cutoff.event_sequence
+            FROM supervised_agent_inbox_events cutoff
+            WHERE cutoff.inbox_item_id=s.inbox_item_id
+            ORDER BY cutoff.event_sequence DESC
+            LIMIT 1 OFFSET ?
+          ),0)
+        ORDER BY s.fifo_sequence,e.event_sequence`).all(
+          agentId,
+          agentId,
+          limit,
+          RETAINED_TIMELINE_EVENTS_PER_RECEIPT,
+        ) as Row[]) {
         const inboxItemId = String(event.inbox_item_id);
-        if (!selected.has(inboxItemId)) continue;
         const timeline = timelines.get(inboxItemId) ?? [];
         timeline.push({
           phase: String(event.phase) as SupervisedInboxEvent["phase"],

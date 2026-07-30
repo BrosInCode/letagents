@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,6 +22,11 @@ type LaunchRecord = {
   cwd: string;
   env: NodeJS.ProcessEnv;
 };
+type TranscriptMessage = {
+  info: Record<string, unknown>;
+  parts: Array<Record<string, unknown>>;
+};
+type TranscriptFactory = (turnId: string) => TranscriptMessage[];
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -40,6 +45,9 @@ function createHarness() {
   let assistantText = "OpenCode bounded reply.";
   let includeAssistantText = true;
   let holdTurnOpen = false;
+  let transcriptWhileBusy = false;
+  let transcriptFactories: TranscriptFactory[] | null = null;
+  let streamEvents: Array<Record<string, unknown>> = [];
   let observedProcessExit: Promise<ProviderProcessExit>;
   let messageReads = 0;
 
@@ -62,6 +70,7 @@ function createHarness() {
       signals.push({ pid, signal });
     },
     allocatePort: async () => 43821,
+    discoverRuntimeConnection: async () => null,
     async fetch(input, init) {
       const url = new URL(input);
       const authorization = new Headers(init?.headers).get("authorization");
@@ -74,6 +83,9 @@ function createHarness() {
             controller.enqueue(encoder.encode(
               'data: {"type":"server.connected","properties":{}}\n\n',
             ));
+            for (const event of streamEvents) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            }
             init?.signal?.addEventListener("abort", () => controller.close(), {
               once: true,
             });
@@ -103,20 +115,27 @@ function createHarness() {
       const messageMatch = url.pathname.match(/^\/session\/([^/]+)\/message$/);
       if (messageMatch) {
         messageReads += 1;
-        if (holdTurnOpen) return json([]);
+        if (holdTurnOpen && !transcriptWhileBusy) return json([]);
         const turnId = String(promptBodies.at(-1)?.messageID ?? "turn-recovery");
+        if (transcriptFactories) {
+          const factory = transcriptFactories[
+            Math.min(messageReads - 1, transcriptFactories.length - 1)
+          ];
+          return json(factory?.(turnId) ?? []);
+        }
         return json([{
           info: {
             id: "assistant-1",
             role: "assistant",
             parentID: turnId,
-            time: { completed: 1_700_000_000_000 },
+            time: { created: 1_700_000_000_000, completed: 1_700_000_000_001 },
           },
           parts: [
             { id: "reasoning-1", type: "reasoning", text: "Checking the bounded context." },
             ...(includeAssistantText
               ? [{ id: "text-1", type: "text", text: assistantText }]
               : []),
+            { id: "finish-1", type: "step-finish", reason: "stop" },
           ],
         }]);
       }
@@ -125,6 +144,7 @@ function createHarness() {
       }
       if (url.pathname.endsWith("/abort") && init?.method === "POST") {
         aborts.push(decodeURIComponent(url.pathname.split("/")[2] ?? ""));
+        holdTurnOpen = false;
         return json(true);
       }
       assert.fail(`Unexpected OpenCode request: ${init?.method ?? "GET"} ${url.pathname}`);
@@ -150,6 +170,16 @@ function createHarness() {
     },
     holdTurnOpen() {
       holdTurnOpen = true;
+    },
+    holdTurnOpenWithTranscript() {
+      holdTurnOpen = true;
+      transcriptWhileBusy = true;
+    },
+    setTranscriptFactories(factories: TranscriptFactory[]) {
+      transcriptFactories = factories;
+    },
+    setStreamEvents(events: Array<Record<string, unknown>>) {
+      streamEvents = events;
     },
     completeObservedProcessExit(exit: ProviderProcessExit) {
       observedProcessExit = Promise.resolve(exit);
@@ -199,6 +229,42 @@ async function spawnAdapter() {
   return { adapter, handle, harness, runtimeRoot };
 }
 
+function userMessage(id: string): TranscriptMessage {
+  return { info: { id, role: "user", time: { created: 5 } }, parts: [] };
+}
+
+/** Mirrors OpenCode's Identifier.create("msg", "ascending"): hex(ms * 0x1000 + counter) + base62 randomness. */
+function openCodeStyleAscendingId(timestampMs: number, counter: number): string {
+  let encoded = BigInt(timestampMs) * BigInt(0x1000) + BigInt(counter);
+  const timeBytes = Buffer.alloc(6);
+  for (let index = 5; index >= 0; index -= 1) {
+    timeBytes[index] = Number(encoded & BigInt(0xff));
+    encoded >>= BigInt(8);
+  }
+  return `msg_${timeBytes.toString("hex")}00000000000000`;
+}
+
+function assistantMessage(
+  turnId: string,
+  id: string,
+  created: number,
+  text: string | null,
+  reason: "tool-calls" | "stop" = "stop",
+): TranscriptMessage {
+  return {
+    info: {
+      id,
+      role: "assistant",
+      parentID: turnId,
+      time: { created, completed: created + 1 },
+    },
+    parts: [
+      ...(text === null ? [] : [{ id: `${id}-text`, type: "text", text }]),
+      { id: `${id}-finish`, type: "step-finish", reason },
+    ],
+  };
+}
+
 test("Open Model launches a dedicated OpenCode server without putting the provider key in config or MCP", async () => {
   const { handle, harness } = await spawnAdapter();
 
@@ -234,6 +300,84 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
   assert.ok(connection?.kind === "opencode_server");
   const serverAuth = await readFile(connection.serverAuthPath, "utf8");
   assert.doesNotMatch(serverAuth, /provider-api-key-must-stay-out-of-config/);
+  assert.deepEqual(
+    (JSON.parse(serverAuth) as { connection?: unknown }).connection,
+    {
+      url: "http://127.0.0.1:43821",
+      pid: 6101,
+      processIdentity: "opencode-birth-6101",
+    },
+  );
+});
+
+test("Open Model reattaches from its exact runtime sidecar when a legacy daemon omitted the connection", async () => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter();
+  assert.ok(handle.providerContinuationId);
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const attached = await replacement.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId,
+    providerConnection: null,
+  });
+
+  assert.ok(attached && !("state" in attached));
+  assert.deepEqual(attached.providerConnection, handle.providerConnection);
+  assert.equal(harness.launches.length, 1, "reattachment must not launch another OpenCode server");
+});
+
+test("Open Model discovers and checkpoints a pre-sidecar-metadata runtime exactly once", async () => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter();
+  assert.ok(handle.providerContinuationId);
+  const connection = handle.providerConnection;
+  assert.ok(connection?.kind === "opencode_server");
+  const legacy = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as {
+    username: string;
+    password: string;
+  };
+  await writeFile(connection.serverAuthPath, `${JSON.stringify({
+    username: legacy.username,
+    password: legacy.password,
+  })}\n`, { mode: 0o600 });
+  let discoveries = 0;
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: {
+      ...harness.dependencies,
+      async discoverRuntimeConnection() {
+        discoveries += 1;
+        return { pid: 6101, url: "http://127.0.0.1:43821" };
+      },
+    },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const attached = await replacement.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId,
+    providerConnection: null,
+  });
+
+  assert.ok(attached && !("state" in attached));
+  assert.equal(discoveries, 1);
+  assert.deepEqual(
+    (JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as {
+      connection?: unknown;
+    }).connection,
+    {
+      url: "http://127.0.0.1:43821",
+      pid: 6101,
+      processIdentity: "opencode-birth-6101",
+    },
+  );
 });
 
 test("Open Model runs one bounded OpenCode prompt and returns the exact assistant reply", async () => {
@@ -278,6 +422,154 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
   assert.ok(stream.some((event) => event.method === "item/agentMessage/delta"));
 });
 
+test("Open Model turn ids use OpenCode's ascending scheme so the native loop can exit", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const before = Date.now();
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-native-id",
+    sourceMessage: { text: "say hi" },
+    activation: { decision: "activate" },
+    actionId: "supervised-room:supervised_agent-1:focus_38:msg_15:action:v1",
+  });
+
+  const after = Date.now();
+  const turnId = String(harness.promptBodies[0]!.messageID);
+  assert.equal(result.turnId, turnId);
+  assert.match(
+    turnId,
+    /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/,
+    "the user message ID must use OpenCode's native ascending scheme",
+  );
+  // OpenCode exits its agentic loop only while lastUser.id < lastAssistant.id
+  // under raw string comparison. The dispatched ID must therefore sort after
+  // everything already in the session and below the assistant IDs OpenCode
+  // mints afterwards (its same-millisecond counter starts at 1).
+  assert.ok(turnId > openCodeStyleAscendingId(before - 1, 4095));
+  assert.ok(turnId < openCodeStyleAscendingId(after, 1));
+});
+
+test("Open Model refuses to dispatch into a session poisoned by legacy turn ids", async () => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter();
+  const fresh = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+  const attached = await fresh.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+  });
+  assert.ok(attached && !("state" in attached));
+  const legacyTurnId = "msg_supervised-room_supervised_agent-1_67453f71";
+  harness.setTranscriptFactories([
+    () => [
+      userMessage(legacyTurnId),
+      assistantMessage(legacyTurnId, "assistant-legacy", 10, "Hi EmmyMay!"),
+    ],
+  ]);
+  const checkpoints: string[] = [];
+
+  await assert.rejects(
+    fresh.runRoomTurn(attached, {
+      inboxItemId: "inbox-poisoned",
+      sourceMessage: { text: "say hi again" },
+      activation: { decision: "activate" },
+      actionId: "poisoned",
+    }, {
+      beforeNativeDispatch: async () => { checkpoints.push("dispatch"); },
+      checkpointTurnStarted: async (turnId) => { checkpoints.push(`turn:${turnId}`); },
+    }),
+    (error: unknown) => {
+      assert.equal(
+        (error as { providerFailureCode?: string }).providerFailureCode,
+        "provider_continuation_missing",
+      );
+      assert.equal(
+        (error as { providerContinuationId?: string }).providerContinuationId,
+        "session-open-model-1",
+      );
+      return true;
+    },
+  );
+  assert.equal(harness.promptBodies.length, 0, "no model work may start in a poisoned session");
+  assert.deepEqual(checkpoints, [], "the failure lands before the dispatch-intent checkpoint");
+});
+
+test("Open Model repair replaces a poisoned session instead of rematerializing it", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.setTranscriptFactories([
+    () => [userMessage("msg_supervised-room_supervised_agent-1_52a35257")],
+  ]);
+  const checkpointed: string[] = [];
+
+  const repaired = await adapter.repairContinuation(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "session-open-model-1",
+    cwd: "/tmp/open-model-worktree",
+    launchPolicy: {},
+  }, {
+    checkpointReplacement: async (id) => { checkpointed.push(id); },
+  });
+
+  assert.equal(repaired.outcome, "replaced");
+  assert.equal(repaired.replacementProviderContinuationId, "session-open-model-2");
+  assert.deepEqual(checkpointed, ["session-open-model-2"]);
+});
+
+test("Open Model waits for the session boundary and selects the final answer after tool-call children", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    (turnId) => [assistantMessage(turnId, "assistant-tool", 10, null, "tool-calls")],
+    (turnId) => [
+      assistantMessage(turnId, "assistant-tool", 10, null, "tool-calls"),
+      assistantMessage(turnId, "assistant-final", 20, "Hi from the final assistant step."),
+    ],
+  ]);
+  harness.setStreamEvents([{
+    type: "session.idle",
+    properties: { sessionID: "session-open-model-1" },
+  }]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-tool-first",
+    sourceMessage: { text: "say hi" },
+    activation: { decision: "activate" },
+    actionId: "tool-first",
+  });
+
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Hi from the final assistant step.");
+  assert.equal(harness.messageReads, 2, "the completed tool child is not a room-turn terminal");
+});
+
+test("Open Model does not mistake prompt materialization lag for an empty completed turn", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.setTranscriptFactories([
+    () => [],
+    (turnId) => [assistantMessage(turnId, "assistant-final", 20, "Materialized reply.")],
+  ]);
+  harness.setStreamEvents([{
+    type: "session.idle",
+    properties: { sessionID: "session-open-model-1" },
+  }]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-materializing",
+    sourceMessage: { text: "say hi" },
+    activation: { decision: "activate" },
+    actionId: "materializing",
+  });
+
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Materialized reply.");
+  assert.equal(harness.messageReads, 2);
+});
+
 test("Open Model classifies the exact no-reply sentinel and unreadable completion without rerunning", async () => {
   const sentinel = await spawnAdapter();
   sentinel.harness.setAssistantText("LETAGENTS_NO_ROOM_REPLY");
@@ -300,6 +592,48 @@ test("Open Model classifies the exact no-reply sentinel and unreadable completio
   });
   assert.equal(missingText.outcome, "unreadable");
   assert.equal(unreadable.harness.promptBodies.length, 1);
+});
+
+test("Open Model surfaces a terminal provider rejection instead of misclassifying it as unreadable", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.setTranscriptFactories([
+    (turnId) => [{
+      info: {
+        id: "assistant-provider-error",
+        role: "assistant",
+        parentID: turnId,
+        time: { created: 10, completed: 11 },
+        error: {
+          name: "APIError",
+          data: {
+            statusCode: 402,
+            message: "This request requires more credits. Visit https://provider.invalid/key/secret-id.",
+          },
+        },
+      },
+      parts: [],
+    }],
+  ]);
+
+  await assert.rejects(
+    adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-provider-error",
+      sourceMessage: { text: "say hi" },
+      activation: { decision: "activate" },
+      actionId: "provider-error",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /provider account could not cover this turn's output budget \(HTTP 402\)/);
+      assert.doesNotMatch(error.message, /secret-id|provider\.invalid/);
+      assert.equal(
+        (error as Error & { roomTurnRecoveryOutcome?: string }).roomTurnRecoveryOutcome,
+        "terminal_failure",
+      );
+      return true;
+    },
+  );
+  assert.equal(harness.promptBodies.length, 1);
 });
 
 test("a fresh adapter reattaches to the exact OpenCode PID and session", async () => {
@@ -357,8 +691,12 @@ test("Open Model refuses a fresh spawn without exact supervisor coordinates", as
 
 test("Open Model interrupts the exact active session through the native abort endpoint", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnOpen();
+  let dispatchMarked = false;
 
-  const result = await adapter.controlTurn(handle);
+  const result = await adapter.controlTurn(handle, null, {
+    markDispatched: async () => { dispatchMarked = true; },
+  });
 
   assert.deepEqual(result, {
     capability: "native_interrupt",
@@ -366,6 +704,56 @@ test("Open Model interrupts the exact active session through the native abort en
     resumed: false,
     state: "idle",
   });
+  assert.equal(dispatchMarked, true);
+  assert.deepEqual(harness.aborts, ["session-open-model-1"]);
+});
+
+test("Open Model reports a completed child as active while the native session is still busy", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    () => [assistantMessage("turn-active", "assistant-tool", 10, null, "tool-calls")],
+  ]);
+
+  assert.equal(await adapter.inspectTurn(handle, "turn-active"), "active");
+});
+
+test("Open Model aborts and fences a bounded turn that exceeds its assistant-step budget", async () => {
+  const harness = createHarness();
+  harness.setTranscriptFactories([
+    (turnId) => [
+      assistantMessage(turnId, "assistant-1", 10, null, "tool-calls"),
+      assistantMessage(turnId, "assistant-2", 20, "A possible answer."),
+      assistantMessage(turnId, "assistant-3", 30, "LETAGENTS_NO_ROOM_REPLY"),
+    ],
+  ]);
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-runaway-")),
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    maxAssistantSteps: 2,
+  });
+  const handle = await adapter.spawn(spawnRequest());
+
+  await assert.rejects(
+    adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-runaway",
+      sourceMessage: { text: "say hi" },
+      activation: { decision: "activate" },
+      actionId: "runaway",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /exceeded the bounded turn limit of 2 assistant steps/);
+      assert.equal(
+        (error as Error & { roomTurnRecoveryOutcome?: string }).roomTurnRecoveryOutcome,
+        "ambiguous",
+      );
+      return true;
+    },
+  );
   assert.deepEqual(harness.aborts, ["session-open-model-1"]);
 });
 
@@ -441,4 +829,5 @@ test("Open Model bounded turns time out without polling transcript history", asy
   );
   assert.equal(harness.promptBodies.length, 1);
   assert.equal(harness.messageReads, 1, "one bounded snapshot replaces transcript polling");
+  assert.deepEqual(harness.aborts, ["session-open-model-1"], "the watchdog stops the exact native session");
 });

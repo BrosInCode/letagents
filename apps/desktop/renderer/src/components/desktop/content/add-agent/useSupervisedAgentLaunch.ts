@@ -39,7 +39,7 @@ export function useSupervisedAgentLaunch(options: {
   currentVersion: () => number;
   onChooseRepo: () => void;
   onCopyAuthCommand: (command: string) => void;
-  onRetry: () => void;
+  onRetry: () => void | Promise<void>;
   onMessage: (message: string | null, tone?: AddAgentFeedbackTone) => void;
   recoveryScanTimeoutMs?: number;
 }) {
@@ -63,6 +63,7 @@ export function useSupervisedAgentLaunch(options: {
   const stoppingEntryId = ref<string | null>(null);
   const creationRequestId = ref<string | null>(null);
   const signInCommandCopiedForEntryId = ref<string | null>(null);
+  const recoveryPending = ref(false);
   const canAddAnotherSupervisedAgentState = computed(() => canAddAnotherSupervisedAgent({
     providerId: toValue(options.providerId),
     entry: conflict.value,
@@ -302,7 +303,8 @@ export function useSupervisedAgentLaunch(options: {
     resetActiveLaunch(false);
   }
 
-  function handleRecover(action: DesktopLaunchRecoveryAction): void {
+  async function handleRecover(action: DesktopLaunchRecoveryAction): Promise<void> {
+    if (recoveryPending.value) return;
     if (action === "choose_project") {
       options.onChooseRepo();
       return;
@@ -314,7 +316,12 @@ export function useSupervisedAgentLaunch(options: {
       return;
     }
     if (activeLaunchId.value) creationRequestId.value = activeLaunchId.value;
-    options.onRetry();
+    recoveryPending.value = true;
+    try {
+      await options.onRetry();
+    } finally {
+      recoveryPending.value = false;
+    }
   }
 
   watch(() => toValue(options.open), (open) => {
@@ -366,6 +373,7 @@ export function useSupervisedAgentLaunch(options: {
     conflictLookupTone,
     stoppingEntryId,
     creationRequestId,
+    recoveryPending,
     canAddAnotherSupervisedAgent: canAddAnotherSupervisedAgentState,
     view,
     begin,

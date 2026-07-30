@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 13;
+export const DAEMON_STATE_SCHEMA_VERSION = 14;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -81,11 +81,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV12ToV13(database);
     return;
   }
+  if (existingVersion === 13) {
+    this.migrateV13ToV14(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV13Shape(database);
+    this.repairAndValidateV14Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -204,6 +208,7 @@ createSchema(database: DatabaseSync): void {
       provider_continuation_id TEXT,
       provider_connection_kind TEXT,
       provider_connection_url TEXT,
+      provider_server_auth_path TEXT,
       provider_connection_pid INTEGER,
       provider_process_identity_present INTEGER NOT NULL CHECK (provider_process_identity_present IN (0, 1)),
       provider_process_identity TEXT,
@@ -673,6 +678,25 @@ migrateV12ToV13(database: DatabaseSync): void {
   try {
     this.applyV13Shape(database);
     this.validateV13Shape(database);
+    this.applyV14Shape(database);
+    this.validateV14Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V14 preserves the complete OpenCode server identity across daemon handoff. */
+migrateV13ToV14(database: DatabaseSync): void {
+  this.repairAndValidateV13Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV14Shape(database);
+    this.validateV14Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -989,6 +1013,8 @@ private applyCurrentSchemaTail(database: DatabaseSync): void {
   this.validateV12Shape(database);
   this.applyV13Shape(database);
   this.validateV13Shape(database);
+  this.applyV14Shape(database);
+  this.validateV14Shape(database);
 }
 
 private validateV12Shape(database: DatabaseSync): void {
@@ -1282,6 +1308,51 @@ repairAndValidateV13Shape(database: DatabaseSync): void {
     throw error;
   }
   this.finishPendingV6SecretScrub(database);
+}
+
+private applyV14Shape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "runtime_deployments").has("provider_server_auth_path")) {
+    database.exec("ALTER TABLE runtime_deployments ADD COLUMN provider_server_auth_path TEXT");
+  }
+  database.exec(`
+    UPDATE runtime_deployments
+    SET provider_connection_kind = NULL,
+        provider_connection_url = NULL,
+        provider_server_auth_path = NULL,
+        provider_connection_pid = NULL,
+        provider_process_identity_present = 0,
+        provider_process_identity = NULL
+    WHERE provider_connection_kind = 'opencode_server'
+      AND (provider_connection_url IS NULL OR provider_server_auth_path IS NULL);
+  `);
+}
+
+private validateV14Shape(database: DatabaseSync): void {
+  this.validateV13Shape(database);
+  if (!this.tableColumns(database, "runtime_deployments").has("provider_server_auth_path")) {
+    throw new Error("Daemon state v14 is missing the OpenCode server authentication reference.");
+  }
+  if (database.prepare(`
+    SELECT 1 FROM runtime_deployments
+    WHERE provider_connection_kind = 'opencode_server'
+      AND (provider_connection_url IS NULL OR provider_server_auth_path IS NULL)
+    LIMIT 1
+  `).get()) {
+    throw new Error("Daemon state v14 contains incomplete OpenCode server connection evidence.");
+  }
+}
+
+repairAndValidateV14Shape(database: DatabaseSync): void {
+  this.repairAndValidateV13Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV14Shape(database);
+    this.validateV14Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
 }
 
 private applyV8Shape(database: DatabaseSync): void {
@@ -2466,8 +2537,8 @@ normalizeLegacyPresenceEncodings(database: DatabaseSync): void {
         provider_connection_pid = NULL, provider_process_identity_present = 0,
         provider_process_identity = NULL
     WHERE provider_connection_kind IS NOT NULL
-      AND (provider_connection_kind NOT IN ('codex_app_server', 'claude_cli', 'cursor_cli')
-        OR (provider_connection_kind = 'codex_app_server' AND provider_connection_url IS NULL));
+      AND (provider_connection_kind NOT IN ('codex_app_server', 'claude_cli', 'cursor_cli', 'opencode_server')
+        OR (provider_connection_kind IN ('codex_app_server', 'opencode_server') AND provider_connection_url IS NULL));
     UPDATE runtime_deployments SET provider_process_identity = NULL
     WHERE provider_process_identity_present = 0;
 
@@ -2551,6 +2622,12 @@ normalizeLegacyPresenceEncodings(database: DatabaseSync): void {
     WHERE terminal_present = 0 OR terminal_ended_at IS NULL OR terminal_stdio_tail IS NULL
        OR terminal_cause IS NULL OR terminal_actor IS NULL OR terminal_generation IS NULL;
   `);
+  if (this.tableColumns(database, "runtime_deployments").has("provider_server_auth_path")) {
+    database.exec(`
+      UPDATE runtime_deployments SET provider_server_auth_path = NULL
+      WHERE provider_ref_present = 0 OR provider_connection_kind <> 'opencode_server';
+    `);
+  }
 }
 
 tableColumns(database: DatabaseSync, table: string): Set<string> {

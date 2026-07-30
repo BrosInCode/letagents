@@ -85,7 +85,9 @@ test("clicking Start (requested only) is connecting to the supervisor", () => {
   const view = foldLaunchJourney({ requested: true, provider: "codex", roomLabel: "Room Agents Rewrite" });
   assert.equal(view.currentPhaseId, "connecting_supervisor");
   assert.equal(stateOf(view, "connecting_supervisor"), "active");
+  assert.equal(view.phases[0]?.label, "Starting the background service");
   assert.equal(view.status, "in_progress");
+  assert.equal(view.durable, false);
   assert.equal(view.ready, false);
   assert.equal(view.failed, false);
   assert.equal(view.joinHint, "You can close this window. We'll keep setting up the agent.");
@@ -150,9 +152,13 @@ test("a pre-durable connection failure blocks on connecting to the supervisor wi
   });
   assert.equal(view.status, "blocked");
   assert.equal(view.failed, true);
+  assert.equal(view.durable, false);
   assert.equal(stateOf(view, "connecting_supervisor"), "failed");
   assert.equal(view.recovery, "reconnect");
-  assert.match(view.failureDetail ?? "", /background agent management/);
+  assert.equal(view.headline, "Background service didn’t start");
+  assert.match(view.failureDetail ?? "", /local service that manages room agents/);
+  assert.equal(view.failureImpact, "No agent was created. Your room and project are unchanged.");
+  assert.match(view.failureDiagnostic ?? "", /background agent management/);
 });
 
 test("a failure after connecting attributes to saving your agent", () => {
@@ -165,6 +171,8 @@ test("a failure after connecting attributes to saving your agent", () => {
   });
   assert.equal(view.status, "failed");
   assert.equal(stateOf(view, "saving_agent"), "failed");
+  assert.equal(view.headline, "Agent setup stopped before it was saved");
+  assert.equal(view.failureImpact, "No agent was created. Your room and project are unchanged.");
   assert.equal(view.recovery, "retry");
 });
 

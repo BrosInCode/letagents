@@ -95,8 +95,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       const handle = remembered.handle;
       if (
         handle.providerContinuationId !== ref.providerContinuationId
-        || !sameProviderActionConnectionIdentity(handle.providerConnection, ref.providerConnection)
+        || (ref.providerConnection
+          && !sameProviderActionConnectionIdentity(handle.providerConnection, ref.providerConnection))
       ) return null;
+      // The Electron adapter registry is already keyed by the exact work
+      // attempt and durable continuation. A predecessor daemon may have
+      // omitted a provider connection it did not know how to serialize; the
+      // remembered native handle is the authority needed to repair that
+      // manifest, never permission to launch a replacement.
       return publicHandle(handle);
     }
     const handle = await (await this.adapter(provider)).attach(ref);
