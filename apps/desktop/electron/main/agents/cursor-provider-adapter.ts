@@ -102,8 +102,11 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   // boundary (immediately when idle) and refuses mid-turn, so the reconciler's
   // stuck-agent poke rung must stay off.
   midTurnInjection: false,
-  // Cursor has no native interrupt+resume; corrections use stop-then-resend.
-  midTurnCorrection: false,
+  // Cursor applies a correction through its own adapter path: controlTurn stops
+  // the live child and calls beginTurn to resume the same session with the
+  // correction. It must NOT be routed into daemon stop-then-resend (its
+  // mcp_polling lane has no daemon inbox pump to consume a synthetic row).
+  midTurnCorrection: true,
   // Every turn's stream-json output is published as bounded/redacted evidence.
   transcriptAccess: true,
   permissionPromptBridging: false,
