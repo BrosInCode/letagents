@@ -194,6 +194,22 @@ function transientProviderStartFailure(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Provider adapters mark a resume failure where the saved process is provably
+ * gone (attach returned terminal identity). Resume can never reattach it, so
+ * the daemon recovers by starting a fresh runtime generation instead of
+ * retrying resume against a corpse — bounded by the crash-loop machinery.
+ */
+function providerRuntimeGoneFailure(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if ((current as { providerRuntimeGone?: unknown } | null)?.providerRuntimeGone === true) return true;
+    if (!(current instanceof Error)) return false;
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 function supervisedRoomPath(roomId: string): string {
   return roomId.split("/").map(encodeURIComponent).join("/");
 }
@@ -6421,6 +6437,44 @@ export class SupervisorDaemon {
 
   private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {
     const message = schedulerErrorDetail(error);
+    // A resume that failed because the saved runtime is provably gone can never
+    // succeed by retrying resume. Recover the way a manual Recover does: drop
+    // the dead continuation so the next convergence starts a fresh runtime, and
+    // record a failed edge so the crash-loop machinery bounds it — a single
+    // crash self-heals in ~1s, a genuine crash-loop backs off then quarantines
+    // (an actionable rest) instead of dead-ending silently in "recovering".
+    if (providerRuntimeGoneFailure(error)) {
+      let didReset = false;
+      await this.serializeEntryTick(entryId, () => this.updateManifestEntry(entryId, (current) => {
+        // Only the daemon-owned running entry with a live continuation to drop
+        // is reset here; anything else (stopped, quarantined, already reset) is
+        // left untouched so this cannot re-fire on a subsequent poke.
+        if (current.desired_state !== "running" || current.condition === "quarantined" || !current.provider_ref) {
+          return current;
+        }
+        didReset = true;
+        return {
+          ...current,
+          observed_state: "failed",
+          condition: "none",
+          last_error: "The previous provider runtime stopped; starting a replacement.",
+          provider_ref: null,
+          last_worker_binding: null,
+          reconciliation: advanceReconciliationState(current.reconciliation, "failed", this.nowMs()),
+        };
+      }));
+      if (didReset) {
+        await this.audit.append({
+          at: new Date().toISOString(), entry_id: entryId, from: "recovering", to: "failed",
+          cause: "provider runtime is gone; recovering with a fresh runtime", actor,
+          generation: this.singleton.currentGeneration,
+        });
+        // Prompt first attempt; convergence honors the persisted backoff for
+        // repeats and quarantines a true crash-loop into an actionable rest.
+        this.scheduleRecoveryConvergence(entryId, 1_000);
+      }
+      return;
+    }
     await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
       const manifest = await this.store.load();
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);

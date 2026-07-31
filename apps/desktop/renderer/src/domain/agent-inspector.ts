@@ -293,6 +293,15 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   if (/room access could not be restored after/i.test(detail)) {
     return "The provider is running, but its room access could not be restored. Reconnect to try the room handoff again.";
   }
+  if (/previous provider runtime stopped; starting a replacement/i.test(detail)) {
+    return "The provider runtime stopped. LetAgents is starting a replacement automatically.";
+  }
+  if (/crash-loop threshold reached/i.test(detail)) {
+    return "The provider runtime kept stopping right after each restart. Recover the agent once its cause is resolved.";
+  }
+  if (/could not be authenticated; refusing to start a competing runtime/i.test(detail)) {
+    return "LetAgents can’t confirm the previous provider process stopped, so it won’t start a competing one. Recover the agent to relaunch it.";
+  }
   return detail;
 }
 
