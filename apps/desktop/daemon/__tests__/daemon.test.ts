@@ -288,6 +288,97 @@ test("watch_agent_stream long-polls one agent's ephemeral live feed", async () =
   }
 });
 
+test("watch_agent_stream drains a backlog larger than one batch without gaps", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const mk = (summary: string): DaemonActivityEvent => ({
+    observed_at: "2026-07-31T00:00:00.000Z", sequence: 0, provider: "open-model", kind: "text_delta", method: "item/agentMessage/delta",
+    summary, status: "working", payload: { m: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+  });
+  type StreamResult = { sequence: number; events: Array<{ sequence: number; summary: string | null }>; ended: boolean };
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void };
+    // Buffer 100 events — more than a single 64-event batch can carry.
+    for (let i = 1; i <= 100; i += 1) internals.pushAgentStreamEvent("agent_backlog", mk(`chunk-${i}`));
+
+    // The first poll returns one capped batch whose cursor is the LAST event it
+    // actually carried, not the producer's newest sequence.
+    const first = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_backlog", after_sequence: 0, wait_ms: 500 })).result as StreamResult;
+    assert.equal(first.events.length, 64);
+    assert.equal(first.events[0]!.sequence, 1);
+    assert.equal(first.events[63]!.sequence, 64);
+    assert.equal(first.sequence, 64, "cursor must be the last delivered event, never the producer high-water mark");
+
+    // Resuming at that cursor drains the remainder; nothing past the cap is skipped.
+    const second = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_backlog", after_sequence: first.sequence, wait_ms: 500 })).result as StreamResult;
+    assert.equal(second.events.length, 36);
+    assert.equal(second.events[0]!.sequence, 65);
+    assert.equal(second.events[35]!.sequence, 100);
+    assert.equal(second.sequence, 100);
+
+    // The two polls together reconstruct the full ordered backlog.
+    const drained = [...first.events, ...second.events].map((event) => event.sequence);
+    assert.deepEqual(drained, Array.from({ length: 100 }, (_, index) => index + 1));
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("purgeAgent drops the ephemeral live feed and settles its outstanding waiters", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const mk = (summary: string): DaemonActivityEvent => ({
+    observed_at: "2026-07-31T00:00:00.000Z", sequence: 0, provider: "open-model", kind: "text_delta", method: "item/agentMessage/delta",
+    summary, status: "working", payload: { m: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void;
+      agentStreams: Map<string, unknown>;
+      agentStreamWaiters: Map<string, Set<() => void>>;
+    };
+    const status = (await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number };
+    // A fully stopped durable identity carrying a live-feed transcript.
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "purge_streams", desired_state: "stopped", observed_state: "stopped",
+    } })).ok, true);
+    internals.pushAgentStreamEvent("purge_streams", mk("hello"));
+    assert.equal(internals.agentStreams.has("purge_streams"), true);
+
+    // A drained watcher blocks, registering a waiter for this entry.
+    const pending = daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "purge_streams", after_sequence: 1, wait_ms: 5_000 });
+    for (let i = 0; i < 100 && (internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) > 0, true, "the drained watcher registers a waiter before purge");
+
+    // A successful purge settles the waiter and drops the entry's ephemeral state.
+    const purge = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
+      entry_id: "purge_streams", daemon_generation: status.generation, revoked_agent_session_id: null,
+    })).result as { outcome: string };
+    assert.equal(purge.outcome, "purged");
+    await pending; // the blocked watcher returns rather than hanging to its own timeout
+    assert.equal(internals.agentStreams.has("purge_streams"), false);
+    assert.equal(internals.agentStreamWaiters.has("purge_streams"), false);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("desired-state compare-and-set cannot resurrect a concurrently stopped launch", async () => {
   const env = await fixture();
   const paths = {

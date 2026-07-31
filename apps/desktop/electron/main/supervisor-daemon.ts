@@ -53,6 +53,13 @@ const KILL_EXIT_TIMEOUT_MS = 1_000;
 const PROCESS_POLL_INTERVAL_MS = 25;
 const STATE_WATCH_RETRY_BASE_MS = 1_000;
 const STATE_WATCH_RETRY_MAX_MS = 30_000;
+/**
+ * While a focused agent's feed sits ended, re-poll at this cadence. The daemon
+ * ends the feed when a provider generation exits but keeps the entry so the next
+ * generation reopens it; this idle picks that reopen up without spinning against
+ * a daemon that answers an ended feed immediately.
+ */
+const AGENT_STREAM_REOPEN_POLL_MS = 1_000;
 const activityEmitter = new EventEmitter();
 const stateEmitter = new EventEmitter();
 const agentStreamEmitter = new EventEmitter();
@@ -1673,6 +1680,7 @@ async function runAgentStreamWatch(): Promise<void> {
   let watchedEntryId: string | null = null;
   let watchedGeneration = 0;
   let consecutiveFailures = 0;
+  let endedNotified = false;
   while (focusedAgentStreamEntryId !== null) {
     const entryId = focusedAgentStreamEntryId;
     try {
@@ -1683,20 +1691,32 @@ async function runAgentStreamWatch(): Promise<void> {
         agentStreamEmitter.emit("agent-stream", { entryId, events: [], ended: true });
         return;
       }
-      // A focus change or daemon restart resets the cursor.
+      // A focus change or daemon restart resets the cursor and the ended latch.
       if (watchedEntryId !== entryId || watchedGeneration !== status.generation) {
         watchedEntryId = entryId;
         watchedGeneration = status.generation;
         afterSequence = 0;
+        endedNotified = false;
       }
       const batch = await supervisorDaemonClient.watchAgentStream({ entryId, afterSequence });
       consecutiveFailures = 0;
       if (focusedAgentStreamEntryId !== entryId) continue; // focus moved mid-poll
       afterSequence = batch.sequence;
-      if (batch.events.length > 0 || batch.ended) {
+      // A reopened provider generation reuses the daemon buffer and keeps its
+      // monotonic cursor, so post-reopen events climb past ours and clear the
+      // latch; the renderer un-ends the feed on the next non-ended batch.
+      if (batch.events.length > 0) endedNotified = false;
+      if (batch.events.length > 0 || (batch.ended && !endedNotified)) {
         agentStreamEmitter.emit("agent-stream", { entryId, events: batch.events, ended: batch.ended });
       }
-      if (batch.ended) return;
+      if (batch.ended) {
+        // `ended` is a generation boundary, not a terminal state: the daemon
+        // keeps the entry so the next generation reopens the feed. Notify the
+        // renderer once and stay subscribed while this entry is focused, idling
+        // so a permanently ended feed re-polls slowly instead of spinning.
+        endedNotified = true;
+        if (focusedAgentStreamEntryId === entryId) await unrefDelay(AGENT_STREAM_REOPEN_POLL_MS);
+      }
     } catch {
       consecutiveFailures += 1;
       await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));

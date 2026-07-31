@@ -2993,6 +2993,12 @@ export class SupervisorDaemon {
         return { outcome: "invalid" as const, error: schedulerErrorDetail(error) };
       }
       this.liveBindingIdentities.delete(entryId); this.cachedWorkerAuthorizations.delete(entryId); this.hostGrants.delete(entryId); this.openModelCredentials.delete(entryId);
+      // The ephemeral live feed shares the durable identity's lifetime: wake any
+      // outstanding watcher so its long-poll returns, then drop the buffer and
+      // its waiter set so a purged agent leaves no transcript in daemon memory.
+      this.notifyAgentStreamWaiters(entryId);
+      this.agentStreams.delete(entryId);
+      this.agentStreamWaiters.delete(entryId);
       return { outcome: "purged" as const };
     }));
   }
@@ -3905,11 +3911,14 @@ export class SupervisorDaemon {
     const snapshot = (): { sequence: number; events: DaemonAgentStreamEvent[]; ended: boolean } => {
       const buffer = this.agentStreams.get(input.entryId);
       if (!buffer) return { sequence: input.afterSequence, events: [], ended: false };
-      return {
-        sequence: buffer.sequence,
-        events: buffer.events.filter((event) => event.sequence > input.afterSequence).slice(0, AGENT_STREAM_MAX_BATCH),
-        ended: buffer.ended,
-      };
+      const events = buffer.events
+        .filter((event) => event.sequence > input.afterSequence)
+        .slice(0, AGENT_STREAM_MAX_BATCH);
+      // Advance the cursor only to the last event actually delivered. Returning
+      // the producer's newest sequence would strand every event past the batch
+      // cap: the client resumes from this cursor and would filter them all out.
+      const sequence = events.length > 0 ? events[events.length - 1]!.sequence : input.afterSequence;
+      return { sequence, events, ended: buffer.ended };
     };
     let current = snapshot();
     if (!this.handoffScheduled && current.events.length === 0 && !current.ended && waitMs > 0) {
