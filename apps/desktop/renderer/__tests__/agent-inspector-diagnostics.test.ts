@@ -142,12 +142,13 @@ test("copy report is allowlisted and bounded even when every event is hostile", 
   assert.doesNotMatch(report, /lastTerminal|durablePayloadRef/);
 });
 
-test("the fourth diagnostics tab is lazy and participates in roving Home/End tab behavior", () => {
+test("the diagnostics tab is lazy and participates in roving Home/End tab behavior", () => {
   const source = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)), "utf8");
   assert.match(source, /defineAsyncComponent\(\(\) => import\("\.\/AgentInspectorDiagnostics\.vue"\)\)/);
   assert.match(source, /v-else id="agent-inspector-diagnostics-panel"/);
   assert.match(source, /<button id="agent-inspector-diagnostics-tab"/);
-  assert.match(source, /\["overview", "work", "settings", "diagnostics"\]/);
+  // The Live tab sits between Overview and Work; Diagnostics stays the End target.
+  assert.match(source, /\["overview", "live", "work", "settings", "diagnostics"\]/);
   assert.match(source, /event\.key === 'End' \? 'diagnostics'/);
 });
 

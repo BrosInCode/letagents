@@ -282,11 +282,13 @@
       :providers="agentInspectorProviders"
       :destinations="focusRooms.filter((candidate) => candidate.identifier !== room.identifier)"
       :settings-conflict="agentInspectorSettingsConflict"
+      :live-feed="agentInspectorLiveFeed"
       :room-identifier="room.identifier"
       :request-version="selectedAgentDetailRequestVersion"
       :managed-sessions="roomManagedAgentSessions"
       :reasoning-sessions="reasoningSessions"
       @close="closeAgentDetail"
+      @live-selected="openAgentInspectorLive"
       @action="runAgentInspectorAction"
       @session-updated="applyAgentInspectorParticipantSessionUpdate"
       @open-reasoning="openReasoningFromAgentDetail"
@@ -343,6 +345,7 @@ import type {
   DesktopReasoningSession,
   DesktopSnapshotSourceStates,
   DesktopSupervisorManifestEntry,
+  DesktopAgentStreamEvent,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorRoomMove,
   DesktopSupervisorStateSnapshot,
@@ -543,6 +546,13 @@ const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
+// Cap the retained live-feed tail so a long turn can't grow the renderer
+// buffer without bound; matches the daemon's ephemeral ring buffer intent.
+const AGENT_LIVE_FEED_LIMIT = 500;
+// Ephemeral live feed for the inspected agent's "Live" tab. Not persisted;
+// accumulates raw stream events for the focused entry only, reset on focus
+// change and inspector close.
+const agentInspectorLiveFeed = ref<{ events: DesktopAgentStreamEvent[]; ended: boolean }>({ events: [], ended: false });
 const agentInspectorWorkResource = ref<AgentInspectorWorkResource>(emptyAgentInspectorWorkResource());
 const agentInspectorWorkSourceMessageId = ref<string | null>(null);
 const agentInspectorConfigurationResource = ref<AgentInspectorConfigurationResource>({ status: "idle", configuration: null, draft: null, error: null });
@@ -708,6 +718,7 @@ let managedAgentSessionsRefreshQueued = false;
 let managedAgentSessionsRefreshOwnerActive = true;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 let unsubscribeSupervisorActivity: (() => void) | null = null;
+let unsubscribeSupervisorAgentStream: (() => void) | null = null;
 let unsubscribeSupervisorState: (() => void) | null = null;
 let supervisorStateSubscriptionActive = false;
 let supervisorStateLastSnapshotAtMs: number | null = null;
@@ -1103,6 +1114,9 @@ onBeforeUnmount(() => {
   unsubscribeManagedAgentSessionUpdate = null;
   unsubscribeSupervisorActivity?.();
   unsubscribeSupervisorActivity = null;
+  unsubscribeSupervisorAgentStream?.();
+  unsubscribeSupervisorAgentStream = null;
+  void desktopIpc.supervisor?.watchAgentStream?.(null);
   unsubscribeSupervisorState?.();
   unsubscribeSupervisorState = null;
   supervisorStateSubscriptionActive = false;
@@ -1145,6 +1159,15 @@ onMounted(() => {
     queueSupervisorStateSnapshot(snapshot);
   }) || null;
   supervisorStateSubscriptionActive = Boolean(unsubscribeSupervisorState);
+  unsubscribeSupervisorAgentStream = desktopIpc.supervisor?.onAgentStream?.((batch) => {
+    // Only accumulate for the agent whose inspector is focused; a batch for a
+    // stale focus (raced focus change) is ignored.
+    if (batch.entryId !== selectedAgentDetailProjection.value?.entryId) return;
+    const events = batch.events.length
+      ? [...agentInspectorLiveFeed.value.events, ...batch.events].slice(-AGENT_LIVE_FEED_LIMIT)
+      : agentInspectorLiveFeed.value.events;
+    agentInspectorLiveFeed.value = { events, ended: batch.ended };
+  }) || null;
 });
 
 function queueSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot): void {
@@ -2304,6 +2327,9 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
   agentInspectorWorkRequestToken += 1;
   agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
   agentInspectorWorkSourceMessageId.value = null;
+  // A fresh agent opens on the Overview tab; drop any prior live subscription
+  // so a stale agent's feed never leaks into the new inspector.
+  stopAgentInspectorLive();
   resetAgentInspectorSettings();
 }
 
@@ -2315,7 +2341,20 @@ function closeAgentDetail(): void {
   agentInspectorWorkRequestToken += 1;
   agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
   agentInspectorWorkSourceMessageId.value = null;
+  stopAgentInspectorLive();
   resetAgentInspectorSettings();
+}
+
+function openAgentInspectorLive(): void {
+  const projection = selectedAgentDetailProjection.value;
+  if (!projection) return;
+  agentInspectorLiveFeed.value = { events: [], ended: false };
+  void desktopIpc.supervisor?.watchAgentStream?.(projection.entryId);
+}
+
+function stopAgentInspectorLive(): void {
+  agentInspectorLiveFeed.value = { events: [], ended: false };
+  void desktopIpc.supervisor?.watchAgentStream?.(null);
 }
 
 function resetAgentInspectorSettings(): void {
