@@ -152,7 +152,9 @@ import {
 } from "./agents/codex-supervisor.js";
 import {
   onSupervisorActivity,
+  onSupervisorAgentStream,
   onSupervisorState,
+  setFocusedAgentStream,
   supervisorDaemonClient,
 } from "./supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
@@ -256,6 +258,7 @@ const { ipcMain } = electron as typeof import("electron");
 let supervisorActivityBridgeRegistered = false;
 let supervisorStateBridgeRegistered = false;
 let supervisorLaunchBridgeRegistered = false;
+let supervisorAgentStreamBridgeRegistered = false;
 
 /** A launch id shared by the durable entry (`supervised_<id>`) and every launch
  * fact. Must satisfy the daemon's creation-request-id shape; fall back to a
@@ -1210,6 +1213,18 @@ export function registerDesktopIpcHandlers(
     supervisorLaunchBridgeRegistered = true;
     onLaunchEvent((event) => emitToMainWindow("desktop:supervisor:launch-event", event));
   }
+  if (!supervisorAgentStreamBridgeRegistered) {
+    supervisorAgentStreamBridgeRegistered = true;
+    onSupervisorAgentStream((batch) => emitToMainWindow("desktop:supervisor:agent-stream", batch));
+  }
+  targetIpcMain.handle(
+    "desktop:supervisor:watch-agent-stream",
+    // The renderer focuses the live feed on the inspected agent, or clears it
+    // (null) when the inspector closes. Only one agent streams at a time.
+    async (_event, entryId?: string | null): Promise<void> => {
+      setFocusedAgentStream(typeof entryId === "string" && entryId.trim() ? entryId : null);
+    },
+  );
   targetIpcMain.handle(
     "desktop:workers:list-managed-agent-sessions",
     async (

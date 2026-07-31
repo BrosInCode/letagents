@@ -55,9 +55,13 @@ const STATE_WATCH_RETRY_BASE_MS = 1_000;
 const STATE_WATCH_RETRY_MAX_MS = 30_000;
 const activityEmitter = new EventEmitter();
 const stateEmitter = new EventEmitter();
+const agentStreamEmitter = new EventEmitter();
 const activitySequences = new Map<string, number>();
 let stateWatchOperation: Promise<void> | null = null;
 let stateWatchUnsupportedGeneration: number | null = null;
+/** The single agent whose live feed is currently subscribed (inspector focus). */
+let focusedAgentStreamEntryId: string | null = null;
+let agentStreamWatchOperation: Promise<void> | null = null;
 
 /** Main-process lifecycle signal. Renderer IPC never receives this hook. */
 export function onSupervisorDaemonGeneration(
@@ -405,6 +409,35 @@ export class SupervisorDaemonClient {
       daemonGeneration: value.daemon_generation,
       sequence: value.sequence,
       entries: value.entries.map(mapEntry),
+    };
+  }
+
+  async watchAgentStream(input: {
+    entryId: string;
+    afterSequence: number;
+    waitMs?: number;
+  }): Promise<{ sequence: number; events: import("../ipc-types/agents.js").DesktopAgentStreamEvent[]; ended: boolean }> {
+    const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
+    const value = await this.request<{
+      sequence: number;
+      events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown }>;
+      ended: boolean;
+    }>("supervisor.watch_agent_stream", {
+      entry_id: input.entryId,
+      after_sequence: input.afterSequence,
+      wait_ms: waitMs,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true);
+    return {
+      sequence: Number(value.sequence ?? input.afterSequence),
+      ended: value.ended === true,
+      events: (Array.isArray(value.events) ? value.events : []).map((event) => ({
+        sequence: Number(event.sequence),
+        observedAt: String(event.observed_at ?? ""),
+        kind: String(event.kind ?? ""),
+        method: String(event.method ?? ""),
+        summary: typeof event.summary === "string" ? event.summary : null,
+        payload: event.payload,
+      })),
     };
   }
 
@@ -1185,6 +1218,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
       agentLifecycle: booleanField(value.capabilities, "agent_lifecycle_v1"),
       agentRuntimeRecovery: booleanField(value.capabilities, "agent_runtime_recovery_v1"),
       agentStateSubscription: booleanField(value.capabilities, "agent_state_subscription_v1"),
+      agentActivityStream: booleanField(value.capabilities, "agent_activity_stream_v1"),
     },
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
@@ -1612,6 +1646,62 @@ function unrefDelay(ms: number): Promise<void> {
     const timer = setTimeout(resolve, ms);
     timer.unref();
   });
+}
+
+export function onSupervisorAgentStream(
+  listener: (batch: import("../ipc-types/agents.js").DesktopAgentStreamBatch) => void,
+): () => void {
+  agentStreamEmitter.on("agent-stream", listener);
+  return () => agentStreamEmitter.off("agent-stream", listener);
+}
+
+/**
+ * Focus the live feed on exactly one agent (or clear it). Only the inspected
+ * agent's token firehose is streamed; switching focus abandons the previous
+ * long-poll and starts a fresh one. Passing null stops streaming entirely.
+ */
+export function setFocusedAgentStream(entryId: string | null): void {
+  if (focusedAgentStreamEntryId === entryId) return;
+  focusedAgentStreamEntryId = entryId;
+  if (entryId && !agentStreamWatchOperation) {
+    agentStreamWatchOperation = runAgentStreamWatch().finally(() => { agentStreamWatchOperation = null; });
+  }
+}
+
+async function runAgentStreamWatch(): Promise<void> {
+  let afterSequence = 0;
+  let watchedEntryId: string | null = null;
+  let watchedGeneration = 0;
+  let consecutiveFailures = 0;
+  while (focusedAgentStreamEntryId !== null) {
+    const entryId = focusedAgentStreamEntryId;
+    try {
+      const status = await supervisorDaemonClient.connectIfRunning();
+      if (!status) return;
+      if (!status.capabilities.agentActivityStream) {
+        // Old daemon: tell the renderer the feed is unavailable, then stop.
+        agentStreamEmitter.emit("agent-stream", { entryId, events: [], ended: true });
+        return;
+      }
+      // A focus change or daemon restart resets the cursor.
+      if (watchedEntryId !== entryId || watchedGeneration !== status.generation) {
+        watchedEntryId = entryId;
+        watchedGeneration = status.generation;
+        afterSequence = 0;
+      }
+      const batch = await supervisorDaemonClient.watchAgentStream({ entryId, afterSequence });
+      consecutiveFailures = 0;
+      if (focusedAgentStreamEntryId !== entryId) continue; // focus moved mid-poll
+      afterSequence = batch.sequence;
+      if (batch.events.length > 0 || batch.ended) {
+        agentStreamEmitter.emit("agent-stream", { entryId, events: batch.events, ended: batch.ended });
+      }
+      if (batch.ended) return;
+    } catch {
+      consecutiveFailures += 1;
+      await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));
+    }
+  }
 }
 
 export async function publishSupervisorActivity(input: {

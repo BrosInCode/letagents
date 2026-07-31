@@ -281,6 +281,12 @@ const api: DesktopApi = {
     },
     getLaunchEvents: (launchId, afterSequence) =>
       ipcRenderer.invoke("desktop:supervisor:get-launch-events", launchId, afterSequence ?? null),
+    onAgentStream: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:supervisor:agent-stream", listener);
+      return () => ipcRenderer.off("desktop:supervisor:agent-stream", listener);
+    },
+    watchAgentStream: (entryId) => ipcRenderer.invoke("desktop:supervisor:watch-agent-stream", entryId ?? null),
   },
   diagnostics: {
     getSnapshot: () => ipcRenderer.invoke("desktop:diagnostics:get-snapshot"),
