@@ -3261,6 +3261,15 @@ export class SupervisorDaemon {
     const capabilities = await this.providerPort?.capabilities(input.workAttemptId, entry.provider);
     const capability = capabilities?.turnControl ?? "unsupported";
     const correction = input.correction?.trim() || null;
+    // A correction is applied natively (Codex: interrupt+resume the same turn)
+    // or via stop-then-resend for stop-only providers (open-model, claude-code):
+    // stop the current turn, then re-run the correction as a fresh bounded turn
+    // on the same provider session. For stop-then-resend, the native turn-control
+    // call is a pure Stop (no correction handed to the adapter), so `controlTurn`
+    // never has to reject an unjournaled correction turn.
+    const supportsNativeCorrection = capabilities?.midTurnCorrection === true;
+    const stopThenResend = Boolean(correction) && !supportsNativeCorrection;
+    const nativeCorrection = stopThenResend ? null : correction;
     const existingControl = entry.turn_control;
     const retryingControl = existingControl?.action_id === input.actionId
       && existingControl.status === "retryable";
@@ -3366,7 +3375,7 @@ export class SupervisorDaemon {
     let providerResult: ProviderTurnControlResult;
     let dispatchMarked = false;
     try {
-      providerResult = await this.providerPort.controlTurn(handle, correction, {
+      providerResult = await this.providerPort.controlTurn(handle, nativeCorrection, {
         actionId: input.actionId,
         markDispatched: async () => {
           if (dispatchMarked) return;
@@ -3413,14 +3422,18 @@ export class SupervisorDaemon {
         : current);
       throw error;
     }
-    // Double-outcome fix: for a Stop that natively interrupted a live turn,
-    // settle the daemon delivery turn so the FIFO pump cannot also publish a
-    // (possibly partial) reply for the same turn. interruptActiveDelivery
+    // Double-outcome fix: a pure native Stop (`nativeCorrection === null` — a
+    // plain Stop OR the stop half of a stop-then-resend) that interrupted a live
+    // turn must settle the daemon delivery turn so the FIFO pump cannot also
+    // publish a (possibly partial) reply for the same turn. interruptActiveDelivery
     // settles the item cancelled_by_user iff it had not already committed to
-    // publishing, then aborts the turn-scoped delivery controller. Corrections
-    // keep today's provider-native path (Codex resume) and are not settled here.
+    // publishing, then aborts the turn-scoped delivery controller (settle before
+    // abort); it reports "published" when a publication won the race, in which
+    // case the reply stands and the turn was not truly interrupted. A Codex
+    // native correction (nativeCorrection !== null) resumes the same turn, is
+    // never settled here, and never enters this branch.
     let settlement: "settled" | "published" | "no_active_turn" = "no_active_turn";
-    if (correction === null && providerResult.interrupted && this.supervisedDelivery) {
+    if (nativeCorrection === null && providerResult.interrupted && this.supervisedDelivery) {
       const credential = await this.workerBindings.credentialFor(binding).catch(() => null);
       const ingressAgent: SupervisedIngressAgent = {
         agentId: entry.id,
@@ -3459,10 +3472,27 @@ export class SupervisorDaemon {
     // interrupted. With no daemon delivery turn (mcp_polling, or idle
     // daemon_inbox) the provider's native interrupt stands unchanged.
     const interrupted = settlement === "published" ? false : providerResult.interrupted;
+    // Stop-then-resend: the stopped turn is settled above; now enqueue the
+    // correction as a fresh bounded turn on the same provider session and kick
+    // convergence so the delivery pump runs it. The synthetic source id is
+    // derived from the (stable) action id so a retried control action
+    // re-enqueues idempotently instead of duplicating the correction turn.
+    let resumed = providerResult.resumed;
+    if (stopThenResend && correction) {
+      await this.supervisedInbox.enqueueCorrection({
+        agent_id: entry.id,
+        room_id: entry.room_id,
+        source_message_id: `correction:${input.actionId}`,
+        source_message: { text: correction, sender: { kind: "supervisor_correction" } },
+        activation: { decision: "activate", reason: "human_correction", addressed: true },
+      });
+      this.requestConvergence(entry.id);
+      resumed = true;
+    }
     const stages: DaemonTurnControlResult["stages"] = ["delivered"];
     if (interrupted) stages.push("interrupting");
     stages.push("applied");
-    if (providerResult.resumed) stages.push("resumed");
+    if (resumed) stages.push("resumed");
     const observedAt = new Date().toISOString();
     await this.updateManifestEntry(entry.id, (current) => {
       if (current.work_attempt_id !== input.workAttemptId
@@ -3504,7 +3534,7 @@ export class SupervisorDaemon {
           status: "completed",
           capability,
           interrupted,
-          resumed: providerResult.resumed,
+          resumed,
           state: providerResult.state,
           stages,
           error: null,
@@ -3524,6 +3554,7 @@ export class SupervisorDaemon {
       stages,
       ...providerResult,
       interrupted,
+      resumed,
     };
   }
 

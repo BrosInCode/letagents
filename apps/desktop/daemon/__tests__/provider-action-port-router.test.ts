@@ -22,6 +22,7 @@ import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -480,7 +481,10 @@ test("daemon convergence drives Claude through the router across stop and same-a
   let proveControlNotApplied = false;
   let sawAcceptedControlBeforeProvider = false;
   const adapter: NativeProviderAdapter = {
-    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
+    // This fake models a native interrupt+resume provider (its controlTurn
+    // resumes on a correction), so it declares midTurnCorrection — the daemon
+    // routes corrections natively rather than via stop-then-resend.
+    capabilities: () => ({ resume: true, midTurnInjection: false, midTurnCorrection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
     async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async attach() { calls.push("attach"); return null; },
     async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
@@ -631,6 +635,107 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(calls.some((call) => call.startsWith("resume:")));
   } finally {
     await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a correction on a stop-only provider is delivered as stop-then-resend, never a rejected correction", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-router-stop-resend-"));
+  const source = join(root, "source");
+  await mkdir(source);
+  await execFileAsync("git", ["init", source]);
+  await execFileAsync("git", ["-C", source, "config", "user.email", "router@example.invalid"]);
+  await execFileAsync("git", ["-C", source, "config", "user.name", "Router Test"]);
+  await writeFile(join(source, "README.md"), "router\n");
+  await execFileAsync("git", ["-C", source, "add", "README.md"]);
+  await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
+  await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
+
+  const calls: string[] = [];
+  let nextPid = 6000;
+  const continuation = "stop-only-continuation";
+  const exitListeners = new Map<string, Set<(terminal: ProviderActionTerminal) => void>>();
+  function lifecycleHandle(workAttemptId: string) {
+    const pid = ++nextPid;
+    return {
+      workAttemptId, pid, providerContinuationId: continuation,
+      providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
+      observedState: () => "working" as const,
+    };
+  }
+  const adapter: NativeProviderAdapter = {
+    // A stop-only provider (open-model / claude-code): it can stop the active
+    // turn but cannot resume a correction, so midTurnCorrection is false.
+    capabilities: () => ({ resume: true, midTurnInjection: false, midTurnCorrection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
+    async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
+    async attach() { return null; },
+    async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
+    async poke() { throw new Error("poke unavailable"); },
+    async controlTurn(handle, correction, options) {
+      await options?.markDispatched?.();
+      calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      if (correction) {
+        // If the daemon ever handed a correction to a stop-only adapter, it
+        // would reject it and the UI would loop on a failing "retryable" state.
+        throw Object.assign(new Error("stop-only provider cannot start an unjournaled correction turn"), { turnControlOutcome: "not_applied" as const });
+      }
+      return { capability: "native_interrupt" as const, interrupted: true, resumed: false, state: "idle" as const };
+    },
+    async stop(handle) {
+      calls.push(`stop:${handle.workAttemptId}`);
+      const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
+      queueMicrotask(() => exitListeners.get(handle.workAttemptId)?.forEach((listener) => listener(terminal)));
+      return terminal;
+    },
+    onExit(handle, listener) {
+      const listeners = exitListeners.get(handle.workAttemptId) ?? new Set<(terminal: ProviderActionTerminal) => void>();
+      listeners.add(listener); exitListeners.set(handle.workAttemptId, listeners);
+      return () => listeners.delete(listener);
+    },
+    onStream: () => () => {},
+  };
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+    workerBindingsPath: join(root, "worker-bindings.json"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", router, true);
+  const entry: DaemonManifestEntry = {
+    id: "stop_only_supervised", room_id: "room", display_name: "OpenModel", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
+    permission_profile_id: "full_access", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+  };
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "stop-only router start");
+    const first = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    const firstGeneration = first.provider_ref?.execution_generation_id;
+    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
+      entry_id: entry.id, room_id: entry.room_id, work_attempt_id: first.work_attempt_id!, execution_generation_id: firstGeneration!,
+      agent_session_id: "agent_session_exact", agent_session_token: "test-session-token", api_url: "https://letagents.test",
+    });
+    const controlled = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: entry.id, work_attempt_id: first.work_attempt_id, execution_generation_id: firstGeneration,
+      action_id: "human-control-1", correction: "Use the revised direction",
+    });
+    assert.equal(controlled.ok, true, "a stop-only correction succeeds via stop-then-resend, not a not_applied loop");
+    assert.deepEqual((controlled.result as { stages: string[] }).stages, ["delivered", "interrupting", "applied", "resumed"]);
+    assert.equal((controlled.result as { resumed: boolean }).resumed, true);
+    assert.equal((controlled.result as { interrupted: boolean }).interrupted, true);
+    // The adapter only ever saw a pure Stop; the correction was never handed to it.
+    assert.deepEqual(calls.filter((call) => call.startsWith("control:")), [`control:${first.work_attempt_id}:stop`]);
+  } finally {
+    await daemon.stop();
+    // The correction is enqueued as a fresh same-session FIFO turn that the
+    // daemon delivery pump runs on the existing provider continuation.
+    const inbox = new SupervisedAgentInboxStore(paths.manifestPath);
+    try {
+      const correction = (await inbox.receipts(entry.id)).find((receipt) => receipt.source_message_id === "correction:human-control-1");
+      assert.ok(correction, "the correction is enqueued as a synthetic inbox turn");
+      assert.equal(correction!.state, "pending");
+      assert.equal((correction!.source_message as { text?: string }).text, "Use the revised direction");
+    } finally { await inbox.close(); }
     await rm(root, { recursive: true, force: true });
   }
 });

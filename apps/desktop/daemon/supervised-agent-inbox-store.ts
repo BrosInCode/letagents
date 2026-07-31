@@ -178,6 +178,34 @@ export class SupervisedAgentInboxStore {
     }));
   }
 
+  /**
+   * Enqueue a human correction as a synthetic FIFO turn that runs on the SAME
+   * provider session as the interrupted turn (stop-then-resend). It mirrors
+   * `ingestPoll`'s inbox INSERT but deliberately never touches the ingress
+   * cursor: a correction is not an observed room message, so advancing the
+   * cursor would skip real messages. The caller owns the synthetic
+   * `source_message_id` (derived from the stable turn-control action id) so a
+   * retried control action re-enqueues idempotently rather than duplicating.
+   */
+  async enqueueCorrection(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
+    this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id"); this.require(input.source_message_id, "source_message_id");
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, input.source_message_id) as Row | undefined;
+      if (existing) return rowToItem(existing);
+      const sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value) + 1;
+      const timestamp = this.now(); const inboxItemId = randomUUID();
+      const actionId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:action:v1`;
+      const replyId = `supervised-room:${input.agent_id}:${input.room_id}:${input.source_message_id}:reply:v1`;
+      run(database.prepare(`INSERT INTO supervised_agent_inbox
+        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,outcome,last_error,failure_code,blocked_by_inbox_item_id,next_attempt_at_ms,created_at,updated_at,acknowledged_at)
+        VALUES (?,?,?,?,?,?,?,'pending',0,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,NULL)`),
+        inboxItemId, input.agent_id, input.room_id, input.source_message_id, JSON.stringify(input.source_message), JSON.stringify(input.activation), sequence, actionId, replyId, timestamp, timestamp);
+      this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
+      this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
+
   async cursor(agentId: string): Promise<{ agent_id: string; room_id: string; last_observed_message_id: string | null; updated_at: string } | null> {
     return this.read(async (database) => {
       const row = database.prepare("SELECT * FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(agentId) as Row | undefined;

@@ -133,6 +133,9 @@ const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
   // Resume is populated per app-server after a protocol-level probe.
   resume: false,
   midTurnInjection: false,
+  // Codex applies a correction natively: interrupt the current turn and resume
+  // the same turn with the correction, without losing it.
+  midTurnCorrection: true,
   transcriptAccess: true,
   permissionPromptBridging: false,
   survivesRestart: true,

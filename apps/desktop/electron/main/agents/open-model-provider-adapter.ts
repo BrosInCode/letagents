@@ -113,6 +113,9 @@ const CAPABILITIES: ProviderAdapterCapabilities = {
   deliveryModes: ["daemon_inbox"],
   resume: true,
   midTurnInjection: false,
+  // Open Model cannot resume an interrupted turn; corrections are delivered via
+  // stop-then-resend on the same OpenCode session.
+  midTurnCorrection: false,
   transcriptAccess: true,
   permissionPromptBridging: false,
   survivesRestart: true,
