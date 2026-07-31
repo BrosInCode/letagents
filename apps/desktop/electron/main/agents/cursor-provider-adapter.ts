@@ -102,6 +102,8 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   // boundary (immediately when idle) and refuses mid-turn, so the reconciler's
   // stuck-agent poke rung must stay off.
   midTurnInjection: false,
+  // Cursor has no native interrupt+resume; corrections use stop-then-resend.
+  midTurnCorrection: false,
   // Every turn's stream-json output is published as bounded/redacted evidence.
   transcriptAccess: true,
   permissionPromptBridging: false,

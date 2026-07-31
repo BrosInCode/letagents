@@ -12,6 +12,8 @@ export type ProviderActionCapabilities = {
   permissionPromptBridging: boolean;
   survivesRestart: boolean;
   turnControl?: "native_interrupt" | "restart_resume" | "unsupported";
+  /** Native interrupt+resume of the current turn (Codex). Absent/false ⇒ the daemon uses stop-then-resend. */
+  midTurnCorrection?: boolean;
   continuationRepair?: "same_process" | "unsupported";
 };
 export type ProviderTurnControlResult = {
