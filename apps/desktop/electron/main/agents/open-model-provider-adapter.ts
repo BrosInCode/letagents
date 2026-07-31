@@ -267,6 +267,22 @@ export class OpenCodeStartTimeoutError extends Error {
   }
 }
 
+/**
+ * The saved OpenCode process is provably gone — attach returned terminal
+ * identity, so resume can never reattach it. This continuation cannot be
+ * recovered; the daemon must start a fresh runtime generation rather than
+ * retry resume against a corpse. Distinct from an unverifiable process (see
+ * resume() below), which may still be alive and is worth a bounded retry.
+ */
+export class OpenCodeRuntimeGoneError extends Error {
+  readonly providerRuntimeGone = true;
+
+  constructor() {
+    super("The saved OpenCode process is no longer running.");
+    this.name = "OpenCodeRuntimeGoneError";
+  }
+}
+
 class OpenCodeTerminalTurnError extends Error {
   // A provider-declared terminal error is authoritative evidence that this
   // exact turn produced no publishable answer. Block it without rerunning the
@@ -596,7 +612,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     // Only a terminal identity proves that the saved writer is gone.
     const attached = await this.attach(ref);
     if (attached && !("state" in attached)) return attached;
-    if (attached?.state === "terminal") throw new Error("The saved OpenCode process is no longer running.");
+    // Terminal identity is proof the process is gone: the daemon must recover
+    // by starting a fresh runtime, not retry resume against a corpse.
+    if (attached?.state === "terminal") throw new OpenCodeRuntimeGoneError();
     throw new Error("The saved OpenCode process could not be authenticated; refusing to start a competing runtime.");
   }
 

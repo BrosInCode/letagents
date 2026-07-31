@@ -31,6 +31,7 @@ import type { ProviderActionPort } from "../provider-action-port.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
+import { OpenCodeRuntimeGoneError } from "../../electron/main/agents/open-model-provider-adapter.js";
 
 /**
  * Unit ports stand in for the production router, whose successful spawn and
@@ -3892,6 +3893,87 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
     assert.equal(durable.execution_generations.length, 1, "recovery does not start a provider generation inline");
     assert.equal(durable.execution_generations[0]?.execution_generation_id, execution.execution_generation_id);
     assert.ok(durable.execution_generations[0]?.terminal, "exact terminal evidence is persisted before replacement");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("a provably-gone provider runtime auto-recovers with a fresh runtime instead of dead-ending in recovering", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const id = "auto_recover_gone_runtime";
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(
+    paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"),
+    undefined, fakeGit(env.root), undefined, TEST_SUPERVISOR,
+  );
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  await durability.close();
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { throw new Error("unused in this test"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("unused in this test"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: "ses_gone" }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, { poll: async () => ({ messages: [] }), publish: async () => {} });
+  try {
+    await daemon.start();
+    let scheduledConvergence = 0;
+    const internals = daemon as unknown as {
+      recordSchedulerFailure: (entryId: string, error: unknown, actor: string) => Promise<void>;
+      scheduleRecoveryConvergence: (entryId: string, delayMs: number) => void;
+      updateManifestEntry: (entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry) => Promise<DaemonManifestEntry>;
+    };
+    const realSchedule = internals.scheduleRecoveryConvergence.bind(internals);
+    internals.scheduleRecoveryConvergence = (entryId, delayMs) => { if (entryId === id) scheduledConvergence += 1; void realSchedule; };
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "open-model", delivery_mode: "daemon_inbox",
+      desired_state: "running", observed_state: "recovering", condition: "coordination_blocked",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id, provider_continuation_id: "ses_gone",
+        provider_connection: { kind: "opencode_server", url: "http://127.0.0.1:52999", pid: 46_000, processIdentity: "opencode-birth-46000", serverAuthPath: join(env.root, "opencode", "server-auth.json") },
+        execution_generation_id: execution.execution_generation_id,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+
+    // The daemon observed the saved runtime is provably gone (adapter marks it).
+    await internals.recordSchedulerFailure(id, new OpenCodeRuntimeGoneError(), "daemon-convergence");
+
+    const recovered = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.equal(recovered.provider_ref, null, "the dead continuation is dropped so the next convergence spawns fresh");
+    assert.equal(recovered.observed_state, "failed", "a failed edge engages the crash-loop backoff/quarantine machinery");
+    assert.equal(recovered.condition, "none", "the entry is not left blocked; it is eligible for a fresh runtime");
+    assert.match(String(recovered.last_error), /starting a replacement/);
+    assert.equal(scheduledConvergence, 1, "a fresh-runtime convergence is scheduled automatically, no manual Recover required");
+
+    // A non-gone durable-continuation failure must NOT drop the continuation:
+    // the process may still be alive and resume must not spawn a competitor.
+    // (manifest.put is idempotent for an existing id, so re-seed in place.)
+    await internals.updateManifestEntry(id, (current) => ({
+      ...current,
+      observed_state: "recovering",
+      condition: "none",
+      last_error: null,
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id, provider_continuation_id: "ses_unverified",
+        provider_connection: { kind: "opencode_server", url: "http://127.0.0.1:52999", pid: 46_000, processIdentity: "opencode-birth-46000", serverAuthPath: join(env.root, "opencode", "server-auth.json") },
+        execution_generation_id: execution.execution_generation_id,
+      },
+    }));
+    await internals.recordSchedulerFailure(id, new Error("The saved OpenCode process could not be authenticated; refusing to start a competing runtime."), "daemon-convergence");
+    const blocked = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])!;
+    assert.ok(blocked.provider_ref, "an unverifiable (maybe-alive) runtime keeps its continuation for a bounded retry");
+    assert.equal(blocked.condition, "coordination_blocked", "it rests at an actionable blocked state, not a fresh-spawn reset");
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
