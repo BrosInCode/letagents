@@ -3415,13 +3415,11 @@ export class SupervisorDaemon {
     }
     // Double-outcome fix: for a Stop that natively interrupted a live turn,
     // settle the daemon delivery turn so the FIFO pump cannot also publish a
-    // (possibly partial) reply for the same turn. interruptActiveDelivery aborts
-    // the turn-scoped delivery controller and settles the item cancelled_by_user
-    // iff it had not already committed to publishing; it returns false when a
-    // publication won the race, in which case the reply stands and the turn was
-    // not truly interrupted. Corrections keep today's provider-native path
-    // (Codex resume) and never settle the delivery turn here.
-    let daemonSettled = false;
+    // (possibly partial) reply for the same turn. interruptActiveDelivery
+    // settles the item cancelled_by_user iff it had not already committed to
+    // publishing, then aborts the turn-scoped delivery controller. Corrections
+    // keep today's provider-native path (Codex resume) and are not settled here.
+    let settlement: "settled" | "published" | "no_active_turn" = "no_active_turn";
     if (correction === null && providerResult.interrupted && this.supervisedDelivery) {
       const credential = await this.workerBindings.credentialFor(binding).catch(() => null);
       const ingressAgent: SupervisedIngressAgent = {
@@ -3440,9 +3438,13 @@ export class SupervisorDaemon {
         daemonGeneration: this.singleton.currentGeneration,
         deliveryMode: entry.delivery_mode ?? "mcp_polling",
       };
-      daemonSettled = await this.supervisedDelivery.interruptActiveDelivery(ingressAgent).catch(() => false);
+      settlement = await this.supervisedDelivery.interruptActiveDelivery(ingressAgent).catch(() => "no_active_turn" as const);
     }
-    const interrupted = correction === null ? providerResult.interrupted && daemonSettled : providerResult.interrupted;
+    // Only a genuine publish-race downgrades `interrupted`: if a daemon turn had
+    // already committed its reply, the reply stands so the turn was not truly
+    // interrupted. With no daemon delivery turn (mcp_polling, or idle
+    // daemon_inbox) the provider's native interrupt stands unchanged.
+    const interrupted = settlement === "published" ? false : providerResult.interrupted;
     const stages: DaemonTurnControlResult["stages"] = ["delivered"];
     if (interrupted) stages.push("interrupting");
     stages.push("applied");

@@ -1856,7 +1856,7 @@ test("Stop settles the in-flight turn cancelled_by_user, suppresses its publish,
       assert.equal(delivery.activeTurn(agent)?.sourceMessageId, "1", "the first message is the in-flight turn");
 
       const settled = await delivery.interruptActiveDelivery(agent);
-      assert.equal(settled, true, "an in-flight pre-publish turn is settled by the interrupt");
+      assert.equal(settled, "settled", "an in-flight pre-publish turn is settled by the interrupt");
       const afterInterrupt = await store.receipts(agent.agentId);
       assert.equal(afterInterrupt.find((receipt) => receipt.source_message_id === "1")?.state, "cancelled_by_user");
 
@@ -1890,13 +1890,71 @@ test("a Stop that races a committed publication loses: the reply stands and the 
       await publishEntered.promise; // the turn has already committed to publishing
 
       const settled = await delivery.interruptActiveDelivery(agent);
-      assert.equal(settled, false, "once publishing has committed, the interrupt loses the race");
+      assert.equal(settled, "published", "once publishing has committed, the interrupt loses the race");
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "publishing", "the committed publication is left authoritative");
 
       publishRelease.resolve();
       await pollPromise;
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged", "the publication completes to acknowledged");
       assert.equal(published.length, 1, "the reply is published exactly once");
+    } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("interruptActiveDelivery reports no_active_turn when no daemon turn is running", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-no-active-turn-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+      poll: async () => ({}), publish: async () => { throw new Error("must not publish"); },
+    }, currentAuthority, 0);
+    try {
+      // No turn has ever run for this agent, so there is nothing to interrupt.
+      // This is the mcp_polling / idle case: the caller must NOT downgrade the
+      // provider's own native interrupt on the strength of a daemon settlement.
+      assert.equal(await delivery.interruptActiveDelivery(agent), "no_active_turn");
+    } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a failed durable cancellation neither aborts the turn nor strands the FIFO", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cancel-failure-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    // A transient cancellation failure must propagate WITHOUT aborting the turn,
+    // so the in-flight deliver() stays the sole consumer able to settle it.
+    const realCancel = store.cancelInterruptedTurn.bind(store);
+    let failCancel = true;
+    store.cancelInterruptedTurn = async (inboxItemId: string, detail?: string) => {
+      if (failCancel) throw new Error("transient sqlite failure");
+      return realCancel(inboxItemId, detail);
+    };
+    const turnEntered = deferred<void>();
+    const turnRelease = deferred<void>();
+    const published: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      turnEntered.resolve();
+      await turnRelease.promise;
+      return { turnId: request.inboxItemId, outcome: "reply", text: "completed after the failed stop" };
+    }), {
+      poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }),
+      publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+    }, currentAuthority, 0);
+    try {
+      const pollPromise = delivery.poll(agent);
+      await turnEntered.promise;
+      // The durable cancellation fails; the interrupt must reject and must not abort.
+      await assert.rejects(delivery.interruptActiveDelivery(agent), /transient sqlite failure/);
+      assert.ok(delivery.activeTurn(agent), "the in-flight turn is still the live consumer after a failed cancellation");
+      // The turn finishes and publishes normally: the head reaches a terminal
+      // state instead of being stranded with no consumer.
+      failCancel = false;
+      turnRelease.resolve();
+      await pollPromise;
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged", "the head settles rather than stalling the FIFO");
+      assert.equal(published.length, 1);
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }

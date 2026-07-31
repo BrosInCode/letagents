@@ -363,23 +363,42 @@ export class SupervisedAgentDelivery {
   /**
    * Stop the in-flight turn for this exact agent identity without retiring the
    * pump, so the next FIFO item (e.g. a stop-then-resend correction) can run.
-   * Aborts the turn-scoped controller — dropping the pending provider-result
-   * wait and short-circuiting the pre-publish authority gates — then settles the
-   * item `cancelled_by_user` if it has not yet committed to publishing.
+   * Settles the head `cancelled_by_user` if it has not yet committed to
+   * publishing, then — only on a successful settlement — aborts the turn-scoped
+   * controller so `deliver()` drops its provider-result wait and returns.
    *
-   * Returns whether the interrupt actually settled the turn (`true`), or lost
-   * the race to a publication that had already committed / no matching active
-   * turn existed (`false`). The identity gate mirrors `activeTurn()` so a stale
-   * caller can never abort a successor turn.
+   * Ordering matters: the durable cancellation is committed BEFORE the abort. If
+   * we aborted first and the cancellation write then failed (e.g. a transient
+   * SQLite error), `deliver()` would already have exited on the turn signal,
+   * leaving the head stuck `dispatching`/`awaiting_result` with no live consumer
+   * to settle or retry it — a stalled FIFO. Settling first means a failed
+   * cancellation leaves the in-flight `deliver()` untouched as the sole consumer.
+   *
+   * The three outcomes are distinct so the caller can report an honest
+   * `interrupted`:
+   *  - `"settled"`: the interrupt won and the item is `cancelled_by_user`.
+   *  - `"published"`: there WAS an active daemon turn but it had already
+   *    committed to publishing — the reply stands and the turn was not truly
+   *    interrupted (only this case downgrades `interrupted`). No abort: the
+   *    publishing turn keeps its own consumer.
+   *  - `"no_active_turn"`: no matching daemon delivery turn (e.g. an mcp_polling
+   *    agent, or an idle daemon_inbox agent). The provider's own native
+   *    interrupt stands; there is no daemon reply to arbitrate.
+   *
+   * The identity gate mirrors `activeTurn()` so a stale caller can never abort a
+   * successor turn.
    */
-  async interruptActiveDelivery(agent: SupervisedIngressAgent, inboxItemId?: string): Promise<boolean> {
+  async interruptActiveDelivery(agent: SupervisedIngressAgent, inboxItemId?: string): Promise<"settled" | "published" | "no_active_turn"> {
     const active = this.activeTurns.get(agent.agentId);
-    if (!active || active.recoveryContext !== this.recoveryContext(agent)) return false;
-    if (inboxItemId && active.inboxItemId !== inboxItemId) return false;
+    if (!active || active.recoveryContext !== this.recoveryContext(agent)) return "no_active_turn";
+    if (inboxItemId && active.inboxItemId !== inboxItemId) return "no_active_turn";
+    // Durable cancellation first; a rejection here propagates and never detaches
+    // the in-flight consumer.
+    const settled = await this.inbox.cancelInterruptedTurn(active.inboxItemId);
+    if (settled?.state !== "cancelled_by_user") return "published";
     const abort = this.activeTurnAborts.get(agent.agentId);
     if (abort?.inboxItemId === active.inboxItemId) abort.controller.abort();
-    const settled = await this.inbox.cancelInterruptedTurn(active.inboxItemId);
-    return settled?.state === "cancelled_by_user";
+    return "settled";
   }
 
   private async retryOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
