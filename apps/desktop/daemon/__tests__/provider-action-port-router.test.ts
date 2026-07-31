@@ -639,8 +639,17 @@ test("daemon convergence drives Claude through the router across stop and same-a
   }
 });
 
-test("a correction on a stop-only provider is delivered as stop-then-resend, never a rejected correction", async () => {
-  const root = await mkdtemp(join(tmpdir(), "letagents-router-stop-resend-"));
+test("a native-correction provider keeps its own adapter path and is never orphaned into a daemon inbox", async () => {
+  // Regression guard for the Cursor routing bug: Cursor advertises only
+  // mcp_polling but applies a correction natively (its controlTurn stops the
+  // child and beginTurns the same session with the correction). Such a provider
+  // must NOT be routed into daemon stop-then-resend, which would strip the
+  // correction and enqueue a synthetic daemon-inbox row its mcp_polling lane
+  // could never pump. The fake below is that Cursor shape (mcp_polling +
+  // midTurnCorrection), registered under a proven-spawnable provider key so the
+  // daemon's capability-based routing is what's under test, not one provider's
+  // spawn lifecycle.
+  const root = await mkdtemp(join(tmpdir(), "letagents-router-native-correction-"));
   const source = join(root, "source");
   await mkdir(source);
   await execFileAsync("git", ["init", source]);
@@ -653,20 +662,21 @@ test("a correction on a stop-only provider is delivered as stop-then-resend, nev
 
   const calls: string[] = [];
   let nextPid = 6000;
-  const continuation = "stop-only-continuation";
+  const continuation = "native-correction-continuation";
   const exitListeners = new Map<string, Set<(terminal: ProviderActionTerminal) => void>>();
   function lifecycleHandle(workAttemptId: string) {
     const pid = ++nextPid;
     return {
       workAttemptId, pid, providerContinuationId: continuation,
-      providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
+      providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `native:${pid}` },
       observedState: () => "working" as const,
     };
   }
   const adapter: NativeProviderAdapter = {
-    // A stop-only provider (open-model / claude-code): it can stop the active
-    // turn but cannot resume a correction, so midTurnCorrection is false.
-    capabilities: () => ({ resume: true, midTurnInjection: false, midTurnCorrection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
+    // mcp_polling lane, but midTurnCorrection: it resumes the correction through
+    // its own controlTurn (restart+resume), so the daemon routes natively rather
+    // than stripping the correction into a daemon-inbox row nothing could pump.
+    capabilities: () => ({ resume: true, midTurnInjection: false, midTurnCorrection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "restart_resume" }),
     async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async attach() { return null; },
     async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
@@ -674,12 +684,8 @@ test("a correction on a stop-only provider is delivered as stop-then-resend, nev
     async controlTurn(handle, correction, options) {
       await options?.markDispatched?.();
       calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
-      if (correction) {
-        // If the daemon ever handed a correction to a stop-only adapter, it
-        // would reject it and the UI would loop on a failing "retryable" state.
-        throw Object.assign(new Error("stop-only provider cannot start an unjournaled correction turn"), { turnControlOutcome: "not_applied" as const });
-      }
-      return { capability: "native_interrupt" as const, interrupted: true, resumed: false, state: "idle" as const };
+      // The native path receives the correction verbatim and resumes the session.
+      return { capability: "restart_resume" as const, interrupted: true, resumed: Boolean(correction), state: correction ? "working" as const : "idle" as const };
     },
     async stop(handle) {
       calls.push(`stop:${handle.workAttemptId}`);
@@ -702,13 +708,13 @@ test("a correction on a stop-only provider is delivered as stop-then-resend, nev
   };
   const daemon = new SupervisorDaemon(paths, "darwin", router, true);
   const entry: DaemonManifestEntry = {
-    id: "stop_only_supervised", room_id: "room", display_name: "OpenModel", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
+    id: "native_correction_supervised", room_id: "room", display_name: "NativeCorrection", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
     permission_profile_id: "full_access", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
   };
   try {
     await daemon.start();
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
-    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "stop-only router start");
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "native-correction router start");
     const first = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     const firstGeneration = first.provider_ref?.execution_generation_id;
     await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
@@ -719,22 +725,21 @@ test("a correction on a stop-only provider is delivered as stop-then-resend, nev
       id: entry.id, work_attempt_id: first.work_attempt_id, execution_generation_id: firstGeneration,
       action_id: "human-control-1", correction: "Use the revised direction",
     });
-    assert.equal(controlled.ok, true, "a stop-only correction succeeds via stop-then-resend, not a not_applied loop");
-    assert.deepEqual((controlled.result as { stages: string[] }).stages, ["delivered", "interrupting", "applied", "resumed"]);
+    assert.equal(controlled.ok, true);
     assert.equal((controlled.result as { resumed: boolean }).resumed, true);
-    assert.equal((controlled.result as { interrupted: boolean }).interrupted, true);
-    // The adapter only ever saw a pure Stop; the correction was never handed to it.
-    assert.deepEqual(calls.filter((call) => call.startsWith("control:")), [`control:${first.work_attempt_id}:stop`]);
+    // The correction reached the adapter's native path verbatim — it was not
+    // stripped to a pure Stop and re-queued.
+    assert.deepEqual(calls.filter((call) => call.startsWith("control:")), [`control:${first.work_attempt_id}:Use the revised direction`]);
   } finally {
     await daemon.stop();
-    // The correction is enqueued as a fresh same-session FIFO turn that the
-    // daemon delivery pump runs on the existing provider continuation.
+    // No synthetic correction row was enqueued into a lane that could never pump it.
     const inbox = new SupervisedAgentInboxStore(paths.manifestPath);
     try {
-      const correction = (await inbox.receipts(entry.id)).find((receipt) => receipt.source_message_id === "correction:human-control-1");
-      assert.ok(correction, "the correction is enqueued as a synthetic inbox turn");
-      assert.equal(correction!.state, "pending");
-      assert.equal((correction!.source_message as { text?: string }).text, "Use the revised direction");
+      assert.equal(
+        (await inbox.receipts(entry.id)).find((receipt) => receipt.source_message_id === "correction:human-control-1"),
+        undefined,
+        "a native-correction provider must not enqueue a daemon-inbox correction row",
+      );
     } finally { await inbox.close(); }
     await rm(root, { recursive: true, force: true });
   }

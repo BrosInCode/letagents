@@ -3261,14 +3261,18 @@ export class SupervisorDaemon {
     const capabilities = await this.providerPort?.capabilities(input.workAttemptId, entry.provider);
     const capability = capabilities?.turnControl ?? "unsupported";
     const correction = input.correction?.trim() || null;
-    // A correction is applied natively (Codex: interrupt+resume the same turn)
-    // or via stop-then-resend for stop-only providers (open-model, claude-code):
-    // stop the current turn, then re-run the correction as a fresh bounded turn
-    // on the same provider session. For stop-then-resend, the native turn-control
-    // call is a pure Stop (no correction handed to the adapter), so `controlTurn`
-    // never has to reject an unjournaled correction turn.
+    // A correction is applied natively (Codex interrupt+resume; Cursor's adapter
+    // stop+beginTurn) or via stop-then-resend for stop-only providers
+    // (open-model, claude-code): stop the current turn, then re-run the
+    // correction as a fresh bounded turn on the same provider session. For
+    // stop-then-resend the native turn-control call is a pure Stop (no correction
+    // handed to the adapter), so `controlTurn` never has to reject an unjournaled
+    // correction turn. Stop-then-resend is gated to `daemon_inbox`: only that
+    // lane has a delivery pump that can consume the synthetic correction row, so
+    // a non-daemon-inbox provider keeps its own adapter correction path instead
+    // of enqueuing a row nothing would ever drain.
     const supportsNativeCorrection = capabilities?.midTurnCorrection === true;
-    const stopThenResend = Boolean(correction) && !supportsNativeCorrection;
+    const stopThenResend = Boolean(correction) && !supportsNativeCorrection && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox";
     const nativeCorrection = stopThenResend ? null : correction;
     const existingControl = entry.turn_control;
     const retryingControl = existingControl?.action_id === input.actionId
@@ -3338,6 +3342,40 @@ export class SupervisorDaemon {
       || handle.workAttemptId !== input.workAttemptId
       || handle.providerContinuationId !== ref.provider_continuation_id) {
       throw new Error("Turn control could not resolve the exact live provider continuation.");
+    }
+    // Stop-then-resend, enqueue-FIRST (crash-safety): make the correction
+    // durable BEFORE journaling the control or dispatching the risky native
+    // Stop. If the daemon crashes anywhere after this, the correction row
+    // survives and the normal delivery pump runs it on the same session — it can
+    // never be lost in a "Stop applied, correction not yet queued" window, and
+    // the uncertain-resolution path can no longer record resumed:true without an
+    // actual enqueue. Enqueuing before the prepared journal means a fence
+    // failure here leaves NO unresolved control record, so the action stays
+    // cleanly retryable. Fence to the exact current entry/binding/generation/
+    // room and refuse if an in-flight room move could compensate the row, so a
+    // concurrent room move/rebind cannot misroute or silently cancel it. The
+    // synthetic source id is derived from the stable action id, so the enqueue is
+    // idempotent across retries and recovery.
+    if (stopThenResend && correction) {
+      const fencedEntry = await this.store.getEntry(entry.id);
+      const fencedBinding = await this.workerBindings.get(entry.id);
+      if (!fencedEntry || !fencedBinding
+        || fencedEntry.work_attempt_id !== input.workAttemptId
+        || fencedEntry.provider_ref?.execution_generation_id !== input.executionGenerationId
+        || fencedEntry.room_id !== entry.room_id
+        || fencedBinding.room_id !== entry.room_id
+        || fencedBinding.work_attempt_id !== input.workAttemptId
+        || fencedBinding.execution_generation_id !== input.executionGenerationId
+        || (await this.store.pendingRoomMoves(entry.id)).length > 0) {
+        throw new Error("The correction could not be queued because the agent's room or execution generation changed; refresh the agent and reapply it.");
+      }
+      await this.supervisedInbox.enqueueCorrection({
+        agent_id: entry.id,
+        room_id: fencedEntry.room_id,
+        source_message_id: `correction:${input.actionId}`,
+        source_message: { text: correction, sender: { kind: "supervisor_correction" } },
+        activation: { decision: "activate", reason: "human_correction", addressed: true },
+      });
     }
     const recordedAt = new Date().toISOString();
     await this.updateManifestEntry(entry.id, (current) => {
@@ -3472,20 +3510,13 @@ export class SupervisorDaemon {
     // interrupted. With no daemon delivery turn (mcp_polling, or idle
     // daemon_inbox) the provider's native interrupt stands unchanged.
     const interrupted = settlement === "published" ? false : providerResult.interrupted;
-    // Stop-then-resend: the stopped turn is settled above; now enqueue the
-    // correction as a fresh bounded turn on the same provider session and kick
-    // convergence so the delivery pump runs it. The synthetic source id is
-    // derived from the (stable) action id so a retried control action
-    // re-enqueues idempotently instead of duplicating the correction turn.
+    // Stop-then-resend: the correction was already durably enqueued before the
+    // Stop (above); the stopped turn is settled, so kick convergence to make the
+    // delivery pump run the correction now as the next FIFO turn on the same
+    // provider session. `resumed: true` reflects that the correction is queued
+    // and will run — the durable row, not this flag, is the source of truth.
     let resumed = providerResult.resumed;
     if (stopThenResend && correction) {
-      await this.supervisedInbox.enqueueCorrection({
-        agent_id: entry.id,
-        room_id: entry.room_id,
-        source_message_id: `correction:${input.actionId}`,
-        source_message: { text: correction, sender: { kind: "supervisor_correction" } },
-        activation: { decision: "activate", reason: "human_correction", addressed: true },
-      });
       this.requestConvergence(entry.id);
       resumed = true;
     }
