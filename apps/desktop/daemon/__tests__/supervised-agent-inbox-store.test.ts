@@ -631,6 +631,74 @@ test("skip message is honest, pre-turn only, and releases the next FIFO item", a
   } finally { await env.cleanup(); }
 });
 
+test("cancelInterruptedTurn settles an in-flight head and releases the next FIFO item", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [first, second] = await store.ingestPoll({
+      agent_id: "interrupt",
+      room_id: "room",
+      last_observed_message_id: "2",
+      messages: [
+        { source_message_id: "1", source_message: {}, activation: {} },
+        { source_message_id: "2", source_message: {}, activation: {} },
+      ],
+    });
+    // A dispatching head (no provider result yet) is settled cancelled_by_user.
+    assert.equal((await store.claimHead("interrupt"))?.inbox_item_id, first!.inbox_item_id);
+    const settled = await store.cancelInterruptedTurn(first!.inbox_item_id);
+    assert.equal(settled?.state, "cancelled_by_user");
+    assert.ok(settled?.acknowledged_at);
+    assert.equal(settled?.last_error, "Stopped by the user.");
+    assert.equal((await store.receipts("interrupt"))[0]!.timeline.at(-1)?.phase, "user_cancelled");
+    // The FIFO advances to the next item — the cancelled head is terminal.
+    assert.equal((await store.claimHead("interrupt"))?.inbox_item_id, second!.inbox_item_id);
+
+    // Awaiting-result is still pre-publish, so it is also interruptible.
+    const outcome = JSON.stringify({ kind: "reply", text: "partial", evidence: "transcript" });
+    await store.checkpointTurnStarted(second!.inbox_item_id, "turn-2");
+    await store.transition(second!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-2", outcome });
+    const settledSecond = await store.cancelInterruptedTurn(second!.inbox_item_id, "Redirected by the user.");
+    assert.equal(settledSecond?.state, "cancelled_by_user");
+    assert.equal(settledSecond?.last_error, "Redirected by the user.");
+
+    // A vanished item is an idempotent no-op (an interrupt that already settled).
+    assert.equal(await store.cancelInterruptedTurn("does-not-exist"), null);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("cancelInterruptedTurn never overrides a committed publication or a terminal outcome", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const [publishing] = await store.ingestPoll({
+      agent_id: "publisher", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
+    });
+    const outcome = JSON.stringify({ kind: "reply", text: "hi", evidence: "transcript" });
+    await store.claimHead("publisher");
+    await store.checkpointTurnStarted(publishing!.inbox_item_id, "turn-1");
+    await store.transition(publishing!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-1", outcome });
+    await store.transition(publishing!.inbox_item_id, "publishing", { outcome });
+    // Once the turn commits to publishing, the interrupt loses the race: the
+    // published reply stays authoritative and the item is left untouched.
+    const raced = await store.cancelInterruptedTurn(publishing!.inbox_item_id);
+    assert.equal(raced?.state, "publishing");
+    assert.equal((await store.get(publishing!.inbox_item_id))?.state, "publishing");
+
+    const [done] = await store.ingestPoll({
+      agent_id: "settled", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
+    });
+    await store.claimHead("settled");
+    await store.checkpointTurnStarted(done!.inbox_item_id, "turn-9");
+    await store.transition(done!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-9", outcome: JSON.stringify({ kind: "no_reply", text: null, evidence: "transcript" }) });
+    await store.transition(done!.inbox_item_id, "acknowledged_no_reply", {});
+    const terminal = await store.cancelInterruptedTurn(done!.inbox_item_id);
+    assert.equal(terminal?.state, "acknowledged_no_reply");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("room move compensation restores only its source queue and exact pre-move cursor idempotently", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");

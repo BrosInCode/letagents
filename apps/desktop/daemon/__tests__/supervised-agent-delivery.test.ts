@@ -1824,3 +1824,80 @@ test("manual rematerialization wakes the repaired pending head without waiting f
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("Stop settles the in-flight turn cancelled_by_user, suppresses its publish, and unblocks the FIFO", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-interrupt-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const turnEntered = deferred<void>();
+    const turnRelease = deferred<void>();
+    const published: string[] = [];
+    let calls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      calls += 1;
+      if (calls === 1) {
+        // The first (soon-to-be-stopped) turn parks mid-flight so the Stop
+        // lands while it is still dispatching, before any result is published.
+        turnEntered.resolve();
+        await turnRelease.promise;
+        return { turnId: request.inboxItemId, outcome: "reply", text: "abandoned partial" };
+      }
+      return { turnId: request.inboxItemId, outcome: "reply", text: "second reply" };
+    }), {
+      poll: async () => ({ messages: [
+        { id: "1", activation: { for_current_agent: { decision: "activate" } } },
+        { id: "2", activation: { for_current_agent: { decision: "activate" } } },
+      ] }),
+      publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+    }, currentAuthority, 0);
+    try {
+      const pollPromise = delivery.poll(agent);
+      await turnEntered.promise;
+      assert.equal(delivery.activeTurn(agent)?.sourceMessageId, "1", "the first message is the in-flight turn");
+
+      const settled = await delivery.interruptActiveDelivery(agent);
+      assert.equal(settled, true, "an in-flight pre-publish turn is settled by the interrupt");
+      const afterInterrupt = await store.receipts(agent.agentId);
+      assert.equal(afterInterrupt.find((receipt) => receipt.source_message_id === "1")?.state, "cancelled_by_user");
+
+      // Release the abandoned turn and let the FIFO advance to the next item.
+      turnRelease.resolve();
+      await pollPromise;
+
+      const receipts = await store.receipts(agent.agentId);
+      assert.equal(receipts.find((receipt) => receipt.source_message_id === "1")?.state, "cancelled_by_user", "the stopped turn stays cancelled");
+      assert.equal(receipts.find((receipt) => receipt.source_message_id === "2")?.state, "acknowledged", "the queue is not wedged: the next item delivers");
+      assert.equal(published.length, 1, "exactly one reply was published — never the stopped turn's");
+      assert.equal(calls, 2, "the stopped turn was not rerun; only the next item ran a fresh turn");
+    } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a Stop that races a committed publication loses: the reply stands and the turn is not settled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-interrupt-publish-race-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const publishEntered = deferred<void>();
+    const publishRelease = deferred<void>();
+    const published: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "reply", text: "final reply" })), {
+      poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }),
+      publish: async (input) => { publishEntered.resolve(); await publishRelease.promise; published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+    }, currentAuthority, 0);
+    try {
+      const pollPromise = delivery.poll(agent);
+      await publishEntered.promise; // the turn has already committed to publishing
+
+      const settled = await delivery.interruptActiveDelivery(agent);
+      assert.equal(settled, false, "once publishing has committed, the interrupt loses the race");
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "publishing", "the committed publication is left authoritative");
+
+      publishRelease.resolve();
+      await pollPromise;
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged", "the publication completes to acknowledged");
+      assert.equal(published.length, 1, "the reply is published exactly once");
+    } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

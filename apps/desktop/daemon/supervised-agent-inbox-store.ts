@@ -801,6 +801,37 @@ export class SupervisedAgentInboxStore {
     }));
   }
   /**
+   * Settle the in-flight FIFO head as user-cancelled when a Stop (or a
+   * stop-then-resend correction) interrupts a turn that provider work already
+   * touched. `skipBlocked` covers only the never-started case; this is the sole
+   * `cancelled_by_user` path once dispatch has begun.
+   *
+   * It is deliberately a no-op once the item reaches `publishing` or a terminal
+   * state: past that commit the reply is being (or has been) posted, so the
+   * published outcome stays authoritative and the interrupt loses the race.
+   * Because both this write and the delivery pump's `publishing` transition are
+   * serialized inbox transactions on the exact FIFO head, exactly one wins —
+   * this is the mutual exclusion that stops one turn producing two outcomes.
+   * The returned item's `state` tells the caller which side won (`cancelled_by_user`
+   * → interrupt settled it; anything else → publication already committed).
+   */
+  async cancelInterruptedTurn(inboxItemId: string, detail = "Stopped by the user."): Promise<SupervisedInboxItem | null> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!row) return null;
+      const item = rowToItem(row);
+      if (item.state !== "dispatching" && item.state !== "awaiting_result" && item.state !== "result_recovery") return item;
+      this.assertCurrentHead(database, item);
+      const timestamp = this.now();
+      run(database.prepare(`UPDATE supervised_agent_inbox
+        SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
+        WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, `user_cancelled:${item.fifo_sequence}`, "user_cancelled", timestamp, detail);
+      this.pruneAgentHistory(database, item.agent_id);
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
+  /**
    * Normalize work interrupted by a daemon crash before a new runtime is
    * allowed to pump it. A persisted reply is authoritative terminal evidence:
    * it may be published again with its stable client id, but must never invoke
