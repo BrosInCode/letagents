@@ -395,7 +395,7 @@ export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState"
 class ReplacementListenerInstallError extends Error {}
 class DeliveryCutoverObservationDetached extends Error {}
 
-function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
+export function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
   const method = event.method.trim();
   const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
     ? event.payload as Record<string, unknown>
@@ -428,7 +428,14 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
       && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages"));
     return failedRoomWait ? "idle" : "working";
   }
-  const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
+  // A `tool_lifecycle` event carries ONE tool call's own status. An errored or
+  // aborted tool (a tool crash, a permission denial, or a tool aborted by a
+  // user Stop) leaves the provider process and the bounded turn healthy, so its
+  // payload.status must never be sniffed as a turn/process failure — otherwise
+  // it would classify the whole agent "failed" and fence (SIGKILL) the session
+  // mid-turn. (Failed mcpToolCall lifecycle is already handled above.)
+  const failedStatus = event.kind !== "tool_lifecycle"
+    && statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
   const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
   const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
   const failedItem = /^item\/completed$/i.test(method)

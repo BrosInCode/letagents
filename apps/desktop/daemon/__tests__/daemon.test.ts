@@ -15,7 +15,7 @@ import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
-import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
+import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, providerStreamLifecycle, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
@@ -8282,4 +8282,18 @@ test("quiescence resume failure blocks the live attempt", async () => {
     assert.deepEqual(await store.garbageCollect(0), []);
     assert.equal((await store.getAttempt(live.work_attempt_id)).state, "coordination_blocked");
   } finally { await env.cleanup(); }
+});
+
+test("providerStreamLifecycle never fails the agent on a tool call's own error status", () => {
+  const base = { workAttemptId: "attempt", providerContinuationId: "thread", observedAt: "2026-08-01T00:00:00.000Z", sequence: 1, provider: "open-model", summary: null, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null };
+  // The #860 Live-tab emitToolCall path: a tool with status "error" (a tool
+  // crash, a permission denial, or a tool aborted by a Stop). This must NOT
+  // classify the whole agent as failed — that would SIGKILL the OpenCode server
+  // mid-turn (and, once stop-then-resend coexists, kill the session the
+  // correction was about to resume on).
+  assert.equal(providerStreamLifecycle({ ...base, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { status: "error", partId: "tool-1" } }), "working");
+  assert.equal(providerStreamLifecycle({ ...base, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { status: "running", partId: "tool-1" } }), "working");
+  // Genuine process/turn failures are still classified failed (no regression).
+  assert.equal(providerStreamLifecycle({ ...base, kind: "error", method: "result", payload: { is_error: true } }), "failed");
+  assert.equal(providerStreamLifecycle({ ...base, kind: "turn_lifecycle", method: "turn/failed", payload: {} }), "failed");
 });
