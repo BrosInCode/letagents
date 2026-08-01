@@ -93,6 +93,8 @@ export class SupervisedAgentDelivery {
   private readonly startupRecovered = new Map<string, string>();
   /** Runtime-only proof of one actual provider delivery, never reconstructed from inbox state. */
   private readonly activeTurns = new Map<string, { recoveryContext: string; inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing" }>();
+  /** Turn-scoped aborts so a Stop/correction can interrupt one turn without retiring the whole pump. */
+  private readonly activeTurnAborts = new Map<string, { inboxItemId: string; controller: AbortController }>();
   private readonly handleContextIds = new WeakMap<object, number>();
   private nextHandleContextId = 1;
   private fenced = false;
@@ -230,6 +232,7 @@ export class SupervisedAgentDelivery {
     }
     this.startupRecovered.delete(agentId);
     this.activeTurns.delete(agentId);
+    this.activeTurnAborts.delete(agentId);
     const health = await this.inbox.ingressHealth(agentId);
     if (health) await this.inbox.setIngressHealth({ agent_id: agentId, room_id: health.room_id, execution_generation_id: health.execution_generation_id, state: "stopped", detail: "Ingress stopped by the supervisor." });
   }
@@ -355,6 +358,47 @@ export class SupervisedAgentDelivery {
     return active?.recoveryContext === this.recoveryContext(agent)
       ? { inboxItemId: active.inboxItemId, sourceMessageId: active.sourceMessageId, phase: active.phase }
       : null;
+  }
+
+  /**
+   * Stop the in-flight turn for this exact agent identity without retiring the
+   * pump, so the next FIFO item (e.g. a stop-then-resend correction) can run.
+   * Settles the head `cancelled_by_user` if it has not yet committed to
+   * publishing, then — only on a successful settlement — aborts the turn-scoped
+   * controller so `deliver()` drops its provider-result wait and returns.
+   *
+   * Ordering matters: the durable cancellation is committed BEFORE the abort. If
+   * we aborted first and the cancellation write then failed (e.g. a transient
+   * SQLite error), `deliver()` would already have exited on the turn signal,
+   * leaving the head stuck `dispatching`/`awaiting_result` with no live consumer
+   * to settle or retry it — a stalled FIFO. Settling first means a failed
+   * cancellation leaves the in-flight `deliver()` untouched as the sole consumer.
+   *
+   * The three outcomes are distinct so the caller can report an honest
+   * `interrupted`:
+   *  - `"settled"`: the interrupt won and the item is `cancelled_by_user`.
+   *  - `"published"`: there WAS an active daemon turn but it had already
+   *    committed to publishing — the reply stands and the turn was not truly
+   *    interrupted (only this case downgrades `interrupted`). No abort: the
+   *    publishing turn keeps its own consumer.
+   *  - `"no_active_turn"`: no matching daemon delivery turn (e.g. an mcp_polling
+   *    agent, or an idle daemon_inbox agent). The provider's own native
+   *    interrupt stands; there is no daemon reply to arbitrate.
+   *
+   * The identity gate mirrors `activeTurn()` so a stale caller can never abort a
+   * successor turn.
+   */
+  async interruptActiveDelivery(agent: SupervisedIngressAgent, inboxItemId?: string): Promise<"settled" | "published" | "no_active_turn"> {
+    const active = this.activeTurns.get(agent.agentId);
+    if (!active || active.recoveryContext !== this.recoveryContext(agent)) return "no_active_turn";
+    if (inboxItemId && active.inboxItemId !== inboxItemId) return "no_active_turn";
+    // Durable cancellation first; a rejection here propagates and never detaches
+    // the in-flight consumer.
+    const settled = await this.inbox.cancelInterruptedTurn(active.inboxItemId);
+    if (settled?.state !== "cancelled_by_user") return "published";
+    const abort = this.activeTurnAborts.get(agent.agentId);
+    if (abort?.inboxItemId === active.inboxItemId) abort.controller.abort();
+    return "settled";
   }
 
   private async retryOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
@@ -484,6 +528,15 @@ export class SupervisedAgentDelivery {
   private async deliver(agent: SupervisedIngressAgent, item: SupervisedInboxItem, controller: AbortController): Promise<void> {
     if (!agent.handle || !await this.hasExecutionAuthority(agent, controller)) return;
     const recoveryContext = this.recoveryContext(agent);
+    // A turn-scoped controller chained off the pump controller: a full stop/
+    // retirement (pump abort) still cancels the turn, but a Stop or a
+    // stop-then-resend correction can abort just this turn's pre-publish work
+    // without tearing down the pump so the next FIFO item can run.
+    const turnController = new AbortController();
+    const relayPumpAbort = () => turnController.abort();
+    if (controller.signal.aborted) turnController.abort();
+    else controller.signal.addEventListener("abort", relayPumpAbort, { once: true });
+    this.activeTurnAborts.set(agent.agentId, { inboxItemId: item.inbox_item_id, controller: turnController });
     const setActive = (phase: "dispatching" | "responding" | "publishing") => {
       this.activeTurns.set(agent.agentId, { recoveryContext, inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id, phase });
     };
@@ -501,20 +554,20 @@ export class SupervisedAgentDelivery {
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, turnController)) return;
       const recovering = Boolean(item.provider_turn_id);
       if (recovering) setActive("responding");
       else setActive("dispatching");
       const observedContext = recovering
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, turnController)) return;
       const turnConfiguration = recovering
         ? { charter: agent.charter }
         : await this.resolveTurnConfiguration?.(agent) ?? { charter: agent.charter };
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, turnController)) return;
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<void> => {
-        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         // New turns already checkpoint through checkpointTurnStarted. This
         // idempotent edge keeps provider-neutral adapters equally strict.
         if (item.state !== "result_recovery") await this.inbox.checkpointTurnStarted(item.inbox_item_id, result.turnId);
@@ -534,7 +587,7 @@ export class SupervisedAgentDelivery {
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
           providerTurnId: item.provider_turn_id!,
-        }, { detachSignal: controller.signal, checkpointTerminalResult })
+        }, { detachSignal: turnController.signal, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
@@ -543,7 +596,7 @@ export class SupervisedAgentDelivery {
         charter: turnConfiguration.charter,
         observedContext,
       }, { beforeNativeDispatch: async () => {
-        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         // The provider cannot call turn/start until this durable causal edge
         // has committed. Dispatching remains truthful until its exact native
         // turn id has also been checkpointed below.
@@ -552,31 +605,31 @@ export class SupervisedAgentDelivery {
         // Compatibility only for a pre-checkpoint adapter during upgrade. It
         // retains the truthful activity projection but cannot replace the
         // exact turn-id callback implemented by the bounded-turn adapter.
-        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id);
         setActive("responding");
       }, checkpointTurnStarted: async (turnId) => {
-        if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointTurnStarted(item.inbox_item_id, turnId);
         // Only an acknowledged exact provider turn is projected responding.
         setActive("responding");
-      }, checkpointTerminalResult, detachSignal: controller.signal });
+      }, checkpointTerminalResult, detachSignal: turnController.signal });
       // Native provider turns are intentionally not cancelable by the daemon:
       // a handoff must retire our authority, not kill a user's provider process.
       // Do not put this promise in the drain group. Instead, race its result
       // with retirement so stop/handoff can return after network/DB work is
       // drained. The attached late-result handler consumes the promise but has
       // no path back into this delivery continuation after retirement.
-      const result = turn && await this.awaitProviderResultOrRetirement(turn, controller);
+      const result = turn && await this.awaitProviderResultOrRetirement(turn, turnController);
       if (!result) throw new Error("Provider does not support bounded room turns.");
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, turnController)) return;
       // Real provider adapters invoke this before releasing their in-memory
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
       await checkpointTerminalResult(result);
       const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
       const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      if (!await this.hasExecutionAuthority(agent, turnController)) return;
       if (item.state !== "result_recovery") {
         await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
       }
@@ -589,7 +642,7 @@ export class SupervisedAgentDelivery {
         return;
       }
       if (result.outcome === "no_reply") {
-        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
@@ -605,10 +658,17 @@ export class SupervisedAgentDelivery {
       await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
       await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
     } catch (error) {
-      if (error instanceof AuthorityLostError || this.fenced || controller.signal.aborted) return;
+      // A turn-scoped abort (Stop / stop-then-resend) is a clean interruption,
+      // not a delivery failure: the item is settled `cancelled_by_user` by
+      // `interruptActiveDelivery`, so never fall through to retry/block it.
+      if (error instanceof AuthorityLostError || this.fenced || controller.signal.aborted || turnController.signal.aborted) return;
       const message = error instanceof Error ? error.message : "Room delivery failed.";
       const current = await this.inbox.get(item.inbox_item_id);
-      if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply") return;
+      if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply" || current.state === "cancelled_by_user" || current.state === "cancelled_by_room_move") return;
+      // A turn-scoped abort that landed during the async read above is a user
+      // interrupt, not a delivery failure: leave the head for interruptActiveDelivery
+      // to settle rather than retrying/blocking (and rerunning) the stopped turn.
+      if (turnController.signal.aborted) return;
       const failure = error as { providerFailureCode?: unknown; providerContinuationId?: unknown };
       if (failure.providerFailureCode === "provider_continuation_missing"
         && current.attempt_count === 0
@@ -660,6 +720,9 @@ export class SupervisedAgentDelivery {
       const retryable = await this.inbox.get(item.inbox_item_id);
       if (await this.hasExecutionAuthority(agent, controller) && retryable?.state === "retryable") await this.inbox.transition(item.inbox_item_id, "pending");
     } finally {
+      controller.signal.removeEventListener("abort", relayPumpAbort);
+      const abort = this.activeTurnAborts.get(agent.agentId);
+      if (abort?.inboxItemId === item.inbox_item_id && abort.controller === turnController) this.activeTurnAborts.delete(agent.agentId);
       const active = this.activeTurns.get(agent.agentId);
       if (active?.recoveryContext === recoveryContext && active.inboxItemId === item.inbox_item_id) this.activeTurns.delete(agent.agentId);
     }
