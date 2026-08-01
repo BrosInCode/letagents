@@ -3438,7 +3438,21 @@ export class SupervisorDaemon {
         daemonGeneration: this.singleton.currentGeneration,
         deliveryMode: entry.delivery_mode ?? "mcp_polling",
       };
-      settlement = await this.supervisedDelivery.interruptActiveDelivery(ingressAgent).catch(() => "no_active_turn" as const);
+      try {
+        settlement = await this.supervisedDelivery.interruptActiveDelivery(ingressAgent);
+      } catch (error) {
+        // The native turn was interrupted, but the daemon could not durably
+        // settle the delivery turn (settle-before-abort means the pump was NOT
+        // detached, so it may still publish a reply). This must never be
+        // recorded as a clean Stop: journal it uncertain — the outcome is
+        // genuinely unresolved — and surface the failure to the caller instead
+        // of silently reporting success.
+        const message = redactCredentialText(error instanceof Error ? error.message : String(error)).value;
+        await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
+          ? { ...current, turn_control: { ...current.turn_control, status: "uncertain" as const, error: message, updated_at: new Date().toISOString() } }
+          : current);
+        throw error;
+      }
     }
     // Only a genuine publish-race downgrades `interrupted`: if a daemon turn had
     // already committed its reply, the reply stands so the turn was not truly
