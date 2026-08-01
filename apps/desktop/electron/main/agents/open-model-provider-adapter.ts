@@ -69,6 +69,7 @@ import {
   type JsonRecord,
   type OpenCodeEvent,
   type OpenCodeMessage,
+  type OpenCodePart,
   type OpenCodeRuntimeAuth,
 } from "./opencode-server-client.js";
 
@@ -919,6 +920,10 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const deadline = Date.now() + this.turnTimeoutMs;
     const emittedLengths = new Map<string, number>();
     const partTypes = new Map<string, string>();
+    // callID -> last-emitted tool status. message.part.updated re-sends the
+    // full tool part on every pending→running→completed/error transition, and
+    // snapshot() re-emits history on reconnect, so dedup by (callID, status).
+    const toolStatuses = new Map<string, string>();
     const assistantIds = new Set<string>();
     const controller = new AbortController();
     const detach = (): void => controller.abort();
@@ -937,7 +942,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       for (const assistant of assistants) {
         const info = record(assistant.info);
         if (typeof info?.id === "string") assistantIds.add(info.id);
-        this.emitMessageEvidence(handle, assistant, emittedLengths);
+        this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses);
       }
       if (assistants.length > this.maxAssistantSteps) {
         throw new OpenCodeBoundedTurnError(
@@ -1005,6 +1010,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
               handle,
               { parts: [part] as OpenCodeMessage["parts"] },
               emittedLengths,
+              toolStatuses,
             );
           }
         }
@@ -1090,8 +1096,13 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     handle: OpenModelHandle,
     message: OpenCodeMessage | null,
     emittedLengths: Map<string, number>,
+    toolStatuses?: Map<string, string>,
   ): void {
     for (const part of message?.parts ?? []) {
+      if (part.type === "tool") {
+        if (toolStatuses) this.emitToolCall(handle, part, toolStatuses);
+        continue;
+      }
       const id = typeof part.id === "string" ? part.id : `${part.type ?? "part"}`;
       const text = typeof part.text === "string" ? part.text : "";
       const previous = emittedLengths.get(id) ?? 0;
@@ -1099,6 +1110,44 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       emittedLengths.set(id, text.length);
       this.emitTextDelta(handle, id, text.slice(previous), part.type === "reasoning");
     }
+  }
+
+  /**
+   * Surface an OpenCode tool call (name, arguments, result) as a live-feed
+   * event. The method stays a neutral "updated" — the daemon classifies stream
+   * lifecycle from method/kind, so a terminal-sounding method or an error kind
+   * would wrongly mark the whole turn idle/failed; tool status rides in the
+   * payload instead. Deduped by (callID, status) because the full part is
+   * re-sent on every transition and re-observed on reconnect.
+   */
+  private emitToolCall(
+    handle: OpenModelHandle,
+    part: OpenCodePart,
+    toolStatuses: Map<string, string>,
+  ): void {
+    const state = record(part.state);
+    const tool = typeof part.tool === "string" ? part.tool : "tool";
+    const callId = typeof part.callID === "string" ? part.callID
+      : typeof part.id === "string" ? part.id : tool;
+    const status = typeof state?.status === "string" ? state.status : "pending";
+    if (toolStatuses.get(callId) === status) return;
+    toolStatuses.set(callId, status);
+    const title = typeof state?.title === "string" ? state.title : "";
+    this.emitStream(handle, {
+      kind: "tool_lifecycle",
+      method: "item/toolCall/updated",
+      summary: `${tool}${title ? ` · ${title}` : ""}`,
+      payload: {
+        partId: typeof part.id === "string" ? part.id : null,
+        callID: callId,
+        tool,
+        status,
+        input: state?.input ?? null,
+        output: typeof state?.output === "string" ? state.output : null,
+        error: typeof state?.error === "string" ? state.error : null,
+        providerExecuted: record(part.metadata)?.providerExecuted === true,
+      },
+    });
   }
 
   private emitTextDelta(

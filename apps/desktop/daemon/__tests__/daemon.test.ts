@@ -15,10 +15,10 @@ import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
-import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
+import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, providerStreamLifecycle, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
-import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { SupervisedDeliveryHttp } from "../supervised-agent-delivery.js";
@@ -226,6 +226,153 @@ test("manifest state subscription returns an initial snapshot and wakes on a com
     assert.equal(snapshot.daemon_generation, initial.daemon_generation);
     assert.ok(snapshot.sequence > initial.sequence);
     assert.equal(snapshot.entries[0]?.id, "state_subscription_agent");
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("watch_agent_stream long-polls one agent's ephemeral live feed", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const mk = (kind: string, method: string, summary: string): DaemonActivityEvent => ({
+    observed_at: "2026-07-31T00:00:00.000Z", sequence: 0, provider: "open-model", kind, method,
+    summary, status: "working", payload: { m: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+  });
+  type StreamResult = { sequence: number; events: Array<{ sequence: number; kind: string; method: string; summary: string | null; payload: unknown }>; ended: boolean };
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void;
+      endAgentStream: (entryId: string) => void;
+    };
+
+    // Capability advertised for graceful client degradation.
+    const status = (await daemonRequest(paths.socketPath, "daemon.status")).result as { capabilities: Record<string, boolean> };
+    assert.equal(status.capabilities.agent_activity_stream_v1, true);
+
+    // Events buffered before the first poll are returned since cursor 0.
+    internals.pushAgentStreamEvent("agent_a", mk("text_delta", "reasoning/summaryTextDelta", "thinking"));
+    internals.pushAgentStreamEvent("agent_a", mk("text_delta", "item/agentMessage/delta", "hello"));
+    const first = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_a", after_sequence: 0, wait_ms: 500 })).result as StreamResult;
+    assert.equal(first.events.length, 2);
+    assert.equal(first.sequence, 2);
+    assert.equal(first.ended, false);
+    assert.equal(first.events[0]!.summary, "thinking");
+
+    // Long-poll blocks, then wakes on the next event (a tool call).
+    const pending = daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_a", after_sequence: first.sequence, wait_ms: 2_000 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    internals.pushAgentStreamEvent("agent_a", mk("tool_lifecycle", "item/toolCall/updated", "bash"));
+    const woken = (await pending).result as StreamResult;
+    assert.equal(woken.events.length, 1);
+    assert.equal(woken.events[0]!.kind, "tool_lifecycle");
+    assert.equal(woken.sequence, 3);
+
+    // Strict per-entry isolation: another agent's watcher sees nothing.
+    const other = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_b", after_sequence: 0, wait_ms: 50 })).result as StreamResult;
+    assert.equal(other.events.length, 0);
+
+    // A torn-down provider closes the feed; the watcher observes ended.
+    internals.endAgentStream("agent_a");
+    const ended = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_a", after_sequence: woken.sequence, wait_ms: 500 })).result as StreamResult;
+    assert.equal(ended.ended, true);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("watch_agent_stream drains a backlog larger than one batch without gaps", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const mk = (summary: string): DaemonActivityEvent => ({
+    observed_at: "2026-07-31T00:00:00.000Z", sequence: 0, provider: "open-model", kind: "text_delta", method: "item/agentMessage/delta",
+    summary, status: "working", payload: { m: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+  });
+  type StreamResult = { sequence: number; events: Array<{ sequence: number; summary: string | null }>; ended: boolean };
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void };
+    // Buffer 100 events — more than a single 64-event batch can carry.
+    for (let i = 1; i <= 100; i += 1) internals.pushAgentStreamEvent("agent_backlog", mk(`chunk-${i}`));
+
+    // The first poll returns one capped batch whose cursor is the LAST event it
+    // actually carried, not the producer's newest sequence.
+    const first = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_backlog", after_sequence: 0, wait_ms: 500 })).result as StreamResult;
+    assert.equal(first.events.length, 64);
+    assert.equal(first.events[0]!.sequence, 1);
+    assert.equal(first.events[63]!.sequence, 64);
+    assert.equal(first.sequence, 64, "cursor must be the last delivered event, never the producer high-water mark");
+
+    // Resuming at that cursor drains the remainder; nothing past the cap is skipped.
+    const second = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_backlog", after_sequence: first.sequence, wait_ms: 500 })).result as StreamResult;
+    assert.equal(second.events.length, 36);
+    assert.equal(second.events[0]!.sequence, 65);
+    assert.equal(second.events[35]!.sequence, 100);
+    assert.equal(second.sequence, 100);
+
+    // The two polls together reconstruct the full ordered backlog.
+    const drained = [...first.events, ...second.events].map((event) => event.sequence);
+    assert.deepEqual(drained, Array.from({ length: 100 }, (_, index) => index + 1));
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("purgeAgent drops the ephemeral live feed and settles its outstanding waiters", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const mk = (summary: string): DaemonActivityEvent => ({
+    observed_at: "2026-07-31T00:00:00.000Z", sequence: 0, provider: "open-model", kind: "text_delta", method: "item/agentMessage/delta",
+    summary, status: "working", payload: { m: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void;
+      agentStreams: Map<string, unknown>;
+      agentStreamWaiters: Map<string, Set<() => void>>;
+    };
+    const status = (await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number };
+    // A fully stopped durable identity carrying a live-feed transcript.
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: "purge_streams", desired_state: "stopped", observed_state: "stopped",
+    } })).ok, true);
+    internals.pushAgentStreamEvent("purge_streams", mk("hello"));
+    assert.equal(internals.agentStreams.has("purge_streams"), true);
+
+    // A drained watcher blocks, registering a waiter for this entry.
+    const pending = daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "purge_streams", after_sequence: 1, wait_ms: 5_000 });
+    for (let i = 0; i < 100 && (internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) > 0, true, "the drained watcher registers a waiter before purge");
+
+    // A successful purge settles the waiter and drops the entry's ephemeral state.
+    const purge = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
+      entry_id: "purge_streams", daemon_generation: status.generation, revoked_agent_session_id: null,
+    })).result as { outcome: string };
+    assert.equal(purge.outcome, "purged");
+    await pending; // the blocked watcher returns rather than hanging to its own timeout
+    assert.equal(internals.agentStreams.has("purge_streams"), false);
+    assert.equal(internals.agentStreamWaiters.has("purge_streams"), false);
   } finally {
     await daemon.stop();
     await env.cleanup();
@@ -8135,4 +8282,18 @@ test("quiescence resume failure blocks the live attempt", async () => {
     assert.deepEqual(await store.garbageCollect(0), []);
     assert.equal((await store.getAttempt(live.work_attempt_id)).state, "coordination_blocked");
   } finally { await env.cleanup(); }
+});
+
+test("providerStreamLifecycle never fails the agent on a tool call's own error status", () => {
+  const base = { workAttemptId: "attempt", providerContinuationId: "thread", observedAt: "2026-08-01T00:00:00.000Z", sequence: 1, provider: "open-model", summary: null, payloadTruncated: false, payloadRedacted: false, durablePayloadRef: null };
+  // The #860 Live-tab emitToolCall path: a tool with status "error" (a tool
+  // crash, a permission denial, or a tool aborted by a Stop). This must NOT
+  // classify the whole agent as failed — that would SIGKILL the OpenCode server
+  // mid-turn (and, once stop-then-resend coexists, kill the session the
+  // correction was about to resume on).
+  assert.equal(providerStreamLifecycle({ ...base, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { status: "error", partId: "tool-1" } }), "working");
+  assert.equal(providerStreamLifecycle({ ...base, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { status: "running", partId: "tool-1" } }), "working");
+  // Genuine process/turn failures are still classified failed (no regression).
+  assert.equal(providerStreamLifecycle({ ...base, kind: "error", method: "result", payload: { is_error: true } }), "failed");
+  assert.equal(providerStreamLifecycle({ ...base, kind: "turn_lifecycle", method: "turn/failed", payload: {} }), "failed");
 });

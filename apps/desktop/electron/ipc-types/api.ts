@@ -344,6 +344,10 @@ export interface DesktopApi {
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;
     /** Replay a launch's facts after `afterSequence` (for modal reopen/restore). */
     getLaunchEvents: (launchId: string, afterSequence?: number | null) => Promise<import("./launch-events.js").DesktopLaunchEvent[]>;
+    /** Subscribe to the focused agent's ephemeral live feed (reasoning/text/tool events). */
+    onAgentStream: (callback: (batch: import("./agents.js").DesktopAgentStreamBatch) => void) => () => void;
+    /** Focus the live feed on one agent, or clear it (null) when the inspector closes. */
+    watchAgentStream: (entryId: string | null) => Promise<void>;
   };
   diagnostics: {
     getSnapshot: () => Promise<DiagnosticsSnapshot>;

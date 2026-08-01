@@ -15,7 +15,7 @@ import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
-import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import {
   deriveProviderConfigurationSnapshot,
@@ -89,6 +89,11 @@ type BootstrapOperation = {
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
+// Ephemeral per-agent live feed: how many recent events to retain in memory,
+// and the most to return in one long-poll response (bounded to fit the
+// control socket's 64 KB frame; the client re-polls for the remainder).
+const AGENT_STREAM_BUFFER_LIMIT = 400;
+const AGENT_STREAM_MAX_BATCH = 64;
 const LIVENESS_GRACE_MS = 30_000;
 const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const WORKER_BEARER_ROTATION_LEAD_MS = 60_000;
@@ -390,7 +395,7 @@ export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState"
 class ReplacementListenerInstallError extends Error {}
 class DeliveryCutoverObservationDetached extends Error {}
 
-function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
+export function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
   const method = event.method.trim();
   const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
     ? event.payload as Record<string, unknown>
@@ -423,7 +428,14 @@ function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "
       && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages"));
     return failedRoomWait ? "idle" : "working";
   }
-  const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
+  // A `tool_lifecycle` event carries ONE tool call's own status. An errored or
+  // aborted tool (a tool crash, a permission denial, or a tool aborted by a
+  // user Stop) leaves the provider process and the bounded turn healthy, so its
+  // payload.status must never be sniffed as a turn/process failure — otherwise
+  // it would classify the whole agent "failed" and fence (SIGKILL) the session
+  // mid-turn. (Failed mcpToolCall lifecycle is already handled above.)
+  const failedStatus = event.kind !== "tool_lifecycle"
+    && statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
   const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
   const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
   const failedItem = /^item\/completed$/i.test(method)
@@ -760,6 +772,9 @@ export class SupervisorDaemon {
   /** Ordered within one singleton generation; snapshots coalesce lower-level writes. */
   private stateSequence = 1;
   private readonly stateWaiters = new Set<() => void>();
+  /** Ephemeral per-agent live feed (not persisted): entryId -> ring buffer + waiters. */
+  private readonly agentStreams = new Map<string, { sequence: number; events: DaemonAgentStreamEvent[]; ended: boolean }>();
+  private readonly agentStreamWaiters = new Map<string, Set<() => void>>();
   private handoffScheduled = false;
   private handoffTeardownScheduled = false;
   /** Resolves only once this daemon has relinquished every authority surface. */
@@ -858,6 +873,14 @@ export class SupervisorDaemon {
         const params = this.paramsRecord(request.params);
         return this.watchState({
           afterDaemonGeneration: Number(params.after_daemon_generation ?? 0),
+          afterSequence: Number(params.after_sequence ?? 0),
+          waitMs: Number(params.wait_ms ?? 25_000),
+        });
+      }
+      if (request.method === "supervisor.watch_agent_stream") {
+        const params = this.paramsRecord(request.params);
+        return this.watchAgentStream({
+          entryId: String(params.entry_id ?? ""),
           afterSequence: Number(params.after_sequence ?? 0),
           waitMs: Number(params.wait_ms ?? 25_000),
         });
@@ -2563,6 +2586,7 @@ export class SupervisorDaemon {
         agent_lifecycle_v1: true,
         agent_runtime_recovery_v1: true,
         agent_state_subscription_v1: true,
+        agent_activity_stream_v1: true,
       },
       generation: this.singleton.currentGeneration,
       pid: process.pid,
@@ -2976,6 +3000,12 @@ export class SupervisorDaemon {
         return { outcome: "invalid" as const, error: schedulerErrorDetail(error) };
       }
       this.liveBindingIdentities.delete(entryId); this.cachedWorkerAuthorizations.delete(entryId); this.hostGrants.delete(entryId); this.openModelCredentials.delete(entryId);
+      // The ephemeral live feed shares the durable identity's lifetime: wake any
+      // outstanding watcher so its long-poll returns, then drop the buffer and
+      // its waiter set so a purged agent leaves no transcript in daemon memory.
+      this.notifyAgentStreamWaiters(entryId);
+      this.agentStreams.delete(entryId);
+      this.agentStreamWaiters.delete(entryId);
       return { outcome: "purged" as const };
     }));
   }
@@ -3840,6 +3870,82 @@ export class SupervisorDaemon {
     this.stateSequence += 1;
     for (const resolve of this.stateWaiters) resolve();
     this.stateWaiters.clear();
+  }
+
+  private notifyAgentStreamWaiters(entryId: string): void {
+    const waiters = this.agentStreamWaiters.get(entryId);
+    if (!waiters) return;
+    for (const resolve of waiters) resolve();
+    waiters.clear();
+  }
+
+  /** Append one redacted event to an agent's ephemeral live feed and wake watchers. */
+  private pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
+    const buffer = this.agentStreams.get(entryId) ?? { sequence: 0, events: [], ended: false };
+    if (buffer.ended) return;
+    buffer.sequence += 1;
+    buffer.events.push({
+      sequence: buffer.sequence,
+      observed_at: event.observed_at,
+      kind: event.kind,
+      method: event.method,
+      summary: event.summary || null,
+      payload: event.payload,
+    });
+    if (buffer.events.length > AGENT_STREAM_BUFFER_LIMIT) {
+      buffer.events.splice(0, buffer.events.length - AGENT_STREAM_BUFFER_LIMIT);
+    }
+    this.agentStreams.set(entryId, buffer);
+    this.notifyAgentStreamWaiters(entryId);
+  }
+
+  /** Mark an agent's live feed closed (provider handle torn down) and wake watchers. */
+  private endAgentStream(entryId: string): void {
+    const buffer = this.agentStreams.get(entryId);
+    if (!buffer || buffer.ended) return;
+    buffer.ended = true;
+    this.notifyAgentStreamWaiters(entryId);
+  }
+
+  private async watchAgentStream(input: {
+    entryId: string;
+    afterSequence: number;
+    waitMs: number;
+  }): Promise<{ sequence: number; events: DaemonAgentStreamEvent[]; ended: boolean }> {
+    const waitMs = Number.isFinite(input.waitMs)
+      ? Math.max(0, Math.min(30_000, Math.floor(input.waitMs)))
+      : 25_000;
+    const snapshot = (): { sequence: number; events: DaemonAgentStreamEvent[]; ended: boolean } => {
+      const buffer = this.agentStreams.get(input.entryId);
+      if (!buffer) return { sequence: input.afterSequence, events: [], ended: false };
+      const events = buffer.events
+        .filter((event) => event.sequence > input.afterSequence)
+        .slice(0, AGENT_STREAM_MAX_BATCH);
+      // Advance the cursor only to the last event actually delivered. Returning
+      // the producer's newest sequence would strand every event past the batch
+      // cap: the client resumes from this cursor and would filter them all out.
+      const sequence = events.length > 0 ? events[events.length - 1]!.sequence : input.afterSequence;
+      return { sequence, events, ended: buffer.ended };
+    };
+    let current = snapshot();
+    if (!this.handoffScheduled && current.events.length === 0 && !current.ended && waitMs > 0) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.agentStreamWaiters.get(input.entryId)?.delete(finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, waitMs);
+        const waiters = this.agentStreamWaiters.get(input.entryId) ?? new Set<() => void>();
+        waiters.add(finish);
+        this.agentStreamWaiters.set(input.entryId, waiters);
+      });
+      current = snapshot();
+    }
+    return current;
   }
 
   private async watchState(input: {
@@ -4897,6 +5003,11 @@ export class SupervisorDaemon {
     mayStartDelivery: () => boolean = () => true,
   ): Promise<void> {
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
+    // A fresh provider generation reopens the live feed. Keep the monotonic
+    // sequence so any in-flight watcher's cursor stays valid across the
+    // teardown/reattach; new events simply continue climbing.
+    const priorStream = this.agentStreams.get(entryId);
+    if (priorStream) priorStream.ended = false;
     this.liveHandles.set(entryId, handle);
     const binding = await this.workerBindings.get(entryId);
     const currentBinding = this.liveBindingIdentities.get(entryId);
@@ -4951,7 +5062,7 @@ export class SupervisorDaemon {
       })().catch(() => undefined));
     }, this.nativeHeartbeatIntervalMs);
     heartbeat.unref();
-    this.liveDisposers.set(entryId, [disposeExit, disposeStream, () => clearInterval(heartbeat)]);
+    this.liveDisposers.set(entryId, [disposeExit, disposeStream, () => clearInterval(heartbeat), () => this.endAgentStream(entryId)]);
     if (mayStartDelivery()) void this.startSupervisedDelivery(entryId).catch(() => undefined);
   }
 
@@ -5145,7 +5256,13 @@ export class SupervisorDaemon {
     });
     // Transcript probes and account telemetry remain in provider diagnostics;
     // they are transport facts, not human-readable agent activity.
-    if (isHumanRoomActivityEvent(event)) await this.appendActivity(entryId, sanitizedEvent);
+    if (isHumanRoomActivityEvent(event)) {
+      // Ephemeral live feed first (in-memory, non-blocking): the focused
+      // inspector sees reasoning/text/tool events token-by-token without the
+      // durable journal's coalescing or 200-event cap.
+      this.pushAgentStreamEvent(entryId, sanitizedEvent);
+      await this.appendActivity(entryId, sanitizedEvent);
+    }
     const waitEvidence = supervisedWaitEvidenceFromProviderEvent(event);
     if (waitEvidence) {
       const pending = this.pendingResumeBindings.get(entryId);

@@ -17,7 +17,9 @@ import {
   mapEntry,
   SupervisorDaemonClient,
   onSupervisorActivity,
+  onSupervisorAgentStream,
   publishSupervisorActivity,
+  setFocusedAgentStream,
   supervisorStateWatchRetryDelay,
   supervisorDaemonSpawnEnvironment,
   supervisorDaemonClient,
@@ -1160,7 +1162,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.77");
+    assert.equal(status.implementationVersion, "2.0.78");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -1412,4 +1414,58 @@ test("every daemon termination signal is identity-guarded and positive-PID only"
   assert.match(helper, /observeRetiredDaemon\(retired\)/);
   assert.match(helper, /retired\.pid <= 1/);
   assert.doesNotMatch(helper, /-retired\.pid|process\.kill\(-/);
+});
+
+test("agent-stream watch treats `ended` as a generation boundary and reopens while focus is unchanged", async () => {
+  type StreamEvent = import("../ipc-types/agents.js").DesktopAgentStreamEvent;
+  type StreamBatch = import("../ipc-types/agents.js").DesktopAgentStreamBatch;
+  const client = supervisorDaemonClient as unknown as {
+    connectIfRunning: () => Promise<unknown>;
+    watchAgentStream: (input: { entryId: string; afterSequence: number }) => Promise<{ sequence: number; events: StreamEvent[]; ended: boolean }>;
+  };
+  const originalConnect = client.connectIfRunning;
+  const originalWatch = client.watchAgentStream;
+  const mkEvent = (sequence: number, summary: string): StreamEvent => ({
+    sequence, observedAt: "2026-07-31T00:00:00.000Z", kind: "text_delta", method: "item/agentMessage/delta", summary, payload: { delta: summary },
+  });
+  // A provider generation streams, exits (ended), then the next generation
+  // reopens the same feed — the exact lifecycle the daemon keeps the entry for.
+  const script: Array<{ sequence: number; events: StreamEvent[]; ended: boolean }> = [
+    { sequence: 1, events: [mkEvent(1, "gen-1")], ended: false },
+    { sequence: 1, events: [], ended: true },
+    { sequence: 2, events: [mkEvent(2, "gen-2")], ended: false },
+  ];
+  const batches: StreamBatch[] = [];
+  const unsubscribe = onSupervisorAgentStream((batch) => { batches.push(batch); });
+  let call = 0;
+  client.connectIfRunning = async () => ({ generation: 1, capabilities: { agentActivityStream: true } });
+  client.watchAgentStream = async () => {
+    call += 1;
+    if (call <= script.length) return script[call - 1]!;
+    // Steady state: a daemon long-poll that idles, so the loop can re-check
+    // focus and exit cleanly on teardown instead of spinning.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return { sequence: 2, events: [], ended: false };
+  };
+  try {
+    setFocusedAgentStream("agent_live");
+    const deadline = Date.now() + 8_000;
+    while (batches.length < 3 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(batches.length >= 3, true, "the watch must reopen after `ended` and deliver the next generation");
+    assert.equal(batches[0]!.entryId, "agent_live");
+    assert.deepEqual(batches[0]!.events.map((event) => event.summary), ["gen-1"]);
+    assert.equal(batches[0]!.ended, false);
+    assert.deepEqual(batches[1]!.events, []);
+    assert.equal(batches[1]!.ended, true, "the generation boundary is reported to the renderer once");
+    assert.deepEqual(batches[2]!.events.map((event) => event.summary), ["gen-2"]);
+    assert.equal(batches[2]!.ended, false, "the reopened generation streams while the entry stays focused");
+  } finally {
+    setFocusedAgentStream(null);
+    // Let the in-flight steady-state poll resolve so the loop observes the
+    // cleared focus and exits before the client mocks are restored.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    unsubscribe();
+    client.connectIfRunning = originalConnect;
+    client.watchAgentStream = originalWatch;
+  }
 });
