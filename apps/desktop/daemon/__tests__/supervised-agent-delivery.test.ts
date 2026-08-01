@@ -1959,3 +1959,35 @@ test("a failed durable cancellation neither aborts the turn nor strands the FIFO
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("a Stop that loses to an interrupt-rejection retryable still settles — it is not reported published and the turn does not rerun", async () => {
+  // claude-code's native interrupt REJECTS the in-flight turn, so deliver()'s
+  // catch can commit `retryable` before the Stop's settlement lands. The Stop
+  // must still settle that head cancelled_by_user (not map it to "published"),
+  // and the stopped turn must NOT be re-dispatched.
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retryable-race-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const published: string[] = [];
+    let calls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+      calls += 1;
+      if (calls === 1) throw new Error(`Claude bounded room turn ${request.inboxItemId} failed: Claude command ended interrupted.`);
+      return { turnId: request.inboxItemId, outcome: "reply", text: "rerun reply after the Stop" };
+    }), {
+      poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }),
+      publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+    }, currentAuthority, 200 /* catch sleeps here between retryable and pending */);
+    try {
+      const pollPromise = delivery.poll(agent);
+      await waitForAsync(async () => (await store.receipts(agent.agentId)).find((receipt) => receipt.source_message_id === "1")?.state === "retryable");
+      const settlement = await delivery.interruptActiveDelivery(agent);
+      assert.equal(settlement, "settled", "a retryable (pre-publish) head is settled by the Stop, not called published");
+      assert.equal((await store.receipts(agent.agentId)).find((receipt) => receipt.source_message_id === "1")?.state, "cancelled_by_user");
+      await pollPromise;
+      assert.equal(calls, 1, "the natively-interrupted turn is NOT rerun after the Stop");
+      assert.equal(published.length, 0, "and nothing is published for the stopped turn");
+    } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -665,6 +665,10 @@ export class SupervisedAgentDelivery {
       const message = error instanceof Error ? error.message : "Room delivery failed.";
       const current = await this.inbox.get(item.inbox_item_id);
       if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply" || current.state === "cancelled_by_user" || current.state === "cancelled_by_room_move") return;
+      // A turn-scoped abort that landed during the async read above is a user
+      // interrupt, not a delivery failure: leave the head for interruptActiveDelivery
+      // to settle rather than retrying/blocking (and rerunning) the stopped turn.
+      if (turnController.signal.aborted) return;
       const failure = error as { providerFailureCode?: unknown; providerContinuationId?: unknown };
       if (failure.providerFailureCode === "provider_continuation_missing"
         && current.attempt_count === 0

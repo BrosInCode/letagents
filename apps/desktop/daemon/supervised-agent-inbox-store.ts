@@ -806,6 +806,13 @@ export class SupervisedAgentInboxStore {
    * touched. `skipBlocked` covers only the never-started case; this is the sole
    * `cancelled_by_user` path once dispatch has begun.
    *
+   * It settles from ANY pre-publish state — including `retryable`, `pending`,
+   * and `blocked`, which a racing `deliver()` catch may have committed for the
+   * SAME turn between the provider-interrupt rejection and this settlement (a
+   * claude-code native interrupt rejects the in-flight turn, so the catch can
+   * transition to `retryable` first). Settling those too is what stops a stopped
+   * turn from being mis-reported as published and then re-dispatched.
+   *
    * It is deliberately a no-op once the item reaches `publishing` or a terminal
    * state: past that commit the reply is being (or has been) posted, so the
    * published outcome stays authoritative and the interrupt loses the race.
@@ -816,11 +823,14 @@ export class SupervisedAgentInboxStore {
    * → interrupt settled it; anything else → publication already committed).
    */
   async cancelInterruptedTurn(inboxItemId: string, detail = "Stopped by the user."): Promise<SupervisedInboxItem | null> {
+    // Every pre-publish state is safe to settle on a user Stop. `publishing`
+    // and the terminal states are not: their outcome is already committed.
+    const cancellable = new Set<SupervisedInboxState>(["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"]);
     return this.exclusive(async (database) => this.transaction(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
-      if (item.state !== "dispatching" && item.state !== "awaiting_result" && item.state !== "result_recovery") return item;
+      if (!cancellable.has(item.state)) return item;
       this.assertCurrentHead(database, item);
       const timestamp = this.now();
       run(database.prepare(`UPDATE supervised_agent_inbox
