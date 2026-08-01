@@ -9,6 +9,7 @@
       'has-thread': hasThread,
     }"
     :data-msg-id="message.id"
+    @contextmenu="openContextMenu"
   >
     <div class="message-avatar" :style="{ '--sender-color': senderColor }" />
     <div class="message-body">
@@ -91,10 +92,28 @@
       @close="reasoningOpen = false"
     />
   </div>
+  <Teleport to="body">
+    <div
+      v-if="contextMenuOpen"
+      ref="contextMenuRef"
+      class="web-message-context-menu"
+      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
+      role="menu"
+      aria-label="Message actions"
+      data-testid="web-message-context-menu"
+      @contextmenu.prevent.stop
+      @keydown="handleMenuKeydown"
+    >
+      <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
+      <button type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+      <div class="web-message-context-menu-separator" role="separator" />
+      <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
+    </div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
@@ -145,6 +164,101 @@ const emit = defineEmits<{
 }>()
 
 const reasoningOpen = ref(false)
+
+// Custom message menu: the browser default is intentionally replaced on
+// message rows only (Slack/Discord pattern); the rest of the page keeps it.
+const contextMenuOpen = ref(false)
+const contextMenuPosition = ref({ x: 0, y: 0 })
+const contextMenuRef = ref<HTMLElement | null>(null)
+let contextMenuRestoreFocus: HTMLElement | null = null
+
+// Native context menus stay useful on these targets (open link in new tab,
+// copy selection, media controls), so the message menu defers to them.
+const NATIVE_MENU_TARGETS = 'a[href], button, input, textarea, select, [contenteditable="true"], img, video, audio'
+
+function openContextMenu(event: MouseEvent) {
+  const target = event.target instanceof Element ? event.target : null
+  if (target?.closest(NATIVE_MENU_TARGETS)) return
+  const selection = window.getSelection()
+  if (selection && !selection.isCollapsed && target && selection.containsNode(target, true)) return
+  event.preventDefault()
+  contextMenuRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  contextMenuPosition.value = {
+    x: Math.min(event.clientX, window.innerWidth - 190),
+    y: Math.min(event.clientY, window.innerHeight - 170),
+  }
+  contextMenuOpen.value = true
+  void nextTick(() => {
+    contextMenuRef.value?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+  })
+}
+
+function closeContextMenu(restoreFocus = false) {
+  if (!contextMenuOpen.value) return
+  contextMenuOpen.value = false
+  if (restoreFocus && contextMenuRestoreFocus?.isConnected) contextMenuRestoreFocus.focus()
+  contextMenuRestoreFocus = null
+}
+
+async function copyMessageFromMenu() {
+  closeContextMenu(true)
+  try {
+    await navigator.clipboard.writeText(props.message.text || '')
+  } catch {
+    // Clipboard may be unavailable; text remains selectable.
+  }
+}
+
+function replyFromMenu() {
+  closeContextMenu()
+  emit('reply', props.message)
+}
+
+function messageInfoFromMenu() {
+  closeContextMenu()
+  emit('info', props.message)
+}
+
+function handleMenuKeydown(event: KeyboardEvent) {
+  const items = Array.from(contextMenuRef.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+  if (items.length === 0) return
+  const activeIndex = items.indexOf(document.activeElement as HTMLElement)
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    items[(activeIndex + 1) % items.length].focus()
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    items[(activeIndex - 1 + items.length) % items.length].focus()
+  } else if (event.key === 'Home') {
+    event.preventDefault()
+    items[0].focus()
+  } else if (event.key === 'End') {
+    event.preventDefault()
+    items[items.length - 1].focus()
+  } else if (event.key === 'Tab') {
+    closeContextMenu(true)
+  }
+}
+
+function handleMenuDismiss(event: Event) {
+  if (!contextMenuOpen.value) return
+  if (event.type === 'keydown' && (event as KeyboardEvent).key !== 'Escape') return
+  // Presses inside the menu are item activations, not dismissals.
+  if (event.type === 'pointerdown' && event.target instanceof Node && contextMenuRef.value?.contains(event.target)) return
+  closeContextMenu(event.type === 'keydown')
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleMenuDismiss, true)
+  document.addEventListener('keydown', handleMenuDismiss, true)
+  window.addEventListener('blur', handleMenuDismiss)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', handleMenuDismiss, true)
+  document.removeEventListener('keydown', handleMenuDismiss, true)
+  window.removeEventListener('blur', handleMenuDismiss)
+})
 const identity = computed(() => resolveAgentIdentity(props.message.sender, props.message.agent_identity))
 const displayName = computed(() => identity.value.displayName || 'anonymous')
 const isSystem = computed(() => ['letagents', 'system'].includes((props.message.sender || '').toLowerCase()))
@@ -471,5 +585,37 @@ const renderedContent = computed(() => renderMessageContent(
   .message-bubble :deep(.md-content) { font-size: 1rem; line-height: 1.6; }
   .message-bubble.thinking-message-bubble,
   .ambient-system-message .message-bubble { padding: 0; border-radius: 0; }
+}
+</style>
+
+<style>
+.web-message-context-menu {
+  position: fixed;
+  z-index: 9998;
+  display: grid;
+  min-width: 172px;
+  padding: 5px;
+  border: 1px solid var(--border, #27272a);
+  border-radius: 10px;
+  background: var(--surface, #18181b);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
+}
+.web-message-context-menu button {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+.web-message-context-menu button:hover,
+.web-message-context-menu button:focus-visible { background: rgba(255, 255, 255, 0.08); outline: none; }
+.web-message-context-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border, #27272a);
 }
 </style>
