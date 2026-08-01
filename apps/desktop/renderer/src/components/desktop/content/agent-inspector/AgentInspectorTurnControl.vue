@@ -71,9 +71,15 @@ const emit = defineEmits<{
 const draft = ref("");
 const fieldId = computed(() => `agent-inspector-turn-correction-${props.entryId}`);
 
-watch(() => [props.entryId, props.control?.workAttemptId, props.control?.executionGenerationId] as const, () => {
-  draft.value = "";
-});
+// Clear the draft only when the correctable turn identity genuinely changes.
+// The getter must return a value-comparable key, not a fresh array: the
+// inspector projection is rebuilt on every activity push during a turn, so an
+// array getter is a new reference each evaluation and Vue would fire this
+// reset on every push — clearing the box out from under the user mid-type.
+watch(
+  () => `${props.entryId}::${props.control?.workAttemptId ?? ""}::${props.control?.executionGenerationId ?? ""}`,
+  () => { draft.value = ""; },
+);
 
 function applyCorrection(): void {
   const correction = draft.value.trim();
