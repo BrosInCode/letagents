@@ -104,6 +104,7 @@ export interface OpenModelProviderAdapterOptions {
   dependencies?: Partial<OpenModelProviderAdapterDependencies>;
   startTimeoutMs?: number;
   turnTimeoutMs?: number;
+  turnControlTimeoutMs?: number;
   maxAssistantSteps?: number;
   stopGraceMs?: number;
 }
@@ -249,6 +250,29 @@ async function nextEventBefore(
   }
 }
 
+/**
+ * Bound a single in-flight operation to a wall-clock deadline. A hung server
+ * response must never stretch a turn-control budget past its ceiling, so the
+ * losing operation is abandoned (its late rejection is swallowed to avoid an
+ * unhandled rejection).
+ */
+async function resolveBeforeDeadline<T>(operation: Promise<T>, deadline: number, message: string): Promise<T> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) { void operation.catch(() => undefined); throw new Error(message); }
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    void operation.catch(() => undefined);
+  }
+}
+
 class OpenCodeBoundedTurnError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
@@ -355,6 +379,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   private readonly deps: OpenModelProviderAdapterDependencies;
   private readonly startTimeoutMs: number;
   private readonly turnTimeoutMs: number;
+  private readonly turnControlTimeoutMs: number;
   private readonly maxAssistantSteps: number;
   private readonly stopGraceMs: number;
   private readonly runtimeRoot: string;
@@ -366,6 +391,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     this.deps = { ...defaultDependencies, ...options.dependencies };
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
     this.turnTimeoutMs = options.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+    this.turnControlTimeoutMs = options.turnControlTimeoutMs ?? TURN_CONTROL_TIMEOUT_MS;
     this.maxAssistantSteps = options.maxAssistantSteps ?? MAX_ASSISTANT_STEPS;
     if (!Number.isSafeInteger(this.maxAssistantSteps) || this.maxAssistantSteps < 1) {
       throw new Error("Open Model maxAssistantSteps must be a positive integer.");
@@ -658,6 +684,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     } catch (error) {
       if (error instanceof OpenCodeBoundedTurnError) {
         await this.abortBoundedTurn(handle, turnId, error);
+      } else if (handle.activeRoomTurnId === turnId) {
+        // A non-bounded failure (network, read, or checkpoint error) must not
+        // leave the handle projecting "working" with a stale active turn id.
+        handle.activeRoomTurnId = null;
+        handle.setState("idle");
       }
       throw error;
     }
@@ -679,6 +710,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     } catch (error) {
       if (error instanceof OpenCodeBoundedTurnError) {
         await this.abortBoundedTurn(handle, request.providerTurnId, error);
+      } else if (handle.activeRoomTurnId === request.providerTurnId) {
+        // Mirror runRoomTurn: a non-bounded failure must not leave a leaked
+        // "working" projection with a stale active turn id.
+        handle.activeRoomTurnId = null;
+        handle.setState("idle");
       }
       throw error;
     }
@@ -721,7 +757,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       );
     }
     await handle.client.abort(handle.providerContinuationId);
-    await this.waitForSessionIdle(handle, TURN_CONTROL_TIMEOUT_MS).catch((error) => {
+    await this.waitForSessionIdle(handle, this.turnControlTimeoutMs).catch((error) => {
       throw new ProviderTurnControlError(
         `OpenCode accepted the abort, but its turn boundary could not be verified: ${error instanceof Error ? error.message : String(error)}`,
         "uncertain",
@@ -1016,7 +1052,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   ): Promise<never> {
     try {
       await handle.client.abort(handle.providerContinuationId);
-      await this.waitForSessionIdle(handle, TURN_CONTROL_TIMEOUT_MS);
+      await this.waitForSessionIdle(handle, this.turnControlTimeoutMs);
     } catch (error) {
       throw new OpenCodeBoundedTurnError(
         `${reason.message} Native abort could not be verified; the exact turn will not be rerun automatically.`,
@@ -1034,7 +1070,14 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (await handle.client.status(handle.providerContinuationId) !== "busy") return;
+      // Bound each status probe to the remaining budget: a server that never
+      // answers status must not stretch a Stop far past its control timeout.
+      const status = await resolveBeforeDeadline(
+        handle.client.status(handle.providerContinuationId),
+        deadline,
+        "OpenCode status probe did not return before the turn-control deadline.",
+      );
+      if (status !== "busy") return;
       await delay(50);
     }
     throw new Error("OpenCode remained busy after native abort.");

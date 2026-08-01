@@ -3401,7 +3401,11 @@ export class SupervisorDaemon {
           ...current,
           turn_control: {
             ...current.turn_control,
-            status: outcome === "not_applied" ? "retryable" : dispatchMarked ? "uncertain" : "retryable",
+            // An adapter that explicitly reports "uncertain" (e.g. an abort was
+            // accepted but its turn boundary could not be verified) must be
+            // honored as uncertain even if native dispatch was never marked —
+            // never silently downgraded to a replayable "retryable".
+            status: outcome === "not_applied" ? "retryable" : outcome === "uncertain" ? "uncertain" : dispatchMarked ? "uncertain" : "retryable",
             error: message,
             updated_at: new Date().toISOString(),
           },
@@ -3409,8 +3413,54 @@ export class SupervisorDaemon {
         : current);
       throw error;
     }
+    // Double-outcome fix: for a Stop that natively interrupted a live turn,
+    // settle the daemon delivery turn so the FIFO pump cannot also publish a
+    // (possibly partial) reply for the same turn. interruptActiveDelivery
+    // settles the item cancelled_by_user iff it had not already committed to
+    // publishing, then aborts the turn-scoped delivery controller. Corrections
+    // keep today's provider-native path (Codex resume) and are not settled here.
+    let settlement: "settled" | "published" | "no_active_turn" = "no_active_turn";
+    if (correction === null && providerResult.interrupted && this.supervisedDelivery) {
+      const credential = await this.workerBindings.credentialFor(binding).catch(() => null);
+      const ingressAgent: SupervisedIngressAgent = {
+        agentId: entry.id,
+        roomId: binding.room_id,
+        provider: entry.provider,
+        charter: entry.charter,
+        apiUrl: binding.api_url,
+        agentSessionId: binding.agent_session_id,
+        bearer: credential ?? "",
+        handle,
+        workAttemptId: binding.work_attempt_id,
+        providerContinuationId: ref.provider_continuation_id ?? null,
+        pid: handle.pid ?? ref.provider_connection?.pid ?? null,
+        executionGenerationId: binding.execution_generation_id,
+        daemonGeneration: this.singleton.currentGeneration,
+        deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      };
+      try {
+        settlement = await this.supervisedDelivery.interruptActiveDelivery(ingressAgent);
+      } catch (error) {
+        // The native turn was interrupted, but the daemon could not durably
+        // settle the delivery turn (settle-before-abort means the pump was NOT
+        // detached, so it may still publish a reply). This must never be
+        // recorded as a clean Stop: journal it uncertain — the outcome is
+        // genuinely unresolved — and surface the failure to the caller instead
+        // of silently reporting success.
+        const message = redactCredentialText(error instanceof Error ? error.message : String(error)).value;
+        await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
+          ? { ...current, turn_control: { ...current.turn_control, status: "uncertain" as const, error: message, updated_at: new Date().toISOString() } }
+          : current);
+        throw error;
+      }
+    }
+    // Only a genuine publish-race downgrades `interrupted`: if a daemon turn had
+    // already committed its reply, the reply stands so the turn was not truly
+    // interrupted. With no daemon delivery turn (mcp_polling, or idle
+    // daemon_inbox) the provider's native interrupt stands unchanged.
+    const interrupted = settlement === "published" ? false : providerResult.interrupted;
     const stages: DaemonTurnControlResult["stages"] = ["delivered"];
-    if (providerResult.interrupted) stages.push("interrupting");
+    if (interrupted) stages.push("interrupting");
     stages.push("applied");
     if (providerResult.resumed) stages.push("resumed");
     const observedAt = new Date().toISOString();
@@ -3429,7 +3479,7 @@ export class SupervisorDaemon {
         provider: current.provider,
         kind: "turn_lifecycle",
         method: correction ? "supervisor/steer" : "supervisor/stop-turn",
-        summary: correction ? "Human correction applied; same continuation resumed" : "Active turn interrupted; worker remains available",
+        summary: correction ? "Human correction applied; same continuation resumed" : interrupted ? "Active turn interrupted; worker remains available" : "Turn already finished before the stop; its reply stands",
         status: providerResult.state === "working" ? "working" : "idle",
         payload: { action_id: input.actionId, capability, stages },
         payload_truncated: false,
@@ -3442,7 +3492,7 @@ export class SupervisorDaemon {
         native_liveness: {
           state: providerResult.state === "working" ? "active" : "idle",
           observed_at: observedAt,
-          detail: correction ? "human correction resumed on the same continuation" : "turn interrupted; worker available",
+          detail: correction ? "human correction resumed on the same continuation" : interrupted ? "turn interrupted; worker available" : "turn already finished; its reply stands",
         },
         activity,
         reconciliation: nextReconciliation,
@@ -3453,7 +3503,7 @@ export class SupervisorDaemon {
           has_correction: Boolean(correction),
           status: "completed",
           capability,
-          interrupted: providerResult.interrupted,
+          interrupted,
           resumed: providerResult.resumed,
           state: providerResult.state,
           stages,
@@ -3473,6 +3523,7 @@ export class SupervisorDaemon {
       duplicate: false,
       stages,
       ...providerResult,
+      interrupted,
     };
   }
 

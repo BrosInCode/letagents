@@ -9,10 +9,11 @@ import {
   OpenModelProviderAdapter,
   type OpenModelProviderAdapterDependencies,
 } from "../main/agents/open-model-provider-adapter.js";
-import type {
-  ProviderHandle,
-  ProviderSpawnRequest,
-  ProviderStreamEvent,
+import {
+  ProviderTurnControlError,
+  type ProviderHandle,
+  type ProviderSpawnRequest,
+  type ProviderStreamEvent,
 } from "../main/agents/provider-adapter.js";
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
@@ -886,4 +887,66 @@ test("Open Model bounded turns time out without polling transcript history", asy
   assert.equal(harness.promptBodies.length, 1);
   assert.equal(harness.messageReads, 1, "one bounded snapshot replaces transcript polling");
   assert.deepEqual(harness.aborts, ["session-open-model-1"], "the watchdog stops the exact native session");
+});
+
+test("Open Model bounds a hung status probe to the turn-control budget instead of hanging the Stop", async () => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-stop-budget-"));
+  const originalFetch = harness.dependencies.fetch;
+  let aborted = false;
+  harness.dependencies.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/session/status") {
+      // Pre-abort checks see a busy session; the post-abort idle probe hangs to
+      // model a server that stopped answering /session/status.
+      if (!aborted) return json({ "session-open-model-1": { type: "busy" } });
+      return new Promise<Response>(() => {});
+    }
+    if (url.pathname.endsWith("/abort") && init?.method === "POST") {
+      aborted = true;
+    }
+    return originalFetch(input, init);
+  };
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    turnControlTimeoutMs: 120,
+  });
+  const handle = await adapter.spawn(spawnRequest());
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    adapter.controlTurn(handle, null, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderTurnControlError);
+      assert.equal(error.turnControlOutcome, "uncertain");
+      assert.match(error.message, /turn boundary could not be verified/);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - startedAt < 2_000, "a hung status probe must not stretch the Stop far past its 120ms budget");
+  assert.deepEqual(harness.aborts, ["session-open-model-1"]);
+});
+
+test("Open Model clears the working projection and active turn id when a non-bounded turn error propagates", async () => {
+  const { adapter, handle } = await spawnAdapter();
+
+  await assert.rejects(
+    adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-non-bounded-leak",
+      sourceMessage: { text: "say hi" },
+      activation: { decision: "activate" },
+      actionId: "non-bounded-leak",
+    }, {
+      // A non-bounded failure (here a checkpoint write) after the turn read.
+      checkpointTerminalResult: async () => { throw new Error("durable checkpoint write failed"); },
+    }),
+    /durable checkpoint write failed/,
+  );
+
+  assert.equal(handle.observedState(), "idle", "a non-bounded failure must not leak a working projection");
+  assert.equal((handle as unknown as { activeRoomTurnId: string | null }).activeRoomTurnId, null, "the stale active turn id is cleared");
 });
