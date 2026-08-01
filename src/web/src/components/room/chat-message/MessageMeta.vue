@@ -16,7 +16,7 @@
           <path d="M3 8h5.5c2.485 0 4.5 2.015 4.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
-      <button v-if="messageInfoEnabled" class="reply-action info-action" type="button" aria-label="Message info" title="Message info" @click="emit('info')">
+      <button class="reply-action info-action" type="button" aria-label="Message info" title="Message info" @click="emit('info')">
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4"/>
           <path d="M8 7v4M8 5h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -39,12 +39,7 @@
 
 <script setup lang="ts">
 import IdeBadge from './IdeBadge.vue'
-import { messageInfoSurfaceEnabled } from '../featureFlags'
 import type { ProvenanceBadge } from './types'
-
-// Gated until the supervised daemon publishes its receipt lifecycle; this PR
-// ships the server foundation.
-const messageInfoEnabled = messageInfoSurfaceEnabled()
 
 defineProps<{
   displayName: string
