@@ -14,7 +14,7 @@
         @status="participantAnnouncement = $event"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
-        @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @live-selected="emit('live-selected')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
@@ -41,7 +41,7 @@
         @status="participantAnnouncement = $event"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
-        @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @live-selected="emit('live-selected')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
@@ -63,6 +63,7 @@ import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts
 import type { AgentInspectorConfigurationResource, AgentInspectorConfigurationDraft, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type {
   DesktopAgentProvider,
+  DesktopAgentStreamEvent,
   DesktopFocusRoomInfo,
   DesktopManagedAgentSession,
   DesktopReasoningSession,
@@ -94,6 +95,7 @@ const props = defineProps<{
   providers: readonly DesktopAgentProvider[];
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
+  liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean };
   roomIdentifier: string;
   requestVersion: number;
   managedSessions: readonly DesktopManagedAgentSession[];
@@ -103,6 +105,7 @@ const emit = defineEmits<{
   close: [];
   action: [intent: AgentInspectorActionIntent];
   "presentation-change": [compact: boolean];
+  "live-selected": [];
   "work-selected": [];
   "work-retry": [];
   "work-source-select": [sourceMessageId: string];
@@ -203,6 +206,7 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       providers: props.providers,
       destinations: props.destinations,
       settingsConflict: props.settingsConflict,
+      liveFeed: props.liveFeed,
     };
   }
   if (participantProjection.value) {

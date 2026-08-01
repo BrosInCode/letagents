@@ -266,6 +266,23 @@ function assistantMessage(
   };
 }
 
+function assistantWithTool(
+  turnId: string,
+  id: string,
+  created: number,
+  toolState: Record<string, unknown>,
+  toolCallId = "call-1",
+  tool = "bash",
+): TranscriptMessage {
+  return {
+    info: { id, role: "assistant", parentID: turnId, time: { created, completed: created + 1 } },
+    parts: [
+      { id: `${id}-tool`, type: "tool", tool, callID: toolCallId, state: toolState },
+      { id: `${id}-finish`, type: "step-finish", reason: "tool-calls" },
+    ],
+  };
+}
+
 test("Open Model launches a dedicated OpenCode server without putting the provider key in config or MCP", async () => {
   const { handle, harness } = await spawnAdapter();
 
@@ -519,6 +536,49 @@ test("Open Model repair replaces a poisoned session instead of rematerializing i
   assert.equal(repaired.outcome, "replaced");
   assert.equal(repaired.replacementProviderContinuationId, "session-open-model-2");
   assert.deepEqual(checkpointed, ["session-open-model-2"]);
+});
+
+test("Open Model surfaces tool calls as neutral tool_lifecycle stream events, deduped by status", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const stream: ProviderStreamEvent[] = [];
+  adapter.onStream(handle, (event) => stream.push(event));
+  harness.holdTurnOpenWithTranscript();
+  // Initial snapshot sees the tool running; a live message.part.updated re-sends
+  // the same running part (must dedup); the session.idle snapshot then sees it
+  // completed with output plus the final answer.
+  harness.setTranscriptFactories([
+    (turnId) => [assistantWithTool(turnId, "assistant-tool", 10, { status: "running", input: { command: "ls" } })],
+    (turnId) => [
+      assistantWithTool(turnId, "assistant-tool", 10, { status: "completed", input: { command: "ls" }, output: "file-a\nfile-b" }),
+      assistantMessage(turnId, "assistant-final", 20, "Listed the files."),
+    ],
+  ]);
+  harness.setStreamEvents([
+    { type: "message.part.updated", properties: { part: { id: "assistant-tool-tool", messageID: "assistant-tool", type: "tool", tool: "bash", callID: "call-1", state: { status: "running", input: { command: "ls" } } } } },
+    { type: "session.idle", properties: { sessionID: "session-open-model-1" } },
+  ]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-tool",
+    sourceMessage: { text: "list files" },
+    activation: { decision: "activate" },
+    actionId: "tool",
+  });
+  assert.equal(result.outcome, "reply");
+
+  const toolEvents = stream.filter((event) => event.kind === "tool_lifecycle");
+  assert.equal(toolEvents.length, 2, "one event per distinct (callID, status); the repeated running snapshot is deduped");
+  for (const event of toolEvents) {
+    // Neutral method + non-error kind so the daemon never misreads a tool as
+    // a terminal/idle turn boundary.
+    assert.equal(event.method, "item/toolCall/updated");
+    assert.doesNotMatch(event.method, /completed|finished|idle|stopped|interrupted/);
+  }
+  const running = toolEvents[0]!.payload as Record<string, unknown>;
+  const completed = toolEvents[1]!.payload as Record<string, unknown>;
+  assert.deepEqual({ tool: running.tool, callID: running.callID, status: running.status }, { tool: "bash", callID: "call-1", status: "running" });
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.output, "file-a\nfile-b");
 });
 
 test("Open Model waits for the session boundary and selects the final answer after tool-call children", async () => {

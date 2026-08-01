@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.77";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.78";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -45,6 +45,21 @@ export type DaemonActivityEvent = {
   payload_truncated: boolean;
   payload_redacted: boolean;
   durable_payload_ref: string | null;
+};
+
+/**
+ * One event on the ephemeral per-agent live feed (reasoning/assistant-text
+ * deltas + tool calls). Redacted like activity, but NOT persisted to the
+ * manifest — it exists only in an in-memory ring buffer for the focused agent
+ * inspector, so a token firehose never touches durable state.
+ */
+export type DaemonAgentStreamEvent = {
+  sequence: number;
+  observed_at: string;
+  kind: string;
+  method: string;
+  summary: string | null;
+  payload: unknown;
 };
 
 /**

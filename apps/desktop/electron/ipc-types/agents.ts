@@ -381,6 +381,7 @@ export interface DesktopSupervisorDaemonStatus {
     agentLifecycle: boolean;
     agentRuntimeRecovery?: boolean;
     agentStateSubscription: boolean;
+    agentActivityStream?: boolean;
   };
 }
 
@@ -460,6 +461,23 @@ export interface DesktopSupervisorActivityEvent {
   payloadTruncated: boolean;
   payloadRedacted: boolean;
   durablePayloadRef: string | null;
+}
+
+/** One event on an agent's ephemeral live feed (reasoning/text deltas + tool calls). */
+export interface DesktopAgentStreamEvent {
+  sequence: number;
+  observedAt: string;
+  kind: string;
+  method: string;
+  summary: string | null;
+  payload: unknown;
+}
+
+/** A batch pushed for the focused agent, with `ended` once its runtime closes. */
+export interface DesktopAgentStreamBatch {
+  entryId: string;
+  events: DesktopAgentStreamEvent[];
+  ended: boolean;
 }
 
 export type DesktopRoomAgentConnectionState = "connected" | "reconnecting" | "disconnected";

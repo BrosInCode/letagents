@@ -56,6 +56,7 @@
 
     <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleTabKeydown">
       <button ref="overviewTab" id="agent-inspector-overview-tab" type="button" role="tab" :aria-selected="selectedTab === 'overview'" aria-controls="agent-inspector-overview-panel" :tabindex="selectedTab === 'overview' ? 0 : -1" @click="selectTab('overview')">Overview</button>
+      <button id="agent-inspector-live-tab" type="button" role="tab" :aria-selected="selectedTab === 'live'" aria-controls="agent-inspector-live-panel" :tabindex="selectedTab === 'live' ? 0 : -1" @click="selectTab('live')">Live</button>
       <button id="agent-inspector-work-tab" type="button" role="tab" :aria-selected="selectedTab === 'work'" aria-controls="agent-inspector-work-panel" :tabindex="selectedTab === 'work' ? 0 : -1" @click="selectTab('work')">Work</button>
       <button id="agent-inspector-settings-tab" type="button" role="tab" :aria-selected="selectedTab === 'settings'" aria-controls="agent-inspector-settings-panel" :tabindex="selectedTab === 'settings' ? 0 : -1" @click="selectTab('settings')">Settings</button>
       <button id="agent-inspector-diagnostics-tab" type="button" role="tab" :aria-selected="selectedTab === 'diagnostics'" aria-controls="agent-inspector-diagnostics-panel" :tabindex="selectedTab === 'diagnostics' ? 0 : -1" @click="selectTab('diagnostics')">Diagnostics</button>
@@ -73,6 +74,10 @@
           @skip-message="emitRecoveryControl('skip_message', $event)"
         />
       </div>
+      <AgentInspectorLive
+        v-else-if="selectedTab === 'live'" id="agent-inspector-live-panel" role="tabpanel" aria-labelledby="agent-inspector-live-tab"
+        :feed="liveFeed"
+      />
       <AgentInspectorWork
         v-else-if="selectedTab === 'work'" id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"
         :resource="workResource" :selected-source-message-id="selectedWorkSourceMessageId" :tasks="projection.assignedWork" :artifacts="workArtifacts"
@@ -134,15 +139,19 @@ import type {
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
-import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
+import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import { AGENT_INSPECTOR_RETIRE_CONFIRMATION } from "../../../../domain/agent-inspector-settings";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
 import AgentInspectorWork from "./AgentInspectorWork.vue";
 import AgentInspectorSettings from "./AgentInspectorSettings.vue";
-/** Diagnostics stays out of the normal inspector path until a human opens it. */
+
+type InspectorTab = "overview" | "live" | "work" | "settings" | "diagnostics";
+
+/** Diagnostics and Live stay out of the normal inspector path until opened. */
 const AgentInspectorDiagnostics = defineAsyncComponent(() => import("./AgentInspectorDiagnostics.vue"));
+const AgentInspectorLive = defineAsyncComponent(() => import("./AgentInspectorLive.vue"));
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
@@ -157,10 +166,12 @@ const props = defineProps<{
   providers: readonly DesktopAgentProvider[];
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
+  liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean };
 }>();
 const emit = defineEmits<{
   close: [];
   action: [intent: AgentInspectorActionIntent];
+  "live-selected": [];
   "work-selected": [];
   "work-retry": [];
   "work-source-select": [sourceMessageId: string];
@@ -178,7 +189,7 @@ const emit = defineEmits<{
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
-const selectedTab = ref<"overview" | "work" | "settings" | "diagnostics">("overview");
+const selectedTab = ref<InspectorTab>("overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
 const retryRequestIsPending = computed(() => props.projection.deliveryProgress?.requestedLocally === true);
 const lifecycleActionBusy = computed(() => props.actionState?.status === "running" || retryRequestIsPending.value);
@@ -224,9 +235,10 @@ defineExpose({ focusInitial, containsFocus });
 
 watch(() => props.projection.entryId, () => { selectedTab.value = "overview"; });
 
-function selectTab(tab: "overview" | "work" | "settings" | "diagnostics"): void {
+function selectTab(tab: InspectorTab): void {
   if (selectedTab.value === tab) return;
   selectedTab.value = tab;
+  if (tab === "live") emit("live-selected");
   if (tab === "work") emit("work-selected");
   if (tab === "settings") emit("settings-selected");
 }
@@ -260,7 +272,7 @@ function emitRecoveryControl(
 function handleTabKeydown(event: KeyboardEvent): void {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const tabs: Array<"overview" | "work" | "settings" | "diagnostics"> = ["overview", "work", "settings", "diagnostics"];
+  const tabs: InspectorTab[] = ["overview", "live", "work", "settings", "diagnostics"];
   const current = tabs.indexOf(selectedTab.value);
   const next = event.key === 'Home' ? 'overview' : event.key === 'End' ? 'diagnostics' : tabs[(current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length]!;
   selectTab(next);
