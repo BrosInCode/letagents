@@ -42,6 +42,15 @@ export interface ProviderAdapterCapabilities {
   resume: boolean;
   /** Inject a message into a running session at its next tool boundary (poke). */
   midTurnInjection: boolean;
+  /**
+   * Apply a human correction to the CURRENT turn natively — interrupt and
+   * resume the same in-flight turn without losing it (Codex). Distinct from
+   * `midTurnInjection` (the reconciler "poke" rung) and from `turnControl`
+   * (which only says a turn can be stopped). When absent/false, the supervisor
+   * delivers a correction as stop-then-resend: it stops the turn and re-runs
+   * the correction as a fresh bounded turn on the same provider session.
+   */
+  midTurnCorrection?: boolean;
   /** Read the live transcript/rollout for runtime activity evidence. */
   transcriptAccess: boolean;
   /** Surface the provider's native permission prompts through the desktop. */

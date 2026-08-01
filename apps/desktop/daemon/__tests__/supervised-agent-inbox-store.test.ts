@@ -699,6 +699,45 @@ test("cancelInterruptedTurn never overrides a committed publication or a termina
   } finally { await env.cleanup(); }
 });
 
+test("enqueueCorrection appends a same-session FIFO turn without moving the ingress cursor, idempotently", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-31T00:00:00.000Z");
+    await store.bootstrapCursor({ agent_id: "corrector", room_id: "room", last_observed_message_id: null });
+    const [observed] = await store.ingestPoll({
+      agent_id: "corrector", room_id: "room", last_observed_message_id: "7",
+      messages: [{ source_message_id: "7", source_message: { text: "please act" }, activation: {} }],
+    });
+    assert.equal((await store.cursor("corrector"))?.last_observed_message_id, "7");
+
+    const correction = await store.enqueueCorrection({
+      agent_id: "corrector", room_id: "room", source_message_id: "correction:action-1",
+      source_message: { text: "Use the revised plan", sender: { kind: "supervisor_correction" } },
+      activation: { decision: "activate", reason: "human_correction", addressed: true },
+    });
+    assert.equal(correction.state, "pending");
+    assert.equal(correction.source_message_id, "correction:action-1");
+    assert.equal((correction.source_message as { text?: string }).text, "Use the revised plan");
+    assert.equal(correction.action_id, "supervised-room:corrector:room:correction:action-1:action:v1");
+    assert.ok(correction.fifo_sequence > observed!.fifo_sequence, "the correction runs after already-queued work");
+    // A correction is not an observed room message; the ingress cursor is untouched.
+    assert.equal((await store.cursor("corrector"))?.last_observed_message_id, "7");
+
+    // Idempotent: a retried control action re-enqueues the exact same item.
+    const again = await store.enqueueCorrection({
+      agent_id: "corrector", room_id: "room", source_message_id: "correction:action-1",
+      source_message: { text: "different text should be ignored" }, activation: {},
+    });
+    assert.equal(again.inbox_item_id, correction.inbox_item_id);
+    assert.equal((again.source_message as { text?: string }).text, "Use the revised plan");
+
+    // FIFO: the correction becomes the head only after the earlier item settles.
+    assert.equal((await store.claimHead("corrector"))?.inbox_item_id, observed!.inbox_item_id);
+    await store.cancelInterruptedTurn(observed!.inbox_item_id);
+    assert.equal((await store.claimHead("corrector"))?.inbox_item_id, correction.inbox_item_id);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("room move compensation restores only its source queue and exact pre-move cursor idempotently", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");

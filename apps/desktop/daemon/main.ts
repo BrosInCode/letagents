@@ -1237,22 +1237,39 @@ export class SupervisorDaemon {
       const manifest = await this.store.load();
       const recoveredAt = new Date().toISOString();
       let changed = false;
-      const entries = manifest.entries.map((entry) => {
-        if (entry.turn_control?.status !== "prepared" && entry.turn_control?.status !== "dispatching") return entry;
+      const entries: DaemonManifestEntry[] = [];
+      for (const entry of manifest.entries) {
+        const control = entry.turn_control;
+        if (control?.status !== "prepared" && control?.status !== "dispatching") { entries.push(entry); continue; }
         changed = true;
-        const wasPrepared = entry.turn_control.status === "prepared";
-        return {
+        const wasPrepared = control.status === "prepared";
+        // A dispatched stop-then-resend is safe to re-drive: the native Stop is
+        // idempotent and the correction enqueue is deduped by its stable id, so
+        // recover it as retryable (the client reapplies the same correction)
+        // rather than stranding it uncertain — the correction is never lost.
+        // stop-then-resend is re-derived from the provider's static capability
+        // (a stop-only provider on daemon_inbox), so no extra journal field is
+        // persisted. A native correction / plain Stop stays uncertain: its
+        // native effect is ambiguous after a crash and is not safe to re-drive.
+        let resumableResend = false;
+        if (!wasPrepared && control.has_correction && this.providerPort) {
+          const caps = await this.providerPort.capabilities(control.work_attempt_id, entry.provider).catch(() => null);
+          resumableResend = Boolean(caps && caps.midTurnCorrection !== true && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox");
+        }
+        entries.push({
           ...entry,
           turn_control: {
-            ...entry.turn_control,
-            status: wasPrepared ? "retryable" as const : "uncertain" as const,
+            ...control,
+            status: wasPrepared || resumableResend ? "retryable" as const : "uncertain" as const,
             error: wasPrepared
               ? "Supervisor restarted before native dispatch; the correction is safe to retry."
-              : "Supervisor restarted after native dispatch began; verify the provider outcome before resolving the action.",
+              : resumableResend
+                ? "Supervisor restarted mid stop-then-resend; reapply the correction to re-queue it (the resend is idempotent)."
+                : "Supervisor restarted after native dispatch began; verify the provider outcome before resolving the action.",
             updated_at: recoveredAt,
           },
-        };
-      });
+        });
+      }
       if (!changed) return;
       const next = await this.writeManifest(this.manifestGeneration, entries, manifest.legacy_lane_owners);
       this.manifestGeneration = next.generation;
@@ -3261,6 +3278,19 @@ export class SupervisorDaemon {
     const capabilities = await this.providerPort?.capabilities(input.workAttemptId, entry.provider);
     const capability = capabilities?.turnControl ?? "unsupported";
     const correction = input.correction?.trim() || null;
+    // A correction is applied natively (Codex interrupt+resume; Cursor's adapter
+    // stop+beginTurn) or via stop-then-resend for stop-only providers
+    // (open-model, claude-code): stop the current turn, then re-run the
+    // correction as a fresh bounded turn on the same provider session. For
+    // stop-then-resend the native turn-control call is a pure Stop (no correction
+    // handed to the adapter), so `controlTurn` never has to reject an unjournaled
+    // correction turn. Stop-then-resend is gated to `daemon_inbox`: only that
+    // lane has a delivery pump that can consume the synthetic correction row, so
+    // a non-daemon-inbox provider keeps its own adapter correction path instead
+    // of enqueuing a row nothing would ever drain.
+    const supportsNativeCorrection = capabilities?.midTurnCorrection === true;
+    const stopThenResend = Boolean(correction) && !supportsNativeCorrection && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox";
+    const nativeCorrection = stopThenResend ? null : correction;
     const existingControl = entry.turn_control;
     const retryingControl = existingControl?.action_id === input.actionId
       && existingControl.status === "retryable";
@@ -3330,6 +3360,23 @@ export class SupervisorDaemon {
       || handle.providerContinuationId !== ref.provider_continuation_id) {
       throw new Error("Turn control could not resolve the exact live provider continuation.");
     }
+    // Re-drive idempotency (crash-recovery replay or transport retry of the same
+    // action): if this action's correction row is already durably queued, the
+    // resend committed on a prior drive. Re-issuing the native Stop now would
+    // interrupt the CORRECTION's own turn (and settle it), silently losing the
+    // correction while journaling success. So skip the Stop/settlement/enqueue
+    // and complete idempotently. If the row was cancelled/compensated it cannot
+    // be re-delivered under this action id — fail so the client reapplies fresh.
+    let alreadyResent = false;
+    if (stopThenResend) {
+      const existingCorrection = (await this.supervisedInbox.receipts(entry.id)).find((receipt) => receipt.source_message_id === `correction:${input.actionId}`);
+      if (existingCorrection) {
+        if (existingCorrection.state === "cancelled_by_user" || existingCorrection.state === "cancelled_by_room_move") {
+          throw new Error("The stop-then-resend correction was cancelled before it could run; reapply it.");
+        }
+        alreadyResent = true;
+      }
+    }
     const recordedAt = new Date().toISOString();
     await this.updateManifestEntry(entry.id, (current) => {
       if (current.work_attempt_id !== input.workAttemptId
@@ -3365,8 +3412,14 @@ export class SupervisorDaemon {
     });
     let providerResult: ProviderTurnControlResult;
     let dispatchMarked = false;
-    try {
-      providerResult = await this.providerPort.controlTurn(handle, correction, {
+    if (alreadyResent) {
+      // The correction is already queued/running on the same session; do NOT
+      // dispatch a second native Stop. Convergence (below) runs the queued
+      // correction; the control completes as a resumed no-op.
+      providerResult = { capability, interrupted: false, resumed: false, state: entry.observed_state === "working" ? "working" : "idle" };
+    } else {
+      try {
+      providerResult = await this.providerPort.controlTurn(handle, nativeCorrection, {
         actionId: input.actionId,
         markDispatched: async () => {
           if (dispatchMarked) return;
@@ -3412,15 +3465,20 @@ export class SupervisorDaemon {
         }
         : current);
       throw error;
+      }
     }
-    // Double-outcome fix: for a Stop that natively interrupted a live turn,
-    // settle the daemon delivery turn so the FIFO pump cannot also publish a
-    // (possibly partial) reply for the same turn. interruptActiveDelivery
+    // Double-outcome fix: a pure native Stop (`nativeCorrection === null` — a
+    // plain Stop OR the stop half of a stop-then-resend) that interrupted a live
+    // turn must settle the daemon delivery turn so the FIFO pump cannot also
+    // publish a (possibly partial) reply for the same turn. interruptActiveDelivery
     // settles the item cancelled_by_user iff it had not already committed to
-    // publishing, then aborts the turn-scoped delivery controller. Corrections
-    // keep today's provider-native path (Codex resume) and are not settled here.
+    // publishing, then aborts the turn-scoped delivery controller (settle before
+    // abort); it reports "published" when a publication won the race, in which
+    // case the reply stands and the turn was not truly interrupted. A Codex
+    // native correction (nativeCorrection !== null) resumes the same turn, is
+    // never settled here, and never enters this branch.
     let settlement: "settled" | "published" | "no_active_turn" = "no_active_turn";
-    if (correction === null && providerResult.interrupted && this.supervisedDelivery) {
+    if (nativeCorrection === null && providerResult.interrupted && this.supervisedDelivery) {
       const credential = await this.workerBindings.credentialFor(binding).catch(() => null);
       const ingressAgent: SupervisedIngressAgent = {
         agentId: entry.id,
@@ -3459,10 +3517,41 @@ export class SupervisorDaemon {
     // interrupted. With no daemon delivery turn (mcp_polling, or idle
     // daemon_inbox) the provider's native interrupt stands unchanged.
     const interrupted = settlement === "published" ? false : providerResult.interrupted;
+    // Stop-then-resend: enqueue the correction now — only AFTER the native Stop
+    // has completed and the original turn is settled. Enqueuing here (not before
+    // the Stop) guarantees the correction is never pumpable, and can never be
+    // hit by the native Stop, until the original turn is gone. The fence +
+    // enqueue run inside serializeEntryTick so they are atomic with room-move
+    // reconciliation (closing the room/generation TOCTOU), and the synthetic
+    // source id is derived from the stable action id so the enqueue is
+    // idempotent under retry/recovery. A dispatched crash before this point is
+    // recovered as retryable (see recoverTurnControls) and safely re-driven.
+    let resumed = providerResult.resumed;
+    if (stopThenResend && correction) {
+      try {
+        // Skip the enqueue when the resend was already committed by a prior
+        // drive (alreadyResent) — the row is present and idempotent by id; just
+        // ensure the pump runs it.
+        if (!alreadyResent) await this.enqueueStopThenResendCorrection(entry.id, entry.room_id, input, correction);
+      } catch (error) {
+        // The native Stop applied but the correction could not be queued (the
+        // room/generation changed, or a transient store failure). A
+        // stop-then-resend is idempotent to re-drive, so journal it retryable —
+        // never stuck unresolved — and surface the failure; the client reapplies
+        // the same correction, which re-queues idempotently.
+        const message = redactCredentialText(error instanceof Error ? error.message : String(error)).value;
+        await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
+          ? { ...current, turn_control: { ...current.turn_control, status: "retryable" as const, error: message, updated_at: new Date().toISOString() } }
+          : current);
+        throw error;
+      }
+      this.requestConvergence(entry.id);
+      resumed = true;
+    }
     const stages: DaemonTurnControlResult["stages"] = ["delivered"];
     if (interrupted) stages.push("interrupting");
     stages.push("applied");
-    if (providerResult.resumed) stages.push("resumed");
+    if (resumed) stages.push("resumed");
     const observedAt = new Date().toISOString();
     await this.updateManifestEntry(entry.id, (current) => {
       if (current.work_attempt_id !== input.workAttemptId
@@ -3504,7 +3593,7 @@ export class SupervisorDaemon {
           status: "completed",
           capability,
           interrupted,
-          resumed: providerResult.resumed,
+          resumed,
           state: providerResult.state,
           stages,
           error: null,
@@ -3524,7 +3613,48 @@ export class SupervisorDaemon {
       stages,
       ...providerResult,
       interrupted,
+      resumed,
     };
+  }
+
+  /**
+   * Queue a stop-then-resend correction as a fresh same-session FIFO turn, only
+   * after the native Stop has settled the original turn. Runs inside
+   * serializeEntryTick so the room/generation fence and the enqueue are atomic
+   * with room-move reconciliation — a room move cannot commit a room/membership
+   * change between the check and the insert (closing the TOCTOU). Refuses if the
+   * exact entry/binding/execution generation/room changed or a room move is in
+   * flight, so the correction can never be misrouted to a stale room or silently
+   * compensated. The synthetic source id is derived from the stable action id,
+   * so the enqueue is idempotent across retries and recovery.
+   */
+  private async enqueueStopThenResendCorrection(
+    entryId: string,
+    expectedRoomId: string,
+    input: { workAttemptId: string; executionGenerationId: string; actionId: string },
+    correction: string,
+  ): Promise<void> {
+    await this.serializeEntryTick(entryId, async () => {
+      const entry = await this.store.getEntry(entryId);
+      const binding = await this.workerBindings.get(entryId);
+      if (!entry || !binding
+        || entry.work_attempt_id !== input.workAttemptId
+        || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
+        || entry.room_id !== expectedRoomId
+        || binding.room_id !== entry.room_id
+        || binding.work_attempt_id !== input.workAttemptId
+        || binding.execution_generation_id !== input.executionGenerationId
+        || (await this.store.pendingRoomMoves(entryId)).length > 0) {
+        throw new Error("The correction could not be queued because the agent's room or execution generation changed; refresh the agent and reapply it.");
+      }
+      await this.supervisedInbox.enqueueCorrection({
+        agent_id: entryId,
+        room_id: entry.room_id,
+        source_message_id: `correction:${input.actionId}`,
+        source_message: { text: correction, sender: { kind: "supervisor_correction" } },
+        activation: { decision: "activate", reason: "human_correction", addressed: true },
+      });
+    });
   }
 
   private async reserveLegacyLane(input: { reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string }): Promise<LegacyLaneOwner> {

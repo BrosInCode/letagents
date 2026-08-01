@@ -361,6 +361,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     deliveryModes: ["mcp_polling", "daemon_inbox"],
     resume: true,
     midTurnInjection: false,
+    midTurnCorrection: true,
     transcriptAccess: true,
     permissionPromptBridging: false,
     survivesRestart: true,
