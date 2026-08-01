@@ -22,6 +22,7 @@ import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -480,7 +481,10 @@ test("daemon convergence drives Claude through the router across stop and same-a
   let proveControlNotApplied = false;
   let sawAcceptedControlBeforeProvider = false;
   const adapter: NativeProviderAdapter = {
-    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
+    // This fake models a native interrupt+resume provider (its controlTurn
+    // resumes on a correction), so it declares midTurnCorrection — the daemon
+    // routes corrections natively rather than via stop-then-resend.
+    capabilities: () => ({ resume: true, midTurnInjection: false, midTurnCorrection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "native_interrupt" }),
     async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async attach() { calls.push("attach"); return null; },
     async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
@@ -631,6 +635,112 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(calls.some((call) => call.startsWith("resume:")));
   } finally {
     await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a native-correction provider keeps its own adapter path and is never orphaned into a daemon inbox", async () => {
+  // Regression guard for the Cursor routing bug: Cursor advertises only
+  // mcp_polling but applies a correction natively (its controlTurn stops the
+  // child and beginTurns the same session with the correction). Such a provider
+  // must NOT be routed into daemon stop-then-resend, which would strip the
+  // correction and enqueue a synthetic daemon-inbox row its mcp_polling lane
+  // could never pump. The fake below is that Cursor shape (mcp_polling +
+  // midTurnCorrection), registered under a proven-spawnable provider key so the
+  // daemon's capability-based routing is what's under test, not one provider's
+  // spawn lifecycle.
+  const root = await mkdtemp(join(tmpdir(), "letagents-router-native-correction-"));
+  const source = join(root, "source");
+  await mkdir(source);
+  await execFileAsync("git", ["init", source]);
+  await execFileAsync("git", ["-C", source, "config", "user.email", "router@example.invalid"]);
+  await execFileAsync("git", ["-C", source, "config", "user.name", "Router Test"]);
+  await writeFile(join(source, "README.md"), "router\n");
+  await execFileAsync("git", ["-C", source, "add", "README.md"]);
+  await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
+  await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
+
+  const calls: string[] = [];
+  let nextPid = 6000;
+  const continuation = "native-correction-continuation";
+  const exitListeners = new Map<string, Set<(terminal: ProviderActionTerminal) => void>>();
+  function lifecycleHandle(workAttemptId: string) {
+    const pid = ++nextPid;
+    return {
+      workAttemptId, pid, providerContinuationId: continuation,
+      providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `native:${pid}` },
+      observedState: () => "working" as const,
+    };
+  }
+  const adapter: NativeProviderAdapter = {
+    // mcp_polling lane, but midTurnCorrection: it resumes the correction through
+    // its own controlTurn (restart+resume), so the daemon routes natively rather
+    // than stripping the correction into a daemon-inbox row nothing could pump.
+    capabilities: () => ({ resume: true, midTurnInjection: false, midTurnCorrection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "restart_resume" }),
+    async spawn(input) { calls.push(`spawn:${input.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
+    async attach() { return null; },
+    async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
+    async poke() { throw new Error("poke unavailable"); },
+    async controlTurn(handle, correction, options) {
+      await options?.markDispatched?.();
+      calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      // The native path receives the correction verbatim and resumes the session.
+      return { capability: "restart_resume" as const, interrupted: true, resumed: Boolean(correction), state: correction ? "working" as const : "idle" as const };
+    },
+    async stop(handle) {
+      calls.push(`stop:${handle.workAttemptId}`);
+      const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
+      queueMicrotask(() => exitListeners.get(handle.workAttemptId)?.forEach((listener) => listener(terminal)));
+      return terminal;
+    },
+    onExit(handle, listener) {
+      const listeners = exitListeners.get(handle.workAttemptId) ?? new Set<(terminal: ProviderActionTerminal) => void>();
+      listeners.add(listener); exitListeners.set(handle.workAttemptId, listeners);
+      return () => listeners.delete(listener);
+    },
+    onStream: () => () => {},
+  };
+  const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+    workerBindingsPath: join(root, "worker-bindings.json"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", router, true);
+  const entry: DaemonManifestEntry = {
+    id: "native_correction_supervised", room_id: "room", display_name: "NativeCorrection", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
+    permission_profile_id: "full_access", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
+  };
+  try {
+    await daemon.start();
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry })).ok, true);
+    await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "native-correction router start");
+    const first = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    const firstGeneration = first.provider_ref?.execution_generation_id;
+    await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).bind({
+      entry_id: entry.id, room_id: entry.room_id, work_attempt_id: first.work_attempt_id!, execution_generation_id: firstGeneration!,
+      agent_session_id: "agent_session_exact", agent_session_token: "test-session-token", api_url: "https://letagents.test",
+    });
+    const controlled = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: entry.id, work_attempt_id: first.work_attempt_id, execution_generation_id: firstGeneration,
+      action_id: "human-control-1", correction: "Use the revised direction",
+    });
+    assert.equal(controlled.ok, true);
+    assert.equal((controlled.result as { resumed: boolean }).resumed, true);
+    // The correction reached the adapter's native path verbatim — it was not
+    // stripped to a pure Stop and re-queued.
+    assert.deepEqual(calls.filter((call) => call.startsWith("control:")), [`control:${first.work_attempt_id}:Use the revised direction`]);
+  } finally {
+    await daemon.stop();
+    // No synthetic correction row was enqueued into a lane that could never pump it.
+    const inbox = new SupervisedAgentInboxStore(paths.manifestPath);
+    try {
+      assert.equal(
+        (await inbox.receipts(entry.id)).find((receipt) => receipt.source_message_id === "correction:human-control-1"),
+        undefined,
+        "a native-correction provider must not enqueue a daemon-inbox correction row",
+      );
+    } finally { await inbox.close(); }
     await rm(root, { recursive: true, force: true });
   }
 });

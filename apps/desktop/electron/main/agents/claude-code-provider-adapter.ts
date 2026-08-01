@@ -116,6 +116,8 @@ const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
   // subsequent interrupted result. That is an interrupt control, not message
   // delivery, so the reconciler's poke rung stays off.
   midTurnInjection: false,
+  // Claude Code has no native interrupt+resume; corrections use stop-then-resend.
+  midTurnCorrection: false,
   // The live stream-json stdout IS the transcript stream; every message is
   // published as bounded/redacted stream evidence.
   transcriptAccess: true,

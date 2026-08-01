@@ -3304,6 +3304,60 @@ test("an intentional stop-turn terminal remains idle without restarting the runn
   }
 });
 
+test("restart recovery re-drives a dispatched stop-then-resend as retryable, but leaves native/plain dispatches uncertain", async () => {
+  const env = await fixture();
+  const manifestPath = join(env.root, "manifest.json");
+  const dispatchedControl = (actionId: string, hasCorrection: boolean) => ({
+    action_id: actionId,
+    work_attempt_id: "attempt",
+    execution_generation_id: "generation",
+    has_correction: hasCorrection,
+    status: "dispatching" as const,
+    capability: "native_interrupt" as const,
+    interrupted: null,
+    resumed: null,
+    state: null,
+    stages: [] as [],
+    error: null,
+    recorded_at: "2026-08-01T00:00:00.000Z",
+    updated_at: "2026-08-01T00:00:00.000Z",
+  });
+  await new ManifestStore(manifestPath).write(0, [
+    // Stop-only provider on daemon_inbox + a correction ⇒ stop-then-resend.
+    { ...entry, id: "resend_agent", room_id: "room-a", provider: "open-model", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", turn_control: dispatchedControl("control-resend", true) },
+    // Native-correction provider (midTurnCorrection) ⇒ not re-drivable blindly.
+    { ...entry, id: "native_agent", room_id: "room-b", provider: "codex", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", turn_control: dispatchedControl("control-native", true) },
+    // A plain Stop (no correction) is always uncertain after a dispatched crash.
+    { ...entry, id: "plain_agent", room_id: "room-c", provider: "open-model", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", turn_control: dispatchedControl("control-plain", false) },
+  ]);
+  // Static capability by provider: recovery re-derives stop-then-resend from it.
+  const port: ProviderActionPort = {
+    capabilities: async (_workAttemptId, provider) => ({ deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false, midTurnCorrection: provider === "codex", transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true, turnControl: "native_interrupt" }),
+    spawn: async () => { throw new Error("unreachable"); }, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }), onExit: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon({
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath,
+    auditPath: join(env.root, "audit.jsonl"),
+  }, "darwin", port, false);
+  try {
+    await daemon.start();
+    const byId = new Map((await new ManifestStore(manifestPath).load()).entries.map((candidate) => [candidate.id, candidate.turn_control]));
+    // A dispatched stop-then-resend is idempotent to re-drive, so it recovers
+    // retryable (the client reapplies the correction) — never lost.
+    assert.equal(byId.get("resend_agent")?.status, "retryable");
+    assert.match(byId.get("resend_agent")?.error ?? "", /stop-then-resend/i);
+    // A native correction's provider effect is ambiguous after a crash — uncertain.
+    assert.equal(byId.get("native_agent")?.status, "uncertain");
+    // A plain Stop (no correction) is likewise uncertain.
+    assert.equal(byId.get("plain_agent")?.status, "uncertain");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("simulated flock reacquires the persistent lock inode after release", async () => {
   const env = await fixture();
   const lock = join(env.root, "daemon.lock");
