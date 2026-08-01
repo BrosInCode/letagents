@@ -3360,6 +3360,23 @@ export class SupervisorDaemon {
       || handle.providerContinuationId !== ref.provider_continuation_id) {
       throw new Error("Turn control could not resolve the exact live provider continuation.");
     }
+    // Re-drive idempotency (crash-recovery replay or transport retry of the same
+    // action): if this action's correction row is already durably queued, the
+    // resend committed on a prior drive. Re-issuing the native Stop now would
+    // interrupt the CORRECTION's own turn (and settle it), silently losing the
+    // correction while journaling success. So skip the Stop/settlement/enqueue
+    // and complete idempotently. If the row was cancelled/compensated it cannot
+    // be re-delivered under this action id — fail so the client reapplies fresh.
+    let alreadyResent = false;
+    if (stopThenResend) {
+      const existingCorrection = (await this.supervisedInbox.receipts(entry.id)).find((receipt) => receipt.source_message_id === `correction:${input.actionId}`);
+      if (existingCorrection) {
+        if (existingCorrection.state === "cancelled_by_user" || existingCorrection.state === "cancelled_by_room_move") {
+          throw new Error("The stop-then-resend correction was cancelled before it could run; reapply it.");
+        }
+        alreadyResent = true;
+      }
+    }
     const recordedAt = new Date().toISOString();
     await this.updateManifestEntry(entry.id, (current) => {
       if (current.work_attempt_id !== input.workAttemptId
@@ -3395,7 +3412,13 @@ export class SupervisorDaemon {
     });
     let providerResult: ProviderTurnControlResult;
     let dispatchMarked = false;
-    try {
+    if (alreadyResent) {
+      // The correction is already queued/running on the same session; do NOT
+      // dispatch a second native Stop. Convergence (below) runs the queued
+      // correction; the control completes as a resumed no-op.
+      providerResult = { capability, interrupted: false, resumed: false, state: entry.observed_state === "working" ? "working" : "idle" };
+    } else {
+      try {
       providerResult = await this.providerPort.controlTurn(handle, nativeCorrection, {
         actionId: input.actionId,
         markDispatched: async () => {
@@ -3442,6 +3465,7 @@ export class SupervisorDaemon {
         }
         : current);
       throw error;
+      }
     }
     // Double-outcome fix: a pure native Stop (`nativeCorrection === null` — a
     // plain Stop OR the stop half of a stop-then-resend) that interrupted a live
@@ -3505,7 +3529,10 @@ export class SupervisorDaemon {
     let resumed = providerResult.resumed;
     if (stopThenResend && correction) {
       try {
-        await this.enqueueStopThenResendCorrection(entry.id, entry.room_id, input, correction);
+        // Skip the enqueue when the resend was already committed by a prior
+        // drive (alreadyResent) — the row is present and idempotent by id; just
+        // ensure the pump runs it.
+        if (!alreadyResent) await this.enqueueStopThenResendCorrection(entry.id, entry.room_id, input, correction);
       } catch (error) {
         // The native Stop applied but the correction could not be queued (the
         // room/generation changed, or a transient store failure). A
