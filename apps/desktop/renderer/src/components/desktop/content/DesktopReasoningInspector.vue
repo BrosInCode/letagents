@@ -9,7 +9,6 @@
         ref="dialogElement"
         class="desktop-reasoning-inspector"
         :data-live="streamState === 'live'"
-        :data-updating="recentlyUpdated"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
@@ -24,6 +23,11 @@
           </div>
           <div class="desktop-reasoning-inspector-actions">
             <span class="desktop-reasoning-freshness" :data-state="streamState" :title="streamDescription">
+              <span
+                v-if="streamState === 'live'"
+                class="desktop-reasoning-freshness-dot"
+                aria-hidden="true"
+              />
               {{ streamLabel }}
             </span>
             <button type="button" @click="emit('close')">Close</button>
@@ -32,10 +36,7 @@
 
         <div class="desktop-reasoning-inspector-body">
           <section class="desktop-reasoning-summary" :data-updating="recentlyUpdated">
-            <span>
-              Current summary
-              <small v-if="streamState === 'live'" class="desktop-reasoning-live-dot" aria-label="Streaming" />
-            </span>
+            <span>Current summary</span>
             <p>{{ currentSummary }}</p>
           </section>
 
