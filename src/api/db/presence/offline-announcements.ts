@@ -10,6 +10,11 @@ export interface LivenessAnnouncementCandidate {
   /** Set when the linked worker session was ended deliberately (clean exit). */
   agent_session_ended_at: string | null;
   /**
+   * Supervisor-grant workers are daemon-owned. Their recoverable lifecycle is
+   * surfaced through the daemon inspector/inbox rather than room chat.
+   */
+  supervisor_managed?: boolean;
+  /**
    * Freshest runtime evidence (tool call or supervisor observation) from the
    * liveness-observation ledger, or null for agents that report none — a
    * silent message channel with a recently active runtime is an agent busy
@@ -31,6 +36,7 @@ const runtimeLastActiveAt = sql<string | null>`(
 const candidateSelection = {
   session: room_agent_delivery_sessions,
   agent_session_ended_at: room_agent_sessions.ended_at,
+  supervisor_managed: sql<boolean>`${room_agent_sessions.supervisor_grant_id} IS NOT NULL`,
   runtime_last_active_at: runtimeLastActiveAt,
   native_last_active_at: runtimeLastActiveAt,
 };
@@ -38,12 +44,14 @@ const candidateSelection = {
 function toCandidate(row: {
   session: typeof room_agent_delivery_sessions.$inferSelect;
   agent_session_ended_at: string | null;
+  supervisor_managed: boolean;
   runtime_last_active_at: string | null;
   native_last_active_at: string | null;
 }): LivenessAnnouncementCandidate {
   return {
     session: toRoomAgentDeliverySession(row.session as RoomAgentDeliverySessionRow),
     agent_session_ended_at: row.agent_session_ended_at ?? null,
+    supervisor_managed: Boolean(row.supervisor_managed),
     runtime_last_active_at: row.runtime_last_active_at ?? null,
     native_last_active_at: row.native_last_active_at ?? null,
   };

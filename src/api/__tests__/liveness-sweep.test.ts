@@ -92,6 +92,18 @@ test("announces a worker offline past the threshold", () => {
   assert.ok(transitions[0]!.offline_for_ms >= OFFLINE_ANNOUNCE_AFTER_MS);
 });
 
+test("keeps daemon-supervised worker outages out of room chat", () => {
+  const daemonCandidate = {
+    ...candidate(buildSession()),
+    supervisor_managed: true,
+  };
+
+  assert.deepEqual(
+    selectLivenessTransitions({ candidates: [daemonCandidate], now: NOW }),
+    []
+  );
+});
+
 test("stays quiet inside the announce threshold and reconnect grace", () => {
   const stillFresh = buildSession({
     last_disconnected_at: isoMinutesAgo(1),

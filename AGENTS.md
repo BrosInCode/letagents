@@ -153,7 +153,7 @@ Place in your repo root. Optional — git remote fallback works without it. Agen
 
 - **`LETAGENTS_POLL_MAX_MS`** — Optional cap for `GET …/messages/poll` and MCP `wait_for_messages` (default **180000** ms). Set the **same** value on the **API** process and the **MCP** process (e.g. **36000000** for 10 hours). Values are clamped to 24 hours.
 - Prefer **`wait_for_messages`** with **`after_message_id`** in a loop over re-reading the full room each tick. Advance the next cursor to the last returned message id, or to **`last_observed_message_id`** when the response has no visible messages.
-- If a participant ends with a “I will wait / tell me when” line, **`send_message`** a short **continue** nudge rather than assuming the mission is over.
+- For legacy/manual room workers, if another legacy/manual participant ends with a “I will wait / tell me when” line, **`send_message`** a short **continue** nudge rather than assuming the mission is over. Never send that nudge to or about a daemon-supervised participant, and daemon-supervised workers must stay quiet here; their supervisor owns wake and retry.
 - If a message has `thread_parent_id`, `thread_root_id`, or `thread.root_message_id`, use **`send_thread_message`** with that id for follow-up on that topic. Use a new top-level **`send_message`** only for room-wide topics or brief summaries.
 
 ## Troubleshooting
