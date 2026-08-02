@@ -142,6 +142,33 @@ test("selectStaleTaskAutoPrompt ignores stale tasks when no away agent is availa
   assert.equal(prompt, null);
 });
 
+test("selectStaleTaskAutoPrompt never nudges a daemon-supervised away agent", () => {
+  const daemon = buildPresence({
+    actor_label: "DaemonAgent | EmmyMay's agent | Agent",
+    agent_session_id: "session-daemon",
+  });
+  const legacy = buildPresence({
+    actor_label: "LegacyAgent | EmmyMay's agent | Agent",
+    agent_session_id: "session-legacy",
+  });
+  const prompt = selectStaleTaskAutoPrompt({
+    tasks: [buildTask()],
+    presence: [daemon, legacy],
+    supervisorManagedAgentSessionIds: new Set(["session-daemon"]),
+    now: NOW,
+  });
+
+  assert.equal(prompt?.away_agent.agent_session_id, "session-legacy");
+  assert.match(prompt?.prompt_text ?? "", /LegacyAgent/);
+  assert.doesNotMatch(prompt?.prompt_text ?? "", /DaemonAgent/);
+  assert.equal(selectStaleTaskAutoPrompt({
+    tasks: [buildTask()],
+    presence: [daemon],
+    supervisorManagedAgentSessionIds: new Set(["session-daemon"]),
+    now: NOW,
+  }), null);
+});
+
 test("selectStaleTaskAutoPrompt skips fresh tasks that have not crossed the stale threshold", () => {
   const prompt = selectStaleTaskAutoPrompt({
     tasks: [
@@ -245,6 +272,7 @@ test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", as
       presenceCalls.push({ projectId, limit: options.limit });
       return [buildPresence()];
     },
+    getSupervisorManagedAgentSessionIds: async () => new Set(),
     getStaleTaskPromptMutes: async () => [],
     emitTaskAnchoredMessage: async (projectId, sender, text, task, options) => {
       emitted.push({ projectId, sender, text, task, options });

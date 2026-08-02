@@ -1,8 +1,8 @@
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull } from "drizzle-orm";
 
 import { db } from "../client.js";
 import { toRoomAgentDeliverySession, toRoomAgentLivenessObservation, toRoomAgentPresence } from "../mappers.js";
-import { room_agent_delivery_sessions, room_agent_liveness_observations, room_agent_presence } from "../schema.js";
+import { room_agent_delivery_sessions, room_agent_liveness_observations, room_agent_presence, room_agent_sessions } from "../schema.js";
 import type {
   RoomAgentDeliverySessionRow,
   RoomAgentLivenessObservationRow,
@@ -12,6 +12,22 @@ import type {
 import { clampLimit, MAX_LIST_LIMIT } from "../utils.js";
 import { filterRoomAgentPresenceForLiveRoster, mergeRoomAgentPresenceRecords } from "./merge.js";
 import { getRoomLiveAgentSuppressionActorLabels } from "./suppression.js";
+
+/** Workers minted by the supervisor daemon, keyed by exact room session. */
+export async function getSupervisorManagedAgentSessionIds(
+  roomId: string
+): Promise<ReadonlySet<string>> {
+  const rows = await db
+    .select({ session_id: room_agent_sessions.session_id })
+    .from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.room_id, roomId),
+      eq(room_agent_sessions.session_kind, "worker"),
+      isNotNull(room_agent_sessions.supervisor_grant_id)
+    ));
+
+  return new Set(rows.map((row) => row.session_id));
+}
 
 export async function getMergedRoomAgentPresenceRecords(
   roomId: string,

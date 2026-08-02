@@ -32,6 +32,7 @@ export interface StaleWorkPromptEmitterDeps {
     projectId: string,
     options: { limit: number }
   ): Promise<RoomAgentPresence[]>;
+  getSupervisorManagedAgentSessionIds(projectId: string): Promise<ReadonlySet<string>>;
   getStaleTaskPromptMutes(
     projectId: string,
     options: { taskIds: string[] }
@@ -155,11 +156,15 @@ function buildPromptCacheKey(task: Task, reason: StaleTaskReason): string {
 export function selectStaleTaskAutoPrompt(input: {
   tasks: Task[];
   presence: RoomAgentPresence[];
+  supervisorManagedAgentSessionIds?: ReadonlySet<string>;
   stalePromptMutes?: readonly StaleTaskPromptMute[];
   now?: number;
 }): StaleTaskAutoPrompt | null {
   const awayAgent = input.presence.find(
-    (entry) => entry.activity_state === "away" && entry.status === "idle"
+    (entry) => entry.activity_state === "away"
+      && entry.status === "idle"
+      && (!entry.agent_session_id
+        || !input.supervisorManagedAgentSessionIds?.has(entry.agent_session_id))
   );
   if (!awayAgent) {
     return null;
@@ -212,9 +217,10 @@ export function createStaleWorkPromptEmitter(deps: StaleWorkPromptEmitterDeps) {
   }
 
   async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | null> {
-    const [taskResult, presence] = await Promise.all([
+    const [taskResult, presence, supervisorManagedAgentSessionIds] = await Promise.all([
       deps.getOpenTasks(projectId, { limit: 200 }),
       deps.getRoomAgentPresence(projectId, { limit: 50 }),
+      deps.getSupervisorManagedAgentSessionIds(projectId),
     ]);
     const stalePromptMutes = taskResult.tasks.length > 0
       ? await deps.getStaleTaskPromptMutes(projectId, {
@@ -226,6 +232,7 @@ export function createStaleWorkPromptEmitter(deps: StaleWorkPromptEmitterDeps) {
     const prompt = selectStaleTaskAutoPrompt({
       tasks: taskResult.tasks,
       presence,
+      supervisorManagedAgentSessionIds,
       stalePromptMutes,
       now,
     });

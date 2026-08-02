@@ -10,6 +10,7 @@ import {
   listStalledRoomCandidates,
   markRoomStallNudgedTx,
   getActiveBoardManager,
+  getSupervisorManagedAgentSessionIds,
   getLivenessAnnouncementCandidate,
   getReachableWorkerDeliverySessionForAgentSession,
   getRoomBoardSettings,
@@ -37,14 +38,16 @@ import {
   INTENT_AUTO_APPROVE_MAX_PER_WINDOW,
   INTENT_AUTO_APPROVE_WINDOW_MS,
 } from "../rooms/board-intent-escalation-sweep.js";
-import { createRoomStallSweeper } from "../rooms/room-stall-sweep.js";
+import {
+  createRoomStallSweeper,
+  selectRoomStallNudgeWorkerLabels,
+} from "../rooms/room-stall-sweep.js";
 import {
   createLivenessSweeper,
   LIVENESS_SWEEP_INTERVAL_MS,
   resolveOfflineAnnounceAfterMs,
   type LivenessAnnouncementInput,
 } from "../rooms/liveness-sweep.js";
-import { isReachableRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { emitProjectMessage } from "./events.js";
 import { workflowEffectBroker } from "../workflow-effects/runtime.js";
 
@@ -356,14 +359,16 @@ class RoomStallNudgeLostRace extends Error {
 const roomStallSweeper = createRoomStallSweeper({
   listStalledRooms: (options) => listStalledRoomCandidates(options),
   hasReachableManager,
-  listLiveWorkerLabels: async (roomId) =>
-    (await getRoomAgentPresence(roomId, { limit: 20 }))
-      .filter(
-        (entry) =>
-          entry.session_kind === "worker"
-          && isReachableRoomAgentActivityState(entry.activity_state)
-      )
-      .map((entry) => entry.actor_label),
+  listLiveWorkerLabels: async (roomId) => {
+    const [presence, supervisorManagedAgentSessionIds] = await Promise.all([
+      getRoomAgentPresence(roomId, { limit: 20 }),
+      getSupervisorManagedAgentSessionIds(roomId),
+    ]);
+    return selectRoomStallNudgeWorkerLabels({
+      presence,
+      supervisorManagedAgentSessionIds,
+    });
+  },
   announceStall: async (input) => {
     let nudged = false;
     try {

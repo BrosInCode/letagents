@@ -7,6 +7,7 @@ import {
   createRoomStallSweeper,
   evaluateRoomStall,
   ROOM_STALL_AFTER_MS,
+  selectRoomStallNudgeWorkerLabels,
   type RoomStallSweeperDeps,
 } from "../rooms/room-stall-sweep.js";
 
@@ -22,6 +23,19 @@ function candidate(overrides: Partial<StalledRoomCandidate> = {}): StalledRoomCa
     last_closed_at: overrides.last_closed_at ?? isoMinutesAgo(45),
     stall_nudged_at: overrides.stall_nudged_at ?? null,
     manager_mode: overrides.manager_mode ?? "manager_optional",
+  };
+}
+
+function workerPresence(input: {
+  actorLabel: string;
+  sessionId: string;
+  activityState?: "active" | "away" | "offline";
+}) {
+  return {
+    actor_label: input.actorLabel,
+    agent_session_id: input.sessionId,
+    session_kind: "worker" as const,
+    activity_state: input.activityState ?? "active",
   };
 }
 
@@ -96,6 +110,25 @@ test("nudge text names live workers and falls back gracefully", () => {
   });
   assert.ok(!humanGated.includes("auto-approve"));
   assert.ok(humanGated.includes("room admin will need to decide"));
+});
+
+test("room-stall nudges exclude daemon-supervised workers", () => {
+  const labels = selectRoomStallNudgeWorkerLabels({
+    presence: [
+      workerPresence({ actorLabel: "DaemonAgent | EmmyMay's agent | Agent", sessionId: "session-daemon" }),
+      workerPresence({ actorLabel: "LegacyAgent | EmmyMay's agent | Agent", sessionId: "session-legacy" }),
+      workerPresence({ actorLabel: "OfflineAgent | EmmyMay's agent | Agent", sessionId: "session-offline", activityState: "offline" }),
+    ],
+    supervisorManagedAgentSessionIds: new Set(["session-daemon"]),
+  });
+
+  assert.deepEqual(labels, ["LegacyAgent | EmmyMay's agent | Agent"]);
+  assert.deepEqual(selectRoomStallNudgeWorkerLabels({
+    presence: [
+      workerPresence({ actorLabel: "DaemonAgent | EmmyMay's agent | Agent", sessionId: "session-daemon" }),
+    ],
+    supervisorManagedAgentSessionIds: new Set(["session-daemon"]),
+  }), []);
 });
 
 interface FakeDepsOptions {

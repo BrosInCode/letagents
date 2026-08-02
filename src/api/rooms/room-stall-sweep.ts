@@ -1,5 +1,7 @@
 import { getAgentPrimaryLabel } from "../../shared/agent-identity.js";
+import { isReachableRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import type { BoardManagerMode } from "../db.js";
+import type { RoomAgentPresence } from "../db.js";
 import type { StalledRoomCandidate } from "../db/coordination/room-stall.js";
 
 /**
@@ -13,6 +15,27 @@ export interface RoomStallVerdict {
   stalled: boolean;
   /** The drain epoch the nudge is fenced on. */
   epoch: string | null;
+}
+
+/**
+ * Daemon-supervised workers recover through their own inbox and must not be
+ * named as the audience for speculative room-stall nudges.
+ */
+export function selectRoomStallNudgeWorkerLabels(input: {
+  presence: readonly Pick<
+    RoomAgentPresence,
+    "actor_label" | "agent_session_id" | "session_kind" | "activity_state"
+  >[];
+  supervisorManagedAgentSessionIds: ReadonlySet<string>;
+}): string[] {
+  return input.presence
+    .filter((entry) =>
+      entry.session_kind === "worker"
+      && isReachableRoomAgentActivityState(entry.activity_state)
+      && (!entry.agent_session_id
+        || !input.supervisorManagedAgentSessionIds.has(entry.agent_session_id))
+    )
+    .map((entry) => entry.actor_label);
 }
 
 /**
