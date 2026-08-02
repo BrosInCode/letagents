@@ -74,4 +74,87 @@ describe("classifyReasoningStream", () => {
   it("titleizes multi-word / underscored statuses", () => {
     assert.equal(classifyReasoningStream({ status: "in_review" }).label, "In Review");
   });
+
+  describe("staleness decay", () => {
+    const base = 1_000_000_000_000; // fixed clock (ms) so the tests never touch the wall clock
+    const at = (ms: number) => new Date(ms).toISOString();
+
+    it("keeps a fresh heuristic-derived live stream live", () => {
+      const result = classifyReasoningStream({
+        summary: "readable reasoning trace",
+        updatedAt: at(base),
+        now: base + 10_000,
+      });
+      assert.equal(result.state, "live");
+      assert.equal(result.label, "Live thinking");
+    });
+
+    it("decays a stale heuristic-derived live stream to recent / Stale (not Idle)", () => {
+      const result = classifyReasoningStream({
+        summary: "readable reasoning trace",
+        updatedAt: at(base),
+        now: base + 300_000,
+      });
+      assert.equal(result.state, "recent");
+      assert.equal(result.label, "Stale");
+      assert.equal(result.description, "No reasoning updates recently");
+    });
+
+    it("decays a stale working stream too (worker died mid-run)", () => {
+      const result = classifyReasoningStream({
+        status: "working",
+        updatedAt: at(base),
+        now: base + 300_000,
+      });
+      assert.equal(result.state, "recent");
+      assert.equal(result.label, "Stale");
+    });
+
+    it("never decays blocked, even when very stale", () => {
+      const result = classifyReasoningStream({
+        status: "blocked",
+        summary: "reasoning summary",
+        updatedAt: at(base),
+        now: base + 10_000_000,
+      });
+      assert.equal(result.state, "blocked");
+      assert.equal(result.label, "Blocked");
+    });
+
+    it("does not decay non-live states (a stale snapshot stays a snapshot)", () => {
+      const result = classifyReasoningStream({
+        summary: "app-server snapshot",
+        updatedAt: at(base),
+        now: base + 10_000_000,
+      });
+      assert.equal(result.state, "snapshot");
+    });
+
+    it("does not decay when no clock is supplied (backward compatible)", () => {
+      const result = classifyReasoningStream({
+        status: "working",
+        summary: "reasoning summary",
+        updatedAt: "2000-01-01T00:00:00.000Z",
+      });
+      assert.equal(result.state, "live");
+    });
+
+    it("does not decay when updatedAt is missing or unparseable", () => {
+      assert.equal(classifyReasoningStream({ status: "working", now: base }).state, "live");
+      assert.equal(
+        classifyReasoningStream({ status: "working", updatedAt: "not-a-date", now: base }).state,
+        "live",
+      );
+    });
+
+    it("respects a custom staleAfterMs threshold", () => {
+      const result = classifyReasoningStream({
+        status: "working",
+        updatedAt: at(base),
+        now: base + 5_000,
+        staleAfterMs: 1_000,
+      });
+      assert.equal(result.state, "recent");
+    });
+  });
 });

@@ -88,7 +88,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type {
   DesktopReasoningSession,
   DesktopReasoningSnapshot,
@@ -131,6 +131,24 @@ const detailError = ref<string | null>(null);
 const recentlyUpdated = ref(false);
 let fetchSerial = 0;
 let livePulseTimer: ReturnType<typeof setTimeout> | null = null;
+const now = ref(Date.now());
+let stalenessTimer: ReturnType<typeof setInterval> | null = null;
+const STALENESS_TICK_MS = 30_000;
+
+function startStalenessTimer(): void {
+  now.value = Date.now();
+  stopStalenessTimer();
+  stalenessTimer = setInterval(() => {
+    now.value = Date.now();
+  }, STALENESS_TICK_MS);
+}
+
+function stopStalenessTimer(): void {
+  if (stalenessTimer) {
+    clearInterval(stalenessTimer);
+    stalenessTimer = null;
+  }
+}
 
 const activeSession = computed(() => detailSession.value || props.session);
 const titleId = computed(() => `desktop-reasoning-${sanitizeId(activeSession.value?.id || "stream")}`);
@@ -250,6 +268,8 @@ const streamClassification = computed(() => {
     summary: snapshot?.summary,
     checking: snapshot?.checking,
     nextAction: snapshot?.next_action,
+    updatedAt: activeSession.value?.updatedAt || activeSession.value?.createdAt,
+    now: now.value,
   });
 });
 const streamState = computed(() => streamClassification.value.state);
@@ -267,10 +287,18 @@ watch(() => props.open, (next) => {
       clearTimeout(livePulseTimer);
       livePulseTimer = null;
     }
+    stopStalenessTimer();
     return;
   }
+  startStalenessTimer();
   void nextTick(() => dialogElement.value?.focus());
 });
+
+onBeforeUnmount(stopStalenessTimer);
+
+// The open watcher is not immediate; start the clock now if we mount open
+// (deep-linked modal), otherwise a stale session reads "live" until first tick.
+if (props.open) startStalenessTimer();
 
 watch(
   () => props.session,

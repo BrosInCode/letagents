@@ -154,6 +154,12 @@ export interface ReasoningStreamInput {
   summary?: string | null;
   checking?: string | null;
   nextAction?: string | null;
+  /** ISO timestamp of the session's last update; paired with `now`, enables staleness decay. */
+  updatedAt?: string | null;
+  /** Current time in ms. When supplied, a stale "live" stream decays to "recent". */
+  now?: number | null;
+  /** Silence window in ms after which a "live" stream is treated as no longer active. */
+  staleAfterMs?: number;
 }
 
 export interface ReasoningStreamClassification {
@@ -163,6 +169,12 @@ export interface ReasoningStreamClassification {
   isCodexReasoningSummary: boolean;
   isCodexSnapshot: boolean;
 }
+
+// A "live" stream with no update within this window is treated as no longer
+// active and decays to the "recent" freshness state. 3 minutes: Codex reasoning
+// streams refresh every few seconds, so this stays unambiguous while giving a
+// legitimately slow turn (a long build or test run) room before it reads stale.
+const DEFAULT_STALE_AFTER_MS = 180_000;
 
 /**
  * Classify a reasoning stream's freshness state, pill label, and tooltip.
@@ -203,6 +215,24 @@ export function classifyReasoningStream(input: ReasoningStreamInput): ReasoningS
   else if (isCodexReasoningSummary) description = "Readable Codex reasoning summary stream";
   else if (isCodexSnapshot) description = "Codex app-server snapshot";
   else description = label;
+
+  // Staleness decay: a "live" stream that has gone quiet is no longer active
+  // *right now*, so demote it to "recent". This is the backstop for a completed
+  // session whose text still trips the heuristic, and for a worker that dies
+  // mid-`working` with no terminal update — both would otherwise claim "Live
+  // thinking" forever. Only evaluated when a clock is supplied; `blocked` and
+  // already-quiet states never decay (state must be "live" to reach here).
+  if (state === "live" && typeof input.now === "number") {
+    const updatedAtMs = timestampValue(input.updatedAt ?? null);
+    const staleAfterMs = input.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+    if (updatedAtMs > 0 && input.now - updatedAtMs > staleAfterMs) {
+      // "Stale", not "Idle": a live-claiming stream that went silent is
+      // possibly dead, which must not glance-alias the healthy `idle` status.
+      state = "recent";
+      label = "Stale";
+      description = "No reasoning updates recently";
+    }
+  }
 
   return { state, label, description, isCodexReasoningSummary, isCodexSnapshot };
 }
