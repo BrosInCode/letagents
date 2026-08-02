@@ -146,3 +146,67 @@ function specificAgentKey(value: string | null | undefined): string {
   }
   return normalized;
 }
+
+export type ReasoningStreamState = "live" | "recent" | "snapshot" | "blocked";
+
+export interface ReasoningStreamInput {
+  status?: string | null;
+  summary?: string | null;
+  checking?: string | null;
+  nextAction?: string | null;
+}
+
+export interface ReasoningStreamClassification {
+  state: ReasoningStreamState;
+  label: string;
+  description: string;
+  isCodexReasoningSummary: boolean;
+  isCodexSnapshot: boolean;
+}
+
+/**
+ * Classify a reasoning stream's freshness state, pill label, and tooltip.
+ *
+ * Precedence is deliberate: an explicit `blocked` status is authoritative and
+ * outranks the Codex reasoning-summary text heuristic. Codex reasoning streams
+ * don't always carry a clean status, so the heuristic infers "live thinking"
+ * from the text — but when the provider does report `blocked`, that must win,
+ * otherwise a blocked session whose text happens to match renders the green
+ * "live" state (and a "Live thinking" pill) around a red Blocker field.
+ */
+export function classifyReasoningStream(input: ReasoningStreamInput): ReasoningStreamClassification {
+  const status = String(input.status || "").trim();
+  const normalizedStatus = status.toLowerCase();
+  const text = [input.summary, input.checking, input.nextAction].join(" ").toLowerCase();
+  const isCodexReasoningSummary =
+    text.includes("readable reasoning") || text.includes("reasoning summary");
+  const isCodexSnapshot = !isCodexReasoningSummary
+    && (text.includes("codex_app_server")
+      || text.includes("app-server snapshot")
+      || text.includes("snapshot-derived"));
+
+  let state: ReasoningStreamState;
+  if (normalizedStatus === "blocked") state = "blocked";
+  else if (isCodexReasoningSummary) state = "live";
+  else if (isCodexSnapshot) state = "snapshot";
+  else if (normalizedStatus === "working" || normalizedStatus === "reviewing") state = "live";
+  else state = "recent";
+
+  let label: string;
+  if (normalizedStatus === "blocked") label = titleizeReasoningStatus(status);
+  else if (isCodexReasoningSummary) label = "Live thinking";
+  else if (isCodexSnapshot) label = "Snapshot";
+  else label = status ? titleizeReasoningStatus(status) : "Reasoning";
+
+  let description: string;
+  if (normalizedStatus === "blocked") description = label;
+  else if (isCodexReasoningSummary) description = "Readable Codex reasoning summary stream";
+  else if (isCodexSnapshot) description = "Codex app-server snapshot";
+  else description = label;
+
+  return { state, label, description, isCodexReasoningSummary, isCodexSnapshot };
+}
+
+function titleizeReasoningStatus(status: string): string {
+  return status.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
