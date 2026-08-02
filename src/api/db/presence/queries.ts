@@ -1,8 +1,8 @@
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import { toRoomAgentDeliverySession, toRoomAgentLivenessObservation, toRoomAgentPresence } from "../mappers.js";
-import { room_agent_delivery_sessions, room_agent_liveness_observations, room_agent_presence } from "../schema.js";
+import { room_agent_delivery_sessions, room_agent_liveness_observations, room_agent_presence, room_agent_sessions } from "../schema.js";
 import type {
   RoomAgentDeliverySessionRow,
   RoomAgentLivenessObservationRow,
@@ -15,18 +15,46 @@ import { getRoomLiveAgentSuppressionActorLabels } from "./suppression.js";
 
 export async function getMergedRoomAgentPresenceRecords(
   roomId: string,
-  options?: { statusLimit?: number; deliveryLimit?: number }
+  options?: {
+    statusLimit?: number;
+    deliveryLimit?: number;
+    excludeSupervisorManaged?: boolean;
+  }
 ): Promise<RoomAgentPresence[]> {
+  const statusScope = options?.excludeSupervisorManaged
+    ? and(
+      eq(room_agent_presence.room_id, roomId),
+      sql`NOT EXISTS (
+        SELECT 1 FROM ${room_agent_sessions}
+        WHERE ${room_agent_sessions.room_id} = ${room_agent_presence.room_id}
+          AND ${room_agent_sessions.session_id} = ${room_agent_presence.agent_session_id}
+          AND ${room_agent_sessions.session_kind} = 'worker'
+          AND ${room_agent_sessions.supervisor_grant_id} IS NOT NULL
+      )`
+    )
+    : eq(room_agent_presence.room_id, roomId);
+  const deliveryScope = options?.excludeSupervisorManaged
+    ? and(
+      eq(room_agent_delivery_sessions.room_id, roomId),
+      sql`NOT EXISTS (
+        SELECT 1 FROM ${room_agent_sessions}
+        WHERE ${room_agent_sessions.room_id} = ${room_agent_delivery_sessions.room_id}
+          AND ${room_agent_sessions.session_id} = ${room_agent_delivery_sessions.agent_session_id}
+          AND ${room_agent_sessions.session_kind} = 'worker'
+          AND ${room_agent_sessions.supervisor_grant_id} IS NOT NULL
+      )`
+    )
+    : eq(room_agent_delivery_sessions.room_id, roomId);
   const statusQuery = db
     .select()
     .from(room_agent_presence)
-    .where(eq(room_agent_presence.room_id, roomId))
+    .where(statusScope)
     .orderBy(desc(room_agent_presence.last_heartbeat_at), asc(room_agent_presence.display_name));
 
   const deliveryQuery = db
     .select()
     .from(room_agent_delivery_sessions)
-    .where(eq(room_agent_delivery_sessions.room_id, roomId))
+    .where(deliveryScope)
     .orderBy(
       desc(room_agent_delivery_sessions.updated_at),
       desc(room_agent_delivery_sessions.active_connection_count),
@@ -57,13 +85,19 @@ export async function getMergedRoomAgentPresenceRecords(
 
 export async function getRoomAgentPresence(
   roomId: string,
-  options?: { limit?: number; staleLimit?: number; staleWithinMs?: number }
+  options?: {
+    limit?: number;
+    staleLimit?: number;
+    staleWithinMs?: number;
+    excludeSupervisorManaged?: boolean;
+  }
 ): Promise<RoomAgentPresence[]> {
   const limit = clampLimit(options?.limit, 50, MAX_LIST_LIMIT);
   const [presence, suppressedActors] = await Promise.all([
     getMergedRoomAgentPresenceRecords(roomId, {
       statusLimit: limit,
       deliveryLimit: limit,
+      excludeSupervisorManaged: options?.excludeSupervisorManaged,
     }),
     getRoomLiveAgentSuppressionActorLabels(roomId),
   ]);

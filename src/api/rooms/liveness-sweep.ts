@@ -114,6 +114,13 @@ export function selectLivenessTransitions(input: {
       continue;
     }
 
+    // Daemon-supervised workers own their own recovery loop and surface
+    // exhausted recovery through the inspector/inbox. Room-visible stale ↔
+    // fresh chatter cannot repair them and is intentionally suppressed.
+    if (candidate.supervisor_managed) {
+      continue;
+    }
+
     // A deliberately ended session is a clean exit, not a death.
     if (candidate.agent_session_ended_at) {
       continue;

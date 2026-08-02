@@ -224,7 +224,11 @@ test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", as
     ),
   });
   const taskCalls: Array<{ projectId: string; limit: number }> = [];
-  const presenceCalls: Array<{ projectId: string; limit: number }> = [];
+  const presenceCalls: Array<{
+    projectId: string;
+    limit: number;
+    excludeSupervisorManaged?: boolean;
+  }> = [];
   const emitted: Array<{
     projectId: string;
     sender: string;
@@ -242,7 +246,7 @@ test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", as
       return { tasks: [staleTask] };
     },
     getRoomAgentPresence: async (projectId, options) => {
-      presenceCalls.push({ projectId, limit: options.limit });
+      presenceCalls.push({ projectId, ...options });
       return [buildPresence()];
     },
     getStaleTaskPromptMutes: async () => [],
@@ -269,6 +273,7 @@ test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", as
   assert.equal(thirdMessage?.id, "msg_2");
   assert.deepEqual(taskCalls.map((call) => call.limit), [200, 200, 200]);
   assert.deepEqual(presenceCalls.map((call) => call.limit), [50, 50, 50]);
+  assert.ok(presenceCalls.every((call) => call.excludeSupervisorManaged));
   assert.equal(emitted.length, 2);
   assert.equal(emitted[0]?.projectId, "github.com/brosincode/letagents");
   assert.equal(emitted[0]?.sender, "letagents");
@@ -278,4 +283,42 @@ test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", as
     parent_activity: "Stale-work prompt",
     parent_event_kind: "all_activity",
   });
+});
+
+test("createStaleWorkPromptEmitter defers mute lookup until a prompt is possible", async () => {
+  const staleTask = buildTask();
+  let taskCalls = 0;
+  let presenceCalls = 0;
+  let muteLookupCalls = 0;
+  let emitted = 0;
+  const emitter = createStaleWorkPromptEmitter({
+    getOpenTasks: async () => ({
+      tasks: taskCalls++ === 0 ? [] : [staleTask],
+    }),
+    getRoomAgentPresence: async (_projectId, options) => {
+      assert.equal(options.excludeSupervisorManaged, true);
+      return [buildPresence({
+        activity_state: presenceCalls++ === 1 ? "active" : "away",
+      })];
+    },
+    getStaleTaskPromptMutes: async () => {
+      muteLookupCalls += 1;
+      return [];
+    },
+    emitTaskAnchoredMessage: async (_projectId, _sender, text) => {
+      emitted += 1;
+      return buildMessage(text, emitted);
+    },
+    now: () => NOW,
+  });
+
+  assert.equal(await emitter.maybeEmitStaleWorkPrompt("room-no-tasks"), null);
+  assert.equal(await emitter.maybeEmitStaleWorkPrompt("room-no-away-agent"), null);
+  assert.equal(muteLookupCalls, 0);
+
+  assert.equal(
+    (await emitter.maybeEmitStaleWorkPrompt("room-promptable"))?.id,
+    "msg_1"
+  );
+  assert.equal(muteLookupCalls, 1);
 });

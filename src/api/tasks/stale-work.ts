@@ -30,7 +30,7 @@ export interface StaleWorkPromptEmitterDeps {
   ): Promise<{ tasks: Task[] }>;
   getRoomAgentPresence(
     projectId: string,
-    options: { limit: number }
+    options: { limit: number; excludeSupervisorManaged?: boolean }
   ): Promise<RoomAgentPresence[]>;
   getStaleTaskPromptMutes(
     projectId: string,
@@ -159,7 +159,8 @@ export function selectStaleTaskAutoPrompt(input: {
   now?: number;
 }): StaleTaskAutoPrompt | null {
   const awayAgent = input.presence.find(
-    (entry) => entry.activity_state === "away" && entry.status === "idle"
+    (entry) => entry.activity_state === "away"
+      && entry.status === "idle"
   );
   if (!awayAgent) {
     return null;
@@ -214,13 +215,21 @@ export function createStaleWorkPromptEmitter(deps: StaleWorkPromptEmitterDeps) {
   async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | null> {
     const [taskResult, presence] = await Promise.all([
       deps.getOpenTasks(projectId, { limit: 200 }),
-      deps.getRoomAgentPresence(projectId, { limit: 50 }),
+      deps.getRoomAgentPresence(projectId, {
+        limit: 50,
+        excludeSupervisorManaged: true,
+      }),
     ]);
-    const stalePromptMutes = taskResult.tasks.length > 0
-      ? await deps.getStaleTaskPromptMutes(projectId, {
-        taskIds: taskResult.tasks.map((task) => task.id),
-      })
-      : [];
+    const hasAwayIdleAgent = presence.some(
+      (entry) => entry.activity_state === "away" && entry.status === "idle"
+    );
+    if (taskResult.tasks.length === 0 || !hasAwayIdleAgent) {
+      return null;
+    }
+
+    const stalePromptMutes = await deps.getStaleTaskPromptMutes(projectId, {
+      taskIds: taskResult.tasks.map((task) => task.id),
+    });
 
     const now = deps.now?.() ?? Date.now();
     const prompt = selectStaleTaskAutoPrompt({

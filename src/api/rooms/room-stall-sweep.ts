@@ -1,5 +1,7 @@
 import { getAgentPrimaryLabel } from "../../shared/agent-identity.js";
+import { isReachableRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import type { BoardManagerMode } from "../db.js";
+import type { RoomAgentPresence } from "../db.js";
 import type { StalledRoomCandidate } from "../db/coordination/room-stall.js";
 
 /**
@@ -13,6 +15,25 @@ export interface RoomStallVerdict {
   stalled: boolean;
   /** The drain epoch the nudge is fenced on. */
   epoch: string | null;
+}
+
+/**
+ * Build the audience from a caller-supplied reminder-eligible roster. The
+ * server excludes daemon-supervised rows in SQL before applying its limit;
+ * this helper then keeps only reachable workers.
+ */
+export function selectRoomStallNudgeWorkerLabels(input: {
+  presence: readonly Pick<
+    RoomAgentPresence,
+    "actor_label" | "agent_session_id" | "session_kind" | "activity_state"
+  >[];
+}): string[] {
+  return input.presence
+    .filter((entry) =>
+      entry.session_kind === "worker"
+      && isReachableRoomAgentActivityState(entry.activity_state)
+    )
+    .map((entry) => entry.actor_label);
 }
 
 /**
