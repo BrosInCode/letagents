@@ -18,22 +18,20 @@ export interface RoomStallVerdict {
 }
 
 /**
- * Daemon-supervised workers recover through their own inbox and must not be
- * named as the audience for speculative room-stall nudges.
+ * Build the audience from a caller-supplied reminder-eligible roster. The
+ * server excludes daemon-supervised rows in SQL before applying its limit;
+ * this helper then keeps only reachable workers.
  */
 export function selectRoomStallNudgeWorkerLabels(input: {
   presence: readonly Pick<
     RoomAgentPresence,
     "actor_label" | "agent_session_id" | "session_kind" | "activity_state"
   >[];
-  supervisorManagedAgentSessionIds: ReadonlySet<string>;
 }): string[] {
   return input.presence
     .filter((entry) =>
       entry.session_kind === "worker"
       && isReachableRoomAgentActivityState(entry.activity_state)
-      && (!entry.agent_session_id
-        || !input.supervisorManagedAgentSessionIds.has(entry.agent_session_id))
     )
     .map((entry) => entry.actor_label);
 }

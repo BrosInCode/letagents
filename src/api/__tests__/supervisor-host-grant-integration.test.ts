@@ -121,6 +121,98 @@ test("lifecycle mint enforces room and agent allowlists through the actual route
   assert.equal(agentDenied.statusCode, 403);
 });
 
+test("daemon-excluded presence filters supervisor sessions before the result limit", { skip: requiresDatabase }, async () => {
+  const { room, agent, grantResult } = await setupLifecycle();
+  const legacySession = await authDb!.createRoomAgentSession({
+    room_id: room.id,
+    session_kind: "worker",
+    runtime: "test",
+    actor_label: "Legacy Agent | Owner's agent | Agent",
+    agent_key: agent.canonical_key,
+    agent_instance_id: "legacy-instance",
+    display_name: "Legacy Agent",
+    owner_account_id: "owner_route",
+    owner_label: "Owner",
+    ide_label: "Agent",
+  });
+  await authDb!.markRoomAgentDeliveryConnected({
+    room_id: room.id,
+    actor_label: legacySession.actor_label,
+    agent_key: legacySession.agent_key,
+    agent_instance_id: legacySession.agent_instance_id,
+    agent_session_id: legacySession.session_id,
+    session_kind: "worker",
+    runtime: "test",
+    display_name: legacySession.display_name,
+    owner_label: legacySession.owner_label,
+    ide_label: legacySession.ide_label,
+    transport: "long_poll",
+  });
+
+  let firstDaemonSessionId = "";
+  let firstDaemonDeliveryKey = "";
+  for (let index = 0; index < 21; index += 1) {
+    const displayName = `Daemon Agent ${String(index).padStart(2, "0")}`;
+    const daemonSession = await authDb!.createRoomAgentSession({
+      room_id: room.id,
+      session_kind: "worker",
+      runtime: "test",
+      actor_label: `${displayName} | Owner's agent | Agent`,
+      agent_key: agent.canonical_key,
+      agent_instance_id: `daemon-instance-${index}`,
+      display_name: displayName,
+      owner_account_id: "owner_route",
+      owner_label: "Owner",
+      ide_label: "Agent",
+      supervisor_grant_id: grantResult.grant.grant_id,
+    });
+    const delivery = await authDb!.markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: daemonSession.actor_label,
+      agent_key: daemonSession.agent_key,
+      agent_instance_id: daemonSession.agent_instance_id,
+      agent_session_id: daemonSession.session_id,
+      session_kind: "worker",
+      runtime: "test",
+      display_name: daemonSession.display_name,
+      owner_label: daemonSession.owner_label,
+      ide_label: daemonSession.ide_label,
+      transport: "long_poll",
+    });
+    if (index === 0) {
+      firstDaemonSessionId = daemonSession.session_id;
+      firstDaemonDeliveryKey = delivery.delivery_key;
+    }
+  }
+
+  const reminderEligible = await authDb!.getRoomAgentPresence(room.id, {
+    limit: 20,
+    excludeSupervisorManaged: true,
+  });
+  assert.deepEqual(
+    reminderEligible.map((entry) => entry.agent_session_id),
+    [legacySession.session_id]
+  );
+
+  const liveCandidate = await authDb!.getLivenessAnnouncementCandidate({
+    room_id: room.id,
+    delivery_key: firstDaemonDeliveryKey,
+  });
+  assert.equal(liveCandidate?.supervisor_managed, true);
+  assert.equal(liveCandidate?.agent_session_ended_at, null);
+
+  await authDb!.endRoomAgentSession({
+    session_id: firstDaemonSessionId,
+    room_id: room.id,
+  });
+  const endedCandidate = await authDb!.getLivenessAnnouncementCandidate({
+    room_id: room.id,
+    delivery_key: firstDaemonDeliveryKey,
+  });
+  assert.equal(endedCandidate?.supervisor_managed, true);
+  assert.ok(endedCandidate?.agent_session_ended_at);
+});
+
 test("a freshly minted supervisor bearer can immediately read its Git-backed Focus room through HTTP", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions");

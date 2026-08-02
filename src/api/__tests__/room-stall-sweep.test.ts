@@ -112,22 +112,17 @@ test("nudge text names live workers and falls back gracefully", () => {
   assert.ok(humanGated.includes("room admin will need to decide"));
 });
 
-test("room-stall nudges exclude daemon-supervised workers", () => {
+test("room-stall labels include only reachable workers from the prefiltered roster", () => {
   const labels = selectRoomStallNudgeWorkerLabels({
     presence: [
-      workerPresence({ actorLabel: "DaemonAgent | EmmyMay's agent | Agent", sessionId: "session-daemon" }),
       workerPresence({ actorLabel: "LegacyAgent | EmmyMay's agent | Agent", sessionId: "session-legacy" }),
       workerPresence({ actorLabel: "OfflineAgent | EmmyMay's agent | Agent", sessionId: "session-offline", activityState: "offline" }),
     ],
-    supervisorManagedAgentSessionIds: new Set(["session-daemon"]),
   });
 
   assert.deepEqual(labels, ["LegacyAgent | EmmyMay's agent | Agent"]);
   assert.deepEqual(selectRoomStallNudgeWorkerLabels({
-    presence: [
-      workerPresence({ actorLabel: "DaemonAgent | EmmyMay's agent | Agent", sessionId: "session-daemon" }),
-    ],
-    supervisorManagedAgentSessionIds: new Set(["session-daemon"]),
+    presence: [],
   }), []);
 });
 

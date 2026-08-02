@@ -324,6 +324,25 @@ test("announce mode posts once per outage and respects the cooldown", async () =
   assert.deepEqual(fake.failoverCalls, []);
 });
 
+test("daemon-supervised managers still trigger governance failover", async () => {
+  const daemonManagerDelivery: LivenessAnnouncementCandidate = {
+    ...delivery(buildDeliverySession()),
+    supervisor_managed: true,
+  };
+  const fake = buildFakeDeps({
+    assignments: [deadManagerEntry()],
+    mode: "auto",
+    deliveries: new Map([["agent_session:agent_session_331", daemonManagerDelivery]]),
+    candidates: [buildCandidate()],
+    connectionStates: new Map([["agent_session_400", "live"]]),
+  });
+
+  const summary = await createBoardManagerFailoverSweeper(fake.deps).sweepOnce();
+
+  assert.equal(summary.failovers, 1);
+  assert.equal(fake.failoverCalls.length, 1);
+});
+
 test("auto mode promotes the best reachable successor and hands over pending intents", async () => {
   const unreachable = buildCandidate({ agent_session_id: "agent_session_350", actor_label: "StoneVale | X | Codex" });
   const reachable = buildCandidate();

@@ -10,7 +10,6 @@ import {
   listStalledRoomCandidates,
   markRoomStallNudgedTx,
   getActiveBoardManager,
-  getSupervisorManagedAgentSessionIds,
   getLivenessAnnouncementCandidate,
   getReachableWorkerDeliverySessionForAgentSession,
   getRoomBoardSettings,
@@ -360,13 +359,12 @@ const roomStallSweeper = createRoomStallSweeper({
   listStalledRooms: (options) => listStalledRoomCandidates(options),
   hasReachableManager,
   listLiveWorkerLabels: async (roomId) => {
-    const [presence, supervisorManagedAgentSessionIds] = await Promise.all([
-      getRoomAgentPresence(roomId, { limit: 20 }),
-      getSupervisorManagedAgentSessionIds(roomId),
-    ]);
+    const presence = await getRoomAgentPresence(roomId, {
+      limit: 20,
+      excludeSupervisorManaged: true,
+    });
     return selectRoomStallNudgeWorkerLabels({
       presence,
-      supervisorManagedAgentSessionIds,
     });
   },
   announceStall: async (input) => {

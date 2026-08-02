@@ -6,7 +6,6 @@ import {
   getAgentIdentityByCanonicalKey,
   getFocusRoomsForParent,
   getOpenTasks,
-  getSupervisorManagedAgentSessionIds,
   getProjectById,
   getRoomAgentPresence,
   getStaleTaskPromptMutes,
@@ -55,7 +54,6 @@ export const {
 export const { maybeEmitStaleWorkPrompt } = createStaleWorkPromptEmitter({
   getOpenTasks,
   getRoomAgentPresence,
-  getSupervisorManagedAgentSessionIds,
   getStaleTaskPromptMutes: async (projectId, options) =>
     getStaleTaskPromptMutes(projectId, options.taskIds),
   emitTaskAnchoredMessage,
