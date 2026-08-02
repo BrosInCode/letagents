@@ -95,6 +95,7 @@ import type {
   DesktopReasoningUpdate,
 } from "../../../../../electron/ipc-types";
 import { displayNameFromActor } from "../../../domain/agents";
+import { classifyReasoningStream } from "../../../domain/reasoning";
 import { formatShortDateTime, timestampValue } from "../../../domain/time";
 import { desktopIpc } from "../../../ipc/index.js";
 
@@ -242,46 +243,18 @@ const currentLiveTimelineEntry = computed<ReasoningTimelineEntry[]>(() => {
   }];
 });
 
-const streamState = computed(() => {
-  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").toLowerCase();
-  if (isCodexReasoningSummary.value) return "live";
-  if (isCodexSnapshot.value) return "snapshot";
-  if (status === "working" || status === "reviewing") return "live";
-  if (status === "blocked") return "blocked";
-  return "recent";
-});
-const isCodexReasoningSummary = computed(() => {
+const streamClassification = computed(() => {
   const snapshot = currentSnapshot.value;
-  const text = [
-    snapshot?.summary,
-    snapshot?.checking,
-    snapshot?.next_action,
-  ].join(" ").toLowerCase();
-  return text.includes("readable reasoning") || text.includes("reasoning summary");
+  return classifyReasoningStream({
+    status: snapshot?.status || activeSession.value?.status,
+    summary: snapshot?.summary,
+    checking: snapshot?.checking,
+    nextAction: snapshot?.next_action,
+  });
 });
-const isCodexSnapshot = computed(() => {
-  if (isCodexReasoningSummary.value) return false;
-  const snapshot = currentSnapshot.value;
-  const text = [
-    snapshot?.summary,
-    snapshot?.checking,
-    snapshot?.next_action,
-  ].join(" ").toLowerCase();
-  return text.includes("codex_app_server") || text.includes("app-server snapshot") || text.includes("snapshot-derived");
-});
-const streamLabel = computed(() => {
-  if (isCodexReasoningSummary.value) return "Live thinking";
-  if (isCodexSnapshot.value) return "Snapshot";
-  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").trim();
-  return status ? labelFromStatus(status) : "Reasoning";
-});
-const streamDescription = computed(() =>
-  isCodexReasoningSummary.value
-    ? "Readable Codex reasoning summary stream"
-    : isCodexSnapshot.value
-      ? "Codex app-server snapshot"
-      : streamLabel.value
-);
+const streamState = computed(() => streamClassification.value.state);
+const streamLabel = computed(() => streamClassification.value.label);
+const streamDescription = computed(() => streamClassification.value.description);
 
 watch(() => props.open, (next) => {
   if (!next) {
