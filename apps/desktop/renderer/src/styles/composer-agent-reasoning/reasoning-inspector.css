@@ -145,6 +145,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 7px;
   flex: 0 0 auto;
   min-height: 30px;
   padding: 0 10px;
@@ -160,8 +161,16 @@
 .desktop-reasoning-freshness[data-state="live"] {
   background: rgba(34, 197, 94, 0.14);
   color: #86efac;
-  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.25);
-  animation: desktop-reasoning-live-pulse 1.8s ease-in-out infinite;
+}
+
+.desktop-reasoning-freshness-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #86efac;
+  box-shadow: 0 0 6px 0 rgba(134, 239, 172, 0.45);
+  animation: desktop-reasoning-breathe 3.6s ease-in-out infinite;
 }
 
 .desktop-reasoning-freshness[data-state="recent"] {
@@ -198,13 +207,16 @@
   display: grid;
   gap: 7px;
   padding: 14px;
-  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+  transition: box-shadow 180ms ease;
 }
 
-.desktop-reasoning-summary[data-updating="true"] {
-  border-color: rgba(56, 189, 248, 0.34);
-  background: rgba(14, 165, 233, 0.08);
-  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.08);
+.desktop-reasoning-inspector[data-live="true"] .desktop-reasoning-summary[data-updating="true"] {
+  box-shadow: inset 0 0 0 1px rgba(134, 239, 172, 0.24);
+  animation: desktop-reasoning-edge-attack 720ms var(--ease-out);
+}
+
+.desktop-reasoning-inspector[data-live="true"] .desktop-reasoning-summary[data-updating="true"] p {
+  animation: desktop-reasoning-reform 300ms var(--ease-out);
 }
 
 .desktop-reasoning-summary span,
@@ -214,18 +226,6 @@
   font-size: 0.72rem;
   font-weight: 900;
   text-transform: uppercase;
-}
-
-.desktop-reasoning-live-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-left: 8px;
-  border-radius: 999px;
-  background: #86efac;
-  box-shadow: 0 0 0 0 rgba(134, 239, 172, 0.34);
-  animation: desktop-reasoning-dot-pulse 1.4s ease-in-out infinite;
-  vertical-align: 1px;
 }
 
 .desktop-reasoning-summary p,
@@ -304,7 +304,7 @@
   border-left: 2px solid rgba(125, 211, 252, 0.4);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
-  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+  transition: border-color 180ms ease, background 180ms ease;
 }
 
 .desktop-reasoning-timeline-entry[data-current="true"] {
@@ -312,11 +312,10 @@
   background: rgba(34, 197, 94, 0.055);
 }
 
-.desktop-reasoning-timeline-entry[data-updating="true"] {
-  transform: translateY(-1px);
-  border-color: rgba(125, 211, 252, 0.18);
-  border-left-color: rgba(125, 211, 252, 0.82);
-  background: rgba(14, 165, 233, 0.09);
+.desktop-reasoning-inspector[data-live="true"] .desktop-reasoning-timeline-entry[data-updating="true"] {
+  border-left-color: rgba(134, 239, 172, 0.85);
+  background: rgba(34, 197, 94, 0.09);
+  animation: desktop-reasoning-entry-land 440ms var(--ease-spring);
 }
 
 .desktop-reasoning-timeline-entry div {
@@ -342,24 +341,57 @@
   margin: 0;
 }
 
-@keyframes desktop-reasoning-live-pulse {
+@keyframes desktop-reasoning-breathe {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.2);
+    transform: scale(0.92);
+    opacity: 0.55;
   }
   50% {
-    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0);
+    transform: scale(1.12);
+    opacity: 1;
   }
 }
 
-@keyframes desktop-reasoning-dot-pulse {
-  0%,
-  100% {
-    opacity: 0.58;
-    transform: scale(0.86);
+@keyframes desktop-reasoning-reform {
+  from {
+    opacity: 0.35;
+    transform: translateY(6px);
   }
-  50% {
+  to {
     opacity: 1;
-    transform: scale(1.08);
+    transform: translateY(0);
+  }
+}
+
+@keyframes desktop-reasoning-entry-land {
+  from {
+    transform: translateY(-6px) scale(0.99);
+  }
+  to {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes desktop-reasoning-edge-attack {
+  from {
+    box-shadow: inset 0 0 0 1px rgba(134, 239, 172, 0.5);
+  }
+  to {
+    box-shadow: inset 0 0 0 1px rgba(134, 239, 172, 0.24);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-reasoning-freshness-dot {
+    animation: none;
+    opacity: 0.92;
+    transform: none;
+  }
+
+  .desktop-reasoning-inspector[data-live="true"] .desktop-reasoning-summary[data-updating="true"],
+  .desktop-reasoning-inspector[data-live="true"] .desktop-reasoning-summary[data-updating="true"] p,
+  .desktop-reasoning-inspector[data-live="true"] .desktop-reasoning-timeline-entry[data-updating="true"] {
+    animation: none;
   }
 }
