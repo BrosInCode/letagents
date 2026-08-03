@@ -62,6 +62,43 @@ test("Open Model supervised coordinates resolve without a Codex context file", a
   assert.equal(resolved.display_name, "Local Qwen");
 });
 
+test("Cursor credential borrowing carries the exact rotating provider-turn capability", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-turn-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 17, pid: 123, started_at: "2026-08-02T00:00:00.000Z" }
+        : { status: "available", credential: "turn-bounded-bearer" };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const result = await borrowSupervisedWorkerCredential({ ...session, runtime: "cursor" }, {
+      LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+      LETAGENTS_SUPERVISOR_ENTRY_ID: "cursor_exact",
+      LETAGENTS_SUPERVISOR_DAEMON_SOCKET: socketPath,
+      LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_cursor",
+      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_cursor",
+      LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "cursor:unpredictable-turn-1",
+    });
+    assert.deepEqual(result, { state: "available", credential: "turn-bounded-bearer" });
+    const borrow = requests.find((request) => request.method === "supervisor.borrow_worker_credential");
+    assert.equal(borrow.params.provider_turn_id, "cursor:unpredictable-turn-1");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("credential borrowing requires the negotiated daemon generation and defers without desktop delivery", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-credential-"));
   const socketPath = join(root, "daemon.sock");

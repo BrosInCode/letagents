@@ -13,7 +13,8 @@ import { safeUserVisibleErrorDetail } from "./user-visible-error";
  * daemon lifecycle (see apps/desktop/daemon/main.ts convergeManifestEntry /
  * bindWorkerSession) advances a fresh launch through:
  *   1. work attempt + workspace provisioned  -> `workspacePath` set
- *   2. provider child spawned                 -> `providerPid` set,
+ *   2. provider runtime established           -> `providerPid` set, or a
+ *                                                Cursor continuation set,
  *                                                observedState left "starting"
  *   3. provider up, awaiting the room bind     -> observedState "recovering"
  *                                                with condition
@@ -144,8 +145,15 @@ function reachedIndex(entry: LaunchFields): number {
   // a bound-but-unreachable worker, or one with room/session evidence but not
   // yet fully ready, remains registering_identity — it must never show Ready.
   // There is deliberately no intermediate `if (bound) return 3`.
-  if (entry.providerPid != null && (bound || workplaceReachable || entry.agentSessionId != null)) return 2; // connecting done, registering active
-  if (entry.providerPid != null) return 1;                    // provider started, connecting active
+  // Cursor is a per-turn lane and honestly has no process while idle. Its
+  // durable continuation is the provider-established milestone; requiring a
+  // PID would leave a healthy supervised Cursor launch stuck forever at
+  // "Starting provider" between turns.
+  const providerEstablished = entry.provider === "cursor"
+    ? entry.providerContinuationId != null
+    : entry.providerPid != null;
+  if (providerEstablished && (bound || workplaceReachable || entry.agentSessionId != null)) return 2; // connecting done, registering active
+  if (providerEstablished) return 1;                          // provider started, connecting active
   if (entry.workspacePath != null) return 0;                  // workspace ready, starting provider
   return -1;                                                  // preparing workspace
 }

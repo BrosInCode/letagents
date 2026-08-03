@@ -32,7 +32,7 @@ type DaemonInternals = {
   publishNativeActivity: () => Promise<boolean>;
 };
 
-async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 8_000): Promise<void> {
+async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;

@@ -310,10 +310,11 @@ test("open-model permission profiles default to honestly-labeled full access", (
   );
 });
 
-test("Open Model is a daemon-supervised OpenCode provider", () => {
+test("desktop-managed providers declare their supervised runtimes", () => {
   const providers = listDesktopAgentProviders();
   const codex = providers.find((provider) => provider.id === "codex");
   const claude = providers.find((provider) => provider.id === "claude-code");
+  const cursor = providers.find((provider) => provider.id === "cursor");
   const openModel = providers.find((provider) => provider.id === "open-model");
 
   assert.ok(codex?.capabilities.includes("supervised_runtime"));
@@ -327,14 +328,14 @@ test("Open Model is a daemon-supervised OpenCode provider", () => {
   assert.ok(openModel?.capabilities.includes("supervised_runtime"));
   assert.equal(openModel?.runtimeCommand, "opencode");
   assert.equal(openModel?.mcpTargetId, null);
+  assert.ok(cursor?.capabilities.includes("supervised_runtime"));
+  assert.ok(cursor?.capabilities.includes("concurrent_supervised_agents"));
+  assert.equal(cursor?.supervisedDeliveryMode, "daemon_inbox");
 });
 
 test("supervised provider admission declares provider-neutral daemon delivery", () => {
   assert.equal(supervisedDeliveryModeForProvider("codex"), "daemon_inbox");
   assert.equal(supervisedDeliveryModeForProvider("open-model"), "daemon_inbox");
   assert.equal(supervisedDeliveryModeForProvider("claude-code"), "daemon_inbox");
-  assert.throws(
-    () => supervisedDeliveryModeForProvider("cursor"),
-    /not available through the supervised engine/,
-  );
+  assert.equal(supervisedDeliveryModeForProvider("cursor"), "daemon_inbox");
 });

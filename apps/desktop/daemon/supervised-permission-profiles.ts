@@ -100,20 +100,20 @@ const openModelProfiles: readonly SupervisedPermissionProfile[] = [
 
 const cursorProfiles: readonly SupervisedPermissionProfile[] = [
   {
-    id: "read_only", label: "Read-only", description: "Requires a supported supervised Cursor runtime.",
-    status: "gated", risk: "low", detail: "Cursor does not currently support supervised room delivery.", isDefault: true,
+    id: "read_only", label: "Read-only", description: "Lets Cursor inspect and answer without editing the workspace.",
+    status: "available", risk: "low", detail: "Maps to Cursor mode=ask without --force.", isDefault: true,
   },
   {
     id: "ask_before_write", label: "Ask before writes", description: "Requires prompt bridging and a supervised Cursor runtime.",
     status: "gated", risk: "medium", detail: "Cursor supervised prompt bridging is not available yet.", isDefault: false,
   },
   {
-    id: "sandboxed_write", label: "Sandboxed writes", description: "Requires a supported supervised Cursor runtime.",
-    status: "gated", risk: "medium", detail: "Cursor does not currently support supervised room delivery.", isDefault: false,
+    id: "sandboxed_write", label: "Sandboxed writes", description: "Lets Cursor write through its native sandboxed headless mode.",
+    status: "gated", risk: "medium", detail: "Cursor supervised write access has not completed its permission-boundary review.", isDefault: false,
   },
   {
-    id: "full_access", label: "Full access", description: "Requires a supported supervised Cursor runtime.",
-    status: "gated", risk: "high", detail: "Cursor does not currently support supervised room delivery.", isDefault: false,
+    id: "full_access", label: "Full access", description: "Lets Cursor use broad local write and shell access in this trusted workspace.",
+    status: "gated", risk: "high", detail: "Cursor supervised full access has not completed its permission-boundary review.", isDefault: false,
   },
 ];
 

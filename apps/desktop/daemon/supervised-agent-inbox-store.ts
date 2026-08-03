@@ -347,6 +347,64 @@ export class SupervisedAgentInboxStore {
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
+  /**
+   * Roll back only a provider turn whose durable wrapper proves native dispatch
+   * never happened. This is intentionally narrower than the ordinary retry
+   * transition: exact turn identity, FIFO ownership, and absence of terminal
+   * or tool-effect evidence are all checked in the same transaction.
+   */
+  async resetUndispatchedTurn(inboxItemId: string, providerTurnId: string): Promise<SupervisedInboxItem> {
+    if (!providerTurnId.trim()) throw new Error("Undispatched reset requires an exact provider turn id.");
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
+      const item = rowToItem(row);
+      if (!["dispatching", "awaiting_result", "result_recovery"].includes(item.state)
+        || item.provider_turn_id !== providerTurnId) {
+        throw new Error("Undispatched reset does not match the exact in-flight provider turn.");
+      }
+      this.assertCurrentHead(database, item);
+      const terminal = database.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(inboxItemId);
+      const effect = database.prepare("SELECT 1 FROM supervised_agent_effects WHERE agent_id=? AND provider_turn_id=? LIMIT 1").get(item.agent_id, providerTurnId);
+      if (terminal || effect || item.outcome) {
+        throw new Error("Undispatched reset found terminal or effect evidence and was refused.");
+      }
+      const timestamp = this.now();
+      run(database.prepare(`UPDATE supervised_agent_inbox
+        SET state='pending',attempt_count=?,provider_turn_id=NULL,outcome=NULL,last_error=NULL,
+            failure_code=NULL,next_attempt_at_ms=NULL,updated_at=?
+        WHERE inbox_item_id=?`), Math.max(0, item.attempt_count - 1), timestamp, inboxItemId);
+      const retryOrdinal = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='retry_scheduled'").get(inboxItemId) as Row).value) + 1;
+      this.recordEvent(database, inboxItemId, `undispatched_retry:${retryOrdinal}:${providerTurnId}`, "retry_scheduled", timestamp, "Prepared provider wrapper exited before native dispatch; retrying the same FIFO item.");
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
+  /**
+   * A controlled handoff may roll back a dispatch intent only after its
+   * provider promise proves no wrapper/native turn was made. Crash recovery
+   * cannot call this path because it lacks that live cleanup proof.
+   */
+  async resetPreNativeHandoff(inboxItemId: string): Promise<SupervisedInboxItem> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+      if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
+      const item = rowToItem(row);
+      if (!["dispatching", "retryable"].includes(item.state) || item.provider_turn_id || item.outcome) {
+        throw new Error("Pre-native handoff reset requires an exact unstarted dispatch or retry-backoff intent.");
+      }
+      this.assertCurrentHead(database, item);
+      const terminal = database.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(inboxItemId);
+      if (terminal) throw new Error("Pre-native handoff reset found terminal evidence and was refused.");
+      const timestamp = this.now();
+      run(database.prepare(`UPDATE supervised_agent_inbox
+        SET state='pending',last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,
+            next_attempt_at_ms=NULL,updated_at=?
+        WHERE inbox_item_id=?`), timestamp, inboxItemId);
+      const queuedOrdinal = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='queued'").get(inboxItemId) as Row).value) + 1;
+      this.recordEvent(database, inboxItemId, `handoff_queued:${queuedOrdinal}`, "queued", timestamp, "Clean handoff completed before native provider dispatch; returning the FIFO item to pending.");
+      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+    }));
+  }
   async checkpointNormalizedTerminal(input: {
     inbox_item_id: string;
     agent_id: string;
@@ -850,7 +908,11 @@ export class SupervisedAgentInboxStore {
    * The returned item's `state` tells the caller which side won (`cancelled_by_user`
    * → interrupt settled it; anything else → publication already committed).
    */
-  async cancelInterruptedTurn(inboxItemId: string, detail = "Stopped by the user."): Promise<SupervisedInboxItem | null> {
+  async cancelInterruptedTurn(
+    inboxItemId: string,
+    detail = "Stopped by the user.",
+    expected?: { agent_id: string; room_id: string },
+  ): Promise<SupervisedInboxItem | null> {
     // Every pre-publish state is safe to settle on a user Stop. `publishing`
     // and the terminal states are not: their outcome is already committed.
     const cancellable = new Set<SupervisedInboxState>(["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"]);
@@ -858,6 +920,9 @@ export class SupervisedAgentInboxStore {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
+      if (expected && (item.agent_id !== expected.agent_id || item.room_id !== expected.room_id)) {
+        throw new Error("Interrupted-turn settlement does not match the exact active delivery identity.");
+      }
       if (!cancellable.has(item.state)) return item;
       this.assertCurrentHead(database, item);
       const timestamp = this.now();

@@ -43,10 +43,12 @@ const agentProviders: DesktopAgentProvider[] = [
     capabilities: [
       "external_mcp",
       "desktop_managed_runtime",
+      "supervised_runtime",
       "auth_preflight",
       "turn_control",
+      "concurrent_supervised_agents",
     ],
-    supervisedDeliveryMode: null,
+    supervisedDeliveryMode: "daemon_inbox",
     runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
     permissionProfiles: listManagedAgentPermissionProfiles("cursor"),

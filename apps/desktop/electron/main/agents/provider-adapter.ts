@@ -238,8 +238,9 @@ export interface ProviderSpawnRequest {
   };
   /**
    * Development-only: absolute path to a locally built MCP server entry (e.g.
-   * dist/mcp/server.js) for supervised Codex smoke tests. Production safety is
-   * caller-enforced: the daemon emits this field only for Codex when BOTH
+   * dist/mcp/server.js) for supervised provider smoke tests. Production safety
+   * is caller-enforced: the daemon emits this field only for supported local
+   * MCP providers when BOTH
    * LETAGENTS_DESKTOP_DEV_SERVER_URL and LETAGENTS_DEV_MCP_SERVER_ENTRY are set.
    * Never place a bearer credential or socket path in this field.
    */
@@ -387,6 +388,13 @@ export interface ProviderRoomTurnOptions {
   beforeNativeDispatch?: () => Promise<void>;
   /** Persist the exact native turn id before awaiting its terminal state. */
   checkpointTurnStarted?: (turnId: string) => Promise<void>;
+  /** Persist a provider's dynamic continuation/process identity before native work proceeds. */
+  checkpointProviderState?: (state: {
+    providerContinuationId: string;
+    providerConnection: ProviderConnectionRef;
+  }) => Promise<void>;
+  /** Synchronously marks that exact turn identity and process recovery state are durable. */
+  markDurableTurnStarted?: () => void;
   /** Persist normalized terminal evidence before provider-local evidence is released. */
   checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
   /** Detach this observer only; never interrupt the provider-native turn. */
@@ -438,12 +446,16 @@ export interface ProviderAdapter {
   /** Recover only a persisted exact native turn; it must not start another turn. */
   recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
     detachSignal?: AbortSignal;
+    checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"];
     checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
   }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: ProviderHandle, request: ProviderContinuationRepairRequest, options: {
     checkpointReplacement: (providerContinuationId: string) => Promise<void>;
     detachSignal?: AbortSignal;
   }): Promise<ProviderContinuationRepairResult>;
+
+  /** Stop an exact durable process birth when a successor cannot reattach its transport. */
+  stopRef?(ref: ProviderContinuationRef, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;
 
   /** Graceful stop → grace → force. Resolves with the immutable terminal payload. */
   stop(handle: ProviderHandle, opts?: ProviderStopOptions): Promise<ProviderTerminalPayload>;

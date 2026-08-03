@@ -10,7 +10,7 @@ import { WorkDurabilityStore } from "./durability-store.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
-import { sameProviderActionConnectionIdentity, type ProviderActionAttachTerminal, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal, type ProviderTurnControlResult } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal, type ProviderTurnControlResult } from "./provider-action-port.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
@@ -844,6 +844,7 @@ export class SupervisorDaemon {
           return { charter: configuration.charter };
         },
         (input) => this.restoreMissingProviderContinuation(input),
+        (input) => this.checkpointDynamicProviderState(input),
       )
       : null;
     this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
@@ -941,6 +942,7 @@ export class SupervisorDaemon {
         return this.prepareBoundedEffect({
           entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
           executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
+          providerTurnId: String(params.provider_turn_id ?? ""),
           mcpRequestId: String(params.mcp_request_id ?? ""), toolName: String(params.tool_name ?? ""),
           input: params.input, mutation: params.mutation === true,
         });
@@ -950,6 +952,7 @@ export class SupervisorDaemon {
         return this.completeBoundedEffect({
           entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
           executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
+          providerTurnId: String(params.provider_turn_id ?? ""),
           effectId: String(params.effect_id ?? ""), result: params.result,
           error: typeof params.error === "string" ? params.error : undefined,
         });
@@ -1215,6 +1218,7 @@ export class SupervisorDaemon {
           entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
           work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
           agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
+          provider_turn_id: String(params.provider_turn_id ?? ""),
           api_url: String(params.api_url ?? ""),
         });
       }
@@ -1729,7 +1733,7 @@ export class SupervisorDaemon {
   }
 
   private async exactActiveBoundedContext(input: {
-    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number; providerTurnId?: string;
   }) {
     if (!input.entryId || !input.workAttemptId || !input.executionGenerationId || input.daemonGeneration !== this.singleton.currentGeneration) {
       throw new Error("The supervised effect coordinates are stale.");
@@ -1758,11 +1762,16 @@ export class SupervisorDaemon {
     if (!active) throw new Error("No exact bounded room turn is currently active for this agent.");
     const inbox = await this.supervisedInbox.get(active.inboxItemId);
     if (!inbox?.provider_turn_id) throw new Error("The bounded room turn has not checkpointed its provider turn id yet.");
+    if ((entry.provider === "cursor" || input.providerTurnId)
+      && input.providerTurnId !== inbox.provider_turn_id) {
+      throw new Error("The supervised provider turn capability is stale.");
+    }
     return { entry, agent, active, inbox };
   }
 
   private async prepareBoundedEffect(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    providerTurnId: string;
     mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
   }): Promise<Record<string, unknown>> {
     if (!input.mcpRequestId.trim() || !input.toolName.trim()) throw new Error("A supervised effect requires MCP request and tool identities.");
@@ -1821,6 +1830,7 @@ export class SupervisorDaemon {
 
   private async completeBoundedEffect(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    providerTurnId: string;
     effectId: string; result?: unknown; error?: string;
   }): Promise<{ completed: true }> {
     const context = await this.exactActiveBoundedContext(input);
@@ -2536,6 +2546,89 @@ export class SupervisorDaemon {
   }
 
   /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
+  private async checkpointDynamicProviderState(input: {
+    agent: SupervisedIngressAgent;
+    providerContinuationId: string;
+    providerConnection: ProviderActionConnectionRef;
+  }): Promise<void> {
+    const { agent, providerContinuationId, providerConnection } = input;
+    if (agent.provider !== "cursor" || providerConnection.kind !== "cursor_cli"
+      || !providerContinuationId.trim() || !agent.handle) {
+      throw new Error("Only an exact live Cursor lane may checkpoint dynamic provider state.");
+    }
+    await this.serializeEntryTick(agent.agentId, async () => {
+      if (this.handoffScheduled) throw new DaemonFenceLostError("Cursor provider state changed during daemon handoff.");
+      await this.singleton.assertCurrent();
+      const current = await this.store.getEntry(agent.agentId);
+      const live = this.liveHandles.get(agent.agentId);
+      if (!current || live !== agent.handle
+        || current.provider !== "cursor"
+        || current.delivery_mode !== "daemon_inbox"
+        || current.work_attempt_id !== agent.workAttemptId
+        || current.provider_ref?.work_attempt_id !== agent.workAttemptId
+        || current.provider_ref.execution_generation_id !== agent.executionGenerationId
+        || (current.provider_ref.provider_continuation_id !== agent.providerContinuationId
+          && current.provider_ref.provider_continuation_id !== providerContinuationId)
+        || live.workAttemptId !== agent.workAttemptId
+        || live.providerContinuationId !== providerContinuationId
+        || !isDeepStrictEqual(live.providerConnection, providerConnection)) {
+        throw new DaemonFenceLostError("Cursor provider state no longer belongs to the exact supervised lane.");
+      }
+      try {
+        if (current.provider_ref.provider_continuation_id !== providerContinuationId
+          || !isDeepStrictEqual(current.provider_ref.provider_connection, providerConnection)) {
+          await this.updateManifestEntry(agent.agentId, (entry) => {
+            if (!entry.provider_ref
+              || entry.provider_ref.execution_generation_id !== agent.executionGenerationId
+              || (entry.provider_ref.provider_continuation_id !== agent.providerContinuationId
+                && entry.provider_ref.provider_continuation_id !== providerContinuationId)) {
+              throw new DaemonFenceLostError("Cursor provider checkpoint lost its manifest fence.");
+            }
+            return {
+              ...entry,
+              provider_ref: {
+                ...entry.provider_ref,
+                provider_continuation_id: providerContinuationId,
+                provider_connection: providerConnection,
+              },
+            };
+          });
+        }
+        // Manifest and live handle now agree. Advance the in-memory ingress
+        // authority before the separate attempt checkpoint so a failure in the
+        // latter cannot split manifest=new from agent/handle=old.
+        agent.providerContinuationId = providerContinuationId;
+        agent.pid = providerConnection.pid;
+        const attempt = await this.durability.getAttempt(agent.workAttemptId);
+        if (attempt.checkpoints.at(-1)?.provider_continuation_id !== providerContinuationId) {
+          await this.durability.checkpoint(agent.workAttemptId, {
+            room_cursor: null,
+            provider_continuation_id: providerContinuationId,
+          });
+        }
+      } catch (error) {
+        // An SQLite/filesystem boundary can report failure after committing.
+        // Re-read the manifest and converge in-memory authority when the exact
+        // new handle/ref is already durable; the next retry then only needs to
+        // finish the idempotent attempt checkpoint.
+        try {
+          const persisted = await this.store.getEntry(agent.agentId);
+          if (persisted?.provider_ref?.provider_continuation_id === providerContinuationId
+            && isDeepStrictEqual(persisted.provider_ref.provider_connection, providerConnection)
+            && this.liveHandles.get(agent.agentId) === agent.handle
+            && agent.handle.providerContinuationId === providerContinuationId) {
+            agent.providerContinuationId = providerContinuationId;
+            agent.pid = providerConnection.pid;
+          }
+        } catch {
+          // Preserve the original checkpoint failure.
+        }
+        throw error;
+      }
+    });
+  }
+
+  /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
   private async isExactSupervisedDeliveryAuthority(authority: SupervisedDeliveryAuthority): Promise<boolean> {
     if (this.handoffScheduled) return false;
     try { await this.singleton.assertCurrent(); } catch { return false; }
@@ -2914,12 +3007,58 @@ export class SupervisorDaemon {
     grantRevokedWithoutWorkerSession = false,
   ) {
     if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Purge is fenced by a stale daemon generation.");
-    return this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
+    return this.serializeEntryTick(entryId, async () => {
+      const preflight = await this.store.getEntry(entryId);
+      if (preflight && (preflight.desired_state !== "stopped"
+        || !["absent", "stopped", "failed"].includes(preflight.observed_state))) {
+        return { outcome: "invalid" as const, error: "Purge requires a fully stopped durable lifecycle." };
+      }
+      const cursorConnection = preflight?.provider_ref?.provider_connection?.kind === "cursor_cli"
+        ? preflight.provider_ref.provider_connection
+        : null;
+      if (preflight && !this.liveHandles.has(entryId) && cursorConnection && cursorConnection.pid !== null) {
+        if (!this.providerPort?.stopRef) {
+          return { outcome: "invalid" as const, error: "Purge cannot prove the unattached Cursor wrapper is stopped." };
+        }
+        try {
+          const ref = this.providerRef(preflight);
+          const terminal = await this.providerPort.stopRef(ref, {
+            actionId: `purge:${entryId}:cursor-wrapper-fence:${preflight.provider_ref!.execution_generation_id}`,
+          });
+          const attempt = await this.durability.getAttempt(ref.workAttemptId);
+          const execution = attempt.execution_generations.find((candidate) =>
+            candidate.execution_generation_id === preflight.provider_ref!.execution_generation_id);
+          if (!execution) throw new Error("Cursor purge fence has no matching durable execution generation.");
+          if (!execution.terminal) {
+            await this.durability.recordTerminal(ref.workAttemptId, execution.execution_generation_id, {
+              ...this.terminalPayload(terminal, execution.actor),
+              actor: execution.actor,
+              generation: execution.generation,
+            });
+          }
+          await this.durability.releaseTerminalExecutionFence(ref.workAttemptId, execution.execution_generation_id);
+        } catch (error) {
+          return {
+            outcome: "invalid" as const,
+            error: `Purge could not fence the unattached Cursor wrapper: ${schedulerErrorDetail(error)}`,
+          };
+        }
+      }
+      return this.serializeManifestMutation(async () => {
       await this.singleton.assertCurrent();
       const operationId = `purge:${entryId}`;
       let purge = await this.store.getPurge(operationId);
       const entry = await this.store.getEntry(entryId);
-      if (!entry) return purge?.phase === "complete" || !purge ? { outcome: "purged" as const } : { outcome: "invalid" as const, error: "Purge identity is absent but its journal is incomplete." };
+      if (!entry) {
+        return purge?.phase === "complete" || !purge
+          ? {
+            outcome: "purged" as const,
+            ...(purge?.attached_work_attempt_id
+              ? { purged_work_attempt_id: purge.attached_work_attempt_id }
+              : {}),
+          }
+          : { outcome: "invalid" as const, error: "Purge identity is absent but its journal is incomplete." };
+      }
       if (this.liveHandles.has(entryId)) return { outcome: "invalid" as const, error: "Purge requires no live provider or bounded delivery turn." };
       if (!purge) {
         try {
@@ -2991,7 +3130,14 @@ export class SupervisorDaemon {
         }
         return { outcome: "invalid" as const, error: "Purge revocation evidence is internally inconsistent." };
       }
-      if (purge.phase === "complete") return { outcome: "purged" as const };
+      if (purge.phase === "complete") {
+        return {
+          outcome: "purged" as const,
+          ...(purge.attached_work_attempt_id
+            ? { purged_work_attempt_id: purge.attached_work_attempt_id }
+            : {}),
+        };
+      }
       if (purge.phase !== "local_commit") return { outcome: "invalid" as const, error: purge.error ?? "Purge journal is not committable." };
       try {
         const committed = await this.store.commitPurge(this.manifestGeneration, { operationId, agentId: entryId, daemonGeneration }, (commit) => this.fenceDaemonCommit(commit));
@@ -3006,8 +3152,14 @@ export class SupervisorDaemon {
       this.notifyAgentStreamWaiters(entryId);
       this.agentStreams.delete(entryId);
       this.agentStreamWaiters.delete(entryId);
-      return { outcome: "purged" as const };
-    }));
+      return {
+        outcome: "purged" as const,
+        ...(purge.attached_work_attempt_id
+          ? { purged_work_attempt_id: purge.attached_work_attempt_id }
+          : {}),
+      };
+      });
+    });
   }
 
   private async recoverPreparedPurges(): Promise<void> {
@@ -3390,6 +3542,27 @@ export class SupervisorDaemon {
       || handle.providerContinuationId !== ref.provider_continuation_id) {
       throw new Error("Turn control could not resolve the exact live provider continuation.");
     }
+    // Cursor's native Stop waits for the exact wrapper (and its descendants) to
+    // settle before returning. Capture the daemon FIFO identity at the native
+    // dispatch edge so it remains cancellable if that provider settlement lets
+    // deliver() clear its in-memory live-turn map first.
+    const deliveryAgent: SupervisedIngressAgent = {
+      agentId: entry.id,
+      roomId: binding.room_id,
+      provider: entry.provider,
+      charter: entry.charter,
+      apiUrl: binding.api_url,
+      agentSessionId: binding.agent_session_id,
+      bearer: "",
+      handle,
+      workAttemptId: binding.work_attempt_id,
+      providerContinuationId: ref.provider_continuation_id ?? null,
+      pid: handle.pid ?? ref.provider_connection?.pid ?? null,
+      executionGenerationId: binding.execution_generation_id,
+      daemonGeneration: this.singleton.currentGeneration,
+      deliveryMode: entry.delivery_mode ?? "mcp_polling",
+    };
+    const interruptedDelivery: { current: { inboxItemId: string; agent: SupervisedIngressAgent } | null } = { current: null };
     // Re-drive idempotency (crash-recovery replay or transport retry of the same
     // action): if this action's correction row is already durably queued, the
     // resend committed on a prior drive. Re-issuing the native Stop now would
@@ -3453,6 +3626,9 @@ export class SupervisorDaemon {
         actionId: input.actionId,
         markDispatched: async () => {
           if (dispatchMarked) return;
+          interruptedDelivery.current = nativeCorrection === null
+            ? this.supervisedDelivery?.captureActiveDeliveryInterrupt(deliveryAgent) ?? null
+            : null;
           await this.updateManifestEntry(entry.id, (current) => {
             if (current.turn_control?.action_id !== input.actionId
               || current.work_attempt_id !== input.workAttemptId
@@ -3509,25 +3685,12 @@ export class SupervisorDaemon {
     // never settled here, and never enters this branch.
     let settlement: "settled" | "published" | "no_active_turn" = "no_active_turn";
     if (nativeCorrection === null && providerResult.interrupted && this.supervisedDelivery) {
-      const credential = await this.workerBindings.credentialFor(binding).catch(() => null);
-      const ingressAgent: SupervisedIngressAgent = {
-        agentId: entry.id,
-        roomId: binding.room_id,
-        provider: entry.provider,
-        charter: entry.charter,
-        apiUrl: binding.api_url,
-        agentSessionId: binding.agent_session_id,
-        bearer: credential ?? "",
-        handle,
-        workAttemptId: binding.work_attempt_id,
-        providerContinuationId: ref.provider_continuation_id ?? null,
-        pid: handle.pid ?? ref.provider_connection?.pid ?? null,
-        executionGenerationId: binding.execution_generation_id,
-        daemonGeneration: this.singleton.currentGeneration,
-        deliveryMode: entry.delivery_mode ?? "mcp_polling",
-      };
       try {
-        settlement = await this.supervisedDelivery.interruptActiveDelivery(ingressAgent);
+        const reservedDelivery = interruptedDelivery.current;
+        settlement = await this.supervisedDelivery.interruptActiveDelivery(
+          reservedDelivery?.agent ?? deliveryAgent,
+          reservedDelivery?.inboxItemId,
+        );
       } catch (error) {
         // The native turn was interrupted, but the daemon could not durably
         // settle the delivery turn (settle-before-abort means the pump was NOT
@@ -4358,7 +4521,20 @@ export class SupervisorDaemon {
       entry = currentAfterAttempt;
       let handle = this.liveHandles.get(entry.id) ?? null;
       if (!handle && entry.provider_ref) {
-        handle = await this.attachLiveProvider(entry);
+        try {
+          handle = await this.attachLiveProvider(entry);
+        } catch (error) {
+          if ((error as { providerAttachOutcome?: unknown })?.providerAttachOutcome !== "in_progress") throw error;
+          await this.transition(
+            entry.id,
+            "recovering",
+            "none",
+            "exact Cursor turn wrapper is still finishing; retrying without launching a successor",
+            "daemon-convergence",
+          );
+          this.scheduleRecoveryConvergence(entry.id, 250);
+          return;
+        }
         entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId) ?? entry;
       }
       if (handle) {
@@ -4401,7 +4577,8 @@ export class SupervisorDaemon {
         if (entry.observed_state !== handle.observedState) {
           await this.transition(entry.id, handle.observedState, entry.condition, "reattached durable provider handle", "daemon-convergence");
         }
-        if (["failed", "idle", "stopped"].includes(handle.observedState)) {
+        if (["failed", "stopped"].includes(handle.observedState)
+          || (handle.observedState === "idle" && entry.delivery_mode !== "daemon_inbox")) {
           await this.fenceTerminalProviderHandleOnce(
             handle,
             `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
@@ -4412,7 +4589,14 @@ export class SupervisorDaemon {
 
       const attempt = await this.durability.getAttempt(entry.work_attempt_id!);
       const activeExecution = attempt.execution_generations.find((candidate) => candidate.terminal === null);
-      if (activeExecution) {
+      // Cursor's daemon-inbox lane is intentionally process-less while idle.
+      // Its adapter returns null only after any recorded per-turn child is
+      // proved absent/fenced, so the durable session must reach resume() even
+      // though the execution generation itself remains nonterminal.
+      const resumableCursorLane = entry.provider === "cursor"
+        && entry.delivery_mode === "daemon_inbox"
+        && entry.provider_ref?.provider_connection?.kind === "cursor_cli";
+      if (activeExecution && !resumableCursorLane) {
         await this.transition(
           entry.id,
           "recovering",
@@ -4493,10 +4677,21 @@ export class SupervisorDaemon {
           || openModelCredential.daemonGeneration !== this.singleton.currentGeneration)) {
         throw new Error("Waiting for desktop Open Model credential handoff.");
       }
-      const generationNumber = attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
-      const execution = await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
+      const reusesActiveCursorExecution = Boolean(resumableCursorLane && activeExecution);
+      const generationNumber = reusesActiveCursorExecution
+        ? activeExecution!.generation
+        : attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
+      const execution = reusesActiveCursorExecution
+        ? activeExecution!
+        : await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
+      if (reusesActiveCursorExecution && priorBinding
+        && priorBinding.execution_generation_id !== execution.execution_generation_id) {
+        throw new Error("Process-less Cursor recovery found a worker binding for a different execution generation.");
+      }
       if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
-        await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
+        if (!reusesActiveCursorExecution) {
+          await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
+        }
         return;
       }
       const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
@@ -4518,7 +4713,9 @@ export class SupervisorDaemon {
         supervisorSocketPath: this.socket.path,
         supervisorExecutionGenerationId: execution.execution_generation_id,
         ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
-        ...(devMcpServerEntryPath && (entry.provider === "codex" || entry.provider === "open-model")
+        ...(devMcpServerEntryPath && (entry.provider === "codex"
+          || entry.provider === "open-model"
+          || entry.provider === "cursor")
           ? { devMcpServerEntryPath }
           : {}),
         ...(openModelCredential ? {
@@ -4539,7 +4736,9 @@ export class SupervisorDaemon {
           Object.assign(spawn, { supervisorWorkerSession: { agentSessionId: mintedHostSession.agentSessionId, roomCursor: null } });
         }
         if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
-          await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
+          if (!reusesActiveCursorExecution) {
+            await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
+          }
           return;
         }
         const dispatchReservation = this.reserveProviderDispatch(entry.id, execution.execution_generation_id);
@@ -4658,6 +4857,14 @@ export class SupervisorDaemon {
           dispatchReservation.release(fatalReservationError);
         }
       } catch (error) {
+        if (reusesActiveCursorExecution && !providerPersisted) {
+          await this.recordWorkerBindingRecoveryFailure(
+            entry.id,
+            execution.execution_generation_id,
+            error,
+          );
+          return;
+        }
         if (providerPersisted && this.handoffScheduled) return;
         // Once the provider reference is durable, do not convert a local
         // post-spawn bookkeeping/credential issue into a terminal execution.
@@ -4715,7 +4922,7 @@ export class SupervisorDaemon {
         );
         return;
       }
-      if (resumed && priorBinding) {
+      if (resumed && priorBinding && !reusesActiveCursorExecution) {
         try {
           await this.stageWorkerBindingAfterResume(entry, priorBinding, execution.execution_generation_id, handle);
         } catch (error) {
@@ -4744,6 +4951,31 @@ export class SupervisorDaemon {
     }
 
     let handle = this.liveHandles.get(entry.id) ?? null;
+    const exactCursorRef = entry.provider_ref?.provider_connection?.kind === "cursor_cli"
+      ? entry.provider_ref
+      : null;
+    if (!handle && exactCursorRef && this.providerPort.stopRef) {
+      await this.transition(entry.id, "stopping", entry.condition, `desired state changed to ${entry.desired_state}`, "daemon-convergence");
+      const terminal = await this.providerPort.stopRef(this.providerRef(entry), {
+        actionId: `manifest:${entry.id}:${entry.desired_state}:${this.nowMs()}`,
+      });
+      const attempt = await this.durability.getAttempt(exactCursorRef.work_attempt_id);
+      const execution = attempt.execution_generations.find((candidate) =>
+        candidate.execution_generation_id === exactCursorRef.execution_generation_id);
+      if (!execution) throw new Error("Cursor exact-reference stop has no matching durable execution generation.");
+      if (!execution.terminal) {
+        await this.durability.recordTerminal(exactCursorRef.work_attempt_id, exactCursorRef.execution_generation_id, {
+          ...this.terminalPayload(terminal, execution.actor),
+          actor: execution.actor,
+          generation: execution.generation,
+        });
+        if (entry.desired_state === "stopped") {
+          await this.durability.releaseTerminalExecutionFence(exactCursorRef.work_attempt_id, exactCursorRef.execution_generation_id);
+        }
+      }
+      await this.observeProviderExitOnce(entry.id, terminal, "daemon-provider", exactCursorRef.execution_generation_id);
+      return;
+    }
     if (!handle && entry.provider_ref) {
       handle = await this.attachLiveProvider(entry);
     }
@@ -6153,9 +6385,23 @@ export class SupervisorDaemon {
     });
   }
 
-  private async borrowWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number; api_url: string }): Promise<{ status: "available"; credential: string } | { status: "deferred" | "stale" }> {
+  private async borrowWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number; api_url: string; provider_turn_id: string }): Promise<{ status: "available"; credential: string } | { status: "deferred" | "stale" }> {
     return this.serializeEntryTick(input.entry_id, async () => {
       if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
+      const entry = await this.store.getEntry(input.entry_id);
+      if (entry?.provider === "cursor") {
+        try {
+          await this.exactActiveBoundedContext({
+            entryId: input.entry_id,
+            workAttemptId: input.work_attempt_id,
+            executionGenerationId: input.execution_generation_id,
+            daemonGeneration: input.daemon_generation,
+            providerTurnId: input.provider_turn_id,
+          });
+        } catch {
+          return { status: "stale" };
+        }
+      }
       const credential = await this.workerBindings.credentialFor(input);
       return credential ? { status: "available", credential } : { status: "deferred" };
     });
