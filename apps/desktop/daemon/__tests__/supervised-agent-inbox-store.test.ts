@@ -61,6 +61,62 @@ test("poll ingestion advances its cursor atomically, deduplicates replay, and re
   } finally { await env.cleanup(); }
 });
 
+test("an exact never-dispatched provider turn can be atomically reset without consuming an attempt", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-02T00:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "cursor-agent", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.claimHead("cursor-agent");
+    await store.checkpointDispatchIntent(item!.inbox_item_id);
+    const started = await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:prepared-only");
+    assert.equal(started.attempt_count, 1);
+
+    const reset = await store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:prepared-only");
+    assert.equal(reset.state, "pending");
+    assert.equal(reset.provider_turn_id, null);
+    assert.equal(reset.attempt_count, 0);
+    assert.equal((await store.claimHead("cursor-agent"))?.inbox_item_id, item!.inbox_item_id);
+    await assert.rejects(
+      store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:different"),
+      /does not match the exact in-flight provider turn/,
+    );
+    const timeline = (await store.receipts("cursor-agent"))[0]!.timeline;
+    assert.equal(timeline.some((event) => event.phase === "retry_scheduled"), true);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("a clean pre-native handoff can atomically restore only an evidence-free dispatch intent", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-02T00:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "cursor-handoff", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.claimHead("cursor-handoff");
+    await store.checkpointDispatchIntent(item!.inbox_item_id);
+
+    const reset = await store.resetPreNativeHandoff(item!.inbox_item_id);
+    assert.equal(reset.state, "pending");
+    assert.equal(reset.provider_turn_id, null);
+    assert.equal(reset.attempt_count, 0);
+    assert.equal((await store.receipts("cursor-handoff"))[0]!.timeline.at(-1)?.phase, "queued");
+
+    await store.claimHead("cursor-handoff");
+    await store.transition(item!.inbox_item_id, "retryable", { last_error: "pre-native retry backoff" });
+    assert.equal((await store.resetPreNativeHandoff(item!.inbox_item_id)).state, "pending");
+    await store.claimHead("cursor-handoff");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:started");
+    await assert.rejects(
+      store.resetPreNativeHandoff(item!.inbox_item_id),
+      /exact unstarted dispatch or retry-backoff intent/,
+    );
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("the same source id in separate rooms remains separate durable inbox and observed context", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);

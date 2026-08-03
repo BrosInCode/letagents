@@ -146,7 +146,7 @@ export function roomAgentDeliverySummary(
  */
 export function canReconnectRoomAgent(
   agent: Pick<DesktopSupervisorManifestEntry,
-    "deliveryMode" | "desiredState" | "observedState" | "nativeLiveness" | "roomAgentState" | "workAttemptId"
+    "provider" | "deliveryMode" | "desiredState" | "observedState" | "nativeLiveness" | "roomAgentState" | "workAttemptId"
     | "agentSessionId" | "agentSessionBindingState" | "executionGenerationId"
     | "providerContinuationId" | "providerPid" | "lastError">,
 ): boolean {
@@ -160,7 +160,7 @@ export function canReconnectRoomAgent(
     && !providerIsKnownStopped
     && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials"
     && !automaticRecoveryIsActive
-    && Boolean(agent.providerPid)
+    && (Boolean(agent.providerPid) || agent.provider === "cursor")
     && Boolean(agent.workAttemptId)
     && Boolean(agent.executionGenerationId)
     && Boolean(agent.providerContinuationId);

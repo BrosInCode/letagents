@@ -309,7 +309,7 @@ export function useAddAgentConfiguration() {
     }
 
     watch(
-      () => [selectedCursorMcpPolicy.value, selectedPermissionProfileId.value] as const,
+      () => [selectedCursorMcpPolicy.value, selectedPermissionProfileId.value, launchMode.value] as const,
       () => {
         if (bindings.open() && bindings.selectedProviderId.value) {
           void loadProviderModels();

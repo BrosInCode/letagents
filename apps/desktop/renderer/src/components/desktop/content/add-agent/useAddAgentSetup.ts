@@ -139,6 +139,7 @@ export function useAddAgentSetup() {
           roomIdentifier: bindings.roomIdentifier(),
           roomGitRoom: bindings.roomGitRoom(),
           repoRootPath: bindings.repoRootPath(),
+          launchMode: bindings.launchMode.value,
           permissionProfileId: bindings.selectedPermissionProfile.value?.id ?? null,
           cursorMcpPolicy: providerId === "cursor" ? bindings.selectedCursorMcpPolicy.value : null,
           model: bindings.selectedModel.value,

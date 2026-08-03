@@ -370,11 +370,117 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
       entry_id: "purge_streams", daemon_generation: status.generation, revoked_agent_session_id: null,
     })).result as { outcome: string };
     assert.equal(purge.outcome, "purged");
+    const replay = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
+      entry_id: "purge_streams", daemon_generation: status.generation, revoked_agent_session_id: null,
+    })).result as { outcome: string };
+    assert.equal(replay.outcome, "purged", "a completed purge tombstone remains replayable after the identity row is gone");
     await pending; // the blocked watcher returns rather than hanging to its own timeout
     assert.equal(internals.agentStreams.has("purge_streams"), false);
     assert.equal(internals.agentStreamWaiters.has("purge_streams"), false);
   } finally {
     await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("purge fences an unattached exact Cursor wrapper before committing profile cleanup authority", async () => {
+  const env = await fixture();
+  const id = "purge_unattached_cursor";
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({
+    taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id,
+  });
+  await durability.close();
+  const connection = { kind: "cursor_cli" as const, pid: 7331, processIdentity: "cursor-wrapper-birth" };
+  let stopRefs = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+      transcriptAccess: false, permissionPromptBridging: false, survivesRestart: true,
+    }),
+    spawn: async () => { throw new Error("purge test must not spawn"); },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("purge test must not resume"); },
+    poke: async () => {},
+    stop: async () => { throw new Error("purge must use the unattached exact-reference fence"); },
+    stopRef: async (ref) => {
+      stopRefs += 1;
+      assert.equal(ref.workAttemptId, attempt.work_attempt_id);
+      assert.deepEqual(ref.providerConnection, connection);
+      return {
+        endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+        terminalCause: "stopped", providerContinuationId: ref.providerContinuationId,
+      };
+    },
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      durability: WorkDurabilityStore;
+      requestConvergence: (entryId: string) => void;
+    };
+    internals.requestConvergence = () => {};
+    const execution = await internals.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id,
+      provider: "cursor",
+      delivery_mode: "daemon_inbox",
+      permission_profile_id: "read_only",
+      desired_state: "stopped",
+      observed_state: "stopped",
+      workspace_path: attempt.workspace_path,
+      work_attempt_id: attempt.work_attempt_id,
+      last_worker_binding: null,
+      run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id,
+        provider_continuation_id: "sess-purge-cursor",
+        provider_connection: connection,
+        execution_generation_id: execution.execution_generation_id,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id, desired_state: "running",
+    })).ok, true);
+    let generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const refusedWhileRunning = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
+      entry_id: id, daemon_generation: generation, revoked_agent_session_id: null,
+    })).result as { outcome: string; error?: string };
+    assert.equal(refusedWhileRunning.outcome, "invalid");
+    assert.match(refusedWhileRunning.error ?? "", /fully stopped durable lifecycle/);
+    assert.equal(stopRefs, 0, "an invalid purge never stops an unattached wrapper owned by a running lifecycle");
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+      id, desired_state: "stopped",
+    })).ok, true);
+    generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const prepared = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
+      entry_id: id, daemon_generation: generation, revoked_agent_session_id: null,
+    })).result as { outcome: string; revocation_kind?: string };
+    assert.equal(prepared.outcome, "revocation_required", JSON.stringify(prepared));
+    assert.equal(prepared.revocation_kind, "grant_only");
+    assert.equal(stopRefs, 1, "purge fences the recorded wrapper before asking Electron to revoke authority");
+    const committed = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
+      entry_id: id, daemon_generation: generation, revoked_agent_session_id: null,
+      grant_revoked_without_worker_session: true,
+    })).result as { outcome: string; purged_work_attempt_id?: string };
+    assert.equal(committed.outcome, "purged");
+    assert.equal(committed.purged_work_attempt_id, attempt.work_attempt_id);
+    assert.equal(stopRefs, 2, "the commit retry re-proves exact wrapper absence before destructive cleanup");
+  } finally {
+    await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
@@ -5733,7 +5839,7 @@ test("two supervised Codex claims wait together behind one legacy Codex owner", 
   }
 });
 
-test("daemon restart quarantines duplicate single-lane provider owners from older manifests", async () => {
+test("daemon restart preserves multiple isolated Cursor owners from older manifests", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const duplicate = (id: string): DaemonManifestEntry => ({
@@ -5741,8 +5847,8 @@ test("daemon restart quarantines duplicate single-lane provider owners from olde
     id,
     room_id: "room_upgrade_duplicate",
     provider: "cursor",
-    desired_state: "running",
-    observed_state: "working",
+    desired_state: "paused",
+    observed_state: "paused",
   });
   await new ManifestStore(paths.manifestPath).write(0, [duplicate("old_owner_a"), duplicate("old_owner_b")]);
   const daemon = new SupervisorDaemon(paths, "darwin");
@@ -5750,13 +5856,249 @@ test("daemon restart quarantines duplicate single-lane provider owners from olde
     await daemon.start();
     const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     assert.equal(manifest.length, 2);
-    assert.ok(manifest.every((item) => item.desired_state === "stopped"));
-    assert.ok(manifest.every((item) => item.last_error?.includes("multiple supervised agents")));
+    assert.ok(manifest.every((item) => item.desired_state === "paused"));
+    assert.ok(manifest.every((item) => !item.last_error?.includes("multiple supervised agents")));
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
       entry: { ...duplicate("replacement"), desired_state: "paused", observed_state: "paused" },
-    })).ok, false, "quarantined owners keep the lane fenced until each provider is observably stopped");
+    })).ok, true, "each Cursor entry owns an isolated profile and continuation");
   } finally {
     await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("idle daemon-inbox Cursor resumes the same durable execution after restart without duplicate spawn", async () => {
+  const env = await fixture();
+  const id = "cursor_idle_restart";
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    workerBindingsPath: join(env.root, "worker-bindings.json"),
+  };
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({
+    taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id,
+  });
+  await durability.close();
+
+  const continuation = "cursor-session-durable";
+  const idleHandle = {
+    workAttemptId: attempt.work_attempt_id,
+    pid: null,
+    providerContinuationId: continuation,
+    providerConnection: { kind: "cursor_cli" as const, pid: null, processIdentity: null },
+    observedState: "idle" as const,
+  };
+  let spawns = 0;
+  let resumes = 0;
+  let firstExecutionGenerationId = "";
+  const port = (): ProviderActionPort => ({
+    capabilities: async () => ({
+      deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+      transcriptAccess: false, permissionPromptBridging: false, survivesRestart: true,
+      turnControl: "restart_resume",
+    }),
+    spawn: async () => { spawns += 1; return idleHandle; },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async (ref) => {
+      resumes += 1;
+      assert.equal(ref.workAttemptId, attempt.work_attempt_id);
+      assert.equal(ref.providerContinuationId, continuation);
+      assert.deepEqual(ref.providerConnection, idleHandle.providerConnection);
+      return idleHandle;
+    },
+    poke: async () => {},
+    stop: async () => ({
+      endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+      terminalCause: "stopped", providerContinuationId: continuation,
+    }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  });
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    poll: ({ signal }) => new Promise((resolve) => {
+      signal.addEventListener("abort", () => resolve({ messages: [] }), { once: true });
+    }),
+    publish: async () => {},
+  };
+  const workers = {
+    createWorkerSession: async () => ({
+      sessionId: "cursor-restart-session", bearer: randomUUID(), bearerId: randomUUID(),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  };
+  let first: SupervisorDaemon | null = new SupervisorDaemon(paths, "darwin", port(), true, 15_000, undefined, {}, deliveryHttp, workers);
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    (first as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "cursor", delivery_mode: "daemon_inbox", observed_state: "absent",
+      permission_profile_id: "read_only", workspace_path: attempt.workspace_path,
+      work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await admitDaemonInboxForProviderTest(first, id, entry.room_id);
+    const firstGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id, room_id: entry.room_id, agent_key: "owner/cursor", grant_id: "grant-cursor-first",
+      supervisor_grant: "cursor-first-grant", grant_generation: 1, api_url: "https://letagents.example",
+      daemon_generation: firstGeneration, host_id: "host-cursor", installation_id: "installation-cursor",
+      grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    await eventually(async () => {
+      const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
+      firstExecutionGenerationId = current?.provider_ref?.execution_generation_id ?? "";
+      return current?.observed_state === "idle" && Boolean(firstExecutionGenerationId);
+    }, "initial process-less Cursor lane", 8_000);
+    assert.equal(spawns, 1);
+    assert.equal(resumes, 0);
+    const before = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as {
+      execution_generations: Array<{ execution_generation_id: string; terminal: unknown }>;
+    };
+    assert.equal(before.execution_generations.length, 1);
+    assert.equal(before.execution_generations[0]?.terminal, null);
+
+    await first.stop();
+    first = null;
+    second = new SupervisorDaemon(paths, "darwin", port(), true, 15_000, undefined, {}, deliveryHttp, workers);
+    await second.start();
+    (second as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const secondGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: id, room_id: entry.room_id, agent_key: "owner/cursor", grant_id: "grant-cursor-second",
+      supervisor_grant: "cursor-second-grant", grant_generation: 2, api_url: "https://letagents.example",
+      daemon_generation: secondGeneration, host_id: "host-cursor", installation_id: "installation-cursor",
+      grant_expires_at: "2099-01-01T00:00:00.000Z",
+    })).ok, true);
+    try {
+      await eventually(async () => {
+        const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
+        return current?.observed_state === "idle" && resumes === 1;
+      }, "restarted Cursor lane resumes", 8_000);
+    } catch (error) {
+      const current = (await daemonRequest(paths.socketPath, "manifest.list")).result;
+      const durable = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result;
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; spawns=${spawns}; resumes=${resumes}; manifest=${JSON.stringify(current)}; attempt=${JSON.stringify(durable)}`);
+    }
+    const after = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as {
+      execution_generations: Array<{ execution_generation_id: string; terminal: unknown }>;
+    };
+    assert.equal(spawns, 1, "restart must not redispatch a fresh Cursor continuation");
+    assert.equal(resumes, 1, "restart performs exactly one native continuation resume");
+    assert.equal(after.execution_generations.length, 1, "process-less restart reuses the active execution generation");
+    assert.equal(after.execution_generations[0]?.execution_generation_id, firstExecutionGenerationId);
+    assert.equal(after.execution_generations[0]?.terminal, null);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(resumes, 1, "repeated convergence cannot kill or duplicate the healthy idle Cursor lane");
+  } finally {
+    await second?.stop().catch(() => undefined);
+    await first?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("Cursor bounded effects and credential borrowing reject a prior provider-turn capability", async () => {
+  const env = await fixture();
+  const id = "cursor_turn_capability";
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+    workerBindingsPath: join(env.root, "worker-bindings.json"),
+  };
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  await durability.close();
+  const handle = {
+    workAttemptId: attempt.work_attempt_id, pid: null, providerContinuationId: "cursor-cap-session",
+    providerConnection: { kind: "cursor_cli" as const, pid: null, processIdentity: null }, observedState: "working" as const,
+  };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { throw new Error("capability test does not launch a provider"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("capability test does not resume a provider"); }, poke: async () => {},
+    stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  });
+  try {
+    await daemon.start();
+    const execution = await (daemon as unknown as { durability: WorkDurabilityStore }).durability.startGeneration(
+      attempt.work_attempt_id,
+      "daemon-provider",
+      1,
+    );
+    const inserted = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id, provider: "cursor", desired_state: "paused", observed_state: "paused",
+      delivery_mode: "daemon_inbox", permission_profile_id: "read_only",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+      run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id, provider_continuation_id: handle.providerContinuationId,
+        provider_connection: handle.providerConnection, execution_generation_id: execution.execution_generation_id,
+      },
+    } });
+    assert.equal(inserted.ok, true, inserted.error);
+    const internals = daemon as unknown as {
+      liveHandles: Map<string, typeof handle>;
+      workerBindings: WorkerBindingStore;
+      supervisedInbox: SupervisedAgentInboxStore;
+      supervisedDelivery: { activeTurn: () => { inboxItemId: string; sourceMessageId: string; phase: "dispatching" } | null };
+    };
+    internals.liveHandles.set(id, handle);
+    await internals.workerBindings.bind({
+      entry_id: id, room_id: entry.room_id, work_attempt_id: attempt.work_attempt_id,
+      execution_generation_id: execution.execution_generation_id, agent_session_id: "cursor-cap-worker",
+      agent_session_token: "cursor-cap-bearer", api_url: "https://letagents.example",
+    });
+    const [item] = await internals.supervisedInbox.ingestPoll({
+      agent_id: id, room_id: entry.room_id, last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "current" }, activation: {} }],
+    });
+    assert(item);
+    await internals.supervisedInbox.transition(item.inbox_item_id, "dispatching");
+    await internals.supervisedInbox.checkpointTurnStarted(item.inbox_item_id, "cursor-turn-current");
+    internals.supervisedDelivery.activeTurn = () => ({
+      inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id, phase: "dispatching",
+    });
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    const coordinates = {
+      entry_id: id, room_id: entry.room_id, work_attempt_id: attempt.work_attempt_id,
+      execution_generation_id: execution.execution_generation_id, agent_session_id: "cursor-cap-worker",
+      daemon_generation: generation, api_url: "https://letagents.example",
+    };
+
+    const staleEffect = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...coordinates, provider_turn_id: "cursor-turn-prior", mcp_request_id: "effect-stale",
+      tool_name: "send_message", input: { text: "must not run" }, mutation: true,
+    });
+    assert.equal(staleEffect.ok, false);
+    assert.match(staleEffect.error ?? "", /provider turn capability is stale/i);
+    const staleBorrow = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
+      ...coordinates, provider_turn_id: "cursor-turn-prior",
+    });
+    assert.deepEqual(staleBorrow.result, { status: "stale" });
+
+    const currentEffect = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
+      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+    });
+    assert.equal(currentEffect.ok, true, currentEffect.error);
+    const currentBorrow = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
+      ...coordinates, provider_turn_id: "cursor-turn-current",
+    });
+    assert.deepEqual(currentBorrow.result, { status: "available", credential: "cursor-cap-bearer" });
+  } finally {
+    await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });

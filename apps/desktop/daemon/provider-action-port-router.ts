@@ -35,14 +35,15 @@ export type NativeProviderAdapter = {
   controlTurn(handle: NativeHandle, correction?: string | null, options?: { checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
   inspectTurn?(handle: NativeHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
   controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
-  runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
-  recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> }): Promise<ProviderRoomTurnResult>;
+  runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
+  recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: NativeHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<{
     handle: NativeHandle;
     outcome: "rematerialized" | "replaced";
     previousProviderContinuationId: string;
     replacementProviderContinuationId: string;
   }>;
+  stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   stop(handle: NativeHandle, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   onExit(handle: NativeHandle, listener: (terminal: ProviderActionTerminal) => void): () => void;
   onStream(handle: NativeHandle, listener: (event: ProviderActionStreamEvent) => void): () => void;
@@ -53,9 +54,9 @@ export type ProviderAdapterLoader = () => Promise<NativeProviderAdapter>;
 function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: number): ProviderActionHandle {
   return {
     workAttemptId: handle.workAttemptId,
-    pid: handle.pid,
-    providerContinuationId: handle.providerContinuationId,
-    providerConnection: handle.providerConnection ?? null,
+    get pid() { return handle.pid; },
+    get providerContinuationId() { return handle.providerContinuationId; },
+    get providerConnection() { return handle.providerConnection ?? null; },
     ...(appliedConfigurationRevision === undefined ? {} : { appliedConfigurationRevision }),
     get observedState() { return handle.observedState(); },
   };
@@ -158,14 +159,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return adapter.controlExactTurn(remembered.handle, options);
   }
 
-  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {
+  async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {
     const remembered = this.required(handle);
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.runRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room turns.`);
     return adapter.runRoomTurn(remembered.handle, request, options);
   }
 
-  async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> }): Promise<ProviderRoomTurnResult> {
+  async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> }): Promise<ProviderRoomTurnResult> {
     const remembered = this.required(handle);
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.recoverRoomTurn) throw new Error(`Provider '${remembered.provider}' does not support bounded room-turn recovery.`);
@@ -192,6 +193,27 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const remembered = this.required(handle);
     const terminal = await (await this.adapter(remembered.provider)).stop(remembered.handle, options);
     if (options?.actionId) this.actions.set(options.actionId, handle.workAttemptId);
+    return terminal;
+  }
+
+  async stopRef(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {
+    const remembered = this.handles.get(ref.workAttemptId);
+    const provider = this.resolveProvider(
+      remembered?.provider,
+      ref.provider,
+      providerFromConnection(ref.providerConnection),
+    );
+    if (remembered
+      && remembered.handle.providerContinuationId === ref.providerContinuationId
+      && sameProviderActionConnectionIdentity(remembered.handle.providerConnection, ref.providerConnection)) {
+      const terminal = await (await this.adapter(provider)).stop(remembered.handle, options);
+      if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
+      return terminal;
+    }
+    const adapter = await this.adapter(provider);
+    if (!adapter.stopRef) throw new Error(`Provider '${provider}' cannot stop an unattached durable process reference.`);
+    const terminal = await adapter.stopRef(ref, options);
+    if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
     return terminal;
   }
 
@@ -256,7 +278,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   private required(handle: ProviderActionHandle): { provider: string; handle: NativeHandle } {
     const remembered = this.handles.get(handle.workAttemptId);
-    if (!remembered || remembered.handle.pid !== handle.pid || remembered.handle.providerContinuationId !== handle.providerContinuationId) {
+    if (!remembered
+      || remembered.handle.providerContinuationId !== handle.providerContinuationId
+      || (remembered.provider !== "cursor" && remembered.handle.pid !== handle.pid)) {
       throw new Error("Provider handle is not owned by the current daemon generation.");
     }
     return remembered;

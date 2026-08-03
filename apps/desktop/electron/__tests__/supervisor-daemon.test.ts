@@ -238,7 +238,7 @@ async function startWireDaemon(
         result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
       } else if (request.method === "supervisor.purge_agent") {
         result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
-          ? { outcome: "purged" }
+          ? { outcome: "purged", purged_work_attempt_id: "attempt-cleanup" }
           : request.params!.entry_id === "agent_grant_only"
             ? { outcome: "revocation_required", operation_id: "purge:agent_grant_only", revocation_kind: "grant_only" }
             : { outcome: "revocation_required", operation_id: `purge:${request.params!.entry_id}`, revocation_kind: "worker_session", agent_session_id: "session_exact" };
@@ -585,7 +585,10 @@ test("purge RPC preserves exact worker-session and grant-only acknowledgement mo
       operationId: "purge:agent_grant_only",
       revocationKind: "grant_only",
     });
-    assert.deepEqual(await client.purgeAgent("agent_exact", 40, "session_exact", false), { outcome: "purged" });
+    assert.deepEqual(await client.purgeAgent("agent_exact", 40, "session_exact", false, true), {
+      outcome: "purged",
+      purgedWorkAttemptId: "attempt-cleanup",
+    });
     assert.deepEqual(await client.purgeAgent("agent_grant_only", 40, null, true), { outcome: "purged" });
     const purgeRequests = wire.requests.filter((request) => request.method === "supervisor.purge_agent");
     assert.deepEqual(purgeRequests.map((request) => request.params), [
@@ -1162,7 +1165,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.78");
+    assert.equal(status.implementationVersion, "2.0.87");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 import { redactCredentialText } from "./agents/provider-evidence.js";
+import { removeCursorSupervisedProfile } from "./agents/cursor-managed-profile.js";
 
 import type {
   DesktopActivityEntry,
@@ -934,11 +935,14 @@ export function registerDesktopIpcHandlers(
         if (storage.effectiveMode !== "cloud") {
           throw new LaunchBlockedError("Supervised agents need a cloud room. Publish or join a cloud room, or use the existing local agent path.", "choose_project");
         }
-        if (provider !== "codex" && provider !== "claude-code" && provider !== "open-model") {
+        if (provider !== "codex" && provider !== "claude-code" && provider !== "cursor" && provider !== "open-model") {
           throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
         }
         if (provider === "claude-code" && input.permissionProfileId === "ask_before_write") {
           throw new LaunchBlockedError("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged. Choose Read-only or Full access.", "retry");
+        }
+        if (provider === "cursor" && input.permissionProfileId !== "read_only") {
+          throw new LaunchBlockedError("Supervised Cursor currently supports only Read-only. Cursor write profiles cannot yet preserve the exact supervised MCP and process boundary.", "retry");
         }
         // Contact the background supervisor first so its (un)availability is an
         // honest, owner-visible fact rather than a hidden part of the claim.
@@ -1185,21 +1189,30 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
     supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration));
   targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
-    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, false);
-    if (prepared.outcome !== "revocation_required") return prepared;
+    const finishPurge = <T extends { outcome: string; purgedWorkAttemptId?: string }>(result: T): T => {
+      // Cursor profiles are keyed only by the exact attempt id. Applying this
+      // cleanup to another provider is a harmless no-op, while keeping the
+      // purge retry replayable after the identity row has already committed.
+      if (result.outcome === "purged" && result.purgedWorkAttemptId) {
+        removeCursorSupervisedProfile(result.purgedWorkAttemptId);
+      }
+      return result;
+    };
+    const prepared = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, false, true);
+    if (prepared.outcome !== "revocation_required") return finishPurge(prepared);
     if (prepared.revocationKind === "grant_only") {
       await supervisorGrantCoordinator.revokeEntryForPurgeWithoutWorkerSession(input.entryId);
-      const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, true);
-      return committed.outcome === "revocation_required"
+      const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, null, true, true);
+      return finishPurge(committed.outcome === "revocation_required"
         ? { outcome: "invalid" as const, error: "Purge grant revocation was not durably acknowledged." }
-        : committed;
+        : committed);
     }
     if (prepared.revocationKind !== "worker_session" || !prepared.agentSessionId) {
       return { outcome: "invalid" as const, error: "Purge did not identify an exact revocation mode." };
     }
     await supervisorGrantCoordinator.revokeEntryForPurge(input.entryId, prepared.agentSessionId);
-    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, prepared.agentSessionId, false);
-    return committed.outcome === "revocation_required" ? { outcome: "invalid" as const, error: "Purge credential revocation was not durably acknowledged." } : committed;
+    const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, prepared.agentSessionId, false, true);
+    return finishPurge(committed.outcome === "revocation_required" ? { outcome: "invalid" as const, error: "Purge credential revocation was not durably acknowledged." } : committed);
   });
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;

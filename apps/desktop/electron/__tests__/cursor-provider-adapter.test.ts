@@ -1,19 +1,39 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { createServer as createHttp2Server } from "node:http2";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
+  CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,
   cursorCliEnv,
   cursorLaunchPolicyArgs,
+  defaultLaunchTurn,
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
 } from "../main/agents/cursor-provider-adapter.js";
 import type {
+  ProviderHandle,
+  ProviderRoomTurnResult,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+
+const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+test.after(() => {
+  if (previousNonDarwinOverride === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousNonDarwinOverride;
+});
 
 // Fake per-turn child harness proving the P2b adapter honors the #765
 // invariants under Cursor's one-child-per-turn model: honest idle-between-turns
@@ -27,12 +47,28 @@ class FakeCursorChild implements CursorCliChild {
   private resolveExited!: (exit: ProviderProcessExit) => void;
   readonly exited: Promise<ProviderProcessExit>;
 
-  constructor(readonly pid: number | null) {
+  private released = false;
+  constructor(
+    readonly pid: number | null,
+    private readonly onRelease: () => void = () => {},
+    readonly ownsDescendantReaping = false,
+    readonly requiresDurableTerminalEvidence = false,
+  ) {
     this.exited = new Promise((resolve) => { this.resolveExited = resolve; });
   }
 
   stderrTail(): string {
     return this.stderr;
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    queueMicrotask(this.onRelease);
+  }
+
+  get isReleased(): boolean {
+    return this.released;
   }
 
   onLine(listener: (line: string) => void): () => void {
@@ -66,6 +102,13 @@ interface HarnessOptions {
   identities?: Map<number, string | null | undefined>;
   /** Defaults to true (a well-behaved CLI); fence tests opt out. */
   dieOnSigterm?: boolean;
+  ownsDescendantReaping?: boolean;
+  mcpAttestationError?: Error;
+  mcpBridgeAttestationError?: Error;
+  mcpAttestationWaitForAbort?: boolean;
+  /** One-based attestation pass to hold until abort. */
+  mcpAttestationWaitForAbortAt?: number;
+  beforeLaunch?: CursorProviderAdapterDependencies["launchTurn"] extends (input: infer Input) => unknown ? (input: Input) => void : never;
 }
 
 function birthIdentity(pid: number): string {
@@ -73,34 +116,169 @@ function birthIdentity(pid: number): string {
 }
 
 function argValue(args: string[], flag: string): string | null {
+  const assigned = args.find((arg) => arg.startsWith(`${flag}=`));
+  if (assigned) return assigned.slice(flag.length + 1);
   const index = args.indexOf(flag);
   return index >= 0 && index + 1 < args.length ? args[index + 1]! : null;
 }
 
+const productionPersonalIdentityDependencies: Partial<CursorProviderAdapterDependencies> = {
+  attestPersonalIdentity: async () => ({
+    userId: 12345,
+    email: "personal@example.test",
+    providerAuthorization: "Bearer test-provider-authorization",
+  }),
+  bindPersonalIdentity: () => {},
+};
+
+function wrapperHostedMcpFixture(root: string): Pick<
+  CursorManagedProfile,
+  "mcpRuntimeEntryPath" | "mcpRuntimeEnv" | "nativeAllowedWriteSubpaths" | "nativeAllowedReadSubpaths"
+> {
+  const bridgeRoot = join(root, "bridge");
+  let canonicalRoot = root;
+  try { canonicalRoot = realpathSync(root); } catch {}
+  const sandboxRoots = [...new Set([root, canonicalRoot])];
+  const sandboxWritableRoots = sandboxRoots.flatMap((sandboxRoot) => [
+    join(sandboxRoot, "home"),
+    join(sandboxRoot, "config"),
+    join(sandboxRoot, "data"),
+    join(sandboxRoot, "cache"),
+    join(sandboxRoot, "npm-cache"),
+    join(sandboxRoot, "tmp"),
+    join(sandboxRoot, "bridge"),
+  ]);
+  return {
+    // The fake Cursor binaries below never open their MCP connector. This
+    // absolute executable is therefore only a bounded wrapper-input fixture.
+    mcpRuntimeEntryPath: "/usr/bin/true",
+    mcpRuntimeEnv: {
+      ELECTRON_RUN_AS_NODE: "1",
+      LETAGENTS_API_URL: "https://letagents.chat",
+      HOME: join(bridgeRoot, "home"),
+      XDG_CONFIG_HOME: join(bridgeRoot, "config"),
+      XDG_DATA_HOME: join(bridgeRoot, "data"),
+      XDG_CACHE_HOME: join(bridgeRoot, "cache"),
+      CURSOR_CONFIG_DIR: join(bridgeRoot, "config", "cursor"),
+      CURSOR_DATA_DIR: join(bridgeRoot, "data", "cursor"),
+      NODE_COMPILE_CACHE: join(bridgeRoot, "cache", "node-compile-cache"),
+      CURSOR_API_KEY: "",
+      CURSOR_AUTH_TOKEN: "",
+    },
+    nativeAllowedWriteSubpaths: sandboxWritableRoots,
+    nativeAllowedReadSubpaths: sandboxRoots,
+  };
+}
+
+function wrapperMcpRuntimeEnv(connectorRoot: string, turnId: string): Record<string, string> {
+  return {
+    ELECTRON_RUN_AS_NODE: "1",
+    LETAGENTS_API_URL: "https://letagents.chat",
+    HOME: join(connectorRoot, "home"),
+    XDG_CONFIG_HOME: join(connectorRoot, "config"),
+    XDG_DATA_HOME: join(connectorRoot, "data"),
+    XDG_CACHE_HOME: join(connectorRoot, "cache"),
+    CURSOR_CONFIG_DIR: join(connectorRoot, "config", "cursor"),
+    CURSOR_DATA_DIR: join(connectorRoot, "data", "cursor"),
+    NODE_COMPILE_CACHE: join(connectorRoot, "cache", "node-compile-cache"),
+    CURSOR_API_KEY: "",
+    CURSOR_AUTH_TOKEN: "",
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_cursor_wrapper_test",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-supervisor-wrapper-test.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "wa-cursor-wrapper-test",
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation-cursor-wrapper-test",
+    LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+    LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: turnId,
+    LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent-session-cursor-wrapper-test",
+    LETAGENTS_SUPERVISOR_ROOM_ID: "github.com/example/repo",
+    LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    LETAGENTS_PERMISSION_PROFILE_ID: "read_only",
+  };
+}
+
 function createHarness(options: HarnessOptions = {}) {
   const children: FakeCursorChild[] = [];
-  const launches: Array<{ cursorBin: string; args: string[]; cwd: string }> = [];
+  const launches: Array<Parameters<CursorProviderAdapterDependencies["launchTurn"]>[0]> = [];
+  const profilePreparations: Array<{
+    workAttemptId: string;
+    cwd: string;
+    profileRoot?: string;
+    includeAuth?: boolean;
+    authSourceHomeDir?: string;
+    inspectionOnly?: boolean;
+    mcpWorkingDirectory?: string;
+    supervisorMcpEnv?: Readonly<Record<string, string>>;
+    mcpConnectorSocketPath?: string;
+  }> = [];
+  const mcpAttestations: Array<{
+    cursorBin: string;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    writableProfileRoot: string;
+    requiredReadableRoots?: string[];
+    expectedServerName?: string;
+    timeoutMs?: number;
+  }> = [];
+  const identityAttestations: Array<{
+    cursorBin: string;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    writableProfileRoot: string;
+    requiredReadableRoots?: string[];
+    timeoutMs?: number;
+  }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 5200;
   let mintedSessions = 0;
 
   const dependencies: CursorProviderAdapterDependencies = {
+    bindPersonalIdentity() {},
+    async attestPersonalIdentity(input) {
+      identityAttestations.push(input);
+      return {
+        userId: 12345,
+        email: "personal@example.test",
+        providerAuthorization: "Bearer test-provider-authorization",
+      };
+    },
+    async attestSupervisedMcp(input) {
+      mcpAttestations.push(input);
+      if (options.mcpAttestationError) throw options.mcpAttestationError;
+      if (options.mcpBridgeAttestationError && input.requiredReadableRoots?.length) {
+        throw options.mcpBridgeAttestationError;
+      }
+      if (options.mcpAttestationWaitForAbort
+        && (options.mcpAttestationWaitForAbortAt === undefined
+          || options.mcpAttestationWaitForAbortAt === mcpAttestations.length)) {
+        await new Promise<void>((_resolve, reject) => {
+          if (input.signal?.aborted) {
+            reject(new Error("MCP attestation aborted"));
+            return;
+          }
+          input.signal?.addEventListener(
+            "abort",
+            () => reject(new Error("MCP attestation aborted")),
+            { once: true },
+          );
+        });
+      }
+    },
     launchTurn(input) {
+      options.beforeLaunch?.(input);
       launches.push(input);
       const pid = options.pid === undefined ? nextPid++ : options.pid;
-      const child = new FakeCursorChild(pid);
-      children.push(child);
-      if (pid !== null && !identities.has(pid)) identities.set(pid, birthIdentity(pid));
-      if (!options.silent) {
+      let child!: FakeCursorChild;
+      child = new FakeCursorChild(pid, () => {
+        if (options.silent || !child.alive) return;
         const sessionId = options.sessionId
           ?? argValue(input.args, "--resume")
           ?? `sess-cursor-${++mintedSessions}`;
-        queueMicrotask(() => {
-          if (!child.alive) return;
-          child.emit({ type: "system", subtype: "init", session_id: sessionId, model: "cursor-fast" });
-        });
-      }
+        child.emit({ type: "system", subtype: "init", session_id: sessionId, model: "cursor-fast" });
+      }, options.ownsDescendantReaping);
+      children.push(child);
+      if (pid !== null && !identities.has(pid)) identities.set(pid, birthIdentity(pid));
       return child;
     },
     signalProcess(pid, signal) {
@@ -117,10 +295,11 @@ function createHarness(options: HarnessOptions = {}) {
     getProcessIdentity(pid) {
       return identities.get(pid);
     },
+    prepareTurnState() {},
     now: () => new Date(1_700_000_000_000).toISOString(),
   };
 
-  return { children, launches, signals, identities, dependencies };
+  return { children, launches, mcpAttestations, identityAttestations, profilePreparations, signals, identities, dependencies };
 }
 
 function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
@@ -134,8 +313,87 @@ function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRe
   };
 }
 
+function daemonSpawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
+  return spawnRequest({
+    deliveryMode: "daemon_inbox",
+    launchPolicy: { mode: "ask", force: false },
+    permissionProfileId: "read_only",
+    reasoningEffort: null,
+    configurationRevision: 1,
+    supervisorEntryId: "supervised_cursor_1",
+    supervisorSocketPath: "/tmp/letagents-supervisor.sock",
+    supervisorExecutionGenerationId: "generation_cursor_1",
+    supervisorWorkerSession: {
+      agentSessionId: "agent_session_cursor_1",
+      roomCursor: "msg_7",
+    },
+    ...over,
+  });
+}
+
+function supervisedAdapter(harness: ReturnType<typeof createHarness>, stopGraceMs?: number): CursorProviderAdapter {
+  return new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    ...(stopGraceMs === undefined ? {} : { stopGraceMs }),
+    supervisedProfileFactory: (input) => {
+      harness.profilePreparations.push(input);
+      const { workAttemptId, profileRoot } = input;
+      const root = profileRoot ?? `/private/cursor/${workAttemptId}`;
+      return {
+        homeDir: `${root}/home`,
+        configDir: `${root}/config`,
+        dataDir: `${root}/data`,
+        cacheDir: `${root}/cache`,
+        env: {
+          HOME: `${root}/home`,
+          CURSOR_CONFIG_DIR: `${root}/config/cursor`,
+          CURSOR_API_KEY: "provider-key-must-not-leak-into-inspection",
+          CURSOR_AUTH_TOKEN: "provider-auth-must-not-leak-into-inspection",
+          LETAGENTS_TOKEN: "profile-token-must-not-leak",
+          LETAGENTS_SUPERVISOR_ENTRY_ID: "profile-stale-entry",
+        },
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntimeEntryPath: "/Applications/LetAgents.app/runtime/letagents/server.js",
+          mcpRuntimeReadRoots: ["/Applications/LetAgents.app/runtime/letagents"],
+          ...(input.mcpConnectorSocketPath ? wrapperHostedMcpFixture(root) : {}),
+        }),
+        mcpServerName: cursorSupervisedMcpServerName(workAttemptId),
+      };
+    },
+  });
+}
+
+async function spawnDaemonLane(
+  adapter: CursorProviderAdapter,
+  _harness: ReturnType<typeof createHarness>,
+  request = daemonSpawnRequest(),
+): Promise<ProviderHandle> {
+  return adapter.spawn(request);
+}
+
+function roomTurnRequest(over: Partial<{
+  inboxItemId: string;
+  actionId: string;
+  charter: string;
+}> = {}) {
+  return {
+    inboxItemId: over.inboxItemId ?? "inbox_cursor_1",
+    actionId: over.actionId ?? "action_cursor_1",
+    charter: over.charter ?? "Review and implement carefully.",
+    sourceMessage: { id: "msg_8", text: "Please fix it" },
+    activation: { decision: "activate" },
+    observedContext: [{ id: "msg_7", text: "Earlier context" }],
+  };
+}
+
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+async function waitForPath(path: string, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) await flush();
+  return existsSync(path);
 }
 
 async function withLoopAlive<T>(work: Promise<T>): Promise<T> {
@@ -157,6 +415,7 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.equal(args[0], "-p");
   assert.ok(args.join(" ").includes("--output-format stream-json"));
   assert.ok(args.includes("--trust"), "headless workspace-trust suppression is adapter-owned");
+  assert.equal(args.includes("--disable-project-configs"), false, "legacy Cursor keeps project config enabled");
   assert.ok(args.join(" ").includes("--workspace /tmp/wa-cursor-1"));
   assert.ok(args.join(" ").includes("--mode ask"), "native policy flag passed verbatim");
   assert.ok(args.join(" ").includes("--sandbox enabled"));
@@ -178,12 +437,105 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
 
 test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags", () => {
   assert.deepEqual(
-    cursorLaunchPolicyArgs({ mode: "plan", force: true, sandbox: "disabled", model: "cursor-fast" }),
-    ["--mode", "plan", "--force", "--sandbox", "disabled", "--model", "cursor-fast"],
+    cursorLaunchPolicyArgs({ mode: "plan", force: true, sandbox: "disabled" }),
+    ["--mode", "plan", "--force", "--sandbox", "disabled"],
   );
-  assert.throws(() => cursorLaunchPolicyArgs({ resume: "sess-x" }), /reserved flag 'resume'/);
-  assert.throws(() => cursorLaunchPolicyArgs({ workspace: "/elsewhere" }), /reserved flag 'workspace'/);
+  assert.throws(() => cursorLaunchPolicyArgs({ resume: "sess-x" }), /unsupported or adapter-owned flag 'resume'/);
+  assert.throws(() => cursorLaunchPolicyArgs({ workspace: "/elsewhere" }), /unsupported or adapter-owned flag 'workspace'/);
+  assert.throws(() => cursorLaunchPolicyArgs({ model: "shadow-model" }), /unsupported or adapter-owned flag 'model'/);
+  assert.throws(() => cursorLaunchPolicyArgs({ approveMcps: false }), /unsupported or adapter-owned flag 'approveMcps'/);
+  assert.throws(() => cursorLaunchPolicyArgs({ yolo: true }), /unsupported or adapter-owned flag 'yolo'/);
   assert.throws(() => cursorLaunchPolicyArgs("yolo"), /native CLI options object/);
+  assert.throws(
+    () => defaultLaunchTurn({
+      cursorBin: process.execPath,
+      args: [],
+      cwd: process.cwd(),
+      testAgentUpstreamEndpoint: "http://127.0.0.1:65536",
+    }),
+    /exact loopback HTTP\/2 origin/,
+  );
+  assert.throws(
+    () => defaultLaunchTurn({
+      cursorBin: process.execPath,
+      args: [],
+      cwd: process.cwd(),
+      testControlPlaneUpstreamEndpoint: "http://127.0.0.1:99999",
+    }),
+    /exact loopback HTTP origin/,
+  );
+  assert.throws(
+    () => defaultLaunchTurn({
+      cursorBin: process.execPath,
+      args: [],
+      cwd: process.cwd(),
+      restrictRemoteAuthority: true,
+      testAgentUpstreamEndpoint: "https://api2.cursor.sh",
+      testControlPlaneUpstreamEndpoint: "https://api2.cursor.sh",
+      testStartupBarrier: {
+        path: "/tmp/letagents-cursor-startup-barrier-Abc123/mcp_listen",
+        stage: "mcp_listen",
+      },
+    }),
+    /startup barrier is restricted to exact loopback unit tests/,
+  );
+  const supervisedBoundary = {
+    cursorBin: process.execPath,
+    args: [],
+    cwd: process.cwd(),
+    restrictRemoteAuthority: true,
+    providerAuthorization: "Bearer sandbox-allow-list-test",
+    mcpConnectorSocketPath: `/tmp/letagents-cursor-mcp-${randomUUID()}/stdio.sock`,
+    mcpRuntimeEntryPath: "/usr/bin/true",
+    mcpRuntimeCwd: process.cwd(),
+    mcpRuntimeEnv: {},
+  };
+  assert.throws(
+    () => defaultLaunchTurn({
+      ...supervisedBoundary,
+      allowedReadSubpaths: [process.cwd()],
+    }),
+    /non-empty read and write sandbox allow-lists/,
+  );
+  assert.throws(
+    () => defaultLaunchTurn({
+      ...supervisedBoundary,
+      allowedWriteSubpaths: [process.cwd()],
+    }),
+    /non-empty read and write sandbox allow-lists/,
+  );
+});
+
+test("the inline Cursor wrapper remains plain JavaScript when Node type stripping is disabled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-plain-js-"));
+  try {
+    const child = defaultLaunchTurn({
+      cursorBin: process.execPath,
+      args: ["-e", `
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-plain-js" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "plain-js", session_id: "sess-plain-js" }) + "\\n");
+`],
+      cwd: root,
+      env: {
+        ...process.env,
+        HOME: root,
+        NODE_OPTIONS: "--no-experimental-strip-types",
+      },
+      deferStart: true,
+    });
+    const lines: string[] = [];
+    child.onLine((line) => lines.push(line));
+
+    await child.prepared;
+    child.release();
+    const exit = await withLoopAlive(child.exited);
+
+    assert.deepEqual(exit, { type: "exit", code: 0, signal: null });
+    assert.equal(child.stderrTail(), "");
+    assert.equal(lines.some((line) => line.includes('"session_id":"sess-plain-js"')), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("cursorCliEnv passes the environment through without curation (v10 §3 — diverges from the legacy allowlist)", () => {
@@ -191,6 +543,2947 @@ test("cursorCliEnv passes the environment through without curation (v10 §3 — 
   assert.equal(env.SOME_RANDOM_VAR, "kept", "no allowlist: unknown vars survive");
   assert.equal(env.HOME, "/Users/someone");
   assert.equal(env.CURSOR_API_KEY, "kept-too");
+});
+
+test("daemon-owned Cursor starts idle without inference and gives only the first journaled turn exact bridge authority", async () => {
+  const harness = createHarness();
+  const previousOwnerToken = process.env.LETAGENTS_TOKEN;
+  const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
+  const previousStaleEntry = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+  const previousGithubToken = process.env.GITHUB_TOKEN;
+  const previousAwsSecret = process.env.AWS_SECRET_ACCESS_KEY;
+  const previousNpmToken = process.env.NPM_TOKEN;
+  process.env.LETAGENTS_TOKEN = "owner-token-must-not-leak";
+  process.env.LETAGENTS_AGENT_SESSION_BEARER = "fixed-bearer-must-not-leak";
+  process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = "stale-entry";
+  process.env.GITHUB_TOKEN = "github-must-not-leak";
+  process.env.AWS_SECRET_ACCESS_KEY = "aws-must-not-leak";
+  process.env.NPM_TOKEN = "npm-must-not-leak";
+  try {
+    const adapter = supervisedAdapter(harness);
+    const handle = await spawnDaemonLane(adapter, harness);
+
+    assert.deepEqual(adapter.capabilities().deliveryModes, ["mcp_polling", "daemon_inbox"]);
+    assert.equal(adapter.capabilities().midTurnCorrection, false);
+    assert.equal(harness.launches.length, 0, "lane creation performs no unjournaled bootstrap inference");
+    assert.equal(handle.observedState(), "idle");
+    assert.equal(handle.pid, null);
+    assert.match(handle.providerContinuationId!, /^cursor-pending:/);
+
+    let turnId = "";
+    const turn = withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async (value) => { turnId = value; },
+    }));
+    await flush();
+    const launch = harness.launches[0]!;
+    assert.equal(launch.args.includes("--force"), false, "daemon read-only Cursor never receives --force");
+    assert.equal(harness.mcpAttestations.length, 2, "both registry shape and the real bridge are attested at the native turn boundary");
+    const inspectionEnv = harness.mcpAttestations[0]!.env;
+    const inspectionPreparations = harness.profilePreparations.filter((entry) => entry.profileRoot !== undefined);
+    assert.equal(inspectionPreparations.length, 4);
+    assert.equal(inspectionPreparations[0]?.includeAuth, false);
+    assert.equal(inspectionPreparations[0]?.inspectionOnly, true);
+    assert.equal(inspectionPreparations[1]?.includeAuth, false);
+    assert.equal(inspectionPreparations[1]?.inspectionOnly, false);
+    assert.equal(inspectionPreparations[2]?.includeAuth, true);
+    assert.equal(inspectionPreparations[2]?.inspectionOnly, true);
+    assert.equal(inspectionPreparations[3]?.includeAuth, true);
+    assert.equal(inspectionPreparations[3]?.inspectionOnly, true);
+    assert.equal(inspectionPreparations[0]?.profileRoot, harness.mcpAttestations[0]!.writableProfileRoot);
+    assert.equal(inspectionPreparations[1]?.profileRoot, harness.mcpAttestations[1]!.writableProfileRoot);
+    assert.notEqual(
+      harness.mcpAttestations[1]!.writableProfileRoot,
+      harness.mcpAttestations[0]!.writableProfileRoot,
+      "the networked bridge never reuses the root exposed to pass one",
+    );
+    assert.equal(harness.mcpAttestations[0]!.cwd, harness.mcpAttestations[0]!.writableProfileRoot);
+    assert.equal(harness.mcpAttestations[1]!.cwd, harness.mcpAttestations[1]!.writableProfileRoot);
+    assert.equal(
+      harness.mcpAttestations[0]!.expectedServerName,
+      cursorSupervisedMcpServerName(inspectionPreparations[0]!.workAttemptId),
+    );
+    assert.equal(
+      harness.mcpAttestations[1]!.expectedServerName,
+      cursorSupervisedMcpServerName(inspectionPreparations[1]!.workAttemptId),
+    );
+    assert.equal(
+      inspectionPreparations[1]?.mcpWorkingDirectory,
+      harness.mcpAttestations[1]!.writableProfileRoot,
+    );
+    assert.deepEqual(
+      harness.mcpAttestations[1]!.requiredReadableRoots,
+      ["/Applications/LetAgents.app/runtime/letagents"],
+    );
+    assert.equal(harness.mcpAttestations[1]!.timeoutMs, 15_000);
+    assert.equal(inspectionEnv.HOME, `${harness.mcpAttestations[0]!.writableProfileRoot}/home`);
+    assert.equal(
+      inspectionEnv.CURSOR_CONFIG_DIR,
+      `${harness.mcpAttestations[0]!.writableProfileRoot}/config/cursor`,
+    );
+    assert.notEqual(inspectionEnv.HOME, launch.env?.HOME, "inspection and real turns never share a profile");
+    assert.equal(inspectionEnv.CURSOR_API_KEY, undefined);
+    assert.equal(inspectionEnv.CURSOR_AUTH_TOKEN, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_TOKEN, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_AGENT_SESSION_BEARER, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISOR_ENTRY_ID, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISOR_DAEMON_SOCKET, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISOR_AGENT_SESSION_ID, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISOR_PROVIDER, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_EXECUTION_PROFILE, undefined);
+    assert.equal(inspectionEnv.LETAGENTS_PERMISSION_PROFILE_ID, undefined);
+    const bridgeEnv = harness.mcpAttestations[1]!.env;
+    assert.notEqual(bridgeEnv.HOME, inspectionEnv.HOME);
+    assert.equal(bridgeEnv.HOME, `${harness.mcpAttestations[1]!.writableProfileRoot}/home`);
+    assert.equal(bridgeEnv.NPM_CONFIG_CACHE, undefined);
+    assert.equal(bridgeEnv.CURSOR_API_KEY, undefined);
+    assert.equal(bridgeEnv.CURSOR_AUTH_TOKEN, undefined);
+    assert.equal(bridgeEnv.LETAGENTS_TOKEN, undefined);
+    assert.equal(bridgeEnv.LETAGENTS_AGENT_SESSION_BEARER, undefined);
+    assert.equal(bridgeEnv.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID, undefined);
+    assert.equal(bridgeEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS, undefined, "supervised mode is confined to the packaged MCP child config");
+    assert.equal(bridgeEnv.LETAGENTS_EXECUTION_PROFILE, undefined, "supervised mode is confined to the packaged MCP child config");
+    assert.equal(harness.identityAttestations.length, 1);
+    assert.equal(harness.identityAttestations[0]!.cwd, inspectionPreparations[2]!.profileRoot);
+    assert.equal(harness.identityAttestations[0]!.env.CURSOR_API_KEY, undefined);
+    assert.equal(harness.identityAttestations[0]!.env.CURSOR_AUTH_TOKEN, undefined);
+    assert.equal(harness.identityAttestations[0]!.env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID, undefined);
+    const finalPreparation = harness.profilePreparations.find((entry) =>
+      entry.mcpConnectorSocketPath !== undefined
+    )!;
+    assert.equal(finalPreparation.authSourceHomeDir, `${inspectionPreparations[3]!.profileRoot}/home`);
+    assert.equal(finalPreparation.supervisorMcpEnv, undefined, "native-readable MCP config contains no supervisor coordinates");
+    assert.deepEqual(Object.fromEntries(Object.entries(launch.mcpRuntimeEnv ?? {}).filter(([key]) =>
+      key.startsWith("LETAGENTS_SUPERVISOR_")
+        || key === "LETAGENTS_SUPERVISED_BOUNDED_TURNS"
+        || key === "LETAGENTS_EXECUTION_PROFILE"
+        || key === "LETAGENTS_PERMISSION_PROFILE_ID"
+    )), {
+      LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_cursor_1",
+      LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-supervisor.sock",
+      LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "wa-cursor-1",
+      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_cursor_1",
+      LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+      LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: turnId,
+      LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent_session_cursor_1",
+      LETAGENTS_SUPERVISOR_ROOM_ID: "github.com/example/repo",
+      LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "TidalHare",
+      LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+      LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      LETAGENTS_PERMISSION_PROFILE_ID: "read_only",
+    });
+    assert.equal(launch.mcpConnectorSocketPath, finalPreparation.mcpConnectorSocketPath);
+    assert.deepEqual(launch.allowedNetworkUnixSockets, [finalPreparation.mcpConnectorSocketPath]);
+    assert.equal(launch.args.includes("--approve-mcps"), false, "project MCPs are never blanket-approved");
+    assert.equal(launch.args.includes("--disable-project-configs"), true, "native project permissions stay disabled");
+    assert.equal(launch.args.includes("--disable-auto-update"), true, "native background updater stays disabled");
+    assert.equal(argValue(launch.args, "--sandbox"), "enabled", "supervised read-only turns keep Cursor's native sandbox enabled");
+    assert.equal(launch.cwd, "/private/cursor/wa-cursor-1", "project MCP discovery is isolated from --workspace");
+    assert.equal(argValue(launch.args, "--workspace"), "/tmp/wa-cursor-1");
+    assert.equal(launch.args.includes("--resume"), false, "the first durable turn establishes the native session");
+    assert.equal(launch.env?.HOME, "/private/cursor/wa-cursor-1/home");
+    assert.equal(launch.env?.CURSOR_API_KEY, undefined);
+    assert.equal(launch.env?.CURSOR_AUTH_TOKEN, undefined, "the native environment contains no provider or placeholder token");
+    assert.equal(launch.env?.AGENT_CLI_CREDENTIAL_STORE, "file", "the public argv placeholder stays in the private profile and never reaches Keychain");
+    assert.equal(launch.env?.NPM_CONFIG_CACHE, undefined);
+    assert.equal(launch.env?.LETAGENTS_TOKEN, undefined);
+    assert.equal(launch.env?.LETAGENTS_AGENT_SESSION_BEARER, undefined);
+    assert.equal(launch.env?.GITHUB_TOKEN, undefined);
+    assert.equal(launch.env?.AWS_SECRET_ACCESS_KEY, undefined);
+    assert.equal(launch.env?.NPM_TOKEN, undefined);
+    assert.equal(launch.env?.LETAGENTS_SUPERVISOR_ENTRY_ID, undefined);
+    assert.equal(launch.env?.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID, undefined);
+    assert.equal(launch.env?.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID, undefined);
+    assert.equal(launch.env?.LETAGENTS_SUPERVISOR_AGENT_SESSION_ID, undefined);
+    assert.equal(launch.env?.LETAGENTS_SUPERVISOR_PROVIDER, undefined);
+    assert.equal(launch.env?.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID, undefined);
+    assert.equal(launch.env?.LETAGENTS_SUPERVISED_BOUNDED_TURNS, undefined);
+    assert.equal(launch.env?.LETAGENTS_EXECUTION_PROFILE, undefined);
+    assert.equal(launch.env?.LETAGENTS_PERMISSION_PROFILE_ID, undefined);
+    const firstRuntimeDataDir = launch.env?.CURSOR_DATA_DIR;
+    assert.match(firstRuntimeDataDir ?? "", /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/);
+    assert.equal(existsSync(firstRuntimeDataDir!), true, "the live turn owns one private local-worker root");
+    harness.children[0]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "ready through real work", session_id: "sess-cursor-1",
+    });
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+    await turn;
+    await flush();
+    assert.equal(existsSync(firstRuntimeDataDir!), false, "turn terminal retirement removes the local-worker root");
+    assert.equal(handle.observedState(), "idle");
+    assert.equal(handle.pid, null, "a completed per-turn lane claims no idle process");
+    assert.equal(handle.providerContinuationId, "sess-cursor-1");
+
+    const resumeTurn = withLoopAlive(adapter.runRoomTurn(
+      handle,
+      roomTurnRequest({ inboxItemId: "inbox-cursor-private-data-resume" }),
+    ));
+    for (let index = 0; index < 100 && !harness.children[1]?.isReleased; index += 1) await flush();
+    assert.equal(harness.children[1]?.isReleased, true);
+    const resumeLaunch = harness.launches[1]!;
+    const resumeRuntimeDataDir = resumeLaunch.env?.CURSOR_DATA_DIR;
+    assert.match(resumeRuntimeDataDir ?? "", /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/);
+    assert.notEqual(resumeRuntimeDataDir, firstRuntimeDataDir, "each resumed turn gets a fresh worker socket namespace");
+    assert.equal(argValue(resumeLaunch.args, "--resume"), "sess-cursor-1");
+    harness.children[1]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "resumed through private data", session_id: "sess-cursor-1",
+    });
+    harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await resumeTurn;
+    await flush();
+    assert.equal(existsSync(resumeRuntimeDataDir!), false);
+  } finally {
+    if (previousOwnerToken === undefined) delete process.env.LETAGENTS_TOKEN;
+    else process.env.LETAGENTS_TOKEN = previousOwnerToken;
+    if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
+    else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
+    if (previousStaleEntry === undefined) delete process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+    else process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = previousStaleEntry;
+    if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousGithubToken;
+    if (previousAwsSecret === undefined) delete process.env.AWS_SECRET_ACCESS_KEY;
+    else process.env.AWS_SECRET_ACCESS_KEY = previousAwsSecret;
+    if (previousNpmToken === undefined) delete process.env.NPM_TOKEN;
+    else process.env.NPM_TOKEN = previousNpmToken;
+  }
+});
+
+test("the production Cursor profile keeps supervisor coordinates out of native config and passes them only to the wrapper MCP", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-production-profile-"));
+  const workspace = join(root, "workspace");
+  const sourceHome = join(root, "source-home");
+  const statePath = join(root, "state", "mcp-state.json");
+  const runtimePackage = join(root, "runtime", "node_modules", "letagents");
+  const runtimeEntry = join(runtimePackage, "dist", "mcp", "server.js");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+  mkdirSync(dirname(runtimeEntry), { recursive: true });
+  writeFileSync(join(runtimePackage, "package.json"), JSON.stringify({
+    name: "letagents",
+    version: LETAGENTS_MCP_RUNTIME_VERSION,
+  }));
+  writeFileSync(runtimeEntry, "// exact development MCP fixture\n");
+
+  const previousStatePath = process.env.LETAGENTS_STATE_PATH;
+  const previousSourceHome = process.env.LETAGENTS_CURSOR_SOURCE_HOME;
+  const previousDevMode = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+  process.env.LETAGENTS_STATE_PATH = statePath;
+  process.env.LETAGENTS_CURSOR_SOURCE_HOME = sourceHome;
+  process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = "http://127.0.0.1:5174";
+  try {
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
+    const request = daemonSpawnRequest({
+      workAttemptId: "wa-cursor-production-profile",
+      cwd: workspace,
+      devMcpServerEntryPath: runtimeEntry,
+    });
+    const handle = await adapter.spawn(request);
+    let turnId = "";
+    const turn = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "inbox-production-profile" }), {
+      checkpointTurnStarted: async (value) => { turnId = value; },
+    });
+    await flush();
+
+    const profileRoot = join(
+      dirname(statePath),
+      "cursor-supervised",
+      createHash("sha256").update(request.workAttemptId).digest("hex").slice(0, 32),
+    );
+    const serverName = cursorSupervisedMcpServerName(request.workAttemptId);
+    const server = JSON.parse(
+      readFileSync(join(profileRoot, "home", ".cursor", "mcp.json"), "utf8"),
+    ).mcpServers[serverName];
+    assert.deepEqual(server.env, { ELECTRON_RUN_AS_NODE: "1" });
+    assert.equal(JSON.stringify(server).includes("LETAGENTS_SUPERVISOR_"), false);
+    assert.equal(server.args.at(-1), harness.launches[0]!.mcpConnectorSocketPath);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(harness.launches[0]!.mcpRuntimeEnv ?? {})
+        .filter(([key]) => key.startsWith("LETAGENTS_SUPERVISOR_")
+          || key === "LETAGENTS_SUPERVISED_BOUNDED_TURNS"
+          || key === "LETAGENTS_EXECUTION_PROFILE"
+          || key === "LETAGENTS_PERMISSION_PROFILE_ID")),
+      {
+        LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_cursor_1",
+        LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-supervisor.sock",
+        LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: request.workAttemptId,
+        LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_cursor_1",
+        LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+        LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: turnId,
+        LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "agent_session_cursor_1",
+        LETAGENTS_SUPERVISOR_ROOM_ID: "github.com/example/repo",
+        LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "TidalHare",
+        LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+        LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+        LETAGENTS_PERMISSION_PROFILE_ID: "read_only",
+      },
+    );
+    assert.equal(harness.launches[0]!.env?.LETAGENTS_SUPERVISOR_ENTRY_ID, undefined);
+    assert.ok(
+      harness.launches[0]!.deniedReadPaths?.some((path) => path.endsWith("/workspace/.cursor/hooks.json")),
+      "the final native process receives exact project hook read denials",
+    );
+    assert.ok(
+      harness.launches[0]!.deniedReadSubpaths?.some((path) => path.endsWith("/home/.cursor/plugins")),
+      "the final native process cannot load profile-persisted plugins",
+    );
+    assert.equal(
+      harness.launches[0]!.restrictRemoteAuthority,
+      true,
+      "the final native process receives the remote-authority control-plane fence",
+    );
+
+    harness.children[0]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "ready", session_id: "sess-cursor-1",
+    });
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+    await turn;
+  } finally {
+    if (previousStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = previousStatePath;
+    if (previousSourceHome === undefined) delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
+    else process.env.LETAGENTS_CURSOR_SOURCE_HOME = previousSourceHome;
+    if (previousDevMode === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+    else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDevMode;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-connector-e2e-"));
+  const workspace = join(root, "workspace");
+  const sourceHome = join(root, "source-home");
+  const statePath = join(root, "state", "mcp-state.json");
+  const runtimePackage = join(root, "runtime", "node_modules", "letagents");
+  const runtimeEntry = join(runtimePackage, "dist", "mcp", "server.js");
+  const runtimePidPath = join(root, "runtime.pid");
+  const managedProfileRoot = join(
+    dirname(statePath),
+    "cursor-supervised",
+    createHash("sha256").update("wa-cursor-connector-e2e").digest("hex").slice(0, 32),
+  );
+  const stubbornModePath = join(managedProfileRoot, "tmp", "stubborn-native-mode");
+  const stubbornPidPath = join(managedProfileRoot, "tmp", "stubborn-native.pid");
+  const cursorBin = join(root, "fake-cursor-agent");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+  mkdirSync(dirname(runtimeEntry), { recursive: true });
+  writeFileSync(join(runtimePackage, "package.json"), JSON.stringify({
+    name: "letagents",
+    version: LETAGENTS_MCP_RUNTIME_VERSION,
+  }));
+writeFileSync(runtimeEntry, `
+const readline = require("node:readline");
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(runtimePidPath)}, String(process.pid));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+const required = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR", "NODE_COMPILE_CACHE"];
+const boundaryValid = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID === "supervised_cursor_1"
+  && process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET === "/tmp/letagents-supervisor.sock"
+  && process.env.LETAGENTS_SUPERVISOR_PROVIDER === "cursor"
+  && process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"
+  && process.env.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn"
+  && process.env.LETAGENTS_PERMISSION_PROFILE_ID === "read_only"
+  && !process.env.LETAGENTS_TOKEN
+  && !process.env.LETAGENTS_AGENT_SESSION_BEARER
+  && required.every((key) => {
+    try { const stat = fs.lstatSync(process.env[key]); return stat.isDirectory() && !stat.isSymbolicLink(); }
+    catch { return false; }
+  });
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
+    : request.method === "tools/list"
+      ? { tools: boundaryValid ? [{ name: "connector_boundary_valid", description: "ok", inputSchema: { type: "object" } }] : [] }
+      : {};
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`);
+  writeFileSync(cursorBin, `#!/usr/bin/env node
+const fs = require("node:fs");
+const net = require("node:net");
+const { spawn } = require("node:child_process");
+const readline = require("node:readline");
+const args = process.argv.slice(2);
+const diag = process.env.TMPDIR + "/connector-diag.log";
+function note(value) { fs.appendFileSync(diag, value + "\\n"); }
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  const config = JSON.parse(fs.readFileSync(process.env.HOME + "/.cursor/mcp.json", "utf8"));
+  process.stdout.write(Object.keys(config.mcpServers)[0] + ": ready\\n");
+  process.exit(0);
+}
+const configText = fs.readFileSync(process.env.HOME + "/.cursor/mcp.json", "utf8");
+note("config-read");
+if (configText.includes("LETAGENTS_SUPERVISOR_")
+  || Object.keys(process.env).some((key) => key.startsWith("LETAGENTS_SUPERVISOR_"))) process.exit(71);
+const config = JSON.parse(configText);
+const server = Object.values(config.mcpServers)[0];
+const socketPath = server.args[server.args.length - 1];
+const connector = spawn(server.command, server.args, { env: { ...process.env, ...server.env }, stdio: ["pipe", "pipe", "inherit"] });
+note("connector-spawned:" + connector.pid);
+const lines = readline.createInterface({ input: connector.stdout });
+let initialized = false;
+let listed = false;
+let secondBlocked = false;
+let finished = false;
+function finishIfReady() {
+  if (finished || !initialized || !listed || !secondBlocked) return;
+  finished = true;
+  connector.stdin.end();
+  if (fs.existsSync(${JSON.stringify(stubbornModePath)})) {
+    const stubborn = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    stubborn.unref();
+    fs.writeFileSync(${JSON.stringify(stubbornPidPath)}, String(stubborn.pid));
+  }
+  const resume = args.find((arg) => arg.startsWith("--resume="));
+  const session = resume ? resume.slice("--resume=".length) : "sess-connector-e2e";
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: session }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "connector-ok:" + socketPath, session_id: session }) + "\\n");
+  if (fs.existsSync(${JSON.stringify(stubbornModePath)})) setTimeout(() => process.exit(0), 100);
+}
+lines.on("line", (line) => {
+  note("connector-line:" + line);
+  const response = JSON.parse(line);
+  if (response.id === 1) initialized = true;
+  if (response.id === 2) listed = response.result.tools.some((tool) => tool.name === "connector_boundary_valid");
+  finishIfReady();
+});
+connector.once("error", () => process.exit(72));
+connector.once("close", (code, signal) => note("connector-close:" + code + ":" + signal));
+connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } }) + "\\n");
+connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\\n");
+setTimeout(() => {
+  const second = net.createConnection({ path: socketPath });
+  let accepted = false;
+  second.once("connect", () => { accepted = true; second.write("replay"); });
+  second.once("error", () => { secondBlocked = true; finishIfReady(); });
+  second.once("close", () => { if (accepted) { secondBlocked = true; finishIfReady(); } });
+}, 25);
+setTimeout(() => process.exit(73), 5000).unref();
+`);
+  chmodSync(cursorBin, 0o700);
+
+  const previousStatePath = process.env.LETAGENTS_STATE_PATH;
+  const previousSourceHome = process.env.LETAGENTS_CURSOR_SOURCE_HOME;
+  const previousDevMode = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+  let stubbornPid: number | null = null;
+  let thirdRuntimePid: number | null = null;
+  const connectorRoots: string[] = [];
+  process.env.LETAGENTS_STATE_PATH = statePath;
+  process.env.LETAGENTS_CURSOR_SOURCE_HOME = sourceHome;
+  process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = "http://127.0.0.1:5174";
+  try {
+    const adapter = new CursorProviderAdapter({
+      cursorBin,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          connectorRoots.push(dirname(input.mcpConnectorSocketPath!));
+          return defaultLaunchTurn(input);
+        },
+      },
+    });
+    const request = daemonSpawnRequest({
+      workAttemptId: "wa-cursor-connector-e2e",
+      cwd: workspace,
+      devMcpServerEntryPath: runtimeEntry,
+    });
+    const handle = await adapter.spawn(request);
+    let first;
+    try {
+      first = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-first" })));
+    } catch (error) {
+      const profileRoot = join(
+        dirname(statePath),
+        "cursor-supervised",
+        createHash("sha256").update(request.workAttemptId).digest("hex").slice(0, 32),
+      );
+      const diagnostic = existsSync(join(profileRoot, "tmp", "connector-diag.log"))
+        ? readFileSync(join(profileRoot, "tmp", "connector-diag.log"), "utf8")
+        : "no-native-diagnostic";
+      const terminals = existsSync(join(profileRoot, "config"))
+        ? readdirSync(join(profileRoot, "config")).filter((entry) => entry.endsWith(".terminal.json"))
+          .map((entry) => readFileSync(join(profileRoot, "config", entry), "utf8"))
+        : [];
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; ${diagnostic}; ${terminals.join(";")}`);
+    }
+    const firstSocket = first.text!.slice("connector-ok:".length);
+    assert.equal(existsSync(dirname(firstSocket)), false, "fresh-turn connector root is removed at terminal");
+    const firstRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
+    assert.throws(
+      () => process.kill(firstRuntimePid, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "terminal publication waits for TERM-resistant wrapper MCP retirement",
+    );
+    const second = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-resume" })));
+    const secondSocket = second.text!.slice("connector-ok:".length);
+    assert.notEqual(secondSocket, firstSocket, "resume receives a new one-turn connector capability");
+    assert.equal(existsSync(dirname(secondSocket)), false, "resume connector root is removed at terminal");
+    const secondRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
+    assert.notEqual(secondRuntimePid, firstRuntimePid);
+    assert.throws(
+      () => process.kill(secondRuntimePid, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "resume terminal also proves wrapper MCP retirement",
+    );
+    assert.equal(handle.providerContinuationId, "sess-connector-e2e");
+
+    writeFileSync(stubbornModePath, "enabled\n");
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-stubborn-native" }))),
+      // A forced process-group reap deliberately kills the wrapper too. The
+      // exact fail-closed observation depends on whether its already-buffered
+      // init/result reaches the parent before that SIGKILL: either the bounded
+      // turn starts and then loses terminal evidence, or startup never becomes
+      // observable. Both paths must reject and the PID assertions below prove
+      // the intended authority-before-group-reap ordering independently.
+      /(?:ended before the bounded room turn produced a terminal result|exited before reporting its stream-json init)/,
+    );
+    assert.equal(await waitForPath(stubbornPidPath), true, "the combined teardown fixture launched its stubborn native member");
+    stubbornPid = Number(readFileSync(stubbornPidPath, "utf8"));
+    thirdRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
+    assert.notEqual(thirdRuntimePid, secondRuntimePid);
+    assert.throws(
+      () => process.kill(thirdRuntimePid!, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "detached MCP retirement completes before native group escalation can kill the wrapper",
+    );
+    assert.throws(
+      () => process.kill(stubbornPid!, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "the subsequent group escalation reaps the TERM-resistant native member",
+    );
+    assert.equal(connectorRoots.length, 3);
+    assert.equal(
+      existsSync(connectorRoots[2]!),
+      false,
+      "adapter-owned exit cleanup removes the connector root when SIGKILL prevents wrapper cleanup",
+    );
+  } finally {
+    for (const pid of [thirdRuntimePid, stubbornPid]) {
+      if (pid && Number.isSafeInteger(pid)) {
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+    }
+    if (previousStatePath === undefined) delete process.env.LETAGENTS_STATE_PATH;
+    else process.env.LETAGENTS_STATE_PATH = previousStatePath;
+    if (previousSourceHome === undefined) delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
+    else process.env.LETAGENTS_CURSOR_SOURCE_HOME = previousSourceHome;
+    if (previousDevMode === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+    else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDevMode;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon-owned Cursor re-attests effective MCP authority before every native launch", async () => {
+  const harness = createHarness({
+    mcpAttestationError: new Error("Supervised Cursor requires exactly one effective MCP entry."),
+  });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+
+  await assert.rejects(
+    adapter.runRoomTurn(handle, roomTurnRequest()),
+    /exactly one effective MCP entry/,
+  );
+  assert.equal(harness.mcpAttestations.length, 1);
+  assert.equal(harness.launches.length, 0, "a child never launches after failed attestation");
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("a project MCP added after the final reseal gains no blanket approval or permission policy", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "letagents-cursor-project-mcp-race-"));
+  try {
+    let insertedAtLaunch = false;
+    const harness = createHarness({
+      beforeLaunch(input) {
+        mkdirSync(join(workspace, ".cursor"), { recursive: true });
+        writeFileSync(join(workspace, ".cursor", "mcp.json"), JSON.stringify({
+          mcpServers: {
+            project_extra: {
+              command: process.execPath,
+              args: ["-e", "throw new Error('must never be auto-approved')"],
+            },
+          },
+        }));
+        insertedAtLaunch = true;
+        assert.notEqual(input.cwd, workspace, "native launch does not inherit an ambient repository cwd");
+        assert.equal(argValue(input.args, "--workspace"), workspace, "repo access still uses Cursor's explicit workspace");
+        assert.equal(input.args.includes("--approve-mcps"), false, "no blanket project-server approval exists");
+        assert.equal(input.args.includes("--disable-project-configs"), true, "late project permissions stay disabled");
+      },
+    });
+    const adapter = supervisedAdapter(harness);
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: workspace }));
+    const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+    await flush();
+
+    assert.equal(insertedAtLaunch, true, "the adversarial config appears only after the last reseal");
+    harness.children[0]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "isolated", session_id: "sess-cursor-1",
+    });
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+    assert.equal((await turn).text, "isolated");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("daemon-owned Cursor blocks launch when the packaged bridge fails after safe enumeration", async () => {
+  const harness = createHarness({
+    mcpBridgeAttestationError: new Error("Cursor failed while inspecting the effective supervised MCP registry (ENOENT)."),
+  });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+
+  await assert.rejects(
+    adapter.runRoomTurn(handle, roomTurnRequest()),
+    /ENOENT/,
+  );
+  assert.equal(harness.mcpAttestations.length, 2);
+  assert.deepEqual(
+    harness.mcpAttestations[1]!.requiredReadableRoots,
+    ["/Applications/LetAgents.app/runtime/letagents"],
+  );
+  assert.equal(harness.launches.length, 0, "a broken real bridge never reaches native launch");
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Cursor turn control cancels an in-flight MCP attestation before any wrapper can launch", async () => {
+  const harness = createHarness({ mcpAttestationWaitForAbort: true });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
+  while (harness.mcpAttestations.length === 0) await flush();
+
+  let controlCheckpointed = false;
+  const control = await adapter.controlTurn(handle, null, {
+    markDispatched: async () => { controlCheckpointed = true; },
+  });
+
+  assert.equal(controlCheckpointed, true);
+  assert.equal(control.interrupted, true);
+  assert.equal(control.resumed, false);
+  await assert.rejects(roomTurn, /attestation was interrupted/);
+  assert.equal(harness.launches.length, 0);
+  assert.equal(handle.pid, null);
+});
+
+test("stopping Cursor during MCP attestation aborts preparation and cannot launch afterward", async () => {
+  const harness = createHarness({ mcpAttestationWaitForAbort: true });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
+  while (harness.mcpAttestations.length === 0) await flush();
+
+  const terminal = await adapter.stop(handle);
+
+  assert.equal(terminal.terminalCause, "stopped");
+  await assert.rejects(roomTurn, /attestation was interrupted/);
+  assert.equal(harness.launches.length, 0);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "stopped");
+});
+
+test("stopping Cursor during the packaged bridge pass cannot fall through to native launch", async () => {
+  const harness = createHarness({
+    mcpAttestationWaitForAbort: true,
+    mcpAttestationWaitForAbortAt: 2,
+  });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
+  while (harness.mcpAttestations.length < 2) await flush();
+
+  const terminal = await adapter.stop(handle);
+
+  assert.equal(terminal.terminalCause, "stopped");
+  await assert.rejects(roomTurn, /attestation was interrupted/);
+  assert.deepEqual(
+    harness.mcpAttestations[1]!.requiredReadableRoots,
+    ["/Applications/LetAgents.app/runtime/letagents"],
+  );
+  assert.equal(harness.launches.length, 0);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "stopped");
+});
+
+test("Cursor handoff aborts pre-native MCP attestation and cannot leave an unjournaled launch", async () => {
+  const harness = createHarness({ mcpAttestationWaitForAbort: true });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const detach = new AbortController();
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    detachSignal: detach.signal,
+  });
+  while (harness.mcpAttestations.length === 0) await flush();
+
+  detach.abort();
+
+  await assert.rejects(roomTurn, (error: unknown) =>
+    error instanceof Error
+    && /attestation was interrupted/.test(error.message)
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
+  assert.equal(harness.launches.length, 0);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Cursor handoff stays cancellation-linked until both turn id and wrapper birth are durable", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const detach = new AbortController();
+  let releaseProviderCheckpoint!: () => void;
+  const providerCheckpointRelease = new Promise<void>((resolve) => { releaseProviderCheckpoint = resolve; });
+  let enterProviderCheckpoint!: () => void;
+  const providerCheckpointEntered = new Promise<void>((resolve) => { enterProviderCheckpoint = resolve; });
+  let durableBoundaryReached = false;
+  let persistedTurnId = "";
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTurnStarted: async (turnId) => { persistedTurnId = turnId; },
+    checkpointProviderState: async () => {
+      enterProviderCheckpoint();
+      await providerCheckpointRelease;
+    },
+    markDurableTurnStarted: () => { durableBoundaryReached = true; },
+    detachSignal: detach.signal,
+  });
+  await providerCheckpointEntered;
+  const child = harness.children[0]!;
+
+  detach.abort();
+  releaseProviderCheckpoint();
+
+  await assert.rejects(roomTurn, (error: unknown) =>
+    error instanceof Error
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
+  assert.match(persistedTurnId, /^cursor:/);
+  assert.equal(durableBoundaryReached, false);
+  assert.equal(child.isReleased, false, "native Cursor stays paused before the combined durability boundary");
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("a failed turn-id checkpoint reaps the prepared wrapper before native Cursor is released", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  let durableBoundaryReached = false;
+
+  await assert.rejects(
+    withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async () => { throw new Error("turn checkpoint unavailable"); },
+      markDurableTurnStarted: () => { durableBoundaryReached = true; },
+    })),
+    /turn checkpoint unavailable/,
+  );
+
+  const child = harness.children[0]!;
+  assert.equal(durableBoundaryReached, false);
+  assert.equal(child.isReleased, false, "native Cursor remains paused when the turn id is not durable");
+  assert.equal(child.alive, false, "the exact prepared wrapper is reaped before the failure returns");
+  assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Cursor control during a blocked provider checkpoint can never release deferred native work", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  let releaseProviderCheckpoint!: () => void;
+  const providerCheckpointRelease = new Promise<void>((resolve) => { releaseProviderCheckpoint = resolve; });
+  let enterProviderCheckpoint!: () => void;
+  const providerCheckpointEntered = new Promise<void>((resolve) => { enterProviderCheckpoint = resolve; });
+  let durableBoundaryReached = false;
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTurnStarted: async () => {},
+    checkpointProviderState: async () => {
+      enterProviderCheckpoint();
+      await providerCheckpointRelease;
+    },
+    markDurableTurnStarted: () => { durableBoundaryReached = true; },
+  });
+  await providerCheckpointEntered;
+  const child = harness.children[0]!;
+
+  const control = adapter.controlTurn(handle, null);
+  while (harness.signals.length === 0) await flush();
+  assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
+  assert.equal(child.isReleased, false);
+  releaseProviderCheckpoint();
+
+  await assert.rejects(roomTurn, (error: unknown) =>
+    error instanceof Error
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
+  await control;
+  assert.equal(durableBoundaryReached, false);
+  assert.equal(child.isReleased, false, "an interrupt edge wins permanently over deferred native release");
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Cursor handoff SIGKILLs and reaps a TERM-resistant prepared wrapper before retiring", async () => {
+  const harness = createHarness({ dieOnSigterm: false, ownsDescendantReaping: true });
+  const adapter = supervisedAdapter(harness, 10);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const detach = new AbortController();
+  let releaseProviderCheckpoint!: () => void;
+  const providerCheckpointRelease = new Promise<void>((resolve) => { releaseProviderCheckpoint = resolve; });
+  let enterProviderCheckpoint!: () => void;
+  const providerCheckpointEntered = new Promise<void>((resolve) => { enterProviderCheckpoint = resolve; });
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTurnStarted: async () => {},
+    checkpointProviderState: async () => {
+      enterProviderCheckpoint();
+      await providerCheckpointRelease;
+    },
+    detachSignal: detach.signal,
+  });
+  await providerCheckpointEntered;
+  const child = harness.children[0]!;
+
+  detach.abort();
+  releaseProviderCheckpoint();
+
+  await withLoopAlive(assert.rejects(roomTurn, (error: unknown) =>
+    error instanceof Error
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched"));
+  assert.deepEqual(harness.signals, [
+    { pid: child.pid, signal: "SIGTERM" },
+    { pid: child.pid, signal: "SIGKILL" },
+  ]);
+  assert.equal(child.isReleased, false, "native Cursor was never released from the prepared wrapper");
+  assert.equal(child.alive, false, "handoff waits until the exact prepared wrapper is reaped");
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Cursor handoff never escalates a prepared wrapper after its PID birth is recycled", async () => {
+  const harness = createHarness({ dieOnSigterm: false, ownsDescendantReaping: true });
+  const adapter = supervisedAdapter(harness, 10);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const detach = new AbortController();
+  let releaseProviderCheckpoint!: () => void;
+  const providerCheckpointRelease = new Promise<void>((resolve) => { releaseProviderCheckpoint = resolve; });
+  let enterProviderCheckpoint!: () => void;
+  const providerCheckpointEntered = new Promise<void>((resolve) => { enterProviderCheckpoint = resolve; });
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTurnStarted: async () => {},
+    checkpointProviderState: async () => {
+      enterProviderCheckpoint();
+      await providerCheckpointRelease;
+    },
+    detachSignal: detach.signal,
+  });
+  await providerCheckpointEntered;
+  const child = harness.children[0]!;
+  const runtimeDataDir = harness.launches[0]!.env?.CURSOR_DATA_DIR;
+  assert.ok(runtimeDataDir);
+  harness.identities.set(child.pid!, "unrelated-recycled-birth");
+
+  detach.abort();
+  releaseProviderCheckpoint();
+
+  await assert.rejects(roomTurn, (error: unknown) =>
+    error instanceof Error
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
+  assert.deepEqual(harness.signals, [], "neither TERM nor KILL may target the recycled PID");
+  assert.equal(child.isReleased, false);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
+
+  // PID recycling proves that the original process has exited even if its
+  // exit notification reaches the adapter later. The delayed observation
+  // must retire its private worker namespace without ever signalling the
+  // recycled PID.
+  child.resolveExit({ type: "exit", code: null, signal: null });
+  await flush();
+  assert.equal(existsSync(runtimeDataDir), false);
+});
+
+test("Cursor handoff never adopts a later PID birth when the prepared wrapper birth was unverifiable", async () => {
+  const harness = createHarness({ dieOnSigterm: false, ownsDescendantReaping: true });
+  let identityReads = 0;
+  const adapter = new CursorProviderAdapter({
+    dependencies: {
+      ...harness.dependencies,
+      getProcessIdentity() {
+        identityReads += 1;
+        return identityReads === 1 ? undefined : "unrelated-recycled-birth";
+      },
+    },
+    stopGraceMs: 10,
+    supervisedProfileFactory: ({ workAttemptId }) => ({
+      homeDir: `/private/cursor/${workAttemptId}/home`,
+      configDir: `/private/cursor/${workAttemptId}/config`,
+      dataDir: `/private/cursor/${workAttemptId}/data`,
+      cacheDir: `/private/cursor/${workAttemptId}/cache`,
+      env: {
+        HOME: `/private/cursor/${workAttemptId}/home`,
+        CURSOR_CONFIG_DIR: `/private/cursor/${workAttemptId}/config/cursor`,
+        NPM_CONFIG_CACHE: `/private/cursor/${workAttemptId}/npm-cache`,
+      },
+      ...wrapperHostedMcpFixture(`/private/cursor/${workAttemptId}`),
+    }),
+  });
+  const handle = await spawnDaemonLane(adapter, harness);
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
+  roomTurn.catch(() => {});
+  await flush();
+  const child = harness.children[0]!;
+
+  assert.equal(identityReads, 1, "cleanup may not re-read and adopt a later PID birth");
+  assert.deepEqual(harness.signals, [], "an uncaptured birth never authorizes TERM or KILL");
+  child.resolveExit({ type: "exit", code: null, signal: null });
+  await assert.rejects(roomTurn, /process identity could not be verified/);
+  assert.equal(child.isReleased, false);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "failed");
+});
+
+test("daemon-owned Cursor runs one exact bounded room turn and checkpoints before native launch", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const order: string[] = [];
+  let persistedTurnId = "";
+  const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    beforeNativeDispatch: async () => { order.push("dispatch_intent"); },
+    checkpointTurnStarted: async (turnId) => {
+      persistedTurnId = turnId;
+      order.push("turn_started");
+      assert.equal(harness.launches.length, 1, "the paused wrapper exists before the turn id becomes durable");
+      assert.equal(harness.children[0]?.isReleased, false, "native Cursor is not released before its exact turn id is durable");
+    },
+    markDurableTurnStarted: () => {
+      order.push("durable");
+      assert.equal(harness.children[0]?.isReleased, false, "the durable milestone precedes native release");
+    },
+    checkpointTerminalResult: async () => { order.push("terminal"); },
+  });
+  await flush();
+
+  assert.match(persistedTurnId, /^cursor:/);
+  assert.equal(harness.launches.length, 1);
+  const launch = harness.launches[0]!;
+  assert.equal(argValue(launch.args, "--resume"), null);
+  assert.equal(launch.args.at(-1)?.includes(`Turn id: ${persistedTurnId}`), true);
+  assert.equal(launch.args.at(-1)?.includes("Please fix it"), true);
+  const child = harness.children[0]!;
+  child.emit({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "  Reply from Cursor  ",
+    request_id: "cursor-request-native-1",
+    session_id: "sess-cursor-1",
+  });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+
+  assert.deepEqual(await pending, {
+    turnId: persistedTurnId,
+    outcome: "reply",
+    text: "Reply from Cursor",
+    evidence: "stream",
+  });
+  assert.deepEqual(order, ["dispatch_intent", "turn_started", "durable", "terminal"]);
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("Cursor bounded turns classify only the exact no-reply sentinel and preserve unreadable completion", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+
+  const noReply = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_no_reply" }));
+  await flush();
+  harness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: CURSOR_NO_ROOM_REPLY_SENTINEL, session_id: "sess-cursor-1",
+  });
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  const noReplyResult = await noReply;
+  assert.deepEqual(noReplyResult, {
+    turnId: noReplyResult.turnId,
+    outcome: "no_reply",
+    text: null,
+    evidence: "stream",
+  });
+
+  const unreadable = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_unreadable" }));
+  await flush();
+  harness.children[1]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: null, session_id: "sess-cursor-1",
+  });
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  const unreadableResult = await unreadable;
+  assert.equal(unreadableResult.outcome, "unreadable");
+  assert.equal(unreadableResult.text, null);
+  assert.equal(unreadableResult.evidence, "none");
+
+  const extraText = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_extra_text" }));
+  await flush();
+  harness.children[2]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: `${CURSOR_NO_ROOM_REPLY_SENTINEL} because this is extra`, session_id: "sess-cursor-1",
+  });
+  harness.children[2]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal((await extraText).outcome, "reply", "sentinel inference is exact, never substring-based");
+
+  const launchCount = harness.launches.length;
+  assert.deepEqual(await adapter.recoverRoomTurn(handle, {
+    inboxItemId: "inbox_cursor_1",
+    providerTurnId: unreadableResult.turnId,
+  }), unreadableResult, "result recovery re-reads retained terminal evidence for the exact same turn");
+  assert.equal(harness.launches.length, launchCount, "unreadable recovery never reruns Cursor");
+});
+
+test("Cursor handoff detaches observation while the same in-memory exact turn remains recoverable without redispatch", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const abort = new AbortController();
+  let turnId = "";
+  const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTurnStarted: async (value) => { turnId = value; },
+    detachSignal: abort.signal,
+  });
+  await flush();
+  abort.abort();
+  await assert.rejects(pending, /observation detached/);
+
+  const child = harness.children[0]!;
+  child.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: "Recovered exact reply", session_id: "sess-cursor-1",
+  });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  const launchCount = harness.launches.length;
+  const recovered = await adapter.recoverRoomTurn(handle, {
+    inboxItemId: "inbox_cursor_1",
+    providerTurnId: turnId,
+  });
+  assert.equal(recovered.text, "Recovered exact reply");
+  assert.equal(harness.launches.length, launchCount, "recovery reads only retained exact evidence");
+  await assert.rejects(
+    () => adapter.recoverRoomTurn(handle, { inboxItemId: "inbox_cursor_1", providerTurnId: "cursor:unknown" }),
+    /refusing to rerun/,
+  );
+});
+
+test("Cursor retains terminal stream evidence when checkpointing fails and recovery never launches again", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  let turnId = "";
+  const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTurnStarted: async (value) => { turnId = value; },
+    checkpointTerminalResult: async () => { throw new Error("database unavailable"); },
+  });
+  const rejected = assert.rejects(pending, /database unavailable/);
+  await flush();
+  harness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: "Durable after retry", session_id: "sess-cursor-1",
+  });
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  await rejected;
+  const launchCount = harness.launches.length;
+  const recovered = await adapter.recoverRoomTurn(handle, {
+    inboxItemId: "inbox_cursor_1",
+    providerTurnId: turnId,
+  });
+  assert.equal(recovered.text, "Durable after retry");
+  assert.equal(harness.launches.length, launchCount);
+});
+
+test("a successor recovers the exact Cursor reply from the private wrapper journal without redispatch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-recovery-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:durable-restart-turn";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "sess-after-restart" }),
+      JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart" }),
+      "",
+    ].join("\n"));
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit", code: 0, signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      turn_authority_revoked: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: { type: "system", subtype: "init", session_id: "sess-after-restart" },
+      result: { type: "result", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart", request_id: null },
+    }));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: ({ workAttemptId }) => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "sess-after-restart",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    let checkpointed = false;
+    const recovered = await adapter.recoverRoomTurn(handle, {
+      inboxItemId: "inbox-after-restart",
+      providerTurnId: turnId,
+    }, {
+      checkpointProviderState: async (state) => {
+        checkpointed = true;
+        assert.equal(state.providerConnection.pid, null);
+      },
+    });
+    assert.deepEqual(recovered, { turnId, outcome: "reply", text: "reply recovered after handoff", evidence: "stream" });
+    assert.equal(checkpointed, true);
+    assert.equal(harness.launches.length, 0, "recovery never starts another native turn");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a successor materializes a trusted durable no-result terminal on the recovered lane", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-terminal-recovery-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:durable-terminal-turn";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, `${JSON.stringify({ type: "system", subtype: "init", session_id: "sess-terminal-restart" })}\n`);
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit", code: 9, signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      turn_authority_revoked: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: { type: "system", subtype: "init", session_id: "sess-terminal-restart" },
+      result: null,
+    }));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "sess-terminal-restart",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (terminal) => terminals.push(terminal));
+
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-terminal-restart", providerTurnId: turnId }, {
+        checkpointProviderState: async () => {
+          assert.equal(terminals.length, 0, "recovered continuation checkpoints before onExit retires the live handle");
+        },
+      }),
+      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
+    );
+    assert.equal(handle.observedState(), "failed");
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0]!.terminalCause, "crashed");
+    assert.equal(terminals[0]!.exitCode, 9);
+    assert.equal(harness.launches.length, 0, "terminal recovery never launches another native turn");
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-terminal-restart", providerTurnId: turnId }),
+      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
+    );
+    assert.equal(terminals.length, 1, "repeated recovery never emits a duplicate exit");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor recovery rejects legacy terminal evidence that did not separately prove authority revocation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-legacy-terminal-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:legacy-terminal";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, "");
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit", code: 0, signal: null,
+      descendants_reaped: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: { type: "system", subtype: "init", session_id: "sess-legacy" },
+      result: { type: "result", is_error: false, result: "must not recover", session_id: "sess-legacy" },
+    }));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "sess-legacy",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-legacy", providerTurnId: turnId }),
+      /does not prove native process-group retirement and turn-authority revocation/,
+    );
+    assert.equal(harness.launches.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor recovery distinguishes a prepared wrapper that never dispatched native work", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-not-dispatched-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:prepared-only";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, "");
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "not_started",
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      turn_authority_revoked: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: null,
+      result: null,
+    }));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "sess-safe",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-prepared", providerTurnId: turnId }),
+      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched",
+    );
+    assert.equal(harness.launches.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor recovery rejects a terminal snapshot cross-wired to another session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-session-contract-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:cross-wired";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, "");
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit", code: 0, signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      turn_authority_revoked: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: { type: "system", subtype: "init", session_id: "sess-stranger" },
+      result: { type: "result", is_error: false, result: "wrong", session_id: "sess-stranger" },
+    }));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "sess-established",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-cross-wired", providerTurnId: turnId }),
+      /different provider continuation/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production Cursor wrapper remains native group leader and writes restart-readable terminal evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(join(root, "npm-cache"), { recursive: true });
+    const executable = join(root, "fake-cursor-agent");
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+const resume = args.find((arg) => arg.startsWith("--resume="));
+const session = resume ? resume.slice("--resume=".length) : "sess-wrapper-" + process.ppid;
+const tokenIndex = args.indexOf("--auth-token");
+if (tokenIndex < 0 || !args[tokenIndex + 1]) process.exit(92);
+fs.mkdirSync(process.env.HOME + "/.cursor", { recursive: true });
+fs.writeFileSync(process.env.HOME + "/.cursor/auth.json", JSON.stringify({
+  accessToken: args[tokenIndex + 1], refreshToken: args[tokenIndex + 1],
+}));
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: session }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "wrapper reply", session_id: session }) + "\\n");
+    `);
+    chmodSync(executable, 0o700);
+    let runtimeDataDir = "";
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          runtimeDataDir = input.env?.CURSOR_DATA_DIR ?? "";
+          return defaultLaunchTurn(input);
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const order: string[] = [];
+    let wrapperPid: number | null = null;
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async () => { order.push("turn"); },
+      checkpointProviderState: async (state) => {
+        order.push(state.providerConnection.pid === null ? "idle" : "wrapper");
+        if (state.providerConnection.pid !== null) wrapperPid = state.providerConnection.pid;
+      },
+    }));
+    assert.equal(result.text, "wrapper reply");
+    assert.deepEqual(order.slice(0, 2), ["turn", "wrapper"], "wrapper identity is durable before the fake Cursor executable is released");
+    assert.equal(order.at(-1), "idle");
+    assert.equal(handle.providerContinuationId, `sess-wrapper-${wrapperPid}`, "native Cursor shares the still-live wrapper's PGID");
+    const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(result.turnId).digest("hex")}.jsonl.terminal.json`);
+    assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).turn_authority_revoked, true);
+    assert.equal(existsSync(runtimeDataDir), false, "the wrapper retires private worker state before terminal acceptance");
+    assert.equal(existsSync(join(homeDir, ".cursor", "auth.json")), false, "terminal publication purges the public file-store placeholder");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal evidence honestly scopes reaping when a detached native child outlives revoked turn authority", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-detached-residual-"));
+  const profileRoot = join(root, "private-profile");
+  const configDir = join(profileRoot, "config");
+  const homeDir = join(profileRoot, "home");
+  const tempDir = join(profileRoot, "tmp");
+  const statusPath = join(tempDir, "detached-status.json");
+  const pidPath = join(tempDir, "detached.pid");
+  const executable = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(tempDir, { recursive: true });
+  writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : ""; }
+const escaped = spawn(process.execPath, ["-e", ${JSON.stringify(`
+const fs = require("node:fs");
+const http = require("node:http");
+const [statusPath, endpoint] = process.argv.slice(1);
+setTimeout(() => {
+  let broadReadBlocked = false;
+  try { fs.readdirSync("/usr/local"); } catch (error) { broadReadBlocked = error && (error.code === "EPERM" || error.code === "EACCES"); }
+  const request = http.request(endpoint, { method: "POST" });
+  let authorityRevoked = false;
+  request.once("response", () => { authorityRevoked = false; finish(); });
+  request.once("error", () => { authorityRevoked = true; finish(); });
+  request.end();
+  function finish() {
+    fs.writeFileSync(statusPath, JSON.stringify({ broadReadBlocked, authorityRevoked, profileWriteStillPossible: true }));
+    setInterval(() => {}, 1000);
+  }
+}, 350);
+`)}, ${JSON.stringify(statusPath)}, value("--agent-endpoint")], {
+  detached: true,
+  // Keep the native stdout/stderr pipes open after the parent exits. Node's
+  // ChildProcess close must remain pending while exit has already fired.
+  stdio: ["ignore", "inherit", "inherit"],
+  env: process.env,
+});
+escaped.unref();
+fs.writeFileSync(${JSON.stringify(pidPath)}, String(escaped.pid));
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-detached-residual" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "detached-boundary-recorded", session_id: "sess-detached-residual" }) + "\\n");
+`);
+  chmodSync(executable, 0o700);
+  let escapedPid: number | null = null;
+  try {
+    const canonicalRoot = realpathSync(root);
+    const canonicalProfileRoot = realpathSync(profileRoot);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(profileRoot, "data"),
+        cacheDir: join(profileRoot, "cache"),
+        env: { HOME: homeDir, TMPDIR: tempDir },
+        ...wrapperHostedMcpFixture(root),
+        nativeAllowedWriteSubpaths: [profileRoot, canonicalProfileRoot],
+        nativeAllowedReadSubpaths: [root, canonicalRoot],
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const pendingResult = withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.equal(await waitForPath(pidPath), true, "the detached fixture publishes its process identity");
+    escapedPid = Number(readFileSync(pidPath, "utf8"));
+    assert.ok(Number.isSafeInteger(escapedPid) && escapedPid > 1);
+    assert.equal(await waitForPath(statusPath), true, "the detached fixture publishes its post-exit probe");
+    assert.deepEqual(JSON.parse(readFileSync(statusPath, "utf8")), {
+      broadReadBlocked: process.platform === "darwin",
+      authorityRevoked: true,
+      profileWriteStillPossible: true,
+    });
+    assert.doesNotThrow(() => process.kill(escapedPid!, 0), "the detached setsid child is an explicit operational residual");
+    process.kill(escapedPid, "SIGKILL");
+    const result = await pendingResult;
+    const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(result.turnId).digest("hex")}.jsonl.terminal.json`);
+    const terminal = JSON.parse(readFileSync(terminalPath, "utf8"));
+    assert.equal(terminal.descendants_reaped, undefined, "terminal evidence never overclaims complete descendant reaping");
+    assert.equal(terminal.native_process_group_reaped, true);
+    assert.equal(terminal.reap_scope, "native_process_group");
+    assert.equal(terminal.turn_authority_revoked, true);
+  } finally {
+    if (escapedPid && Number.isSafeInteger(escapedPid)) {
+      try { process.kill(escapedPid, "SIGKILL"); } catch {}
+      for (let index = 0; index < 50; index += 1) {
+        try { process.kill(escapedPid, 0); await flush(); }
+        catch { break; }
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("SIGTERM at every async wrapper startup boundary cannot publish not_started beside later native work", async () => {
+  for (const stage of ["mcp_listen", "authority_listen", "agent_listen"] as const) {
+    const root = mkdtempSync("/tmp/letagents-cursor-startup-barrier-");
+    const barrierPath = join(root, stage);
+    const statePath = join(root, "turn.jsonl");
+    const nativeMarker = join(root, "native-launched");
+    const executable = join(root, "fake-cursor-agent");
+    const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
+    const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
+    writeFileSync(statePath, "");
+    writeFileSync(executable, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(nativeMarker)}, "launched\\n");\nsetInterval(() => {}, 1000);\n`);
+    chmodSync(executable, 0o700);
+    const mcpRuntimeEnv = wrapperMcpRuntimeEnv(connectorRoot, `cursor:startup-race-${stage}`);
+    let child: CursorCliChild | null = null;
+    try {
+      child = defaultLaunchTurn({
+        cursorBin: executable,
+        args: ["-p", "--output-format", "stream-json", "startup race"],
+        cwd: root,
+        env: {
+          HOME: join(root, "home"),
+          CURSOR_DATA_DIR: runtimeDataRoot,
+          PATH: process.env.PATH,
+        },
+        deferStart: true,
+        statePath,
+        mcpConnectorSocketPath: join(connectorRoot, "stdio.sock"),
+        mcpRuntimeEntryPath: "/usr/bin/true",
+        mcpRuntimeCwd: root,
+        mcpRuntimeEnv,
+        providerAuthorization: "Bearer startup-race-provider-proof",
+        restrictRemoteAuthority: true,
+        allowedWriteSubpaths: [runtimeDataRoot, realpathSync(runtimeDataRoot)],
+        allowedReadSubpaths: [root, realpathSync(root)],
+        testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+        testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+        testStartupBarrier: { path: barrierPath, stage },
+      });
+      await child.prepared;
+      child.release();
+      assert.equal(await waitForPath(join(barrierPath, "ready")), true, `${stage} startup barrier was reached`);
+      assert.ok(child.pid);
+      process.kill(child.pid!, "SIGTERM");
+      const exit = await withLoopAlive(child.exited);
+
+      assert.equal(exit.type, "exit");
+      assert.equal(existsSync(nativeMarker), false, `${stage} cancellation never launches native Cursor`);
+      assert.equal(existsSync(connectorRoot), false, `${stage} cancellation retires the wrapper MCP listener`);
+      assert.equal(existsSync(runtimeDataRoot), false, `${stage} cancellation retires the turn-private data root`);
+      const terminal = JSON.parse(readFileSync(`${statePath}.terminal.json`, "utf8"));
+      assert.equal(terminal.type, "not_started");
+      assert.equal(terminal.native_process_group_reaped, true);
+      assert.equal(terminal.turn_authority_revoked, true);
+    } finally {
+      if (child?.pid) {
+        try { process.kill(child.pid, "SIGKILL"); } catch {}
+      }
+      rmSync(connectorRoot, { recursive: true, force: true });
+      rmSync(runtimeDataRoot, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("inherited native evidence pipes fail closed on a hard deadline after authority retirement", async () => {
+  const root = mkdtempSync("/tmp/letagents-cursor-evidence-deadline-");
+  const statePath = join(root, "turn.jsonl");
+  const writableRoot = join(root, "writable");
+  const escapedPidPath = join(writableRoot, "escaped.pid");
+  const executable = join(root, "fake-cursor-agent");
+  const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
+  const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
+  writeFileSync(statePath, "");
+  mkdirSync(writableRoot);
+  writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const escaped = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+  detached: true,
+  stdio: ["ignore", "inherit", "inherit"],
+});
+escaped.unref();
+fs.writeFileSync(${JSON.stringify(escapedPidPath)}, String(escaped.pid));
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-evidence-deadline" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "must-not-be-accepted-before-close", session_id: "sess-evidence-deadline" }) + "\\n");
+`);
+  chmodSync(executable, 0o700);
+  let escapedPid: number | null = null;
+  let child: CursorCliChild | null = null;
+  try {
+    child = defaultLaunchTurn({
+      cursorBin: executable,
+      args: ["-p", "--output-format", "stream-json", "evidence deadline"],
+      cwd: root,
+      env: { HOME: join(root, "home"), CURSOR_DATA_DIR: runtimeDataRoot, PATH: process.env.PATH },
+      deferStart: true,
+      statePath,
+      mcpConnectorSocketPath: join(connectorRoot, "stdio.sock"),
+      mcpRuntimeEntryPath: "/usr/bin/true",
+      mcpRuntimeCwd: root,
+      mcpRuntimeEnv: wrapperMcpRuntimeEnv(connectorRoot, "cursor:evidence-deadline"),
+      providerAuthorization: "Bearer evidence-deadline-provider-proof",
+      restrictRemoteAuthority: true,
+      allowedWriteSubpaths: [writableRoot, realpathSync(writableRoot), runtimeDataRoot, realpathSync(runtimeDataRoot)],
+      allowedReadSubpaths: [root, realpathSync(root)],
+      testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+      testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+    });
+    await child.prepared;
+    const startedAt = Date.now();
+    child.release();
+    const exit = await withLoopAlive(child.exited);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(existsSync(escapedPidPath), true, `native fixture never launched: ${child.stderrTail()}`);
+    escapedPid = Number(readFileSync(escapedPidPath, "utf8"));
+
+    assert.equal(exit.type, "exit");
+    if (exit.type === "exit") assert.equal(exit.code, 1);
+    assert.ok(elapsedMs >= 2_500 && elapsedMs < 10_000, `evidence drain failed closed in ${elapsedMs}ms`);
+    assert.equal(existsSync(`${statePath}.terminal.json`), false, "an open inherited pipe never yields trusted terminal evidence");
+    assert.equal(existsSync(connectorRoot), false, "the hard deadline leaves no wrapper MCP authority");
+    assert.equal(existsSync(runtimeDataRoot), false, "the hard deadline leaves no turn-private worker root");
+    assert.doesNotThrow(() => process.kill(escapedPid!, 0), "the escaped holder demonstrates why close could not complete");
+  } finally {
+    if (escapedPid && Number.isSafeInteger(escapedPid)) {
+      try { process.kill(escapedPid, "SIGKILL"); } catch {}
+    }
+    if (child?.pid) {
+      try { process.kill(child.pid, "SIGKILL"); } catch {}
+    }
+    rmSync(connectorRoot, { recursive: true, force: true });
+    rmSync(runtimeDataRoot, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the live adapter never publishes buffered results when the wrapper evidence deadline fails", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-evidence-deadline-"));
+  const profileRoot = join(root, "private-profile");
+  const configDir = join(profileRoot, "config");
+  const homeDir = join(profileRoot, "home");
+  const tempDir = join(profileRoot, "tmp");
+  const escapedPidPath = join(tempDir, "escaped.pid");
+  const executable = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(tempDir, { recursive: true });
+  writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+const escaped = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+  detached: true,
+  stdio: ["ignore", "inherit", "inherit"],
+});
+escaped.unref();
+fs.writeFileSync(${JSON.stringify(escapedPidPath)}, String(escaped.pid));
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-live-evidence-deadline" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "must-never-be-published", session_id: "sess-live-evidence-deadline" }) + "\\n");
+`);
+  chmodSync(executable, 0o700);
+  let escapedPid: number | null = null;
+  let connectorRoot = "";
+  let runtimeDataRoot = "";
+  let turnId = "";
+  try {
+    const canonicalRoot = realpathSync(root);
+    const canonicalProfileRoot = realpathSync(profileRoot);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          connectorRoot = dirname(input.mcpConnectorSocketPath!);
+          runtimeDataRoot = input.env?.CURSOR_DATA_DIR ?? "";
+          return defaultLaunchTurn({
+            ...input,
+            testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+            testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+          });
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(profileRoot, "data"),
+        cacheDir: join(profileRoot, "cache"),
+        env: { HOME: homeDir, TMPDIR: tempDir },
+        ...wrapperHostedMcpFixture(root),
+        nativeAllowedWriteSubpaths: [profileRoot, canonicalProfileRoot],
+        nativeAllowedReadSubpaths: [root, canonicalRoot],
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    const startedAt = Date.now();
+    await assert.rejects(withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-evidence-deadline" }), {
+      checkpointTurnStarted: async (value) => { turnId = value; },
+    })), /ended before the bounded room turn produced a terminal result/);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(await waitForPath(escapedPidPath), true, "the inherited-pipe fixture launched");
+    escapedPid = Number(readFileSync(escapedPidPath, "utf8"));
+
+    assert.ok(elapsedMs >= 2_500 && elapsedMs < 10_000, `live evidence rejection completed in ${elapsedMs}ms`);
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0]!.terminalCause, "protocol_error");
+    assert.equal(handle.observedState(), "failed");
+    assert.ok(turnId);
+    const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl.terminal.json`);
+    assert.equal(existsSync(terminalPath), false, "the adapter never invents missing wrapper containment evidence");
+    assert.equal(existsSync(connectorRoot), false, "the rejected live result leaves no wrapper MCP authority");
+    assert.equal(existsSync(runtimeDataRoot), false, "the rejected live result leaves no turn-private worker root");
+  } finally {
+    if (escapedPid && Number.isSafeInteger(escapedPid)) {
+      try { process.kill(escapedPid, "SIGKILL"); } catch {}
+    }
+    if (connectorRoot) rmSync(connectorRoot, { recursive: true, force: true });
+    if (runtimeDataRoot) rmSync(runtimeDataRoot, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("live results require the same durable containment evidence as restart recovery", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-terminal-proof-"));
+  const harness = createHarness({ ownsDescendantReaping: true });
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        Object.defineProperty(child, "requiresDurableTerminalEvidence", { value: true });
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: (input) => {
+        const profileRoot = input.profileRoot ?? root;
+        const homeDir = join(profileRoot, "home");
+        const configDir = join(profileRoot, "config");
+        mkdirSync(homeDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        return {
+          homeDir,
+          configDir,
+          dataDir: join(profileRoot, "data"),
+          cacheDir: join(profileRoot, "cache"),
+          env: { HOME: homeDir, NPM_CONFIG_CACHE: join(profileRoot, "npm-cache") },
+          ...(input.inspectionOnly ? {} : wrapperHostedMcpFixture(profileRoot)),
+        };
+      },
+    });
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: root }));
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    const pending = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-terminal-proof" }));
+    for (let index = 0; index < 100 && harness.children.length === 0; index += 1) await flush();
+    const child = harness.children[0]!;
+    for (let index = 0; index < 100 && !child.isReleased; index += 1) await flush();
+    assert.equal(child.isReleased, true);
+    await flush();
+    child.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "must-not-publish-without-containment", session_id: "sess-cursor-1",
+    });
+    const statePath = harness.launches[0]!.statePath!;
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit",
+      code: 0,
+      signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      turn_authority_revoked: false,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: { type: "system", subtype: "init", session_id: "sess-cursor-1" },
+      result: {
+        type: "result", subtype: "success", is_error: false,
+        result: "must-not-publish-without-containment", session_id: "sess-cursor-1",
+      },
+    }));
+    child.resolveExit({ type: "exit", code: 0, signal: null });
+
+    await assert.rejects(withLoopAlive(pending), /ended before the bounded room turn produced a terminal result/);
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0]!.terminalCause, "protocol_error");
+    assert.equal(handle.observedState(), "failed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production supervised wrapper blocks remote Cursor authority and retires its loopback proxy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-remote-authority-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    const executable = join(root, "fake-cursor-agent");
+    writeFileSync(executable, `#!/usr/bin/env node
+const http = require("node:http");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : null;
+}
+const endpoint = value("--endpoint");
+const agentEndpoint = value("--agent-endpoint");
+if (!endpoint || !agentEndpoint || agentEndpoint === endpoint
+  || !agentEndpoint.startsWith("http://127.0.0.1:")
+  || value("--http-version") !== "1.1") process.exit(7);
+const blockedPaths = [
+  "/aiserver.v1.DashboardService/GetMcpConfig",
+  "/aiserver.v1.DashboardService/GetEffectiveUserPlugins",
+  "/aiserver.v1.DashboardService/GetManagedSkills",
+  "/aiserver.v1.DashboardService/GetTeamAdminSettingsOrEmptyIfNotInTeam",
+  "/aiserver.v1.DashboardService/GetTeamHooks",
+  "/aiserver.v1.AnalyticsService/BootstrapStatsig",
+];
+function expectBlocked(path) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(new URL(path, endpoint), { method: "POST", headers: { "content-length": "0" } }, (response) => {
+      response.resume();
+      response.once("end", () => response.statusCode === 503 ? resolve() : reject(new Error("unexpected status")));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+function expectChunkedBlocked() {
+  return new Promise((resolve, reject) => {
+    const request = http.request(new URL("/aiserver.v1.DashboardService/GetMe", endpoint), {
+      method: "POST", headers: { "transfer-encoding": "chunked" },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => response.statusCode === 503 ? resolve() : reject(new Error("chunked request was accepted")));
+    });
+    request.once("error", reject);
+    request.end("x");
+  });
+}
+Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then(() => {
+    process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-remote-authority" }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: endpoint, session_id: "sess-remote-authority" }) + "\\n");
+}).catch(() => process.exit(9));
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.match(result.text ?? "", /^http:\/\/127\.0\.0\.1:\d+$/);
+    const proxyUrl = new URL(result.text!);
+    await new Promise<void>((resolveRequest, rejectRequest) => {
+      const request = httpRequest(proxyUrl, { method: "POST" });
+      request.once("response", () => rejectRequest(new Error("retired Cursor authority proxy still accepted requests")));
+      request.once("error", () => resolveRequest());
+      request.end();
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal evidence waits for in-flight control and agent bearer authority to be destroyed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-inflight-authority-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const executable = join(root, "fake-cursor-agent");
+  const writableRoot = join(root, "tmp");
+  const controlMarker = join(writableRoot, "control-received");
+  const agentMarker = join(writableRoot, "agent-received");
+  const revokedStatus = join(writableRoot, "detached-revoked.json");
+  const detachedPidPath = join(writableRoot, "detached.pid");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(writableRoot, { recursive: true });
+  let controlAuthorization = "";
+  let agentAuthorization = "";
+  let controlSocketClosed = false;
+  let agentStreamClosed = false;
+  const controlUpstream = createHttpServer((request, response) => {
+    controlAuthorization = String(request.headers.authorization ?? "");
+    request.socket.once("close", () => { controlSocketClosed = true; });
+    response.once("close", () => { controlSocketClosed = true; });
+    request.resume();
+    writeFileSync(controlMarker, "received");
+    // Deliberately never respond: retirement must destroy this in-flight
+    // bearer request before its terminal can authorize recovery.
+  });
+  const agentUpstream = createHttp2Server();
+  agentUpstream.on("stream", (stream, headers) => {
+    agentAuthorization = String(headers.authorization ?? "");
+    stream.once("close", () => { agentStreamClosed = true; });
+    stream.resume();
+    writeFileSync(agentMarker, "received");
+    // Deliberately keep the bidirectional Run stream active.
+  });
+  await Promise.all([
+    new Promise<void>((resolveListen, rejectListen) => {
+      controlUpstream.once("error", rejectListen);
+      controlUpstream.listen(0, "127.0.0.1", () => {
+        controlUpstream.removeListener("error", rejectListen);
+        resolveListen();
+      });
+    }),
+    new Promise<void>((resolveListen, rejectListen) => {
+      agentUpstream.once("error", rejectListen);
+      agentUpstream.listen(0, "127.0.0.1", () => {
+        agentUpstream.removeListener("error", rejectListen);
+        resolveListen();
+      });
+    }),
+  ]);
+  const controlAddress = controlUpstream.address();
+  const agentAddress = agentUpstream.address();
+  assert.ok(controlAddress && typeof controlAddress !== "string");
+  assert.ok(agentAddress && typeof agentAddress !== "string");
+  const testControlPlaneUpstreamEndpoint = `http://127.0.0.1:${controlAddress.port}`;
+  const testAgentUpstreamEndpoint = `http://127.0.0.1:${agentAddress.port}`;
+  let detachedPid: number | null = null;
+  try {
+    const detachedSource = `
+const fs = require("node:fs");
+const http = require("node:http");
+const http2 = require("node:http2");
+const [statusPath, controlEndpoint, agentEndpoint] = process.argv.slice(1);
+let controlClosed = false;
+let agentClosed = false;
+const keepAlive = setInterval(() => {}, 1000);
+function finish() {
+  if (!controlClosed || !agentClosed) return;
+  clearInterval(keepAlive);
+  fs.writeFileSync(statusPath, JSON.stringify({ controlClosed, agentClosed }));
+}
+const control = http.request(new URL("/aiserver.v1.DashboardService/GetMe", controlEndpoint), {
+  method: "POST",
+  headers: { "content-length": "4", "connection": "keep-alive", "authorization": "Bearer public-placeholder" },
+});
+control.once("response", (response) => { response.resume(); response.once("close", () => { controlClosed = true; finish(); }); });
+control.once("error", () => { controlClosed = true; finish(); });
+control.once("close", () => { controlClosed = true; finish(); });
+control.end("ping");
+const session = http2.connect(agentEndpoint);
+const stream = session.request({
+  ":method": "POST",
+  ":path": "/agent.v1.AgentService/Run",
+  "content-type": "application/connect+proto",
+  "authorization": "Bearer public-placeholder",
+});
+function agentDone() { agentClosed = true; try { session.destroy(); } catch {} finish(); }
+stream.once("error", agentDone);
+stream.once("close", agentDone);
+session.once("error", agentDone);
+session.once("close", agentDone);
+stream.write("active-run");
+`;
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+const escaped = spawn(process.execPath, ["-e", ${JSON.stringify(detachedSource)}, ${JSON.stringify(revokedStatus)}, value("--endpoint"), value("--agent-endpoint")], {
+  detached: true,
+  stdio: "ignore",
+  env: process.env,
+});
+escaped.unref();
+fs.writeFileSync(${JSON.stringify(detachedPidPath)}, String(escaped.pid));
+let checks = 0;
+const ready = setInterval(() => {
+  checks += 1;
+  if (fs.existsSync(${JSON.stringify(controlMarker)}) && fs.existsSync(${JSON.stringify(agentMarker)})) {
+    clearInterval(ready);
+    process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-inflight-authority" }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "inflight-authority-open", session_id: "sess-inflight-authority" }) + "\\n");
+  } else if (checks > 250) process.exit(91);
+}, 20);
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint, testControlPlaneUpstreamEndpoint });
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.equal(result.text, "inflight-authority-open");
+    detachedPid = Number(readFileSync(detachedPidPath, "utf8"));
+    assert.equal(await waitForPath(revokedStatus), true, "the detached fixture observes both upstream sockets closing");
+    assert.deepEqual(JSON.parse(readFileSync(revokedStatus, "utf8")), { controlClosed: true, agentClosed: true });
+    assert.equal(controlAuthorization, "Bearer test-provider-authorization");
+    assert.equal(agentAuthorization, "Bearer test-provider-authorization");
+    assert.equal(controlSocketClosed, true, "control upstream is closed before the terminal result resolves");
+    assert.equal(agentStreamClosed, true, "agent upstream is closed before the terminal result resolves");
+    const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(result.turnId).digest("hex")}.jsonl.terminal.json`);
+    assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).turn_authority_revoked, true);
+  } finally {
+    if (detachedPid && Number.isSafeInteger(detachedPid)) {
+      try { process.kill(detachedPid, "SIGKILL"); } catch {}
+    }
+    await Promise.all([
+      new Promise<void>((resolveClose) => controlUpstream.close(() => resolveClose())),
+      new Promise<void>((resolveClose) => agentUpstream.close(() => resolveClose())),
+    ]);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised agent proxy admits one exact HTTP/1 Run stream and injects its wrapper-held bearer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h1-proxy-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const executable = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  let upstreamAuthorization = "";
+  let upstreamBody = "";
+  const upstream = createHttp2Server();
+  upstream.on("stream", (stream, headers) => {
+    upstreamAuthorization = String(headers.authorization ?? "");
+    stream.on("data", (chunk) => { upstreamBody += chunk.toString("utf8"); });
+    stream.once("end", () => {
+      stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+      stream.end("h1-upstream-ok");
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", () => {
+      upstream.removeListener("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const upstreamAddress = upstream.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+  const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
+  try {
+    writeFileSync(executable, `#!/usr/bin/env node
+const http = require("node:http");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+const endpoint = value("--agent-endpoint");
+function request(path, contentType, body) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(new URL(path, endpoint), {
+      method: "POST",
+      headers: { "content-type": contentType, "authorization": "Bearer public-placeholder", "content-length": Buffer.byteLength(body) },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.once("end", () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.once("error", reject);
+    req.end(body);
+  });
+}
+(async () => {
+  const wrongMedia = await request("/agent.v1.AgentService/Run", "application/connect+protobufad", "wrong");
+  const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
+  const accepted = await request("/agent.v1.AgentService/Run", "application/connect+proto; charset=binary", "h1-request-body");
+  const replay = await request("/agent.v1.AgentService/Run", "application/connect+proto", "replay");
+  if (wrongMedia.status !== 503 || wrongPath.status !== 503
+    || accepted.status !== 200 || accepted.body !== "h1-upstream-ok" || replay.status !== 503) process.exit(78);
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h1" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h1-proxy-ok", session_id: "sess-agent-h1" }) + "\\n");
+})().catch(() => process.exit(79));
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.equal(result.text, "h1-proxy-ok");
+    assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
+    assert.equal(upstreamBody, "h1-request-body");
+  } finally {
+    await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised agent proxy relays exact HTTP/2 Run streams, survives an idle first token, and rejects replay", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h2-proxy-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const executable = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  let upstreamAuthorization = "";
+  let upstreamBody = "";
+  let upstreamRuns = 0;
+  const upstream = createHttp2Server();
+  upstream.on("stream", (stream, headers) => {
+    upstreamRuns += 1;
+    upstreamAuthorization = String(headers.authorization ?? "");
+    stream.on("data", (chunk) => { upstreamBody += chunk.toString("utf8"); });
+    stream.once("end", () => {
+      setTimeout(() => {
+        stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+        stream.end("h2-upstream-ok");
+      }, 5_250);
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", () => {
+      upstream.removeListener("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const upstreamAddress = upstream.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+  const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
+  try {
+    writeFileSync(executable, `#!/usr/bin/env node
+const http2 = require("node:http2");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+const endpoint = value("--agent-endpoint");
+const client = http2.connect(endpoint);
+function request(path, contentType, body) {
+  return new Promise((resolve, reject) => {
+    const stream = client.request({
+      ":method": "POST", ":path": path,
+      "content-type": contentType,
+      "authorization": "Bearer public-placeholder",
+    });
+    const chunks = [];
+    let status = 0;
+    stream.once("response", (headers) => { status = Number(headers[":status"] || 0); });
+    stream.on("data", (chunk) => chunks.push(chunk));
+    stream.once("error", reject);
+    stream.once("end", () => resolve({ status, body: Buffer.concat(chunks).toString("utf8") }));
+    stream.end(body);
+  });
+}
+(async () => {
+  const wrongMedia = await request("/agent.v1.AgentService/Run", "application/connect+protobufad", "wrong");
+  const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
+  const accepted = await request("/agent.v1.AgentService/Run", "application/connect+proto; charset=binary", "h2-request-body");
+  const replay = await request("/agent.v1.AgentService/Run", "application/connect+proto", "replay");
+  client.close();
+  if (wrongMedia.status !== 503 || wrongPath.status !== 503
+    || accepted.status !== 200 || accepted.body !== "h2-upstream-ok" || replay.status !== 503) process.exit(88);
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h2" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h2-proxy-ok", session_id: "sess-agent-h2" }) + "\\n");
+})().catch(() => process.exit(89));
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.equal(result.text, "h2-proxy-ok");
+    assert.equal(upstreamRuns, 1);
+    assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
+    assert.equal(upstreamBody, "h2-request-body");
+  } finally {
+    await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised native Cursor sandbox blocks late hook reads", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-native-hook-sandbox-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    const blockedHook = join(root, "late-hooks.json");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(blockedHook, '{"hooks":{"beforeSubmitPrompt":[{"command":"steal"}]}}\n');
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+let result = "hook-readable";
+try { fs.readFileSync(${JSON.stringify(blockedHook)}, "utf8"); }
+catch (error) {
+  if (!error || (error.code !== "EPERM" && error.code !== "EACCES")) process.exit(8);
+  result = "hook-blocked";
+}
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-hook-sandbox" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-hook-sandbox" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+        nativeDeniedReadPaths: [blockedHook, join(realpathSync(root), "late-hooks.json")],
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.equal(result.text, "hook-blocked");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised native sandbox blocks macOS effect-delegating helpers and writable copied executables", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-native-delegation-"));
+  try {
+    const profileRoot = join(root, "private-profile");
+    const configDir = join(profileRoot, "config");
+    const homeDir = join(profileRoot, "home");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+const copiedOpen = process.env.HOME + "/copied-open";
+fs.copyFileSync("/usr/bin/open", copiedOpen);
+fs.chmodSync(copiedOpen, 0o700);
+function blocked(command, commandArgs) {
+  const result = spawnSync(command, commandArgs, { stdio: "ignore" });
+  return result.error?.code === "EPERM" || result.error?.code === "EACCES" || result.status !== 0;
+}
+const outcome = {
+  directOpen: blocked("/usr/bin/open", ["--help"]),
+  copiedOpen: blocked(copiedOpen, ["--help"]),
+  appleScript: blocked("/usr/bin/osascript", ["-e", "return 1"]),
+  keychainCli: blocked("/usr/bin/security", ["list-keychains"]),
+};
+const session = "sess-native-delegation";
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: session }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: session }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(profileRoot, "data"),
+        cacheDir: join(profileRoot, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+        nativeAllowedWriteSubpaths: [profileRoot, realpathSync(profileRoot)],
+        nativeAllowedReadSubpaths: [root, realpathSync(root)],
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.deepEqual(JSON.parse(result.text!), {
+      directOpen: true,
+      copiedOpen: true,
+      appleScript: true,
+      keychainCli: true,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised native sandbox cannot signal its wrapper or unrelated same-UID processes", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-native-signal-fence-"));
+  const victim = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], { stdio: "ignore" });
+  const victimClosed = new Promise<void>((resolve) => victim.once("close", () => resolve()));
+  try {
+    const profileRoot = join(root, "private-profile");
+    const configDir = join(profileRoot, "config");
+    const homeDir = join(profileRoot, "home");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(executable, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+const ownChild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], { stdio: "ignore" });
+let externalBlocked = false;
+let parentBlocked = false;
+let childAllowed = false;
+try { process.kill(${victim.pid}, "SIGTERM"); }
+catch (error) { externalBlocked = error?.code === "EPERM" || error?.code === "EACCES"; }
+try { process.kill(process.ppid, "SIGTERM"); }
+catch (error) { parentBlocked = error?.code === "EPERM" || error?.code === "EACCES"; }
+try { process.kill(ownChild.pid, "SIGTERM"); childAllowed = true; }
+catch {}
+const session = "sess-native-signal-fence";
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: session }) + "\\n");
+process.stdout.write(JSON.stringify({
+  type: "result", subtype: "success", is_error: false,
+  result: JSON.stringify({ externalBlocked, parentBlocked, childAllowed }), session_id: session,
+}) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(profileRoot, "data"),
+        cacheDir: join(profileRoot, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+        nativeAllowedWriteSubpaths: [profileRoot, realpathSync(profileRoot)],
+        nativeAllowedReadSubpaths: [root, realpathSync(root)],
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.deepEqual(JSON.parse(result.text!), {
+      externalBlocked: true,
+      parentBlocked: true,
+      childAllowed: true,
+    });
+    assert.doesNotThrow(() => process.kill(victim.pid!, 0), "the unrelated process remains alive");
+  } finally {
+    try { victim.kill("SIGKILL"); } catch {}
+    await victimClosed;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised native sandbox fences private config, runtime, Statsig temps, and redirected authority roots", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-native-authority-fences-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    const cursorHome = join(homeDir, ".cursor");
+    const runtimeConfig = join(configDir, "cursor");
+    const runtimeRoot = join(root, "runtime");
+    const workspace = join(root, "workspace");
+    const externalCursor = join(root, "external-cursor");
+    const privateMcp = join(cursorHome, "mcp.json");
+    const privatePermissions = join(runtimeConfig, "cli-config.json");
+    const identityBinding = join(configDir, "letagents-cursor-identity.json");
+    const runtimeFile = join(runtimeRoot, "server.js");
+    const statsigTemp = join(runtimeConfig, "statsig-cache.json.4321.01234567-89ab-cdef-0123-456789abcdef.tmp");
+    const redirectedSettings = join(workspace, ".cursor", "settings.json");
+    const executable = join(root, "fake-cursor-agent");
+    for (const directory of [cursorHome, runtimeConfig, runtimeRoot, workspace, externalCursor, join(root, "data"), join(root, "cache")]) {
+      mkdirSync(directory, { recursive: true });
+    }
+    writeFileSync(privateMcp, "mcp-original\n");
+    writeFileSync(privatePermissions, "permissions-original\n");
+    writeFileSync(identityBinding, '{"userId":12345}\n');
+    writeFileSync(runtimeFile, "runtime-original\n");
+    writeFileSync(join(externalCursor, "settings.json"), "redirected-secret\n");
+    symlinkSync(externalCursor, join(workspace, ".cursor"), "dir");
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+const cliTemp = ${JSON.stringify(`${privatePermissions}.native-tmp`)};
+let cliConfigRewritten = false;
+try {
+  fs.writeFileSync(cliTemp, "permissions-native-rewrite\\n");
+  fs.renameSync(cliTemp, ${JSON.stringify(privatePermissions)});
+  cliConfigRewritten = true;
+} catch {}
+const attempts = [
+  () => fs.writeFileSync(${JSON.stringify(privateMcp)}, "replaced"),
+  () => fs.unlinkSync(${JSON.stringify(identityBinding)}),
+  () => fs.writeFileSync(${JSON.stringify(runtimeFile)}, "replaced"),
+  () => fs.writeFileSync(${JSON.stringify(statsigTemp)}, "remote gates"),
+  () => fs.readFileSync(${JSON.stringify(redirectedSettings)}, "utf8"),
+  () => fs.symlinkSync(${JSON.stringify(externalCursor)}, ${JSON.stringify(join(workspace, ".claude"))}, "dir"),
+  () => fs.readdirSync("/usr/local"),
+  () => fs.readdirSync("/Library/Application Support"),
+];
+let blocked = 0;
+const outcomes = [];
+for (const attempt of attempts) {
+  try { attempt(); outcomes.push("allowed"); }
+  catch (error) {
+    if (error && (error.code === "EPERM" || error.code === "EACCES")) { blocked += 1; outcomes.push("blocked"); }
+    else outcomes.push(error && error.code || "error");
+  }
+}
+const result = blocked === attempts.length && cliConfigRewritten
+  ? "authority-fences-blocked"
+  : "authority-fence-bypass:" + blocked + ":cli=" + cliConfigRewritten + ":" + outcomes.join(",");
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-authority-fences" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-authority-fences" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const canonicalRoot = realpathSync(root);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+        nativeDeniedReadMetadataPaths: [
+          join(canonicalRoot, "workspace", ".cursor"),
+          join(canonicalRoot, "workspace", ".claude"),
+        ],
+        nativeDeniedReadWriteRegexes: [
+          `^${join(root, "config", "cursor", "statsig-cache[.]json[.][0-9]+[.][0-9A-Fa-f-]+[.]tmp")}$`,
+          `^${join(canonicalRoot, "config", "cursor", "statsig-cache[.]json[.][0-9]+[.][0-9A-Fa-f-]+[.]tmp")}$`,
+        ],
+        nativeDeniedWritePaths: [privateMcp, realpathSync(privateMcp), identityBinding, realpathSync(identityBinding)],
+        nativeDeniedWriteStructuralPaths: [root, homeDir, cursorHome, configDir, runtimeConfig],
+        nativeDeniedWriteSubpaths: [runtimeRoot],
+        nativeAllowedWriteSubpaths: [
+          homeDir, realpathSync(homeDir), configDir, realpathSync(configDir),
+          join(root, "data"), join(canonicalRoot, "data"), join(root, "cache"), join(canonicalRoot, "cache"),
+        ],
+        nativeAllowedReadSubpaths: [
+          homeDir, realpathSync(homeDir), configDir, realpathSync(configDir),
+          join(root, "data"), join(canonicalRoot, "data"), join(root, "cache"), join(canonicalRoot, "cache"),
+          workspace, realpathSync(workspace),
+        ],
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: workspace }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.equal(result.text, "authority-fences-blocked");
+    assert.equal(readFileSync(privateMcp, "utf8"), "mcp-original\n");
+    assert.equal(readFileSync(privatePermissions, "utf8"), "permissions-native-rewrite\n");
+    assert.equal(readFileSync(identityBinding, "utf8"), '{"userId":12345}\n');
+    assert.equal(readFileSync(runtimeFile, "utf8"), "runtime-original\n");
+    assert.equal(existsSync(statsigTemp), false);
+    assert.equal(existsSync(join(workspace, ".claude")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production Cursor turn wrapper never leaks Electron's wrapper-only Node mode into native Cursor", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-electron-env-"));
+  const previousElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+  try {
+    const executable = join(root, "fake-cursor-agent");
+    writeFileSync(executable, `#!/usr/bin/env node
+if (process.argv.includes("--endpoint") || process.argv.includes("--agent-endpoint")) process.exit(8);
+if (process.env.ELECTRON_RUN_AS_NODE !== undefined) process.exit(7);
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-electron-env" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "native env clean", session_id: "sess-electron-env" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    process.env.ELECTRON_RUN_AS_NODE = "1";
+
+    const adapter = new CursorProviderAdapter({ cursorBin: executable });
+    const handle = await adapter.spawn(spawnRequest({ cwd: root }));
+    for (let index = 0; index < 100 && handle.observedState() !== "idle"; index += 1) await flush();
+    assert.equal(handle.observedState(), "idle");
+    assert.equal(handle.providerContinuationId, "sess-electron-env");
+  } finally {
+    if (previousElectronRunAsNode === undefined) delete process.env.ELECTRON_RUN_AS_NODE;
+    else process.env.ELECTRON_RUN_AS_NODE = previousElectronRunAsNode;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production Cursor wrapper fences multi-chunk oversized output without buffering it as a live line", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-oversized-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(join(root, "npm-cache"), { recursive: true });
+    const executable = join(root, "fake-cursor-agent");
+    writeFileSync(executable, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+for (let index = 0; index < 12; index += 1) process.stdout.write("x".repeat(64 * 1024));
+process.stdout.write("\\n");
+setInterval(() => {}, 1_000);
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      turnStartTimeoutMs: 5_000,
+      supervisedProfileFactory: () => ({
+        homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+        checkpointTurnStarted: async () => {},
+        checkpointProviderState: async () => {},
+      })),
+      /session contract|exited before reporting its stream-json init/,
+    );
+    assert.equal(handle.observedState(), "failed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production Cursor wrapper fences aggregate byte and event floods", async () => {
+  const floods = [
+    {
+      name: "aggregate-bytes",
+      source: `const line = "x".repeat(64 * 1024) + "\\n";
+for (let index = 0; index < 130; index += 1) process.stdout.write(line);
+setInterval(() => {}, 1_000);`,
+    },
+    {
+      name: "event-count",
+      source: `for (let index = 0; index < 4_100; index += 1) process.stdout.write("x\\n");
+setInterval(() => {}, 1_000);`,
+    },
+    {
+      name: "stderr-bytes",
+      source: `process.stderr.write("e".repeat(300 * 1024));
+setInterval(() => {}, 1_000);`,
+    },
+  ];
+  for (const flood of floods) {
+    const root = mkdtempSync(join(tmpdir(), `letagents-cursor-wrapper-${flood.name}-`));
+    try {
+      const configDir = join(root, "config");
+      const homeDir = join(root, "home");
+      mkdirSync(configDir, { recursive: true });
+      mkdirSync(homeDir, { recursive: true });
+      mkdirSync(join(root, "npm-cache"), { recursive: true });
+      const executable = join(root, "fake-cursor-agent");
+      writeFileSync(executable, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+${flood.source}
+`);
+      chmodSync(executable, 0o700);
+      const adapter = new CursorProviderAdapter({
+        cursorBin: executable,
+        dependencies: productionPersonalIdentityDependencies,
+        turnStartTimeoutMs: 5_000,
+        supervisedProfileFactory: () => ({
+          homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+          env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
+          ...wrapperHostedMcpFixture(root),
+        }),
+      });
+      const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+      await assert.rejects(
+        withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+          checkpointTurnStarted: async () => {},
+          checkpointProviderState: async () => {},
+        })),
+        /session contract|exited before reporting its stream-json init/,
+        flood.name,
+      );
+      assert.equal(handle.observedState(), "failed", flood.name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a transient first-session checkpoint failure recovers the exact terminal without splitting live and durable identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-recovery-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(join(root, "npm-cache"), { recursive: true });
+    const executable = join(root, "fake-cursor-agent");
+    writeFileSync(executable, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-checkpoint-real" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "checkpoint recovered", session_id: "sess-checkpoint-real" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    let realSessionCheckpoints = 0;
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async () => {},
+      checkpointProviderState: async (state) => {
+        if (state.providerContinuationId === "sess-checkpoint-real") {
+          realSessionCheckpoints += 1;
+          if (realSessionCheckpoints === 1) {
+            // Let the already-emitted result drain so this covers recovery of
+            // a terminal first turn, not the separate interrupted-turn case.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            throw new Error("transient manifest checkpoint failure");
+          }
+        }
+      },
+    }));
+    assert.equal(result.text, "checkpoint recovered");
+    assert.equal(realSessionCheckpoints, 2, "recovery retries the real session checkpoint exactly once");
+    assert.equal(handle.providerContinuationId, "sess-checkpoint-real");
+    assert.equal(handle.observedState(), "idle");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("post-init checkpoint recovery prefers a successful result durably captured during TERM teardown", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-term-recovery-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(join(root, "npm-cache"), { recursive: true });
+    const executable = join(root, "fake-cursor-agent");
+    writeFileSync(executable, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-term-real" }) + "\\n");
+process.once("SIGTERM", () => {
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "late durable reply", session_id: "sess-term-real" }) + "\\n");
+  setTimeout(() => process.exit(0), 5);
+});
+setInterval(() => {}, 1_000);
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    let realSessionCheckpoints = 0;
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async () => {},
+      checkpointProviderState: async (state) => {
+        if (state.providerContinuationId === "sess-term-real") {
+          realSessionCheckpoints += 1;
+          if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
+        }
+      },
+    }));
+    assert.equal(result.text, "late durable reply");
+    assert.equal(realSessionCheckpoints, 2);
+    assert.equal(handle.providerContinuationId, "sess-term-real");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("post-init checkpoint recovery terminalizes a trusted durable no-result exit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-terminal-"));
+  try {
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(join(root, "npm-cache"), { recursive: true });
+    const executable = join(root, "fake-cursor-agent");
+    writeFileSync(executable, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-checkpoint-terminal" }) + "\\n");
+process.once("SIGTERM", () => process.exit(9));
+setInterval(() => {}, 1_000);
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: productionPersonalIdentityDependencies,
+      supervisedProfileFactory: () => ({
+        homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    let realSessionCheckpoints = 0;
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "checkpoint-terminal" }), {
+        checkpointTurnStarted: async () => {},
+        checkpointProviderState: async (state) => {
+          if (state.providerContinuationId !== "sess-checkpoint-terminal") return;
+          realSessionCheckpoints += 1;
+          if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
+          assert.equal(
+            terminals.length,
+            0,
+            "recovered continuation checkpoints before onExit retires the daemon's live handle",
+          );
+        },
+      })),
+      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
+    );
+    assert.equal(realSessionCheckpoints, 2, "terminal recovery still converges the real session checkpoint");
+    assert.equal(handle.observedState(), "failed");
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0]!.terminalCause, "crashed");
+    assert.equal(terminals[0]!.exitCode, 9);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("post-init checkpoint failure cannot recover a buffered result without trusted containment evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-no-terminal-"));
+  const harness = createHarness({ ownsDescendantReaping: true });
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        Object.defineProperty(child, "requiresDurableTerminalEvidence", { value: true });
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: (input) => {
+        const profileRoot = input.profileRoot ?? root;
+        const homeDir = join(profileRoot, "home");
+        const configDir = join(profileRoot, "config");
+        mkdirSync(homeDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        return {
+          homeDir,
+          configDir,
+          dataDir: join(profileRoot, "data"),
+          cacheDir: join(profileRoot, "cache"),
+          env: { HOME: homeDir, NPM_CONFIG_CACHE: join(profileRoot, "npm-cache") },
+          ...(input.inspectionOnly ? {} : wrapperHostedMcpFixture(profileRoot)),
+        };
+      },
+    });
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: root }));
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    let realSessionCheckpoints = 0;
+    let terminalCheckpoints = 0;
+    const pending = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "checkpoint-no-terminal" }), {
+      checkpointTurnStarted: async () => {},
+      checkpointProviderState: async (state) => {
+        if (state.providerContinuationId !== "sess-cursor-1") return;
+        realSessionCheckpoints += 1;
+        if (realSessionCheckpoints !== 1) return;
+        // Buffer a superficially successful result before the transient
+        // manifest failure forces teardown. The injected supervised child
+        // exits on TERM but deliberately writes no containment terminal,
+        // modeling a wrapper lost to forced process-group SIGKILL.
+        harness.children[0]!.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "must-not-publish-from-memory",
+          session_id: "sess-cursor-1",
+        });
+        throw new Error("transient manifest checkpoint failure");
+      },
+      checkpointTerminalResult: async () => { terminalCheckpoints += 1; },
+    });
+
+    await assert.rejects(
+      withLoopAlive(pending),
+      /trusted terminal recovery was unavailable.*no trusted terminal evidence/i,
+    );
+    assert.equal(realSessionCheckpoints, 1, "untrusted recovery never retries the provider checkpoint");
+    assert.equal(terminalCheckpoints, 0, "the buffered result never reaches durable publication");
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0]!.terminalCause, "protocol_error");
+    assert.equal(handle.observedState(), "failed");
+    assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }]);
+    assert.equal(existsSync(`${harness.launches[0]!.statePath}.terminal.json`), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon Cursor correction refuses an unjournaled side turn and native resume itself launches no bootstrap", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const request = daemonSpawnRequest();
+  const handle = await adapter.resume({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: "sess-cursor-existing",
+    providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+  }, request);
+  assert.equal(harness.launches.length, 0, "successor recovery cannot race an orphan with a bootstrap side turn");
+  assert.equal(handle.observedState(), "idle");
+  await assert.rejects(
+    () => adapter.controlTurn(handle, "Do this instead"),
+    /cannot start an unjournaled correction turn/,
+  );
+  assert.equal(harness.launches.length, 0);
+
+  const turn = adapter.runRoomTurn(handle, roomTurnRequest());
+  await flush();
+  assert.equal(argValue(harness.launches[0]!.args, "--resume"), "sess-cursor-existing");
+  harness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: "continued safely", session_id: "sess-cursor-existing",
+  });
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal((await turn).text, "continued safely");
+});
+
+test("daemon Cursor rejects missing supervisor coordinates and write authority before launching", async () => {
+  const missingHarness = createHarness();
+  const missingAdapter = supervisedAdapter(missingHarness);
+  await assert.rejects(
+    () => missingAdapter.spawn(daemonSpawnRequest({ supervisorSocketPath: undefined })),
+    /requires exact supervisor coordinates/,
+  );
+  assert.equal(missingHarness.launches.length, 0);
+
+  await assert.rejects(
+    () => missingAdapter.spawn(daemonSpawnRequest({
+      workAttemptId: "wa-write-profile",
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    })),
+    /only the read-only permission profile/,
+  );
+  assert.equal(missingHarness.launches.length, 0);
 });
 
 test("a successful result is TURN-terminal: the lane goes idle with NO claimed process and is not attempt-terminal", async () => {
@@ -250,6 +3543,19 @@ test("stop during a live turn orders SIGTERM before the observed terminal and es
   assert.equal(killed.terminalCause, "killed");
 });
 
+test("live Cursor stop never signals a recycled wrapper PID or process group", async () => {
+  const harness = createHarness({ dieOnSigterm: false });
+  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 10 });
+  const handle = await adapter.spawn(spawnRequest());
+  harness.identities.set(handle.pid!, "unrelated-recycled-birth");
+
+  const stopped = await adapter.stop(handle);
+
+  assert.deepEqual(harness.signals, []);
+  assert.equal(stopped.terminalCause, "stopped");
+  assert.equal(handle.pid, null);
+});
+
 test("stop while idle needs no signal: nothing is running, the attempt ends immediately as stopped", async () => {
   const harness = createHarness();
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies });
@@ -282,7 +3588,7 @@ test("poke delivers at the boundary: refused mid-turn, runs a --resume turn when
   await adapter.poke(handle, "next room event");
   assert.equal(harness.launches.length, 2, "boundary delivery runs a fresh per-turn child");
   const args = harness.launches[1]!.args;
-  assert.ok(args.join(" ").includes("--resume sess-cursor-1"), "the next turn continues the recorded session");
+  assert.ok(args.includes("--resume=sess-cursor-1"), "the next turn continues the recorded session without an option-alias ambiguity");
   assert.equal(args[args.length - 1], "next room event");
   assert.equal(handle.observedState(), "working");
   assert.equal(handle.pid, 5201, "the new turn's live pid is claimed while it runs");
@@ -306,7 +3612,7 @@ test("Cursor turn control fences only the live turn child and resumes the same s
   assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }]);
   assert.deepEqual(terminals, [], "turn-child interruption never becomes attempt-terminal evidence");
   assert.equal(harness.launches.length, 2);
-  assert.ok(harness.launches[1]!.args.join(" ").includes("--resume sess-cursor-1"));
+  assert.ok(harness.launches[1]!.args.includes("--resume=sess-cursor-1"));
   assert.equal(harness.launches[1]!.args.at(-1), "Apply the corrected direction.");
   assert.equal(handle.providerContinuationId, "sess-cursor-1");
   assert.equal(handle.observedState(), "working");
@@ -319,7 +3625,7 @@ test("resume presents the recorded session and a stranger session id mid-stream 
     { workAttemptId: "wa-cursor-1", providerContinuationId: "sess-old" },
     spawnRequest(),
   );
-  assert.ok(harness.launches[0]!.args.join(" ").includes("--resume sess-old"));
+  assert.ok(harness.launches[0]!.args.includes("--resume=sess-old"));
   assert.equal(handle.providerContinuationId, "sess-old", "the SAME session continues");
 
   // A stranger session id in the init itself must not silently become the
@@ -332,6 +3638,14 @@ test("resume presents the recorded session and a stranger session id mid-stream 
   ), /violated the session contract/);
   assert.deepEqual(wrong.signals.map((entry) => entry.signal), ["SIGTERM"], "the mismatched turn child was fenced");
   assert.equal(wrong.children[0]!.alive, false);
+
+  const aliasHarness = createHarness();
+  const aliasAdapter = new CursorProviderAdapter({ dependencies: aliasHarness.dependencies });
+  await assert.rejects(aliasAdapter.resume(
+    { workAttemptId: "wa-cursor-alias", providerContinuationId: "--yolo" },
+    spawnRequest({ workAttemptId: "wa-cursor-alias" }),
+  ), /not a valid Cursor session identity/);
+  assert.equal(aliasHarness.launches.length, 0, "an option-shaped session id never reaches argv");
 });
 
 test("startup gates on a valid init, not arbitrary stdout bytes (msg_1758)", async () => {
@@ -395,6 +3709,21 @@ test("an init that carries no session id is fenced immediately as a session-cont
   assert.equal(harness.children[0]!.alive, false);
 });
 
+test("a late Cursor protocol callback never signals a recycled wrapper PID", async () => {
+  const harness = createHarness({ silent: true, dieOnSigterm: false });
+  const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
+  const spawning = adapter.spawn(spawnRequest());
+  spawning.catch(() => {});
+  await flush();
+  harness.identities.set(5200, "unrelated-recycled-birth");
+
+  harness.children[0]!.emit({ type: "system", subtype: "init" });
+
+  assert.deepEqual(harness.signals, [], "the late stream callback is fenced by exact process birth");
+  harness.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
+  await assert.rejects(spawning, /violated the session contract/);
+});
+
 test("a child that exits before init rejects the launch and records terminal evidence", async () => {
   const harness = createHarness({ silent: true });
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
@@ -419,6 +3748,22 @@ test("a streaming-but-quiet turn stays working; a completely silent turn is fenc
   const silentAdapter = new CursorProviderAdapter({ dependencies: silent.dependencies, turnStartTimeoutMs: 40, stopGraceMs: 30 });
   await assert.rejects(silentAdapter.spawn(spawnRequest({ workAttemptId: "wa-cursor-3" })), /no stream-json init within the startup bound/);
   assert.equal(silent.children[0]!.alive, false, "the unobservable child was terminated and awaited");
+});
+
+test("post-release Cursor startup cleanup never signals a recycled wrapper PID", async () => {
+  const harness = createHarness({ silent: true, dieOnSigterm: false });
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    turnStartTimeoutMs: 30,
+    stopGraceMs: 10,
+  });
+  const spawning = adapter.spawn(spawnRequest());
+  spawning.catch(() => {});
+  await flush();
+  harness.identities.set(5200, "unrelated-recycled-birth");
+
+  await assert.rejects(spawning, /no stream-json init within the startup bound/);
+  assert.deepEqual(harness.signals, [], "timeout cleanup revalidates the exact process birth before TERM");
 });
 
 test("a recycled pid can neither authenticate an attach nor be signalled; unverifiable identity stays ambiguous", async () => {
@@ -447,22 +3792,57 @@ test("a recycled pid can neither authenticate an attach nor be signalled; unveri
   }), null);
 });
 
-test("attach to a live orphaned turn child fences it (TERM, identity recheck, KILL) before reporting absent", async () => {
+test("attach to a live checkpointed Cursor wrapper returns promptly without signalling or launching beside it", async () => {
   const harness = createHarness({ dieOnSigterm: false });
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
   const handle = await adapter.spawn(spawnRequest());
 
   const fresh = new CursorProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
-  const attached = await withLoopAlive(fresh.attach({
+  await assert.rejects(fresh.attach({
     workAttemptId: "wa-cursor-1",
     providerContinuationId: handle.providerContinuationId!,
     providerConnection: { kind: "cursor_cli", pid: 5200, processIdentity: birthIdentity(5200) },
-  }));
+  }), /still running/);
+  assert.deepEqual(harness.signals, [], "a successor never interrupts the exact checkpointed writer");
+  harness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: "durably completed", session_id: handle.providerContinuationId,
+  });
+  harness.identities.set(5200, null);
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  const attached = await fresh.attach({
+    workAttemptId: "wa-cursor-1",
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: { kind: "cursor_cli", pid: 5200, processIdentity: birthIdentity(5200) },
+  });
 
-  assert.equal(attached, null, "after fencing, the lane is provably absent for bounded resume");
-  assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"], "exact-child fence ordering");
-  assert.equal(harness.identities.get(5200), null, "the orphan is verifiably gone before recovery may proceed");
-  assert.equal(harness.launches.length, 1, "fencing never launches a second writer");
+  assert.equal(attached, null, "after natural terminal evidence, the lane is provably absent for bounded resume");
+  assert.deepEqual(harness.signals, []);
+  assert.equal(harness.launches.length, 1, "attach never launches a second writer");
+});
+
+test("exact-reference stop signals only the verified Cursor wrapper birth", async () => {
+  const harness = createHarness();
+  const fresh = new CursorProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 100 });
+  harness.identities.set(6100, birthIdentity(6100));
+  const exact = fresh.stopRef!({
+    workAttemptId: "wa-stop-ref",
+    providerContinuationId: "sess-stop-ref",
+    providerConnection: { kind: "cursor_cli", pid: 6100, processIdentity: birthIdentity(6100) },
+  });
+  await flush();
+  harness.identities.set(6100, null);
+  const terminal = await exact;
+  assert.equal(terminal.terminalCause, "stopped");
+  assert.deepEqual(harness.signals, [{ pid: 6100, signal: "SIGTERM" }]);
+
+  harness.identities.set(6200, "reused-birth");
+  await fresh.stopRef!({
+    workAttemptId: "wa-reused-ref",
+    providerContinuationId: "sess-reused-ref",
+    providerConnection: { kind: "cursor_cli", pid: 6200, processIdentity: "recorded-birth" },
+  });
+  assert.equal(harness.signals.some((entry) => entry.pid === 6200), false, "a recycled pid is never signalled");
 });
 
 test("a result line delivered after exit resolution still counts: the lane goes idle, never falsely terminal (msg_1780)", async () => {

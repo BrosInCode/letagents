@@ -250,7 +250,10 @@ function hasLiveProvider(entry: DesktopSupervisorManifestEntry): boolean {
 }
 
 function providerRuntimePresent(entry: DesktopSupervisorManifestEntry): boolean {
-  return Boolean(entry.providerPid)
+  const runtimeIdentityPresent = entry.provider === "cursor"
+    ? Boolean(entry.providerContinuationId)
+    : Boolean(entry.providerPid);
+  return runtimeIdentityPresent
     && entry.nativeLiveness.state !== "terminal"
     && entry.observedState !== "failed"
     && !providerRuntimeStopped(entry)

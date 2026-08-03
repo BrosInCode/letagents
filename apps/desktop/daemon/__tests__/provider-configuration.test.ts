@@ -62,6 +62,18 @@ test("provider configuration maps permission profiles to native launch authority
     force: true,
     sandbox: "enabled",
   });
+
+  assert.deepEqual(resolveProviderConfigurationSnapshot({
+    provider: "cursor",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "read_only",
+    launchPolicy: {},
+    configurationRevision: 6,
+  }).launchPolicy, {
+    mode: "ask",
+    force: false,
+  });
 });
 
 test("trusted profile selection replaces only native authority and preserves provider options", () => {
@@ -97,9 +109,14 @@ test("trusted profile selection replaces only native authority and preserves pro
     experimental: true, permission: { "*": "allow" },
   });
 
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 6,
+  }, { mode: "ask", force: false, sandbox: null }).launchPolicy, {
+    mode: "ask", force: false,
+  });
   assert.throws(() => deriveProviderConfigurationSnapshot({
-    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "sandboxed_write", configurationRevision: 6,
-  }, { mode: "ask", force: false, sandbox: null, workspace: "preserve-me" }), /does not currently support supervised room delivery/);
+    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 6,
+  }, { mode: "ask", force: false, workspace: "elsewhere" }), /unsupported native option 'workspace'/);
 });
 
 test("provider configuration rejects unsupported and conflicting native settings", () => {
@@ -142,6 +159,11 @@ test("supervised profile contract gates Claude prompt approval without changing 
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "full_access")?.status, "available");
+  const cursor = supervisedPermissionProfilesForProvider("cursor");
+  assert.equal(cursor.find((profile) => profile.id === "read_only")?.status, "available");
+  assert.equal(cursor.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.status, "gated");
+  assert.equal(cursor.find((profile) => profile.id === "full_access")?.status, "gated");
 });
 
 test("isolated supervised provider runtimes admit multiple agents in one room", () => {
@@ -149,5 +171,5 @@ test("isolated supervised provider runtimes admit multiple agents in one room", 
   assert.equal(providerSupportsConcurrentSupervisedAgents("claude-code"), true);
   assert.equal(providerSupportsConcurrentSupervisedAgents("claude"), true);
   assert.equal(providerSupportsConcurrentSupervisedAgents("open-model"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("cursor"), false);
+  assert.equal(providerSupportsConcurrentSupervisedAgents("cursor"), true);
 });

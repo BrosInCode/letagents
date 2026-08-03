@@ -214,6 +214,62 @@ test("provider router selects the native adapter by manifest provider and fences
   assert.equal(cursor.providerContinuationId, "continuation:cursor-attempt");
 });
 
+test("Cursor router ownership remains stable while its per-turn PID changes", async () => {
+  let pid: number | null = null;
+  let resolveTurn!: () => void;
+  let signalStarted!: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  const turnGate = new Promise<void>((resolve) => { resolveTurn = resolve; });
+  const calls: string[] = [];
+  const native = {
+    workAttemptId: "cursor-dynamic",
+    get pid() { return pid; },
+    providerContinuationId: "cursor-session",
+    get providerConnection() {
+      return { kind: "cursor_cli" as const, pid, processIdentity: pid === null ? null : `cursor:${pid}` };
+    },
+    observedState: () => pid === null ? "idle" as const : "working" as const,
+  };
+  const adapter: NativeProviderAdapter = {
+    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: false, turnControl: "restart_resume" }),
+    async spawn() { return native; },
+    async attach() { return native; },
+    async resume() { return native; },
+    async poke() {},
+    async controlTurn() { calls.push("control"); return { capability: "restart_resume", interrupted: true, resumed: false, state: "idle" }; },
+    async runRoomTurn() {
+      pid = 8181;
+      signalStarted();
+      await turnGate;
+      pid = null;
+      return { turnId: "cursor:dynamic", outcome: "reply", text: "done" };
+    },
+    async stop(handle) {
+      calls.push(`stop:${handle.pid}`);
+      return { endedAt: new Date(0).toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId };
+    },
+    onExit: () => () => {},
+    onStream: () => () => {},
+  };
+  const router = new ProviderActionPortRouter({ cursor: async () => adapter });
+  const handle = await router.spawn({
+    provider: "cursor", workAttemptId: "cursor-dynamic", roomId: "room", cwd: "/tmp/cursor",
+    launchPolicy: { mode: "ask", force: false }, agentDisplayName: "DynamicCursor",
+  });
+  assert.equal(handle.pid, null);
+  const turn = router.runRoomTurn(handle, {
+    inboxItemId: "inbox", sourceMessage: {}, activation: {}, actionId: "action",
+  });
+  await started;
+  assert.equal(handle.pid, 8181, "public handle proxies the native per-turn PID");
+  await router.controlTurn(handle);
+  await router.stop(handle);
+  assert.deepEqual(calls, ["control", "stop:8181"]);
+  resolveTurn();
+  await turn;
+  assert.equal(handle.pid, null);
+});
+
 test("provider router accepts a missing legacy connection only for the exact remembered work attempt and continuation", async () => {
   const calls: string[] = [];
   const adapter = fakeAdapter("codex", calls);
@@ -304,7 +360,7 @@ test("devMcpServerEntryFromEnv returns path only when both env gates are set", (
   );
 });
 
-test("daemon spawn includes devMcpServerEntryPath for codex when both env gates are set, omits it otherwise", async () => {
+test("daemon spawn gates the local MCP entry to supported providers and explicit development", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-dev-spawn-gate-"));
   const source = join(root, "source");
   await mkdir(source);
@@ -368,6 +424,34 @@ test("daemon spawn includes devMcpServerEntryPath for codex when both env gates 
       assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js", "codex + both gates: devMcpServerEntryPath must reach adapter");
     } finally {
       await daemon1.stop();
+    }
+
+    capturedSpawns.length = 0;
+    const cursorPaths = {
+      lockPath: join(root, "dc.lock"), socketPath: join(root, "dc.sock"), manifestPath: join(root, "manifestc.json"), auditPath: join(root, "auditc.jsonl"),
+      attemptsPath: join(root, "attemptsc.json"), attemptsRoot: join(root, "attemptsc"), workspaceRoot: root,
+    };
+    const cursorEntry: DaemonManifestEntry = {
+      ...codexEntry,
+      id: "dev_gate_cursor",
+      display_name: "CursorAgent",
+      provider: "cursor",
+      permission_profile_id: "read_only",
+      provider_launch_policy: { mode: "ask", force: false },
+    };
+    const cursorDaemon = new SupervisorDaemon(
+      cursorPaths,
+      "darwin",
+      new ProviderActionPortRouter({ cursor: async () => makeDevAdapter() }),
+      true,
+    );
+    try {
+      await cursorDaemon.start();
+      assert.equal((await daemonRequest(cursorPaths.socketPath, "manifest.put", { entry: cursorEntry })).ok, true);
+      await eventually(async () => ((await daemonRequest(cursorPaths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "Cursor dev-gate spawn");
+      assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, "/absolute/dist/mcp/server.js");
+    } finally {
+      await cursorDaemon.stop();
     }
 
     // Case 2: a stale generic Claude profile must be rejected before native dispatch.

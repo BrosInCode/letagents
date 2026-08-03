@@ -32,11 +32,16 @@ const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reaso
 /**
  * Admission may share a room/provider lane only when every durable entry owns
  * an independently addressable native runtime. Codex uses separate app-server
- * threads; Claude launches an isolated CLI/session per entry; Open Model
- * launches one isolated OpenCode server per entry.
+ * threads; Claude launches an isolated CLI/session per entry; Cursor uses a
+ * stable private profile and continuation per entry; Open Model launches one
+ * isolated OpenCode server per entry.
  */
 export function providerSupportsConcurrentSupervisedAgents(provider: string): boolean {
-  return provider === "codex" || provider === "claude-code" || provider === "claude" || provider === "open-model";
+  return provider === "codex"
+    || provider === "claude-code"
+    || provider === "claude"
+    || provider === "cursor"
+    || provider === "open-model";
 }
 
 /**
@@ -107,6 +112,11 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   }
 
   scalarCliPolicy(policy, "Cursor");
+  for (const key of Object.keys(policy)) {
+    if (!["mode", "force", "sandbox"].includes(key)) {
+      throw new Error(`Cursor supervised launch policy contains unsupported native option '${key}'.`);
+    }
+  }
   const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "sandboxed_write", "full_access"]);
   const authority = profile === "sandboxed_write"
     ? { mode: null, force: true, sandbox: "enabled" }
@@ -130,7 +140,10 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     launchPolicy: {
       ...rest,
       ...(authority.mode === null ? {} : { mode: authority.mode }),
-      ...(authority.force ? { force: true } : {}),
+      // Keep the negative authority explicit. The native adapter independently
+      // attests this durable snapshot before it turns `false` into an omitted
+      // CLI flag, so a missing field can never be mistaken for read-only.
+      force: authority.force,
       ...(authority.sandbox === null ? {} : { sandbox: authority.sandbox }),
     },
     configurationRevision: input.configurationRevision,

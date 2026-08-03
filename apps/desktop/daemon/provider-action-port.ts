@@ -146,6 +146,13 @@ export interface ProviderActionPort {
     beforeNativeDispatch?: () => Promise<void>;
     /** Durable exact turn checkpoint; completes after turn/start returns and before terminal observation. */
     checkpointTurnStarted?: (turnId: string) => Promise<void>;
+    /** Persist a provider's dynamic continuation/process identity before native work proceeds. */
+    checkpointProviderState?: (state: {
+      providerContinuationId: string;
+      providerConnection: ProviderActionConnectionRef;
+    }) => Promise<void>;
+    /** Synchronously marks that exact turn identity and process recovery state are durable. */
+    markDurableTurnStarted?: () => void;
     /** Release provider-local output only after this durable terminal checkpoint succeeds. */
     checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
     /** Detach this local observation without interrupting the native turn. */
@@ -156,6 +163,10 @@ export interface ProviderActionPort {
   /** Recover only this persisted native turn; implementations must never call turn/start. */
   recoverRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
     detachSignal?: AbortSignal;
+    checkpointProviderState?: (state: {
+      providerContinuationId: string;
+      providerConnection: ProviderActionConnectionRef;
+    }) => Promise<void>;
     checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
   }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: {
@@ -163,6 +174,8 @@ export interface ProviderActionPort {
     checkpointReplacement: (providerContinuationId: string) => Promise<void>;
     detachSignal?: AbortSignal;
   }): Promise<ProviderContinuationRepairResult>;
+  /** Stop an exact durable process birth without first attaching its transport. */
+  stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   stop(handle: ProviderActionHandle, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal>;
   onExit(handle: ProviderActionHandle, listener: (terminal: ProviderActionTerminal) => void): Promise<() => void>;
   onStream?(handle: ProviderActionHandle, listener: (event: ProviderActionStreamEvent) => void): Promise<() => void>;

@@ -18,8 +18,8 @@
     },
     {
       "name": "brace-expansion",
-      "version": "5.0.8",
-      "reason": "Exact patched release required to remediate GHSA-mh99-v99m-4gvg (no patched release exists on any older major line) before the normal cooldown expires; registry signatures and the full test suite are verified in CI. Accepted by maintainer merge of PR #842 on 2026-07-25; remove after 2026-07-30 when the cooldown is naturally satisfied."
+      "version": "5.0.9",
+      "reason": "Exact patched release required to remediate GHSA-rgw5-rvv9-x895 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-06 when the cooldown is naturally satisfied."
     },
     {
       "name": "@typescript-eslint/parser",

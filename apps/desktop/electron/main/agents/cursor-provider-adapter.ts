@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Server as HttpServer } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { tmpdir } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   buildCodexStartPrompt,
@@ -16,6 +21,10 @@ import {
   type ProviderContinuationRef,
   type ProviderHandle,
   type ProviderObservedState,
+  type ProviderRoomTurnOptions,
+  type ProviderRoomTurnRecoveryRequest,
+  type ProviderRoomTurnRequest,
+  type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
   type ProviderTurnControlResult,
@@ -35,6 +44,20 @@ import {
   sameProcessBirthIdentity,
   type ProviderProcessExit,
 } from "./provider-evidence.js";
+import { apiUrl as desktopApiUrl } from "../paths.js";
+import {
+  bindCursorSupervisedIdentity,
+  prepareCursorSupervisedProfile,
+  type CursorPersonalIdentity,
+  type CursorManagedProfile,
+} from "./cursor-managed-profile.js";
+import {
+  assertCursorSupervisedMcpAuthority,
+  cursorMcpInspectionEnv,
+  runCursorSandboxedInspection,
+} from "./cursor-mcp-authority.js";
+import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
+import { buildCursorChildEnv } from "./cursor-runner.js";
 
 // P2b (plan v10 §4.8/§6, task_38, matrix row in §4.8): Cursor through its
 // native `cursor-agent` harness. Unlike Codex (durable app-server) and Claude
@@ -50,17 +73,43 @@ import {
 //   - a successful turn result is TURN-terminal, never ATTEMPT-terminal; the
 //     attempt ends only via stop() or a turn that dies without its result.
 //
-// No permission/credential logic lives here: the Add Agent launch policy is
-// rendered as CLI flags purely syntactically and the child sees the user's own
-// environment (v10 §3 — see cursorCliEnv below for the one open spike cell).
+// For daemon-owned turns this boundary also attests the read-only native policy,
+// reseals an attempt-private MCP profile, and builds a narrow child environment.
+// Generic interactive Cursor lanes retain their established local behavior.
 
 const TURN_START_TIMEOUT_MS = 30_000;
+const MAX_DURABLE_TURN_STREAM_BYTES = 8 * 1024 * 1024;
+const MAX_DURABLE_TURN_TERMINAL_BYTES = 1024 * 1024;
+const MAX_CURSOR_STREAM_LINE_BYTES = 512 * 1024;
+const MAX_CURSOR_STREAM_EVENTS = 4_096;
+const MAX_CURSOR_SESSION_ID_LENGTH = 256;
+const CURSOR_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+// The bridge is packaged locally; a registry check must never wait on network
+// installation. Keep enough room for Cursor's native MCP handshake on a busy
+// machine without turning a broken local runtime into a long launch stall.
+const CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS = 15_000;
+const CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS = 15_000;
+// Syntactically JWT-shaped because current Cursor decodes `exp` before it
+// honors the documented argv override. The payload is public, far-future, and
+// deliberately unsigned/non-secret; trusted proxies replace it upstream.
+const CURSOR_SUPERVISED_PROXY_PLACEHOLDER_TOKEN = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDAsInN1YiI6ImxldGFnZW50cy1ub24tc2VjcmV0LXByb3h5LXBsYWNlaG9sZGVyIn0.placeholder";
+const CURSOR_SUPERVISED_AGENT_ENDPOINT = "https://api2.cursor.sh";
+const CURSOR_SUPERVISED_CONTROL_PLANE_PATHS = [
+  "/aiserver.v1.DashboardService/GetMe",
+  "/aiserver.v1.DashboardService/GetUserPrivacyMode",
+  "/aiserver.v1.ServerConfigService/GetServerConfig",
+  "/aiserver.v1.AiService/AvailableModels",
+  "/aiserver.v1.AiService/GetUsableModels",
+  "/aiserver.v1.AiService/GetDefaultModelForCli",
+] as const;
 
 type CursorStreamMessage = Record<string, unknown> & {
   type?: unknown;
   subtype?: unknown;
   session_id?: unknown;
   is_error?: unknown;
+  result?: unknown;
+  request_id?: unknown;
 };
 
 export interface CursorCliChild {
@@ -70,13 +119,42 @@ export interface CursorCliChild {
   onLine(listener: (line: string) => void): () => void;
   /** Bounded stderr tail — the provider-quota signature lives here (msg_1708). */
   stderrTail(): string;
+  /** Release a prepared wrapper only after its exact process identity is durable. */
+  release(): void;
+  /** Production wrappers resolve only after their journal and IPC handlers exist. */
+  prepared?: Promise<void>;
+  /** The wrapper, not its parent, must prove its whole native process group is gone. */
+  ownsDescendantReaping?: boolean;
+  /** Production wrappers require their containment journal before a live result is trusted. */
+  requiresDurableTerminalEvidence?: boolean;
 }
 
 export interface CursorProviderAdapterDependencies {
-  launchTurn(input: { cursorBin: string; args: string[]; cwd: string }): CursorCliChild;
+  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
+  attestSupervisedMcp(input: {
+    cursorBin: string;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    writableProfileRoot: string;
+    requiredReadableRoots?: string[];
+    expectedServerName?: string;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<void>;
+  attestPersonalIdentity(input: {
+    cursorBin: string;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    writableProfileRoot: string;
+    requiredReadableRoots?: string[];
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<CursorPersonalIdentity>;
+  bindPersonalIdentity(profile: CursorManagedProfile, identity: CursorPersonalIdentity): void;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
+  prepareTurnState(path: string): void;
   now(): string;
 }
 
@@ -89,10 +167,50 @@ export interface CursorProviderAdapterOptions {
   turnStartTimeoutMs?: number;
   /** SIGTERM → SIGKILL escalation window for stop() and the attach-path fence. */
   stopGraceMs?: number;
+  /** Injectable so adapter tests never touch the user's real Cursor profile. */
+  supervisedProfileFactory?: (input: {
+    workAttemptId: string;
+    cwd: string;
+    /** Disposable root for non-authoritative MCP inspection. */
+    profileRoot?: string;
+    /** Inspection profiles deliberately omit Cursor login credentials. */
+    includeAuth?: boolean;
+    /** Auth-only source already refreshed by a live identity attestation. */
+    authSourceHomeDir?: string;
+    identityAttestationOnly?: boolean;
+    attestedPersonalIdentity?: CursorPersonalIdentity;
+    exposeLoginCredentials?: boolean;
+    /** Inspection profiles expose only an inert local MCP readiness probe. */
+    inspectionOnly?: boolean;
+    /** Development-only runtime entry already gated by the daemon. */
+    devMcpServerEntryPath?: string;
+    /** Credentialless validation runs outside the real repository. */
+    mcpWorkingDirectory?: string;
+    /** Exact bounded-turn coordinates explicitly written into final MCP config. */
+    supervisorMcpEnv?: Readonly<Record<string, string>>;
+    /** Per-turn stdio connector owned by the durable wrapper. */
+    mcpConnectorSocketPath?: string;
+  }) => CursorManagedProfile;
+}
+
+export class CursorIdentityAuthRequiredError extends Error {
+  constructor() {
+    super("Cursor Agent needs sign-in before its live identity can be supervised.");
+    this.name = "CursorIdentityAuthRequiredError";
+  }
+}
+
+export class CursorTeamManagedIdentityError extends Error {
+  constructor() {
+    super(
+      "Team-managed Cursor accounts are not supported for supervised agents because Cursor team policy cannot be safely mediated yet.",
+    );
+    this.name = "CursorTeamManagedIdentityError";
+  }
 }
 
 const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
-  deliveryModes: ["mcp_polling"],
+  deliveryModes: ["mcp_polling", "daemon_inbox"],
   // `--resume <session_id>` is the documented continuation across per-turn
   // children (the legacy engine already relies on it); the adapter asserts the
   // session identity echo per turn. Subject to TrailDelta's task_38 spike cell.
@@ -102,11 +220,11 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   // boundary (immediately when idle) and refuses mid-turn, so the reconciler's
   // stuck-agent poke rung must stay off.
   midTurnInjection: false,
-  // Cursor applies a correction through its own adapter path: controlTurn stops
-  // the live child and calls beginTurn to resume the same session with the
-  // correction. It must NOT be routed into daemon stop-then-resend (its
-  // mcp_polling lane has no daemon inbox pump to consume a synthetic row).
-  midTurnCorrection: true,
+  // A legacy polling lane can still call controlTurn directly with a
+  // correction, but the negotiated supervised capability is false: daemon
+  // inbox corrections must use the durable stop-then-resend row rather than
+  // start an unjournaled side turn.
+  midTurnCorrection: false,
   // Every turn's stream-json output is published as bounded/redacted evidence.
   transcriptAccess: true,
   permissionPromptBridging: false,
@@ -116,38 +234,50 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   turnControl: "restart_resume",
 };
 
-// Flags the adapter owns. Everything else in the launch policy is the user's
-// native CLI configuration, forwarded verbatim (no reinterpretation — v10 §3).
-const RESERVED_POLICY_KEYS = new Set([
-  "p",
-  "print",
-  "outputFormat",
-  "output-format",
-  "resume",
-  "workspace",
-  "cwd",
-  // Headless operation requires the workspace-trust prompt suppressed; the
-  // adapter owns that flag (same as the legacy runner). Workspace trust is
-  // launch mechanics, not a permission mode — the policy's mode/force/sandbox
-  // flags still pass through verbatim.
-  "trust",
-]);
+// Provider configuration normalizes Cursor permission authority into exactly
+// these three native flags. Fail closed on everything else: Cursor has aliases
+// such as --yolo/--continue and path/plugin flags that can silently override
+// the supervised workspace, sandbox, or continuation boundary.
+const ALLOWED_POLICY_KEYS = new Set(["mode", "force", "sandbox"]);
+
+export const CURSOR_NO_ROOM_REPLY_SENTINEL = "LETAGENTS_NO_ROOM_REPLY";
+const CURSOR_PENDING_CONTINUATION_PREFIX = "cursor-pending:";
+const CURSOR_MCP_CONNECTOR_PARENT = "/tmp";
+const CURSOR_MCP_CONNECTOR_ROOT_PATTERN = `^${escapeCursorSandboxRegex(CURSOR_MCP_CONNECTOR_PARENT)}/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`;
+
+export function boundedCursorRoomTurnPrompt(
+  request: ProviderRoomTurnRequest,
+  turnId: string,
+): string {
+  return [
+    "You are handling one daemon-owned room inbox item in an exact bounded turn.",
+    `Your durable charter: ${request.charter?.trim() || "Help thoughtfully within the room."}`,
+    "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
+    "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
+    "Answer the activating message in your final response; do not send that same reply with a message tool.",
+    `If no response should be published, return exactly ${CURSOR_NO_ROOM_REPLY_SENTINEL} with no other text.`,
+    `Turn id: ${turnId}`,
+    `Inbox item: ${request.inboxItemId}`,
+    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
+    `Source message: ${JSON.stringify(request.sourceMessage)}`,
+    `Activation: ${JSON.stringify(request.activation)}`,
+  ].join("\n");
+}
 
 function camelToKebab(key: string): string {
   return key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
 }
 
 /**
- * Mechanically render the opaque Add Agent launch policy as CLI flags —
+ * Render the attested Add Agent permission policy as CLI flags —
  * `{ mode: "ask", force: true, sandbox: "enabled" }` becomes
  * `--mode ask --force --sandbox enabled`. Purely syntactic; values are never
- * mapped, renamed, or filtered beyond the adapter-owned reserved flags.
+ * mapped or renamed. Unknown flags fail closed because Cursor exposes authority
+ * aliases and alternate workspace/plugin roots outside these three keys.
  *
- * Note (msg_1780 spike): the adapter injects no --model, so a policy that
- * omits it inherits the ACCOUNT default model — which can surface as a
- * provider_quota terminal on limited accounts. That is the user's native CLI
- * behavior, deliberately not second-guessed here; the Add Agent policy is
- * where a model belongs.
+ * Model is adapter-owned because it is separately attested in the durable
+ * provider configuration snapshot. Allowing launchPolicy.model as well would
+ * create duplicate flags with provider-version-dependent precedence.
  */
 export function cursorLaunchPolicyArgs(value: unknown): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -156,8 +286,8 @@ export function cursorLaunchPolicyArgs(value: unknown): string[] {
   const policy = value as Record<string, unknown>;
   const args: string[] = [];
   for (const [key, entry] of Object.entries(policy)) {
-    if (RESERVED_POLICY_KEYS.has(key)) {
-      throw new Error(`Cursor launchPolicy cannot override reserved flag '${key}'.`);
+    if (!ALLOWED_POLICY_KEYS.has(key)) {
+      throw new Error(`Cursor launchPolicy contains unsupported or adapter-owned flag '${key}'.`);
     }
     if (entry === undefined || entry === null || entry === false) continue;
     const flag = `--${camelToKebab(key)}`;
@@ -186,6 +316,77 @@ export function cursorCliEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proc
   return { ...base };
 }
 
+function cursorDaemonChildEnv(
+  profileEnv: Record<string, string>,
+): NodeJS.ProcessEnv {
+  // Supervised children receive the established Cursor runtime allowlist only;
+  // Electron often carries unrelated GitHub/cloud/npm/database credentials.
+  const env = buildCursorChildEnv(profileEnv);
+  // A bounded provider turn borrows only the daemon's exact-generation tool
+  // authority. Ambient desktop owner/fixed-worker credentials and stale
+  // supervisor coordinates must never leak into the Cursor child or its MCPs.
+  for (const key of Object.keys(env)) {
+    const normalizedKey = key.toUpperCase();
+    if (normalizedKey === "LETAGENTS_TOKEN"
+      || normalizedKey === "LETAGENTS_AGENT_SESSION_BEARER"
+      || normalizedKey === "CURSOR_API_KEY"
+      || normalizedKey === "CURSOR_AUTH_TOKEN"
+      || normalizedKey === "NODE_EXTRA_CA_CERTS"
+      || normalizedKey === "SSL_CERT_DIR"
+      || normalizedKey === "SSL_CERT_FILE"
+      || normalizedKey.startsWith("LETAGENTS_SUPERVISOR_")
+      || normalizedKey === "LETAGENTS_SUPERVISED_BOUNDED_TURNS"
+      || normalizedKey === "LETAGENTS_EXECUTION_PROFILE"
+      || normalizedKey === "LETAGENTS_PERMISSION_PROFILE_ID") {
+      delete env[key];
+    }
+  }
+  return env;
+}
+
+function cursorSupervisorMcpEnv(
+  req: ProviderSpawnRequest,
+  providerTurnId?: string | null,
+): Record<string, string> {
+  return {
+    LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId!,
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath!,
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId!,
+    LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+    ...(providerTurnId ? { LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: providerTurnId } : {}),
+    ...(req.supervisorWorkerSession ? {
+      LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: req.supervisorWorkerSession.agentSessionId,
+      LETAGENTS_SUPERVISOR_ROOM_ID: req.roomId,
+      ...(req.agentDisplayName?.trim()
+        ? { LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: req.agentDisplayName.trim() }
+        : {}),
+    } : {}),
+    LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    ...(req.permissionProfileId
+      ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId }
+      : {}),
+  };
+}
+
+function throwIfCursorTurnLaunchAborted(signal?: AbortSignal, roomTurnId?: string | null): void {
+  if (signal?.aborted) {
+    throw new CursorRoomTurnNotDispatchedError(
+      "Cursor turn preparation was interrupted before native dispatch.",
+      roomTurnId,
+    );
+  }
+}
+
+function cursorTurnLaunchAbort(signal?: AbortSignal): Promise<"aborted"> {
+  if (!signal) return new Promise(() => {});
+  if (signal.aborted) return Promise.resolve("aborted");
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+  });
+}
+
 function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind {
   const type = typeof message.type === "string" ? message.type : "";
   if (type === "assistant") return "text_delta";
@@ -204,37 +405,1614 @@ function streamMethod(message: CursorStreamMessage): string {
 }
 
 function sessionIdOf(message: CursorStreamMessage): string | null {
-  return typeof message.session_id === "string" && message.session_id.trim()
-    ? message.session_id.trim()
+  if (typeof message.session_id !== "string") return null;
+  const sessionId = message.session_id.trim();
+  return sessionId
+    && sessionId.length <= MAX_CURSOR_SESSION_ID_LENGTH
+    && CURSOR_SESSION_ID_PATTERN.test(sessionId)
+    ? sessionId
     : null;
 }
 
-function defaultLaunchTurn(input: { cursorBin: string; args: string[]; cwd: string }): CursorCliChild {
-  const child = spawn(input.cursorBin, input.args, {
+function requireCursorSessionId(value: string, label: string): string {
+  const sessionId = value.trim();
+  if (sessionId.length > MAX_CURSOR_SESSION_ID_LENGTH
+    || !CURSOR_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new Error(`${label} is not a valid Cursor session identity.`);
+  }
+  return sessionId;
+}
+
+function isExactCursorLoopbackTestOrigin(value: string): boolean {
+  const match = /^http:\/\/127[.]0[.]0[.]1:([1-9][0-9]{0,4})$/.exec(value);
+  if (!match) return false;
+  const port = Number(match[1]);
+  return Number.isSafeInteger(port) && port <= 65_535;
+}
+
+export function defaultLaunchTurn(input: {
+  cursorBin: string;
+  args: string[];
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  deferStart?: boolean;
+  statePath?: string;
+  deniedReadPaths?: string[];
+  deniedReadSubpaths?: string[];
+  deniedReadMetadataPaths?: string[];
+  deniedReadWriteRegexes?: string[];
+  deniedWritePaths?: string[];
+  deniedWriteStructuralPaths?: string[];
+  deniedWriteSubpaths?: string[];
+  allowedWriteSubpaths?: string[];
+  allowedReadSubpaths?: string[];
+  allowedNetworkUnixSockets?: string[];
+  mcpConnectorSocketPath?: string;
+  mcpRuntimeEntryPath?: string;
+  mcpRuntimeCwd?: string;
+  mcpRuntimeEnv?: Readonly<Record<string, string>>;
+  providerAuthorization?: string;
+  restrictRemoteAuthority?: boolean;
+  /** Injectable only through direct unit tests; adapter production never sets it. */
+  testAgentUpstreamEndpoint?: string;
+  /** Injectable only through direct unit tests; adapter production never sets it. */
+  testControlPlaneUpstreamEndpoint?: string;
+  /** Injectable only through direct unit tests; adapter production never sets it. */
+  testStartupBarrier?: {
+    path: string;
+    stage: "mcp_listen" | "authority_listen" | "agent_listen";
+  };
+}): CursorCliChild {
+  const deniedReadPaths = validateCursorSandboxPaths(input.deniedReadPaths);
+  const deniedReadSubpaths = validateCursorSandboxPaths(input.deniedReadSubpaths);
+  const deniedReadMetadataPaths = validateCursorSandboxPaths(input.deniedReadMetadataPaths);
+  const deniedReadWriteRegexes = validateCursorSandboxRegexes(input.deniedReadWriteRegexes);
+  const deniedWritePaths = validateCursorSandboxPaths(input.deniedWritePaths);
+  const deniedWriteStructuralPaths = validateCursorSandboxPaths(input.deniedWriteStructuralPaths);
+  const deniedWriteSubpaths = validateCursorSandboxPaths(input.deniedWriteSubpaths);
+  const allowedWriteSubpaths = validateCursorSandboxPaths(input.allowedWriteSubpaths);
+  const allowedReadSubpaths = input.allowedReadSubpaths?.length
+    ? validateCursorSandboxPaths([
+      ...input.allowedReadSubpaths,
+      ...cursorSandboxRuntimeReadSubpaths(input.cursorBin, input.cwd, input.env ?? process.env),
+    ])
+    : [];
+  const allowedNetworkUnixSockets = validateCursorSandboxPaths(
+    (input.allowedNetworkUnixSockets ?? []).flatMap(cursorSandboxPathVariants),
+  );
+  if (input.statePath) {
+    const streamPaths = validateCursorSandboxPaths(
+      cursorSandboxPathVariants(input.statePath),
+    );
+    const terminalPaths = validateCursorSandboxPaths(
+      cursorSandboxPathVariants(`${input.statePath}.terminal.json`),
+    );
+    deniedReadPaths.push(...streamPaths, ...terminalPaths);
+    deniedWritePaths.push(...streamPaths, ...terminalPaths);
+    deniedReadWriteRegexes.push(...terminalPaths.map((terminalPath) =>
+      `^${escapeCursorSandboxRegex(terminalPath)}[.]tmp-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`
+    ));
+  }
+  const restrictRemoteAuthority = input.restrictRemoteAuthority === true;
+  const providerAuthorization = input.providerAuthorization;
+  const agentUpstreamEndpoint = input.testAgentUpstreamEndpoint ?? CURSOR_SUPERVISED_AGENT_ENDPOINT;
+  const controlPlaneUpstreamEndpoint = input.testControlPlaneUpstreamEndpoint ?? "https://api2.cursor.sh";
+  if (agentUpstreamEndpoint !== CURSOR_SUPERVISED_AGENT_ENDPOINT
+    && !isExactCursorLoopbackTestOrigin(agentUpstreamEndpoint)) {
+    throw new Error("Cursor's supervised agent upstream test seam requires an exact loopback HTTP/2 origin.");
+  }
+  if (controlPlaneUpstreamEndpoint !== "https://api2.cursor.sh"
+    && !isExactCursorLoopbackTestOrigin(controlPlaneUpstreamEndpoint)) {
+    throw new Error("Cursor's supervised control-plane upstream test seam requires an exact loopback HTTP origin.");
+  }
+  const testStartupBarrier = input.testStartupBarrier;
+  if (testStartupBarrier && (
+    !restrictRemoteAuthority
+    || !input.testAgentUpstreamEndpoint
+    || !input.testControlPlaneUpstreamEndpoint
+    || !isExactCursorLoopbackTestOrigin(input.testAgentUpstreamEndpoint)
+    || !isExactCursorLoopbackTestOrigin(input.testControlPlaneUpstreamEndpoint)
+    || !/^(?:\/private)?\/tmp\/letagents-cursor-startup-barrier-[A-Za-z0-9]{6,64}\/(?:mcp_listen|authority_listen|agent_listen)$/.test(testStartupBarrier.path)
+    || !testStartupBarrier.path.endsWith(`/${testStartupBarrier.stage}`)
+  )) {
+    throw new Error("Cursor's startup barrier is restricted to exact loopback unit tests.");
+  }
+  if (restrictRemoteAuthority && (!providerAuthorization
+    || !/^Bearer [^\s\0]{1,16384}$/.test(providerAuthorization))) {
+    throw new Error("Supervised Cursor requires an in-memory live provider authorization proof.");
+  }
+  if (restrictRemoteAuthority && (!input.mcpConnectorSocketPath
+    || !input.mcpRuntimeEntryPath
+    || !input.mcpRuntimeCwd
+    || !input.mcpRuntimeEnv)) {
+    throw new Error("Supervised Cursor requires a wrapper-owned MCP connector boundary.");
+  }
+  if (restrictRemoteAuthority
+    && (allowedWriteSubpaths.length === 0 || allowedReadSubpaths.length === 0)) {
+    throw new Error("Supervised Cursor requires non-empty read and write sandbox allow-lists.");
+  }
+  if (restrictRemoteAuthority && input.args.some((arg) =>
+    arg === "-e"
+      || arg === "--endpoint"
+      || arg.startsWith("--endpoint=")
+      || arg === "--agent-endpoint"
+      || arg.startsWith("--agent-endpoint=")
+      || arg === "--auth-token"
+      || arg.startsWith("--auth-token=")
+      || arg === "--http-version"
+      || arg.startsWith("--http-version="))) {
+    throw new Error("Supervised Cursor endpoint and authentication flags are adapter-owned.");
+  }
+  // The wrapper is the durable process identity. It does not launch Cursor
+  // until release(), allowing the daemon to checkpoint PID + birth identity
+  // before any model/tool side effect. It also mirrors the exact stream and a
+  // terminal record to an owner-private file for restart/handoff recovery.
+const wrapperSource = String.raw`
+const { appendFileSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } = require("node:fs");
+const { spawn, spawnSync } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
+const http = require("node:http");
+const http2 = require("node:http2");
+const https = require("node:https");
+const net = require("node:net");
+const path = require("node:path");
+const { StringDecoder } = require("node:string_decoder");
+const [bin, statePath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
+const deniedReadPaths = JSON.parse(deniedReadPathsJson || "[]");
+const deniedReadSubpaths = JSON.parse(deniedReadSubpathsJson || "[]");
+const deniedReadMetadataPaths = JSON.parse(deniedReadMetadataPathsJson || "[]");
+const deniedReadWriteRegexes = JSON.parse(deniedReadWriteRegexesJson || "[]");
+const deniedWritePaths = JSON.parse(deniedWritePathsJson || "[]");
+const deniedWriteStructuralPaths = JSON.parse(deniedWriteStructuralPathsJson || "[]");
+const deniedWriteSubpaths = JSON.parse(deniedWriteSubpathsJson || "[]");
+const allowedWriteSubpaths = JSON.parse(allowedWriteSubpathsJson || "[]");
+const allowedReadSubpaths = JSON.parse(allowedReadSubpathsJson || "[]");
+const allowedNetworkUnixSockets = JSON.parse(allowedNetworkUnixSocketsJson || "[]");
+const restrictRemoteAuthority = restrictRemoteAuthorityValue === "1";
+let providerAuthorization = "";
+const publicAuthPlaceholder = ${JSON.stringify(CURSOR_SUPERVISED_PROXY_PLACEHOLDER_TOKEN)};
+const supervisedAgentEndpoint = ${JSON.stringify(agentUpstreamEndpoint)};
+const supervisedControlPlaneEndpoint = ${JSON.stringify(controlPlaneUpstreamEndpoint)};
+const supervisedControlPlanePaths = new Set(${JSON.stringify(CURSOR_SUPERVISED_CONTROL_PLANE_PATHS)});
+const deniedDelegatingExecutables = ${JSON.stringify([
+  "/bin/launchctl", "/bin/kill",
+  "/usr/bin/afplay", "/usr/bin/automator", "/usr/bin/defaults", "/usr/bin/killall",
+  "/usr/bin/mdfind", "/usr/bin/mdls", "/usr/bin/open", "/usr/bin/osascript",
+  "/usr/bin/pbcopy", "/usr/bin/pbpaste", "/usr/bin/qlmanage", "/usr/bin/say",
+  "/usr/bin/screencapture", "/usr/bin/security", "/usr/bin/shortcuts", "/usr/bin/xcrun",
+  "/usr/sbin/diskutil", "/usr/sbin/networksetup", "/usr/sbin/scutil",
+])};
+const mcpConnectorRootPattern = new RegExp(${JSON.stringify(CURSOR_MCP_CONNECTOR_ROOT_PATTERN)});
+let started = false;
+let startPromise = null;
+let native = null;
+let authorityProxy = null;
+let agentProxy = null;
+let mcpConnectorServer = null;
+let mcpConnectorSocket = null;
+let mcpRuntime = null;
+let mcpRuntimeEnv = null;
+let mcpConnectorAdmitted = false;
+const agentProxySessions = new Set();
+const agentProxySockets = new Set();
+const agentProxyInternalServers = new Set();
+const agentProxyUpstreamSessions = new Set();
+const agentProxyUpstreamStreams = new Set();
+const authorityProxySockets = new Set();
+const authorityProxyUpstreams = new Set();
+let finalizing = false;
+let authorityRetiring = false;
+let authorityRetirementPromise = null;
+let runtimeDataRetirementResult = null;
+let persistedBytes = 0;
+let exitEvidence = null;
+let exitCode = 1;
+let reapPromise = null;
+let evidenceDrainTimer = null;
+let pendingLine = "";
+let droppingOversizedLine = false;
+let sawInit = false;
+let initSnapshot = null;
+let resultSnapshot = null;
+let sessionContractValid = true;
+let streamContractComplete = true;
+let observedSessionId = null;
+let protocolErrorEmitted = false;
+let streamBudgetExceeded = false;
+let stderrBudgetExceeded = false;
+let forwardedStreamBytes = 0;
+let forwardedStreamEvents = 0;
+let forwardedStderrBytes = 0;
+const decoder = new StringDecoder("utf8");
+let stateFd = statePath ? openSync(statePath, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW) : null;
+const maxPersistedBytes = ${MAX_DURABLE_TURN_STREAM_BYTES};
+const maxLineBytes = ${MAX_CURSOR_STREAM_LINE_BYTES};
+const maxStreamEvents = ${MAX_CURSOR_STREAM_EVENTS};
+const maxStderrBytes = 256 * 1024;
+const maxSessionLength = ${MAX_CURSOR_SESSION_ID_LENGTH};
+const sessionPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const terminalPath = statePath ? statePath + ".terminal.json" : "";
+const resumeArgument = args.find((arg) => typeof arg === "string" && arg.startsWith("--resume="));
+const expectedSessionId = resumeArgument ? resumeArgument.slice("--resume=".length) : null;
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitAtTestStartupBarrier(stage) {
+  if (!testStartupBarrierPath || testStartupBarrierStage !== stage) return;
+  mkdirSync(testStartupBarrierPath, { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(testStartupBarrierPath, "ready"), stage + "\n", { mode: 0o600 });
+  const releasePath = path.join(testStartupBarrierPath, "release");
+  while (!finalizing && !authorityRetiring && !existsSync(releasePath)) await wait(5);
+}
+function forwardBoundedStderr(source, label) {
+  source.on("data", (value) => {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    if (stderrBudgetExceeded) return;
+    const remaining = Math.max(0, maxStderrBytes - forwardedStderrBytes);
+    const bounded = chunk.subarray(0, remaining);
+    forwardedStderrBytes += bounded.length;
+    if (bounded.length && !process.stderr.write(bounded)) {
+      source.pause();
+      process.stderr.once("drain", () => source.resume());
+    }
+    if (chunk.length <= remaining) return;
+    stderrBudgetExceeded = true;
+    const detail = label + " exceeded the supervised stderr byte budget.";
+    if (!exitEvidence) exitEvidence = { type: "error", error: detail };
+    exitCode = 1;
+    if (native) void beginFatalReaping();
+    else void finishNotStarted(detail);
+  });
+}
+function terminal(value) {
+  if (!terminalPath) return;
+  const tmp = terminalPath + ".tmp-" + randomUUID();
+  writeFileSync(tmp, JSON.stringify(value) + "\n", { mode: 0o600, flag: "wx" });
+  renameSync(tmp, terminalPath);
+}
+function validSession(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maxSessionLength
+    && sessionPattern.test(value);
+}
+function emitProtocolError(detail) {
+  if (protocolErrorEmitted) return;
+  protocolErrorEmitted = true;
+  process.stdout.write(JSON.stringify({
+    type: "letagents_stream_contract_error",
+    session_id: "",
+    error: detail || "Cursor violated the bounded stream-json contract.",
+  }) + "\n");
+}
+function exceedStreamBudget(detail) {
+  if (streamBudgetExceeded) return;
+  streamBudgetExceeded = true;
+  streamContractComplete = false;
+  pendingLine = "";
+  emitProtocolError(detail);
+  void beginFatalReaping();
+}
+function inspectLine(line) {
+  if (streamBudgetExceeded) return;
+  const lineBytes = Buffer.byteLength(line, "utf8");
+  if (lineBytes > maxLineBytes) {
+    streamContractComplete = false;
+    emitProtocolError("Cursor emitted an oversized stream-json line.");
+    return;
+  }
+  if (forwardedStreamEvents >= maxStreamEvents) {
+    exceedStreamBudget("Cursor exceeded the bounded stream-json event budget.");
+    return;
+  }
+  if (forwardedStreamBytes + lineBytes + 1 > maxPersistedBytes) {
+    exceedStreamBudget("Cursor exceeded the bounded aggregate stream-json byte budget.");
+    return;
+  }
+  forwardedStreamEvents += 1;
+  forwardedStreamBytes += lineBytes + 1;
+  process.stdout.write(line + "\n");
+  const trimmed = line.trim();
+  if (!trimmed || !trimmed.startsWith("{")) return;
+  let message;
+  try { message = JSON.parse(trimmed); }
+  catch {
+    streamContractComplete = false;
+    emitProtocolError("Cursor emitted malformed stream-json output.");
+    return;
+  }
+  if (!message || typeof message !== "object" || Array.isArray(message)) return;
+  const hasSession = Object.prototype.hasOwnProperty.call(message, "session_id");
+  const sessionId = validSession(message.session_id) ? message.session_id : null;
+  if (hasSession && !sessionId) sessionContractValid = false;
+  if (sessionId) {
+    const contractSession = expectedSessionId || observedSessionId;
+    if (contractSession && sessionId !== contractSession) sessionContractValid = false;
+  }
+  if (message.type === "system" && message.subtype === "init") {
+    if (!sessionId) sessionContractValid = false;
+    else {
+      if (observedSessionId && observedSessionId !== sessionId) sessionContractValid = false;
+      observedSessionId = sessionId;
+      sawInit = true;
+      initSnapshot = { type: "system", subtype: "init", session_id: sessionId };
+    }
+  }
+  if (message.type === "result") {
+    if (!sawInit) {
+      sessionContractValid = false;
+      emitProtocolError("Cursor emitted a result before its verified init event.");
+    }
+    const result = typeof message.result === "string" ? message.result : null;
+    if (result !== null && Buffer.byteLength(result, "utf8") > maxLineBytes) {
+      streamContractComplete = false;
+      return;
+    }
+    resultSnapshot = {
+      type: "result",
+      ...(sessionId ? { session_id: sessionId } : {}),
+      is_error: message.is_error === true,
+      result,
+      request_id: typeof message.request_id === "string" ? message.request_id : null,
+    };
+  }
+}
+function consumeText(text) {
+  let cursor = 0;
+  while (cursor < text.length) {
+    if (streamBudgetExceeded) return;
+    const newline = text.indexOf("\n", cursor);
+    if (droppingOversizedLine) {
+      if (newline === -1) return;
+      droppingOversizedLine = false;
+      cursor = newline + 1;
+      continue;
+    }
+    if (newline === -1) {
+      const segment = text.slice(cursor);
+      if (Buffer.byteLength(pendingLine, "utf8") + Buffer.byteLength(segment, "utf8") > maxLineBytes) {
+        streamContractComplete = false;
+        pendingLine = "";
+        droppingOversizedLine = true;
+        emitProtocolError("Cursor emitted an oversized stream-json line.");
+      } else {
+        pendingLine += segment;
+      }
+      return;
+    }
+    const segment = text.slice(cursor, newline);
+    if (Buffer.byteLength(pendingLine, "utf8") + Buffer.byteLength(segment, "utf8") > maxLineBytes) {
+      streamContractComplete = false;
+      pendingLine = "";
+      emitProtocolError("Cursor emitted an oversized stream-json line.");
+      cursor = newline + 1;
+      continue;
+    }
+    pendingLine += segment;
+    inspectLine(pendingLine.endsWith("\r") ? pendingLine.slice(0, -1) : pendingLine);
+    pendingLine = "";
+    cursor = newline + 1;
+  }
+}
+function flushParser() {
+  consumeText(decoder.end());
+  if (!droppingOversizedLine && pendingLine) inspectLine(pendingLine);
+  pendingLine = "";
+}
+function ownGroupMembers() {
+  if (process.platform === "win32") return [];
+  try {
+    // This wrapper remains the process-group leader until every native
+    // descendant is gone. The detached ps probe cannot become a false member.
+    const inspected = spawnSync("/bin/ps", ["-axo", "pid=,pgid="], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], detached: true,
+      timeout: 250, maxBuffer: 1024 * 1024,
+    });
+    if (inspected.error || inspected.status !== 0 || typeof inspected.stdout !== "string") return null;
+    return inspected.stdout.split(/\r?\n/).flatMap((line) => {
+      const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+      if (!match) return [];
+      const pid = Number(match[1]);
+      const pgid = Number(match[2]);
+      return pgid === process.pid && pid !== process.pid ? [pid] : [];
+    });
+  } catch { return null; }
+}
+function signalNativeGroup(signal) {
+  if (!native) return;
+  if (process.platform === "win32") {
+    try { native.kill(signal); } catch {}
+    return;
+  }
+  try { process.kill(-process.pid, signal); }
+  catch (error) { if (!error || error.code !== "ESRCH") throw error; }
+}
+async function reapNativeGroup() {
+  // macOS exposes no cgroup/job-object equivalent to an unprivileged desktop
+  // process. A deliberately detached setsid child can leave this PGID. The
+  // wrapper therefore records this exact scope (never "all descendants") and
+  // revokes every turn capability/proxy separately before terminal evidence;
+  // the inherited read-only Seatbelt still confines an escaped native child.
+  if (!native) return true;
+  if (process.platform === "win32") return false;
+  let members = ownGroupMembers();
+  if (members === null || members.length > 0) {
+    signalNativeGroup("SIGTERM");
+    const graceDeadline = Date.now() + 500;
+    while (Date.now() < graceDeadline) {
+      await wait(25);
+      members = ownGroupMembers();
+      if (members !== null && members.length === 0) break;
+    }
+  }
+  if (members === null || members.length > 0) {
+    // The still-live wrapper is the exact group leader, so its PGID cannot be
+    // recycled. A forced group kill also kills this wrapper; leave no possibly
+    // truncated terminal record and let successor recovery fail closed.
+    signalNativeGroup("SIGKILL");
+    await new Promise(() => {});
+  }
+  return true;
+}
+function beginReaping() {
+  if (!reapPromise) reapPromise = reapNativeGroup();
+  return reapPromise;
+}
+function beginFatalReaping() {
+  const authorityRetirement = beginTurnAuthorityRetirement();
+  if (!reapPromise) {
+    reapPromise = (async () => {
+      await authorityRetirement;
+      return reapNativeGroup();
+    })();
+  }
+  return reapPromise;
+}
+function armEvidenceDrainDeadline() {
+  if (evidenceDrainTimer) return;
+  evidenceDrainTimer = setTimeout(() => {
+    void (async () => {
+      await beginTurnAuthorityRetirement();
+      retireTurnRuntimeData();
+      try { purgePublicPlaceholderCredentialFile(); } catch {}
+      if (stateFd !== null) { try { closeSync(stateFd); } catch {} stateFd = null; }
+      // No terminal record: inherited evidence pipes never closed, so a
+      // successor must fail closed instead of accepting a truncated stream.
+      process.exit(1);
+    })();
+  }, 3000);
+}
+function failStreamPersistence(error) {
+  streamContractComplete = false;
+  if (stateFd !== null) { try { closeSync(stateFd); } catch {} stateFd = null; }
+  if (!exitEvidence) {
+    exitEvidence = { type: "error", error: "Cursor durable stream persistence failed: " + (error && error.message ? error.message : String(error)) };
+  }
+  exitCode = 1;
+  void beginFatalReaping();
+}
+async function closeMcpConnector() {
+  if (mcpConnectorServer) { try { mcpConnectorServer.close(); } catch {} }
+  mcpConnectorServer = null;
+  let socketClosed = true;
+  if (mcpConnectorSocket && !mcpConnectorSocket.destroyed) {
+    socketClosed = false;
+    mcpConnectorSocket.once("close", () => { socketClosed = true; });
+    try { mcpConnectorSocket.destroy(); } catch {}
+  }
+  let runtimeClosed = true;
+  if (mcpRuntime) {
+    const runtime = mcpRuntime;
+    runtimeClosed = runtime.exitCode !== null || runtime.signalCode !== null;
+    runtime.once("exit", () => { runtimeClosed = true; });
+    runtime.once("error", () => { runtimeClosed = true; });
+    try { mcpRuntime.stdin.end(); } catch {}
+    try { runtime.kill("SIGTERM"); } catch {}
+    const graceDeadline = Date.now() + 500;
+    while (!runtimeClosed && Date.now() < graceDeadline) await wait(25);
+    if (!runtimeClosed) {
+      try { runtime.kill("SIGKILL"); } catch {}
+      const killDeadline = Date.now() + 500;
+      while (!runtimeClosed && Date.now() < killDeadline) await wait(25);
+    }
+  }
+  const socketDeadline = Date.now() + 500;
+  while (!socketClosed && Date.now() < socketDeadline) await wait(5);
+  const revoked = socketClosed && runtimeClosed;
+  mcpConnectorSocket = null;
+  mcpRuntime = null;
+  const connectorRoot = path.dirname(mcpConnectorSocketPath || "");
+  if (revoked && mcpConnectorRootPattern.test(connectorRoot)) {
+    rmSync(connectorRoot, { recursive: true, force: true });
+  }
+  return revoked;
+}
+function purgePublicPlaceholderCredentialFile() {
+  const home = process.env.HOME;
+  if (!home || !path.isAbsolute(home)) throw new Error("missing private HOME");
+  const credentialPath = path.join(home, ".cursor", "auth.json");
+  let stat;
+  try { stat = lstatSync(credentialPath); }
+  catch (error) { if (error && error.code === "ENOENT") return; throw error; }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) throw new Error("unexpected Cursor credential file");
+  const parsed = JSON.parse(readFileSync(credentialPath, "utf8"));
+  const keys = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed).sort() : [];
+  if (keys.length !== 2 || keys[0] !== "accessToken" || keys[1] !== "refreshToken"
+    || parsed.accessToken !== publicAuthPlaceholder || parsed.refreshToken !== publicAuthPlaceholder) {
+    throw new Error("Cursor credential file contains unexpected authority");
+  }
+  unlinkSync(credentialPath);
+}
+function purgeTurnRuntimeDataRoot() {
+  if (!restrictRemoteAuthority) return true;
+  const root = process.env.CURSOR_DATA_DIR;
+  if (typeof root !== "string"
+    || !/^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/.test(root)) {
+    throw new Error("unexpected Cursor turn data root");
+  }
+  let stat;
+  try { stat = lstatSync(root); }
+  catch (error) { if (error && error.code === "ENOENT") return true; throw error; }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error("redirected Cursor turn data root");
+  }
+  rmSync(root, { recursive: true, force: true });
+  try { lstatSync(root); }
+  catch (error) { if (error && error.code === "ENOENT") return true; throw error; }
+  throw new Error("Cursor turn data root survived retirement");
+}
+function validatedMcpRuntimeEnv(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("missing MCP runtime environment");
+  const allowed = new Set(${JSON.stringify([
+    "ELECTRON_RUN_AS_NODE", "LETAGENTS_API_URL", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    "XDG_CACHE_HOME", "CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR", "NODE_COMPILE_CACHE", "CURSOR_API_KEY",
+    "CURSOR_AUTH_TOKEN", "LETAGENTS_SUPERVISOR_ENTRY_ID", "LETAGENTS_SUPERVISOR_DAEMON_SOCKET",
+    "LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID", "LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID",
+    "LETAGENTS_SUPERVISOR_PROVIDER", "LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID",
+    "LETAGENTS_SUPERVISOR_AGENT_SESSION_ID", "LETAGENTS_SUPERVISOR_ROOM_ID",
+    "LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME", "LETAGENTS_SUPERVISED_BOUNDED_TURNS",
+    "LETAGENTS_EXECUTION_PROFILE", "LETAGENTS_PERMISSION_PROFILE_ID",
+  ])});
+  const result = {};
+  const entries = Object.entries(value);
+  if (entries.length > allowed.size) throw new Error("oversized MCP runtime environment");
+  for (const [key, entry] of entries) {
+    if (!allowed.has(key) || typeof entry !== "string" || entry.includes("\0") || Buffer.byteLength(entry, "utf8") > 16 * 1024) {
+      throw new Error("invalid MCP runtime environment");
+    }
+    result[key] = entry;
+  }
+  const required = [
+    "LETAGENTS_API_URL", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+    "CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR", "NODE_COMPILE_CACHE", "LETAGENTS_SUPERVISOR_ENTRY_ID",
+    "LETAGENTS_SUPERVISOR_DAEMON_SOCKET", "LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID",
+    "LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID", "LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID",
+    "LETAGENTS_SUPERVISOR_AGENT_SESSION_ID", "LETAGENTS_SUPERVISOR_ROOM_ID",
+    "LETAGENTS_PERMISSION_PROFILE_ID",
+  ];
+  if (required.some((key) => !result[key])
+    || result.ELECTRON_RUN_AS_NODE !== "1"
+    || result.LETAGENTS_SUPERVISOR_PROVIDER !== "cursor"
+    || result.LETAGENTS_SUPERVISED_BOUNDED_TURNS !== "1"
+    || result.LETAGENTS_EXECUTION_PROFILE !== "supervised_room_turn"
+    || result.LETAGENTS_PERMISSION_PROFILE_ID !== "read_only"
+    || result.CURSOR_API_KEY !== ""
+    || result.CURSOR_AUTH_TOKEN !== "") {
+    throw new Error("incomplete MCP runtime environment");
+  }
+  return result;
+}
+function startMcpConnector() {
+  if (!restrictRemoteAuthority) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const failStart = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const connectorRoot = path.dirname(mcpConnectorSocketPath);
+    if (!mcpConnectorRootPattern.test(connectorRoot)
+      || mcpConnectorSocketPath !== connectorRoot + "/stdio.sock"
+      || mcpConnectorSocketPath.includes("\0")
+      || Buffer.byteLength(mcpConnectorSocketPath, "utf8") > 100
+      || !mcpRuntimeEntryPath.startsWith("/")
+      || !mcpRuntimeCwd.startsWith("/")) {
+      failStart(new Error("invalid MCP connector boundary"));
+      return;
+    }
+    const expectedRuntimePaths = {
+      HOME: connectorRoot + "/home",
+      XDG_CONFIG_HOME: connectorRoot + "/config",
+      XDG_DATA_HOME: connectorRoot + "/data",
+      XDG_CACHE_HOME: connectorRoot + "/cache",
+      CURSOR_CONFIG_DIR: connectorRoot + "/config/cursor",
+      CURSOR_DATA_DIR: connectorRoot + "/data/cursor",
+      NODE_COMPILE_CACHE: connectorRoot + "/cache/node-compile-cache",
+    };
+    if (Object.entries(expectedRuntimePaths).some(([key, value]) => mcpRuntimeEnv[key] !== value)) {
+      failStart(new Error("MCP runtime state escaped its private connector root"));
+      return;
+    }
+    try {
+      mkdirSync(connectorRoot, { mode: 0o700 });
+      for (const directory of [
+        expectedRuntimePaths.HOME,
+        expectedRuntimePaths.XDG_CONFIG_HOME,
+        expectedRuntimePaths.XDG_DATA_HOME,
+        expectedRuntimePaths.XDG_CACHE_HOME,
+        expectedRuntimePaths.CURSOR_CONFIG_DIR,
+        expectedRuntimePaths.CURSOR_DATA_DIR,
+        expectedRuntimePaths.NODE_COMPILE_CACHE,
+      ]) mkdirSync(directory, { recursive: true, mode: 0o700 });
+    } catch (error) {
+      void closeMcpConnector();
+      failStart(error);
+      return;
+    }
+    const server = net.createServer({ allowHalfOpen: false }, (socket) => {
+      if (finalizing || authorityRetiring || mcpConnectorAdmitted) { socket.destroy(); return; }
+      mcpConnectorAdmitted = true;
+      mcpConnectorSocket = socket;
+      // Cursor initializes MCP before it can execute model-directed code. One
+      // accepted stdio connection prevents a later native/escaped process from
+      // replaying this otherwise-readable connector path.
+      server.close();
+      const runtime = spawn(process.execPath, [mcpRuntimeEntryPath], {
+        cwd: mcpRuntimeCwd,
+        env: mcpRuntimeEnv,
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      });
+      mcpRuntime = runtime;
+      socket.pipe(runtime.stdin);
+      runtime.stdout.pipe(socket);
+      forwardBoundedStderr(runtime.stderr, "Cursor's hosted MCP runtime");
+      socket.once("error", () => { try { runtime.kill("SIGTERM"); } catch {} });
+      socket.once("close", () => { try { runtime.stdin.end(); } catch {} });
+      runtime.once("error", () => socket.destroy());
+      runtime.once("close", () => socket.destroy());
+    });
+    mcpConnectorServer = server;
+    server.once("error", failStart);
+    server.once("close", () => {
+      if (!settled && (finalizing || authorityRetiring)) {
+        failStart(new Error("Cursor MCP connector startup was cancelled."));
+      }
+    });
+    server.listen(mcpConnectorSocketPath, async () => {
+      await waitAtTestStartupBarrier("mcp_listen");
+      if (finalizing || authorityRetiring) {
+        try { server.close(); } catch {}
+        failStart(new Error("Cursor MCP connector startup was cancelled."));
+        return;
+      }
+      server.removeListener("error", failStart);
+      try { chmodSync(mcpConnectorSocketPath, 0o600); }
+      catch (error) { void closeMcpConnector(); failStart(error); return; }
+      settled = true;
+      server.on("error", (error) => {
+        const detail = "Cursor MCP connector failed: " + (error && error.message ? error.message : String(error));
+        if (!native) { finishNotStarted(detail); return; }
+        if (!exitEvidence) exitEvidence = { type: "error", error: detail };
+        exitCode = 1;
+        void beginFatalReaping();
+      });
+      resolve();
+    });
+  });
+}
+async function closeAuthorityProxy() {
+  if (authorityProxy) {
+    try { authorityProxy.close(); } catch {}
+    try { authorityProxy.closeAllConnections(); } catch {}
+  }
+  if (agentProxy) { try { agentProxy.close(); } catch {} }
+  for (const server of agentProxyInternalServers) {
+    try { server.close(); } catch {}
+    try { server.closeAllConnections(); } catch {}
+  }
+  agentProxyInternalServers.clear();
+  for (const upstream of authorityProxyUpstreams) { try { upstream.destroy(); } catch {} }
+  for (const stream of agentProxyUpstreamStreams) {
+    try { stream.close(http2.constants.NGHTTP2_CANCEL); } catch {}
+    try { stream.destroy(); } catch {}
+  }
+  for (const session of agentProxyUpstreamSessions) { try { session.destroy(); } catch {} }
+  for (const socket of authorityProxySockets) { try { socket.destroy(); } catch {} }
+  for (const session of agentProxySessions) { try { session.destroy(); } catch {} }
+  for (const socket of agentProxySockets) { try { socket.destroy(); } catch {} }
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline && (
+    authorityProxyUpstreams.size > 0
+    || agentProxyUpstreamStreams.size > 0
+    || agentProxyUpstreamSessions.size > 0
+    || authorityProxySockets.size > 0
+    || agentProxySessions.size > 0
+    || agentProxySockets.size > 0
+  )) await wait(5);
+  const revoked = authorityProxyUpstreams.size === 0
+    && agentProxyUpstreamStreams.size === 0
+    && agentProxyUpstreamSessions.size === 0
+    && authorityProxySockets.size === 0
+    && agentProxySessions.size === 0
+    && agentProxySockets.size === 0;
+  authorityProxy = null;
+  agentProxy = null;
+  return revoked;
+}
+function beginTurnAuthorityRetirement() {
+  authorityRetiring = true;
+  if (!authorityRetirementPromise) {
+    authorityRetirementPromise = (async () => {
+      // Invoke both closures before the first await. This synchronously closes
+      // every listener/socket and signals the detached MCP runtime before any
+      // native-controlled cleanup or process-group escalation can block us.
+      const proxyRetirement = closeAuthorityProxy().catch(() => {
+        exitEvidence = { type: "error", error: "Cursor authority proxies could not be retired." };
+        exitCode = 1;
+        streamContractComplete = false;
+        return false;
+      });
+      const mcpRetirement = closeMcpConnector().catch(() => {
+        exitEvidence = { type: "error", error: "Cursor MCP connector could not be retired." };
+        exitCode = 1;
+        streamContractComplete = false;
+        return false;
+      });
+      const [proxyAuthorityRevoked, mcpAuthorityRevoked] = await Promise.all([
+        proxyRetirement,
+        mcpRetirement,
+      ]);
+      return { proxyAuthorityRevoked, mcpAuthorityRevoked };
+    })();
+  }
+  return authorityRetirementPromise;
+}
+function retireTurnRuntimeData() {
+  try { runtimeDataRetirementResult = purgeTurnRuntimeDataRoot(); }
+  catch {
+    runtimeDataRetirementResult = false;
+    exitEvidence = { type: "error", error: "Cursor's private turn data root could not be retired safely." };
+    exitCode = 1;
+    streamContractComplete = false;
+  }
+  return runtimeDataRetirementResult;
+}
+function denyControlPlaneRequest(request, response) {
+  request.resume();
+  response.writeHead(503, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+    "connection": "close",
+  });
+  response.end("Cursor remote authority is disabled for this supervised turn.");
+}
+function startAgentProxy() {
+  if (!restrictRemoteAuthority) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    let admitted = false;
+    function forward(source, headers, downstream) {
+      const path = headers[":path"] || source.url;
+      const upstreamSession = http2.connect(supervisedAgentEndpoint);
+      agentProxyUpstreamSessions.add(upstreamSession);
+      upstreamSession.once("close", () => agentProxyUpstreamSessions.delete(upstreamSession));
+      const upstreamHeaders = {
+        ":method": "POST",
+        ":path": path,
+        ":scheme": "https",
+        ":authority": "api2.cursor.sh",
+        authorization: providerAuthorization,
+      };
+      for (const [key, value] of Object.entries(headers)) {
+        if (key.startsWith(":")
+          || key === "authorization"
+          || key === "connection"
+          || key === "host"
+          || key === "proxy-connection"
+          || key === "transfer-encoding"
+          || value === undefined) continue;
+        upstreamHeaders[key] = value;
+      }
+      let upstream;
+      try { upstream = upstreamSession.request(upstreamHeaders); }
+      catch { downstream.fail(502); upstreamSession.destroy(); return; }
+      agentProxyUpstreamStreams.add(upstream);
+      upstream.once("close", () => agentProxyUpstreamStreams.delete(upstream));
+      let requestBytes = 0;
+      let responseBytes = 0;
+      let failed = false;
+      function fail(status) {
+        if (failed) return;
+        failed = true;
+        try { upstream.close(http2.constants.NGHTTP2_CANCEL); } catch {}
+        try { upstreamSession.close(); } catch {}
+        downstream.fail(status);
+      }
+      upstreamSession.once("error", () => fail(502));
+      upstream.once("error", () => fail(502));
+      source.once("error", () => fail(499));
+      source.on("data", (chunk) => {
+        if (failed) return;
+        requestBytes += chunk.length;
+        if (requestBytes > 64 * 1024 * 1024) { fail(413); return; }
+        if (!upstream.write(chunk)) {
+          source.pause();
+          upstream.once("drain", () => source.resume());
+        }
+      });
+      source.once("end", () => { if (!failed) upstream.end(); });
+      upstream.once("response", (responseHeaders) => {
+        if (failed) return;
+        const downstreamHeaders = {};
+        for (const [key, value] of Object.entries(responseHeaders)) {
+          if (key === "connection" || key === "proxy-connection" || key === "transfer-encoding") continue;
+          downstreamHeaders[key] = value;
+        }
+        try { downstream.respond(downstreamHeaders); } catch { fail(502); }
+      });
+      upstream.on("data", (chunk) => {
+        if (failed) return;
+        responseBytes += chunk.length;
+        if (responseBytes > 64 * 1024 * 1024) { fail(502); return; }
+        if (!downstream.write(chunk)) {
+          upstream.pause();
+          downstream.onceDrain(() => upstream.resume());
+        }
+      });
+      upstream.once("end", () => {
+        if (!failed) downstream.end();
+        upstreamSession.close();
+      });
+      downstream.onceClose(() => {
+        try { upstream.close(); } catch {}
+        try { upstreamSession.close(); } catch {}
+      });
+    }
+    function requestAllowed(method, path, contentType) {
+      if (finalizing
+        || authorityRetiring
+        || admitted
+        || method !== "POST"
+        || path !== "/agent.v1.AgentService/Run"
+        || typeof contentType !== "string"
+        || !/^application\/connect[+]proto(?:\s*;|$)/i.test(contentType.trim())) return false;
+      admitted = true;
+      return true;
+    }
+    const h2Server = http2.createServer({ settings: { maxHeaderListSize: 64 * 1024 } });
+    agentProxyInternalServers.add(h2Server);
+    h2Server.once("close", () => {
+      agentProxyInternalServers.delete(h2Server);
+      if (!settled && (finalizing || authorityRetiring)) failStart(new Error("Cursor agent proxy startup was cancelled."));
+    });
+    h2Server.on("connection", (socket) => {
+      if (finalizing || authorityRetiring) { socket.destroy(); return; }
+      agentProxySockets.add(socket);
+      socket.once("close", () => agentProxySockets.delete(socket));
+    });
+    h2Server.on("session", (session) => {
+      if (finalizing || authorityRetiring) { session.destroy(); return; }
+      agentProxySessions.add(session);
+      session.once("close", () => agentProxySessions.delete(session));
+    });
+    h2Server.on("stream", (stream, headers) => {
+      const method = headers[":method"];
+      const path = headers[":path"];
+      const contentType = headers["content-type"];
+      if (!requestAllowed(method, path, contentType)) {
+        try { stream.respond({ ":status": 503, "cache-control": "no-store" }); } catch {}
+        stream.end("Cursor agent proxy rejected the request.");
+        return;
+      }
+      forward(stream, headers, {
+        respond: (value) => stream.respond(value),
+        fail: (status) => {
+          try { if (!stream.headersSent) stream.respond({ ":status": status }); } catch {}
+          try { stream.close(http2.constants.NGHTTP2_CANCEL); } catch {}
+        },
+        write: (chunk) => stream.write(chunk),
+        end: () => stream.end(),
+        onceDrain: (listener) => stream.once("drain", listener),
+        onceClose: (listener) => stream.once("close", listener),
+      });
+    });
+    h2Server.on("sessionError", () => {});
+    const h1Server = http.createServer((request, response) => {
+      const contentType = request.headers["content-type"];
+      if (!requestAllowed(request.method, request.url, contentType)) {
+        request.resume();
+        response.writeHead(503, { "cache-control": "no-store", "connection": "close" });
+        response.end("Cursor agent proxy rejected the request.");
+        return;
+      }
+      forward(request, request.headers, {
+        respond: (value) => {
+          const status = Number(value[":status"] || 502);
+          const headers = {};
+          for (const [key, entry] of Object.entries(value)) {
+            if (!key.startsWith(":") && key !== "connection" && key !== "transfer-encoding") headers[key] = entry;
+          }
+          response.writeHead(status, headers);
+        },
+        fail: (status) => {
+          try { if (!response.headersSent) response.writeHead(status, { "connection": "close" }); } catch {}
+          response.destroy();
+        },
+        write: (chunk) => response.write(chunk),
+        end: () => response.end(),
+        onceDrain: (listener) => response.once("drain", listener),
+        onceClose: (listener) => response.once("close", listener),
+      });
+    });
+    agentProxyInternalServers.add(h1Server);
+    h1Server.once("close", () => {
+      agentProxyInternalServers.delete(h1Server);
+      if (!settled && (finalizing || authorityRetiring)) failStart(new Error("Cursor agent proxy startup was cancelled."));
+    });
+    h1Server.on("connection", (socket) => {
+      if (finalizing || authorityRetiring) { socket.destroy(); return; }
+      agentProxySockets.add(socket);
+      socket.once("close", () => agentProxySockets.delete(socket));
+    });
+    h1Server.on("clientError", (_error, socket) => { try { socket.destroy(); } catch {} });
+    const h2Preface = Buffer.from("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    let h2Port = null;
+    let h1Port = null;
+    let internalReady = 0;
+    let settled = false;
+    function failStart(error) {
+      if (settled) return;
+      settled = true;
+      void closeAuthorityProxy();
+      reject(error);
+    }
+    function internalListening(server, protocol) {
+      if (finalizing || authorityRetiring) {
+        failStart(new Error("Cursor agent proxy startup was cancelled."));
+        return;
+      }
+      const address = server.address();
+      if (!address || typeof address === "string") { failStart(new Error("Cursor internal agent proxy did not expose a loopback port.")); return; }
+      if (protocol === "h2") h2Port = address.port;
+      else h1Port = address.port;
+      internalReady += 1;
+      if (internalReady !== 2) return;
+      const mux = net.createServer((socket) => {
+        if (finalizing || authorityRetiring || agentProxySockets.size >= 24) { socket.destroy(); return; }
+        agentProxySockets.add(socket);
+        socket.once("close", () => agentProxySockets.delete(socket));
+        socket.setTimeout(5000, () => socket.destroy());
+        let probe = Buffer.alloc(0);
+        function inspect(chunk) {
+          probe = Buffer.concat([probe, chunk]);
+          const prefixLength = Math.min(probe.length, h2Preface.length);
+          const couldBeH2 = probe.subarray(0, prefixLength).equals(h2Preface.subarray(0, prefixLength));
+          if (couldBeH2 && probe.length < h2Preface.length) return;
+          socket.removeListener("data", inspect);
+          socket.pause();
+          socket.setTimeout(0);
+          const routed = net.connect({ host: "127.0.0.1", port: couldBeH2 ? h2Port : h1Port });
+          agentProxySockets.add(routed);
+          routed.once("close", () => agentProxySockets.delete(routed));
+          routed.once("error", () => socket.destroy());
+          socket.once("error", () => routed.destroy());
+          routed.once("connect", () => {
+            if (finalizing || authorityRetiring) { routed.destroy(); socket.destroy(); return; }
+            routed.write(probe);
+            socket.pipe(routed);
+            routed.pipe(socket);
+            socket.resume();
+          });
+        }
+        socket.on("data", inspect);
+      });
+      agentProxy = mux;
+      mux.once("close", () => {
+        if (!settled && (finalizing || authorityRetiring)) failStart(new Error("Cursor agent proxy startup was cancelled."));
+      });
+      mux.once("error", failStart);
+      mux.listen({ host: "127.0.0.1", port: 0, exclusive: true }, async () => {
+        await waitAtTestStartupBarrier("agent_listen");
+        if (settled) { try { mux.close(); } catch {} return; }
+        if (finalizing || authorityRetiring) {
+          try { mux.close(); } catch {}
+          failStart(new Error("Cursor agent proxy startup was cancelled."));
+          return;
+        }
+        settled = true;
+        mux.removeListener("error", failStart);
+        mux.on("error", (error) => {
+          const detail = "Cursor agent proxy failed: " + (error && error.message ? error.message : String(error));
+          if (!native) { void finishNotStarted(detail); return; }
+          if (!exitEvidence) exitEvidence = { type: "error", error: detail };
+          exitCode = 1;
+          void beginFatalReaping();
+        });
+        const address = mux.address();
+        if (!address || typeof address === "string") {
+          void closeAuthorityProxy();
+          reject(new Error("Cursor agent proxy did not expose a loopback port."));
+          return;
+        }
+        resolve(address.port);
+      });
+    }
+    h2Server.once("error", failStart);
+    h1Server.once("error", failStart);
+    h2Server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+      if (finalizing || authorityRetiring) { failStart(new Error("Cursor agent proxy startup was cancelled.")); return; }
+      h2Server.removeListener("error", failStart);
+      internalListening(h2Server, "h2");
+    });
+    h1Server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+      if (finalizing || authorityRetiring) { failStart(new Error("Cursor agent proxy startup was cancelled.")); return; }
+      h1Server.removeListener("error", failStart);
+      internalListening(h1Server, "h1");
+    });
+  });
+}
+function startAuthorityProxy() {
+  if (!restrictRemoteAuthority) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const failStart = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const server = http.createServer((request, response) => {
+      if (finalizing || authorityRetiring) { request.destroy(); response.destroy(); return; }
+      const requestPath = typeof request.url === "string" ? request.url : "";
+      if (request.method !== "POST" || !supervisedControlPlanePaths.has(requestPath)) {
+        denyControlPlaneRequest(request, response);
+        return;
+      }
+      const contentLengthHeader = request.headers["content-length"];
+      const transferEncoding = request.headers["transfer-encoding"];
+      const contentLength = typeof contentLengthHeader === "string" && /^\d{1,7}$/.test(contentLengthHeader)
+        ? Number(contentLengthHeader)
+        : -1;
+      if (transferEncoding !== undefined
+        || !Number.isSafeInteger(contentLength)
+        || contentLength < 0
+        || contentLength > 1024 * 1024) {
+        denyControlPlaneRequest(request, response);
+        return;
+      }
+      const headers = {
+        ...request.headers,
+        host: "api2.cursor.sh",
+        authorization: providerAuthorization,
+      };
+      delete headers.connection;
+      delete headers["proxy-connection"];
+      delete headers.upgrade;
+      delete headers["keep-alive"];
+      delete headers["transfer-encoding"];
+      const controlPlaneUrl = new URL(requestPath, supervisedControlPlaneEndpoint);
+      const controlPlaneClient = controlPlaneUrl.protocol === "https:" ? https : http;
+      const upstream = controlPlaneClient.request({
+        protocol: controlPlaneUrl.protocol,
+        hostname: controlPlaneUrl.hostname,
+        port: controlPlaneUrl.port || (controlPlaneUrl.protocol === "https:" ? 443 : 80),
+        method: "POST",
+        path: requestPath,
+        headers,
+        ...(controlPlaneUrl.protocol === "https:" ? { servername: "api2.cursor.sh" } : {}),
+        timeout: 15000,
+        agent: false,
+      }, (upstreamResponse) => {
+        authorityProxyUpstreams.add(upstreamResponse);
+        upstreamResponse.once("close", () => authorityProxyUpstreams.delete(upstreamResponse));
+        const responseHeaders = {
+          ...upstreamResponse.headers,
+        };
+        delete responseHeaders.connection;
+        delete responseHeaders["proxy-connection"];
+        delete responseHeaders.upgrade;
+        delete responseHeaders["keep-alive"];
+        response.writeHead(upstreamResponse.statusCode || 502, responseHeaders);
+        upstreamResponse.once("error", () => response.destroy());
+        upstreamResponse.pipe(response);
+      });
+      authorityProxyUpstreams.add(upstream);
+      upstream.once("close", () => authorityProxyUpstreams.delete(upstream));
+      upstream.once("timeout", () => upstream.destroy(new Error("Cursor control-plane request timed out.")));
+      upstream.once("error", () => {
+        if (!response.headersSent) response.writeHead(502, { "connection": "close" });
+        response.end();
+      });
+      request.once("aborted", () => upstream.destroy());
+      let receivedBytes = 0;
+      let requestOverflow = false;
+      request.on("data", (chunk) => {
+        if (requestOverflow) return;
+        receivedBytes += chunk.length;
+        if (receivedBytes > 1024 * 1024) {
+          requestOverflow = true;
+          upstream.destroy();
+          if (!response.headersSent) response.writeHead(413, { "connection": "close" });
+          response.end();
+          request.resume();
+          return;
+        }
+        if (!upstream.write(chunk)) {
+          request.pause();
+          upstream.once("drain", () => request.resume());
+        }
+      });
+      request.once("end", () => { if (!requestOverflow) upstream.end(); });
+      request.once("error", () => upstream.destroy());
+    });
+    server.on("connection", (socket) => {
+      if (finalizing || authorityRetiring || authorityProxySockets.size >= 8) { socket.destroy(); return; }
+      authorityProxySockets.add(socket);
+      socket.once("close", () => authorityProxySockets.delete(socket));
+    });
+    server.on("clientError", (_error, socket) => {
+      try { socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); } catch {}
+    });
+    server.maxHeadersCount = 64;
+    server.headersTimeout = 5000;
+    server.requestTimeout = 20000;
+    server.keepAliveTimeout = 1000;
+    authorityProxy = server;
+    server.once("error", failStart);
+    server.once("close", () => {
+      if (!settled && (finalizing || authorityRetiring)) {
+        failStart(new Error("Cursor authority proxy startup was cancelled."));
+      }
+    });
+    server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, async () => {
+      await waitAtTestStartupBarrier("authority_listen");
+      if (finalizing || authorityRetiring) {
+        try { server.close(); } catch {}
+        failStart(new Error("Cursor authority proxy startup was cancelled."));
+        return;
+      }
+      server.removeListener("error", failStart);
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        closeAuthorityProxy();
+        failStart(new Error("Cursor authority proxy did not expose a loopback port."));
+        return;
+      }
+      settled = true;
+      server.on("error", (error) => {
+        const detail = "Cursor authority proxy failed: " + (error && error.message ? error.message : String(error));
+        if (!native) {
+          finishNotStarted(detail);
+          return;
+        }
+        if (!exitEvidence) {
+          exitEvidence = { type: "error", error: detail };
+        }
+        exitCode = 1;
+        void beginFatalReaping();
+      });
+      resolve(address.port);
+    });
+  });
+}
+async function finalize() {
+  if (finalizing) return;
+  finalizing = true;
+  if (evidenceDrainTimer) { clearTimeout(evidenceDrainTimer); evidenceDrainTimer = null; }
+  const { proxyAuthorityRevoked, mcpAuthorityRevoked } = await beginTurnAuthorityRetirement();
+  const nativeGroupReaped = await beginReaping();
+  const runtimeDataRetired = retireTurnRuntimeData();
+  const turnAuthorityRevoked = proxyAuthorityRevoked && mcpAuthorityRevoked && runtimeDataRetired;
+  if (!turnAuthorityRevoked) exitCode = 1;
+  try { purgePublicPlaceholderCredentialFile(); }
+  catch {
+    exitEvidence = { type: "error", error: "Cursor's public credential placeholder could not be purged safely." };
+    exitCode = 1;
+    streamContractComplete = false;
+  }
+  flushParser();
+  try { purgeStatsigTemporaryFiles(); }
+  catch (error) {
+    exitEvidence = { type: "error", error: "Cursor Statsig temporary state could not be purged." };
+    exitCode = 1;
+    streamContractComplete = false;
+  }
+  if (stateFd !== null) { try { closeSync(stateFd); } catch {} stateFd = null; }
+  try {
+    terminal({
+      ...(exitEvidence || { type: "error", error: "Cursor wrapper closed without native exit evidence." }),
+      native_process_group_reaped: nativeGroupReaped,
+      reap_scope: "native_process_group",
+      turn_authority_revoked: turnAuthorityRevoked,
+      session_contract_valid: sessionContractValid,
+      stream_contract_complete: streamContractComplete,
+      init: initSnapshot,
+      result: resultSnapshot,
+    });
+  } catch {}
+  process.exit(exitCode);
+}
+function purgeStatsigTemporaryFiles() {
+  const configDir = process.env.CURSOR_CONFIG_DIR;
+  if (!configDir) return;
+  const stat = lstatSync(configDir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("redirected config");
+  const directory = opendirSync(configDir);
+  let entries = 0;
+  try {
+    for (;;) {
+      const entry = directory.readSync();
+      if (!entry) break;
+      entries += 1;
+      if (entries > 4096) throw new Error("too many config entries");
+      if (!/^statsig-cache[.]json[.][1-9][0-9]{0,9}[.][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[.]tmp$/i.test(entry.name)) continue;
+      const path = configDir + "/" + entry.name;
+      const entryStat = lstatSync(path);
+      if (entryStat.isDirectory() && !entryStat.isSymbolicLink()) throw new Error("Statsig temp is a directory");
+      unlinkSync(path);
+    }
+  } finally { directory.closeSync(); }
+}
+async function start() {
+  if (started || finalizing || authorityRetiring) return;
+  started = true;
+  let authorityProxyPort = null;
+  let agentProxyPort = null;
+  try {
+    await startMcpConnector();
+    if (finalizing || authorityRetiring) return;
+    authorityProxyPort = await startAuthorityProxy();
+    if (finalizing || authorityRetiring) return;
+    agentProxyPort = await startAgentProxy();
+    if (finalizing || authorityRetiring) return;
+  } catch (error) {
+    await finishNotStarted("Cursor authority proxy failed: " + (error && error.message ? error.message : String(error)), true);
+    return;
+  }
+  const nativeEnv = { ...process.env };
+  // Wrapper-only: packaged Electron needs this to execute the inline Node
+  // wrapper, but an Electron-backed Cursor binary must never inherit it.
+  delete nativeEnv.ELECTRON_RUN_AS_NODE;
+  const sandboxed = process.platform === "darwin"
+    && (restrictRemoteAuthority
+      || deniedReadPaths.length > 0
+      || deniedReadSubpaths.length > 0
+      || deniedReadMetadataPaths.length > 0
+      || deniedReadWriteRegexes.length > 0
+      || deniedWritePaths.length > 0
+      || deniedWriteStructuralPaths.length > 0
+      || deniedWriteSubpaths.length > 0
+      || allowedWriteSubpaths.length > 0
+      || allowedReadSubpaths.length > 0);
+  const nativeCommand = sandboxed ? "/usr/bin/sandbox-exec" : bin;
+  const cursorArgs = authorityProxyPort === null || agentProxyPort === null
+    ? args
+    : [
+      "--endpoint", "http://127.0.0.1:" + authorityProxyPort,
+      "--agent-endpoint", "http://127.0.0.1:" + agentProxyPort,
+      // This Cursor path consumes its documented auth override only from
+      // argv. The value is deliberately non-secret and merely suppresses a
+      // credential-store lookup; both proxies replace it before forwarding.
+      "--auth-token", publicAuthPlaceholder,
+      "--http-version", "1.1",
+      ...args,
+    ];
+  const nativeArgs = sandboxed
+    ? [
+      "-p",
+      [
+        "(version 1)",
+        "(allow default)",
+        ...(restrictRemoteAuthority ? [
+          // Cursor queries its own process metadata during startup. Preserve
+          // self inspection while denying native/model descendants visibility
+          // into wrapper-hosted MCP and future same-UID process environments.
+          "(deny process-info* (target others))",
+          // Native Cursor and model-directed tools may manage themselves and
+          // their own child tools, but must never signal the trusted wrapper
+          // or an unrelated same-UID process. Hiding process metadata is not
+          // sufficient because a known or inherited PID remains signalable.
+          "(deny signal (require-not (require-any (target self) (target children))))",
+          // Model-directed helpers inherit file/network rules, but macOS GUI
+          // and daemon clients can delegate effects to an unsandboxed service.
+          // Block those channels independently of Cursor's command classifier.
+          "(deny appleevent-send)",
+          "(deny mach-lookup (global-name \"com.apple.coreservices.appleevents\"))",
+          "(deny mach-lookup (global-name \"com.apple.coreservices.launchservicesd\"))",
+          "(deny mach-lookup (global-name \"com.apple.launchservices.mapdb\"))",
+          "(deny mach-lookup (global-name \"com.apple.pasteboard.1\"))",
+          "(deny network-inbound)",
+          "(deny network-outbound (require-not (require-any "
+            + "(remote ip \"localhost:" + authorityProxyPort + "\") "
+            + "(remote ip \"localhost:" + agentProxyPort + "\") "
+            + allowedNetworkUnixSockets.map((path) =>
+              "(remote unix-socket (literal " + JSON.stringify(path) + "))"
+            ).join(" ")
+            + ")))",
+          ...deniedDelegatingExecutables.map((path) =>
+            "(deny process-exec (literal " + JSON.stringify(path) + "))"
+          ),
+        ] : []),
+        ...allowedWriteSubpaths.map((path) =>
+          "(deny process-exec (subpath " + JSON.stringify(path) + "))"
+        ),
+        ...(allowedReadSubpaths.length > 0 ? [
+          "(deny file-read-data (require-not (require-any "
+            + "(literal \"/\") "
+            + allowedReadSubpaths.map((path) =>
+              "(subpath " + JSON.stringify(path) + ")"
+            ).join(" ")
+            + ")))",
+        ] : []),
+        ...(allowedWriteSubpaths.length > 0 ? [
+          "(deny file-write* (require-not (require-any "
+            + "(literal \"/dev/null\") "
+            + allowedWriteSubpaths.map((path) =>
+              "(subpath " + JSON.stringify(path) + ")"
+            ).join(" ")
+            + ")))",
+        ] : []),
+        ...deniedReadPaths.map((path) =>
+          "(deny file-read* (literal " + JSON.stringify(path) + "))"
+        ),
+        ...deniedReadSubpaths.map((path) =>
+          "(deny file-read* (subpath " + JSON.stringify(path) + "))"
+        ),
+        ...deniedReadMetadataPaths.map((path) =>
+          "(deny file-read-metadata (literal " + JSON.stringify(path) + "))"
+        ),
+        ...deniedReadWriteRegexes.map((pattern) =>
+          "(deny file-read* (regex #" + JSON.stringify(pattern) + "))"
+        ),
+        // The same authority locations are immutable for the complete native
+        // process tree. This closes late-create and redirected-download races
+        // for hooks, settings, plugins, Statsig gates, and bundled MCPs.
+        ...deniedReadPaths.map((path) =>
+          "(deny file-write* (literal " + JSON.stringify(path) + "))"
+        ),
+        ...deniedReadSubpaths.map((path) =>
+          "(deny file-write* (subpath " + JSON.stringify(path) + "))"
+        ),
+        ...deniedReadMetadataPaths.map((path) =>
+          "(deny file-write* (literal " + JSON.stringify(path) + "))"
+        ),
+        ...deniedReadWriteRegexes.map((pattern) =>
+          "(deny file-write* (regex #" + JSON.stringify(pattern) + "))"
+        ),
+        ...deniedWritePaths.map((path) =>
+          "(deny file-write* (literal " + JSON.stringify(path) + "))"
+        ),
+        ...deniedWriteStructuralPaths.map((path) =>
+          "(deny file-write-unlink (literal " + JSON.stringify(path) + "))"
+        ),
+        ...deniedWriteSubpaths.map((path) =>
+          "(deny file-write* (subpath " + JSON.stringify(path) + "))"
+        ),
+      ].join("\n"),
+      bin,
+      ...cursorArgs,
+    ]
+    : cursorArgs;
+  if (finalizing || authorityRetiring) return;
+  native = spawn(nativeCommand, nativeArgs, {
+    cwd: process.cwd(), env: nativeEnv, stdio: ["ignore", "pipe", "pipe"],
+    // The durable wrapper is already a detached group leader. Keep native
+    // Cursor and its descendants in that exact, still-live group so a reaped
+    // native PID can never be mistaken for later group authority.
+    detached: false,
+  });
+  native.stdout.on("data", (chunk) => {
+    if (statePath && stateFd !== null && persistedBytes < maxPersistedBytes) {
+      try {
+        const bounded = chunk.subarray(0, Math.max(0, maxPersistedBytes - persistedBytes));
+        if (bounded.length) appendFileSync(stateFd, bounded);
+        persistedBytes += bounded.length;
+      } catch (error) {
+        failStreamPersistence(error);
+      }
+    }
+    consumeText(decoder.write(chunk));
+  });
+  forwardBoundedStderr(native.stderr, "Cursor native process");
+  native.once("error", (error) => {
+    exitEvidence = { type: "error", error: error && error.message ? error.message : String(error) };
+    exitCode = 1;
+    void beginFatalReaping();
+    armEvidenceDrainDeadline();
+  });
+  native.once("exit", (code, signal) => {
+    exitEvidence = { type: "exit", code, signal };
+    exitCode = code === 0 ? 0 : (typeof code === "number" ? code : 1);
+    // Descendants may hold stdout open. Reaping starts at native exit, while
+    // terminal publication waits for close so the final result bytes drain.
+    void beginFatalReaping();
+    armEvidenceDrainDeadline();
+  });
+  native.once("close", () => { void finalize(); });
+}
+async function finishNotStarted(error, calledFromStart = false) {
+  if (finalizing) return;
+  finalizing = true;
+  authorityRetiring = true;
+  // First revoke anything already published. Then wait for the in-progress
+  // startup continuation to observe the cancellation fence and close again,
+  // so a late listen callback cannot outlive not_started evidence.
+  try { await closeAuthorityProxy(); } catch {}
+  try { await closeMcpConnector(); } catch {}
+  if (!calledFromStart && startPromise) {
+    try { await startPromise; } catch {}
+  }
+  let proxyAuthorityRevoked = false;
+  let mcpAuthorityRevoked = false;
+  try { proxyAuthorityRevoked = await closeAuthorityProxy(); } catch {}
+  try { mcpAuthorityRevoked = await closeMcpConnector(); } catch {}
+  try { purgePublicPlaceholderCredentialFile(); } catch {}
+  const runtimeDataRetired = retireTurnRuntimeData();
+  if (stateFd !== null) { try { closeSync(stateFd); } catch {} stateFd = null; }
+  try {
+    terminal({
+      type: "not_started",
+      ...(error ? { error } : {}),
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      turn_authority_revoked: proxyAuthorityRevoked && mcpAuthorityRevoked && runtimeDataRetired,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: null,
+      result: null,
+    });
+  } catch {}
+  process.exit(1);
+}
+process.on("message", (message) => {
+  if (!message || message.type !== "start") return;
+  if (restrictRemoteAuthority) {
+    if (typeof message.providerAuthorization !== "string"
+      || !/^Bearer [^\s\0]{1,16384}$/.test(message.providerAuthorization)) {
+      void finishNotStarted("Cursor wrapper received no valid provider authorization proof.");
+      return;
+    }
+    providerAuthorization = message.providerAuthorization;
+    try { mcpRuntimeEnv = validatedMcpRuntimeEnv(message.mcpRuntimeEnv); }
+    catch { void finishNotStarted("Cursor wrapper received no valid MCP runtime boundary."); return; }
+  }
+  const pendingStart = start();
+  startPromise = pendingStart;
+  void pendingStart.catch((error) => finishNotStarted(
+    "Cursor wrapper startup failed: " + (error && error.message ? error.message : String(error)),
+    true,
+  )).finally(() => {
+    if (startPromise === pendingStart) startPromise = null;
+  });
+});
+process.on("disconnect", () => {
+  if (native) return;
+  void finishNotStarted();
+});
+process.on("SIGTERM", () => { if (native) void beginFatalReaping(); else void finishNotStarted(); });
+process.on("SIGINT", () => { if (native) void beginFatalReaping(); else void finishNotStarted(); });
+process.stdout.on("error", () => {});
+process.stderr.on("error", () => {});
+if (process.send) process.send({ type: "prepared" });
+`;
+  const child = spawn(process.execPath, [
+    "-e",
+    wrapperSource,
+    input.cursorBin,
+    input.statePath ?? "",
+    JSON.stringify(deniedReadPaths),
+    JSON.stringify(deniedReadSubpaths),
+    JSON.stringify(deniedReadMetadataPaths),
+    JSON.stringify(deniedReadWriteRegexes),
+    JSON.stringify(deniedWritePaths),
+    JSON.stringify(deniedWriteStructuralPaths),
+    JSON.stringify(deniedWriteSubpaths),
+    JSON.stringify(allowedWriteSubpaths),
+    JSON.stringify(allowedReadSubpaths),
+    JSON.stringify(allowedNetworkUnixSockets),
+    input.mcpConnectorSocketPath ?? "",
+    input.mcpRuntimeEntryPath ?? "",
+    input.mcpRuntimeCwd ?? "",
+    testStartupBarrier?.path ?? "",
+    testStartupBarrier?.stage ?? "",
+    restrictRemoteAuthority ? "1" : "0",
+    ...input.args,
+  ], {
     cwd: input.cwd,
     // The prompt travels as a positional argument; cursor-agent has no stdin
     // channel (matrix row). Its own process group so group signalling reaps
     // any descendants.
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
     detached: process.platform !== "win32",
-    env: cursorCliEnv(),
+    env: {
+      ...(input.env ?? cursorCliEnv()),
+      ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+    },
   });
 
   const lineListeners = new Set<(line: string) => void>();
   const stderrChunks: string[] = [];
+  let wrapperPrepared = false;
+  let resolvePrepared!: () => void;
+  let rejectPrepared!: (error: Error) => void;
+  const prepared = new Promise<void>((resolve, reject) => {
+    resolvePrepared = resolve;
+    rejectPrepared = reject;
+  });
+  child.on("message", (message) => {
+    if (!wrapperPrepared && message && typeof message === "object"
+      && (message as { type?: unknown }).type === "prepared") {
+      wrapperPrepared = true;
+      resolvePrepared();
+    }
+  });
   const exited = new Promise<ProviderProcessExit>((resolve) => {
-    child.once("error", (error) => resolve({ type: "error", error }));
+    child.once("error", (error) => {
+      if (!wrapperPrepared) rejectPrepared(error);
+      resolve({ type: "error", error });
+    });
     // "close", not "exit": close fires only after the stdio streams have
     // drained, so the final buffered `result` line is always delivered before
     // the exit evidence resolves. With "exit" a cleanly completed turn could be
     // misclassified as a crash because its result line was still in the pipe
     // (TrailDelta review, msg_1780).
-    child.once("close", (code, signal) => resolve({ type: "exit", code, signal }));
+    child.once("close", (code, signal) => {
+      if (!wrapperPrepared) rejectPrepared(new Error("Cursor wrapper exited before preparing its durable turn boundary."));
+      resolve({ type: "exit", code, signal });
+    });
   });
   if (child.stdout) {
-    const lines = createInterface({ input: child.stdout });
-    lines.on("line", (line) => {
+    let bufferedLine = Buffer.alloc(0);
+    let droppingOversizedLine = false;
+    let protocolErrorEmitted = false;
+    const emitLine = (line: string) => {
       for (const listener of lineListeners) listener(line);
+    };
+    const emitOversizedLineError = () => {
+      if (protocolErrorEmitted) return;
+      protocolErrorEmitted = true;
+      emitLine(JSON.stringify({
+        type: "letagents_stream_contract_error",
+        session_id: "",
+        error: "Cursor wrapper emitted an oversized stream-json line.",
+      }));
+    };
+    child.stdout.on("data", (value: Buffer | string) => {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      let cursor = 0;
+      while (cursor < chunk.length) {
+        const newline = chunk.indexOf(0x0a, cursor);
+        if (droppingOversizedLine) {
+          if (newline < 0) return;
+          droppingOversizedLine = false;
+          cursor = newline + 1;
+          continue;
+        }
+        const end = newline < 0 ? chunk.length : newline;
+        const segment = chunk.subarray(cursor, end);
+        if (bufferedLine.length + segment.length > MAX_CURSOR_STREAM_LINE_BYTES) {
+          bufferedLine = Buffer.alloc(0);
+          emitOversizedLineError();
+          if (newline < 0) {
+            droppingOversizedLine = true;
+            return;
+          }
+          cursor = newline + 1;
+          continue;
+        }
+        bufferedLine = bufferedLine.length === 0
+          ? Buffer.from(segment)
+          : Buffer.concat([bufferedLine, segment]);
+        if (newline < 0) return;
+        const line = bufferedLine.length > 0 && bufferedLine.at(-1) === 0x0d
+          ? bufferedLine.subarray(0, -1)
+          : bufferedLine;
+        emitLine(line.toString("utf8"));
+        bufferedLine = Buffer.alloc(0);
+        cursor = newline + 1;
+      }
+    });
+    child.stdout.on("end", () => {
+      if (!droppingOversizedLine && bufferedLine.length) emitLine(bufferedLine.toString("utf8"));
+      bufferedLine = Buffer.alloc(0);
     });
   }
   child.stderr?.on("data", (chunk: Buffer) => {
@@ -242,7 +2020,8 @@ function defaultLaunchTurn(input: { cursorBin: string; args: string[]; cwd: stri
     if (stderrChunks.length > 20) stderrChunks.shift();
   });
 
-  return {
+  let released = false;
+  const result: CursorCliChild = {
     pid: child.pid ?? null,
     exited,
     onLine(listener) {
@@ -252,13 +2031,434 @@ function defaultLaunchTurn(input: { cursorBin: string; args: string[]; cwd: stri
     stderrTail() {
       return stderrChunks.join("");
     },
+    prepared,
+    ownsDescendantReaping: process.platform !== "win32",
+    requiresDurableTerminalEvidence: Boolean(input.statePath && restrictRemoteAuthority),
+    release() {
+      if (released) return;
+      released = true;
+      child.send?.({
+        type: "start",
+        ...(providerAuthorization ? { providerAuthorization } : {}),
+        ...(input.mcpRuntimeEnv ? { mcpRuntimeEnv: input.mcpRuntimeEnv } : {}),
+      });
+    },
   };
+  if (!input.deferStart) result.release();
+  return result;
+}
+
+function validateCursorSandboxPaths(paths: string[] | undefined): string[] {
+  if (!paths) return [];
+  if (paths.length > 512) throw new Error("Cursor native sandbox has too many authority paths.");
+  return [...new Set(paths.map((path) => {
+    if (!isAbsolute(path) || path.includes("\0") || Buffer.byteLength(path, "utf8") > 4_096) {
+      throw new Error("Cursor native sandbox authority paths must be bounded and absolute.");
+    }
+    return path;
+  }))];
+}
+
+function cursorSandboxRuntimeReadSubpaths(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const resolveExecutable = (entry: string): { logical: string; canonical: string }[] => {
+    const candidates = isAbsolute(entry) || entry.includes("/")
+      ? [resolve(cwd, entry)]
+      : (env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => resolve(directory, entry));
+    for (const candidate of candidates) {
+      if (!existsSync(candidate)) continue;
+      try {
+        return [{ logical: candidate, canonical: realpathSync(candidate) }];
+      } catch {
+        // Continue to another exact PATH candidate without invoking a shell.
+      }
+    }
+    return [];
+  };
+  const appRoot = (executable: string): string | null => {
+    let current = dirname(executable);
+    for (;;) {
+      if (current.endsWith(".app")) return current;
+      const parent = dirname(current);
+      if (parent === current) return null;
+      current = parent;
+    }
+  };
+  const commandExecutables = resolveExecutable(command);
+  const hostExecutables = resolveExecutable(process.execPath);
+  const commandRuntimeRoots = commandExecutables.map(({ canonical }) =>
+    appRoot(canonical) ?? dirname(canonical));
+  const hostAppRoots = hostExecutables.flatMap(({ canonical }) => {
+    const root = appRoot(canonical);
+    return root ? [root] : [];
+  });
+  return [...new Set([
+    // The logical launcher may sit beside unrelated user scripts (commonly
+    // ~/.local/bin), so admit that symlink/file exactly. Cursor's canonical
+    // installation directory is a real multi-file runtime and remains the
+    // smallest viable subtree. The host Node/Electron binary is exact unless
+    // it belongs to an application bundle.
+    ...commandExecutables.flatMap(({ logical, canonical }) => [logical, canonical]),
+    ...hostExecutables.flatMap(({ logical, canonical }) => [logical, canonical]),
+    ...commandRuntimeRoots,
+    ...hostAppRoots,
+    "/System",
+    "/Library/Apple",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/lib",
+    "/usr/libexec",
+    "/usr/sbin",
+    "/usr/share",
+    "/private/etc/hosts",
+    "/private/etc/localtime",
+    "/private/etc/nsswitch.conf",
+    "/private/etc/paths",
+    "/private/etc/paths.d",
+    "/private/etc/resolv.conf",
+    "/private/etc/ssl",
+    "/private/var/db/timezone",
+    "/private/var/run/resolv.conf",
+    // Device nodes remain kernel-permission constrained; Node/Cursor require
+    // random/null/stdio devices during startup and child execution.
+    "/dev",
+  ].filter(existsSync).map((path) => realpathSync(path)))];
+}
+
+function cursorSandboxPathVariants(path: string): string[] {
+  const logical = resolve(path);
+  let canonical = logical;
+  try {
+    canonical = realpathSync(logical);
+  } catch {
+    try { canonical = join(realpathSync(dirname(logical)), basename(logical)); }
+    catch { /* Validation below still rejects malformed/non-absolute input. */ }
+  }
+  const aliases = [logical, canonical].flatMap((candidate) => {
+    if (candidate === "/tmp" || candidate.startsWith("/tmp/")
+      || candidate === "/var" || candidate.startsWith("/var/")
+      || candidate === "/etc" || candidate.startsWith("/etc/")) {
+      return [candidate, `/private${candidate}`];
+    }
+    if (candidate === "/private/tmp" || candidate.startsWith("/private/tmp/")
+      || candidate === "/private/var" || candidate.startsWith("/private/var/")
+      || candidate === "/private/etc" || candidate.startsWith("/private/etc/")) {
+      return [candidate, candidate.slice("/private".length)];
+    }
+    return [candidate];
+  });
+  return [...new Set(aliases)];
+}
+
+const CURSOR_TURN_RUNTIME_DATA_PATTERN = /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/;
+
+function prepareCursorTurnRuntimeDataDir(): string {
+  const root = mkdtempSync(join(realpathSync("/tmp"), "letagents-cursor-data-"));
+  chmodSync(root, 0o700);
+  if (!CURSOR_TURN_RUNTIME_DATA_PATTERN.test(root)) {
+    throw new Error("Cursor's private turn data root has an unexpected identity.");
+  }
+  return root;
+}
+
+function removeCursorTurnRuntimeDataDir(root: string): void {
+  if (!CURSOR_TURN_RUNTIME_DATA_PATTERN.test(root)) {
+    throw new Error("Refusing to remove an unexpected Cursor turn data root.");
+  }
+  try {
+    const stat = lstatSync(root);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error("Refusing to remove a redirected Cursor turn data root.");
+    }
+    rmSync(root, { recursive: true, force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function escapeCursorSandboxRegex(path: string): string {
+  if (/[\x00-\x1f\x7f[\]\\^]/.test(path)) {
+    throw new Error("Cursor sandbox regex paths contain unsupported characters.");
+  }
+  return [...path].map((character) => /[A-Za-z0-9/_-]/.test(character)
+    ? character
+    : `[${character}]`).join("");
+}
+
+function validateCursorSandboxRegexes(patterns: string[] | undefined): string[] {
+  if (!patterns) return [];
+  if (patterns.length > 64) throw new Error("Cursor native sandbox has too many authority patterns.");
+  return [...new Set(patterns.map((pattern) => {
+    if (!pattern.startsWith("^")
+      || !pattern.endsWith("$")
+      || pattern.includes("\0")
+      || Buffer.byteLength(pattern, "utf8") > 4_096) {
+      throw new Error("Cursor native sandbox authority patterns must be bounded and anchored.");
+    }
+    try {
+      new RegExp(pattern);
+    } catch {
+      throw new Error("Cursor native sandbox authority pattern is invalid.");
+    }
+    return pattern;
+  }))];
+}
+
+export async function assertCursorPersonalIdentity(input: {
+  cursorBin: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  writableProfileRoot: string;
+  requiredReadableRoots?: string[];
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<CursorPersonalIdentity> {
+  const proxy = await startCursorIdentityProxy(input.signal);
+  try {
+    const result = await runCursorSandboxedInspection({
+      cursorBin: input.cursorBin,
+      commandArgs: [
+        "--endpoint", proxy.endpoint,
+        "--http-version", "1.1",
+        "--disable-auto-update",
+        "status", "--format", "json",
+      ],
+      cwd: input.cwd,
+      env: input.env,
+      writableProfileRoot: input.writableProfileRoot,
+      requiredReadableRoots: input.requiredReadableRoots,
+      allowedNetworkRemotes: [proxy.remote],
+      timeoutMs: input.timeoutMs ?? CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
+      signal: input.signal,
+    });
+    if (!result.ok) {
+      const detail = result.stderr.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+        || result.errorCode
+        || "native status failed";
+      throw new Error(`Cursor live identity attestation failed: ${detail}`);
+    }
+    const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    const userInfo = parsed.userInfo;
+    if (parsed.status === "unauthenticated" || parsed.isAuthenticated === false) {
+      throw new CursorIdentityAuthRequiredError();
+    }
+    if (parsed.status !== "authenticated"
+      || parsed.isAuthenticated !== true
+      || !userInfo
+      || typeof userInfo !== "object"
+      || Array.isArray(userInfo)
+      || typeof (userInfo as Record<string, unknown>).userId !== "number"
+      || !Number.isSafeInteger((userInfo as Record<string, unknown>).userId)
+      || ((userInfo as Record<string, unknown>).userId as number) <= 0) {
+      throw new Error("Cursor could not prove the live account identity.");
+    }
+    if (Object.prototype.hasOwnProperty.call(userInfo, "teamId")
+      && (userInfo as Record<string, unknown>).teamId !== null
+      && (userInfo as Record<string, unknown>).teamId !== undefined) {
+      throw new CursorTeamManagedIdentityError();
+    }
+    proxy.assertGetMeCompleted();
+    const providerAuthorization = proxy.providerAuthorization();
+    const userId = (userInfo as Record<string, unknown>).userId as number;
+    const emailValue = (userInfo as Record<string, unknown>).email;
+    return {
+      userId,
+      email: typeof emailValue === "string" && emailValue.trim()
+        ? emailValue.trim()
+        : null,
+      providerAuthorization,
+    };
+  } finally {
+    await proxy.close();
+  }
+}
+
+function startCursorIdentityProxy(signal?: AbortSignal): Promise<{
+  endpoint: string;
+  remote: string;
+  assertGetMeCompleted(): void;
+  providerAuthorization(): string;
+  close(): Promise<void>;
+}> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error("Cursor live identity attestation was interrupted."));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let getMeRequests = 0;
+    let getMeSuccesses = 0;
+    let providerAuthorization: string | null = null;
+    const server: HttpServer = createServer((request, response) => {
+      const requestPath = typeof request.url === "string" ? request.url : "";
+      if (request.method !== "POST"
+        || requestPath !== "/aiserver.v1.DashboardService/GetMe") {
+        request.resume();
+        response.writeHead(503, { connection: "close", "cache-control": "no-store" });
+        response.end("Cursor identity attestation permits only GetMe.");
+        return;
+      }
+      getMeRequests += 1;
+      const requestAuthorization = request.headers.authorization;
+      if (typeof requestAuthorization !== "string"
+        || !/^Bearer [^\s\0]{1,16384}$/.test(requestAuthorization)
+        || (providerAuthorization !== null && providerAuthorization !== requestAuthorization)) {
+        request.resume();
+        response.writeHead(503, { connection: "close", "cache-control": "no-store" });
+        response.end("Cursor identity authorization was rejected.");
+        return;
+      }
+      providerAuthorization = requestAuthorization;
+      const contentLengthHeader = request.headers["content-length"];
+      const contentLength = typeof contentLengthHeader === "string" && /^\d{1,7}$/.test(contentLengthHeader)
+        ? Number(contentLengthHeader)
+        : -1;
+      if (request.headers["transfer-encoding"] !== undefined
+        || !Number.isSafeInteger(contentLength)
+        || contentLength < 0
+        || contentLength > 1024 * 1024) {
+        request.resume();
+        response.writeHead(503, { connection: "close", "cache-control": "no-store" });
+        response.end("Cursor identity request framing was rejected.");
+        return;
+      }
+      const headers: Record<string, string | string[] | undefined> = {
+        ...request.headers,
+        host: "api2.cursor.sh",
+      };
+      delete headers.connection;
+      delete headers["proxy-connection"];
+      delete headers.upgrade;
+      delete headers["keep-alive"];
+      delete headers["transfer-encoding"];
+      const upstream = httpsRequest({
+        protocol: "https:",
+        hostname: "api2.cursor.sh",
+        port: 443,
+        method: "POST",
+        path: requestPath,
+        headers,
+        servername: "api2.cursor.sh",
+        timeout: 15_000,
+      }, (upstreamResponse) => {
+        const responseHeaders: Record<string, string | string[] | undefined> = {
+          ...upstreamResponse.headers,
+        };
+        delete responseHeaders.connection;
+        delete responseHeaders["proxy-connection"];
+        delete responseHeaders.upgrade;
+        delete responseHeaders["keep-alive"];
+        response.writeHead(upstreamResponse.statusCode || 502, responseHeaders);
+        let responseBytes = 0;
+        upstreamResponse.on("data", (chunk: Buffer) => {
+          responseBytes += chunk.length;
+          if (responseBytes > 1024 * 1024) {
+            upstreamResponse.destroy();
+            response.destroy();
+          }
+        });
+        upstreamResponse.once("end", () => {
+          if (responseBytes <= 1024 * 1024
+            && (upstreamResponse.statusCode ?? 0) >= 200
+            && (upstreamResponse.statusCode ?? 0) < 300) {
+            getMeSuccesses += 1;
+          }
+        });
+        upstreamResponse.once("error", () => response.destroy());
+        upstreamResponse.pipe(response);
+      });
+      upstream.once("timeout", () => upstream.destroy(new Error("Cursor GetMe timed out.")));
+      upstream.once("error", () => {
+        if (!response.headersSent) response.writeHead(502, { connection: "close" });
+        response.end();
+      });
+      request.once("aborted", () => upstream.destroy());
+      let receivedBytes = 0;
+      let overflow = false;
+      request.on("data", (chunk: Buffer) => {
+        if (overflow) return;
+        receivedBytes += chunk.length;
+        if (receivedBytes > 1024 * 1024) {
+          overflow = true;
+          upstream.destroy();
+          if (!response.headersSent) response.writeHead(413, { connection: "close" });
+          response.end();
+          request.resume();
+          return;
+        }
+        if (!upstream.write(chunk)) {
+          request.pause();
+          upstream.once("drain", () => request.resume());
+        }
+      });
+      request.once("end", () => { if (!overflow) upstream.end(); });
+      request.once("error", () => upstream.destroy());
+    });
+    server.maxHeadersCount = 64;
+    server.headersTimeout = 5_000;
+    server.requestTimeout = 20_000;
+    server.keepAliveTimeout = 1_000;
+    const abort = (): void => {
+      server.close();
+      if (!settled) {
+        settled = true;
+        reject(new Error("Cursor live identity attestation was interrupted."));
+      }
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    server.once("error", (error) => {
+      signal?.removeEventListener("abort", abort);
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    });
+    server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+      if (settled) return;
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        server.close();
+        reject(new Error("Cursor identity proxy did not expose a loopback port."));
+        return;
+      }
+      settled = true;
+      resolve({
+        endpoint: `http://127.0.0.1:${address.port}`,
+        remote: `localhost:${address.port}`,
+        assertGetMeCompleted() {
+          if (getMeRequests !== 1 || getMeSuccesses !== 1 || providerAuthorization === null) {
+            throw new Error("Cursor did not complete exactly one live GetMe identity proof.");
+          }
+        },
+        providerAuthorization() {
+          if (providerAuthorization === null) {
+            throw new Error("Cursor did not provide a live authorization proof.");
+          }
+          return providerAuthorization;
+        },
+        close: () => new Promise<void>((resolveClose) => {
+          signal?.removeEventListener("abort", abort);
+          server.closeAllConnections?.();
+          server.close(() => resolveClose());
+        }),
+      });
+    });
+  });
 }
 
 const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   launchTurn: defaultLaunchTurn,
+  attestSupervisedMcp: assertCursorSupervisedMcpAuthority,
+  attestPersonalIdentity: assertCursorPersonalIdentity,
+  bindPersonalIdentity: bindCursorSupervisedIdentity,
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
+  prepareTurnState: (path) => writeFileSync(path, "", { flag: "wx", mode: 0o600 }),
   now: () => new Date().toISOString(),
 };
 
@@ -269,8 +2469,80 @@ interface LiveTurn {
   sawInit: boolean;
   sawResult: boolean;
   resultWasError: boolean;
+  resultText: string | null;
+  providerRequestId: string | null;
   interruptRequested: boolean;
-  completion?: Promise<void>;
+  /** Supervisor-minted identity embedded in the prompt and durable inbox. */
+  roomTurnId: string | null;
+  statePath: string | null;
+  completion?: Promise<CursorTurnTerminal>;
+}
+
+type CursorTurnTerminal = {
+  state: "result" | "interrupted" | "attempt_terminal";
+  exit: ProviderProcessExit;
+  text: string | null;
+  isError: boolean;
+  providerRequestId: string | null;
+  attemptTerminal: ProviderTerminalPayload | null;
+  /** Exact init identity retained when a live post-init checkpoint fails. */
+  providerContinuationId?: string;
+};
+
+class CursorRoomTurnRecoveryError extends Error {
+  readonly roomTurnRecoveryOutcome = "ambiguous" as const;
+}
+
+class CursorRoomTurnNotDispatchedError extends Error {
+  readonly roomTurnRecoveryOutcome = "not_dispatched" as const;
+  constructor(message: string, readonly providerTurnId: string | null = null) {
+    super(message);
+  }
+}
+
+class CursorPostDispatchCheckpointError extends Error {}
+
+class CursorRoomTurnObservationDetachedError extends Error {}
+
+class CursorRoomTurnTerminalError extends Error {
+  readonly roomTurnRecoveryOutcome = "terminal_failure" as const;
+}
+
+class CursorRecordedTurnInProgressError extends Error {
+  readonly providerAttachOutcome = "in_progress" as const;
+}
+
+/** Read one exact inode with O_NOFOLLOW and a preallocated size bound. */
+function readBoundedCursorTurnFile(path: string, maxBytes: number, label: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new CursorRoomTurnRecoveryError(`${label} could not be opened safely.`);
+  }
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > maxBytes) {
+      throw new CursorRoomTurnRecoveryError(`${label} is not a bounded regular file.`);
+    }
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    const after = fstatSync(fd);
+    if (offset !== before.size || after.size !== before.size
+      || after.dev !== before.dev || after.ino !== before.ino
+      || after.mtimeMs !== before.mtimeMs) {
+      throw new CursorRoomTurnRecoveryError(`${label} changed while it was being read.`);
+    }
+    return bytes.toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // The empirically proven usage-limit signature (task_38 spike, msg_1708):
@@ -297,6 +2569,11 @@ class CursorProviderHandle implements ProviderHandle {
   terminal: ProviderTerminalPayload | null = null;
   providerContinuationId: string | null = null;
   liveTurn: LiveTurn | null = null;
+  activeRoomTurnId: string | null = null;
+  roomTurnOperationId: string | null = null;
+  roomTurnAbortController: AbortController | null = null;
+  roomTurnOperationSettled: Promise<void> | null = null;
+  readonly roomTurnResults = new Map<string, CursorTurnTerminal>();
   readonly exitListeners = new Set<(payload: ProviderTerminalPayload) => void>();
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
@@ -306,6 +2583,9 @@ class CursorProviderHandle implements ProviderHandle {
     readonly workAttemptId: string,
     readonly cwd: string,
     readonly policyArgs: string[],
+    readonly deliveryMode: "mcp_polling" | "daemon_inbox",
+    readonly spawnRequest: ProviderSpawnRequest,
+    readonly supervisedProfile: CursorManagedProfile | null,
   ) {}
 
   /**
@@ -337,8 +2617,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly turnStartTimeoutMs: number;
   private readonly stopGraceMs: number;
+  private readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
   private readonly handles = new Map<string, CursorProviderHandle>();
-  private readonly pendingAttaches = new Map<string, Promise<ProviderHandle | null>>();
 
   constructor(options: CursorProviderAdapterOptions = {}) {
     this.cursorBin = options.cursorBin || process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
@@ -347,6 +2627,25 @@ export class CursorProviderAdapter implements ProviderAdapter {
     this.streamSink = options.streamSink;
     this.turnStartTimeoutMs = options.turnStartTimeoutMs ?? TURN_START_TIMEOUT_MS;
     this.stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+    this.supervisedProfileFactory = options.supervisedProfileFactory
+      ?? ((input) => prepareCursorSupervisedProfile({
+        workAttemptId: input.workAttemptId,
+        workspaceRoot: input.cwd,
+        apiBaseUrl: desktopApiUrl,
+        profileRoot: input.profileRoot,
+        includeAuth: input.includeAuth,
+        authSourceHomeDir: input.authSourceHomeDir,
+        identityAttestationOnly: input.identityAttestationOnly,
+        attestedPersonalIdentity: input.attestedPersonalIdentity,
+        exposeLoginCredentials: input.exposeLoginCredentials,
+        inspectionOnly: input.inspectionOnly,
+        mcpWorkingDirectory: input.mcpWorkingDirectory,
+        supervisorMcpEnv: input.supervisorMcpEnv,
+        mcpConnectorSocketPath: input.mcpConnectorSocketPath,
+        mcpRuntime: input.inspectionOnly ? undefined : resolveLetAgentsMcpRuntime({
+          devEntryPath: input.devMcpServerEntryPath,
+        }),
+      }));
   }
 
   capabilities(): ProviderAdapterCapabilities {
@@ -370,10 +2669,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
   /**
    * Between turns there is genuinely nothing to attach: no process exists and
    * the continuation lives entirely in the session id. During a live turn a
-   * fresh adapter cannot reattach stdio, so a verified-live recorded child is
-   * fenced (TERM → grace → identity recheck → KILL → verified disappearance)
-   * before the lane is reported absent for bounded resume — the same msg_1188
-   * discipline as the Claude adapter. Unverifiable state throws ambiguous.
+   * fresh adapter cannot reattach stdio. A still-live exact wrapper is reported
+   * promptly as in-progress so daemon lifecycle control never queues behind an
+   * unbounded attach. It is not treated as absent and no successor is launched.
    */
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | null> {
     const handle = this.handles.get(ref.workAttemptId);
@@ -388,15 +2686,51 @@ export class CursorProviderAdapter implements ProviderAdapter {
       return null;
     }
 
-    const pending = this.pendingAttaches.get(ref.workAttemptId);
-    if (pending) return pending;
-    const attaching = this.fenceRecordedTurnChild(connection).finally(() => {
-      if (this.pendingAttaches.get(ref.workAttemptId) === attaching) {
-        this.pendingAttaches.delete(ref.workAttemptId);
+    return this.observeRecordedTurnChild(connection);
+  }
+
+  async stopRef(
+    ref: ProviderContinuationRef,
+    options: ProviderStopOptions = {},
+  ): Promise<ProviderTerminalPayload> {
+    const connection = ref.providerConnection;
+    if (!connection || connection.kind !== "cursor_cli") {
+      throw new Error("Cursor exact-reference stop requires a Cursor wrapper reference.");
+    }
+    if ((connection.pid === null) !== (connection.processIdentity == null)) {
+      throw new Error("Cursor exact-reference stop requires a verified wrapper process birth.");
+    }
+    if (connection.pid !== null && connection.processIdentity) {
+      const identity = this.deps.getProcessIdentity(connection.pid);
+      if (identity === undefined) {
+        throw new Error("Cursor exact-reference stop is ambiguous because process identity cannot be verified.");
       }
+      if (identity !== null && sameProcessBirthIdentity(identity, connection.processIdentity)) {
+      // The wrapper owns its native process group and performs TERM→KILL
+      // escalation internally. Killing the wrapper itself could orphan Cursor.
+        this.deps.signalProcess(connection.pid, "SIGTERM");
+        const deadline = Date.now() + (options.graceMs ?? this.stopGraceMs);
+        for (;;) {
+          const current = this.deps.getProcessIdentity(connection.pid);
+          if (current === null || (typeof current === "string"
+            && !sameProcessBirthIdentity(current, connection.processIdentity))) break;
+          if (current === undefined) {
+            throw new Error("Cursor exact-reference stop lost process-birth visibility before absence was proved.");
+          }
+          if (Date.now() >= deadline) {
+            throw new Error("Cursor's process-reaping wrapper has not yet proved all recorded turn descendants are gone.");
+          }
+          await delay(25);
+        }
+      }
+    }
+    return synthesizeTerminalPayload({
+      endedAt: this.deps.now(),
+      exitCode: 0,
+      signal: null,
+      providerContinuationId: ref.providerContinuationId,
+      stopRequested: true,
     });
-    this.pendingAttaches.set(ref.workAttemptId, attaching);
-    return attaching;
   }
 
   /**
@@ -406,6 +2740,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
    */
   async poke(providerHandle: ProviderHandle, message: string): Promise<void> {
     const handle = this.requireHandle(providerHandle);
+    if (handle.deliveryMode === "daemon_inbox") {
+      throw new Error("Cursor daemon-inbox delivery is journaled as bounded room turns; poke is unavailable.");
+    }
     if (handle.terminal) {
       throw new Error("Cursor lane is terminal; nothing can be delivered.");
     }
@@ -425,25 +2762,45 @@ export class CursorProviderAdapter implements ProviderAdapter {
     const handle = this.requireHandle(providerHandle);
     if (handle.terminal) throw new Error("Cursor continuation is terminal; no turn can be controlled.");
     const text = correction?.trim() || null;
-    const turn = handle.liveTurn;
+    if (text && handle.deliveryMode === "daemon_inbox") {
+      throw new ProviderTurnControlError(
+        "Cursor daemon-inbox turn control can stop the active bounded turn, but cannot start an unjournaled correction turn.",
+        "not_applied",
+      );
+    }
+    let turn = handle.liveTurn;
+    const pendingController = turn ? null : handle.roomTurnAbortController;
+    if (turn || pendingController) {
+      await options.markDispatched?.();
+      if (!turn && pendingController) {
+        turn = handle.liveTurn;
+        if (!turn && handle.roomTurnAbortController === pendingController) {
+          const settled = handle.roomTurnOperationSettled;
+          pendingController.abort();
+          await settled;
+          return {
+            capability: "restart_resume",
+            interrupted: true,
+            resumed: false,
+            state: "idle",
+          };
+        }
+      }
+    }
     if (turn) {
-      const identity = this.deps.getProcessIdentity(turn.pid);
-      if (typeof identity !== "string" || !sameProcessBirthIdentity(identity, turn.processIdentity)) {
+      const identity = this.exactProcessStatus(turn.pid, turn.processIdentity);
+      if (identity !== "exact") {
         throw new Error("Cursor turn identity is stale; refusing to interrupt a different process.");
       }
       try {
-        await options.markDispatched?.();
-        const dispatchIdentity = this.deps.getProcessIdentity(turn.pid);
         if (handle.liveTurn !== turn
-          || typeof dispatchIdentity !== "string"
-          || !sameProcessBirthIdentity(dispatchIdentity, turn.processIdentity)) {
+          || this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM") !== "signalled") {
           throw new ProviderTurnControlError(
             "Cursor turn ended before the child interrupt was dispatched.",
             "not_applied",
           );
         }
         turn.interruptRequested = true;
-        this.deps.signalProcess(turn.pid, "SIGTERM");
       } catch (error) {
         turn.interruptRequested = false;
         throw error;
@@ -452,7 +2809,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
         turn.child.exited.then(() => true),
         delay(this.stopGraceMs).then(() => false),
       ]);
-      if (!graceful) this.deps.signalProcess(turn.pid, "SIGKILL");
+      if (!graceful && turn.child.ownsDescendantReaping) {
+        throw new Error("Cursor's process-reaping wrapper has not yet proved the interrupted turn descendants are gone.");
+      }
+      if (!graceful) {
+        const killed = this.signalExactProcess(turn.pid, turn.processIdentity, "SIGKILL");
+        if (killed === "ambiguous") {
+          throw new Error("Cursor turn process birth became unverifiable before interrupt escalation.");
+        }
+      }
       await turn.child.exited;
       await turn.completion;
       if (handle.terminal) throw new Error("Cursor turn interruption unexpectedly ended the supervised attempt.");
@@ -469,6 +2834,305 @@ export class CursorProviderAdapter implements ProviderAdapter {
     };
   }
 
+  async runRoomTurn(
+    providerHandle: ProviderHandle,
+    request: ProviderRoomTurnRequest,
+    options: ProviderRoomTurnOptions = {},
+  ): Promise<ProviderRoomTurnResult> {
+    const handle = this.requireHandle(providerHandle);
+    if (handle.deliveryMode !== "daemon_inbox") {
+      throw new Error("Cursor bounded room turns require daemon_inbox delivery.");
+    }
+    if (handle.terminal) throw new Error("Cursor continuation is terminal; no bounded room turn can run.");
+    if (handle.state === "failed") throw new Error("Cursor continuation has failed; no bounded room turn can run.");
+    if (handle.liveTurn || handle.roomTurnOperationId || handle.activeRoomTurnId) {
+      throw new Error("Cursor continuation already has a bounded room turn in progress.");
+    }
+    if (!request.inboxItemId.trim() || !request.actionId.trim()) {
+      throw new Error("Bounded Cursor room turn requires durable inbox and action ids.");
+    }
+
+    const turnId = `cursor:${randomUUID()}`;
+    const turnAbortController = new AbortController();
+    let settleRoomTurnOperation!: () => void;
+    handle.roomTurnOperationId = turnId;
+    handle.roomTurnAbortController = turnAbortController;
+    handle.roomTurnOperationSettled = new Promise((resolve) => {
+      settleRoomTurnOperation = resolve;
+    });
+    const detachDuringPreparation = () => turnAbortController.abort();
+    const detachSignal = options.detachSignal;
+    if (detachSignal?.aborted) detachDuringPreparation();
+    else detachSignal?.addEventListener("abort", detachDuringPreparation, { once: true });
+    const unlinkPreparationDetach = () => {
+      detachSignal?.removeEventListener("abort", detachDuringPreparation);
+    };
+    const markDurableTurnStarted = () => {
+      options.markDurableTurnStarted?.();
+      unlinkPreparationDetach();
+    };
+    try {
+      await (options.beforeNativeDispatch ?? options.markDispatched)?.();
+      handle.activeRoomTurnId = turnId;
+      let turn: LiveTurn;
+      try {
+        turn = await this.beginTurn(
+          handle,
+          boundedCursorRoomTurnPrompt(request, turnId),
+          handle.providerContinuationId,
+          turnId,
+          options.checkpointProviderState,
+          options.checkpointTurnStarted,
+          turnAbortController.signal,
+          markDurableTurnStarted,
+        );
+      } catch (error) {
+        if (!(error instanceof CursorPostDispatchCheckpointError)) throw error;
+        // This exact wrapper crossed the durable turn boundary. Handoff now
+        // detaches observation instead of cancelling preparation.
+        unlinkPreparationDetach();
+        // Native work may have completed while its real session checkpoint
+        // failed. Re-read only this exact wrapper terminal; never redispatch.
+        return this.recoverRoomTurn(handle, {
+          inboxItemId: request.inboxItemId,
+          providerTurnId: turnId,
+        }, {
+          detachSignal: options.detachSignal,
+          checkpointProviderState: options.checkpointProviderState,
+          checkpointTerminalResult: options.checkpointTerminalResult,
+        });
+      }
+      const terminal = await this.awaitRoomTurnTerminal(turn.completion!, options.detachSignal);
+      await options.checkpointProviderState?.({
+        providerContinuationId: handle.providerContinuationId!,
+        providerConnection: handle.providerConnection,
+      });
+      const result = this.providerRoomTurnResult(turnId, terminal);
+      await options.checkpointTerminalResult?.(result);
+      if (options.checkpointTerminalResult && result.outcome !== "unreadable") {
+        this.removeDurableTurnJournal(handle, turnId);
+      }
+      // Cursor has no exact-turn read API. Keep unreadable terminal evidence
+      // until the daemon performs its one result-recovery pass; replies and
+      // explicit no-replies are already durably normalized and can be dropped.
+      if (result.outcome !== "unreadable") handle.roomTurnResults.delete(turnId);
+      return result;
+    } finally {
+      unlinkPreparationDetach();
+      settleRoomTurnOperation();
+      if (handle.roomTurnAbortController === turnAbortController) {
+        handle.roomTurnAbortController = null;
+        handle.roomTurnOperationSettled = null;
+      }
+      if (handle.roomTurnOperationId === turnId) handle.roomTurnOperationId = null;
+      if (handle.activeRoomTurnId === turnId && handle.roomTurnResults.has(turnId)) {
+        handle.activeRoomTurnId = null;
+      } else if (handle.activeRoomTurnId === turnId && !handle.liveTurn) {
+        // Launch/init failed before a recoverable exact turn existed.
+        handle.activeRoomTurnId = null;
+      }
+    }
+  }
+
+  async recoverRoomTurn(
+    providerHandle: ProviderHandle,
+    request: ProviderRoomTurnRecoveryRequest,
+    options: {
+      detachSignal?: AbortSignal;
+      checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"];
+      checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+    } = {},
+  ): Promise<ProviderRoomTurnResult> {
+    const handle = this.requireHandle(providerHandle);
+    const turnId = request.providerTurnId.trim();
+    if (!turnId) {
+      throw new CursorRoomTurnRecoveryError("Cursor room-turn recovery requires an exact persisted turn id.");
+    }
+    let terminal: CursorTurnTerminal | null;
+    try {
+      // The wrapper journal keeps consuming native stdout during a TERM fence,
+      // after live listeners have detached. Prefer that exact durable terminal
+      // over an earlier in-memory teardown snapshot so a late successful result
+      // cannot be hidden until the next daemon restart.
+      terminal = this.readDurableTurnTerminal(handle, turnId) ?? handle.roomTurnResults.get(turnId) ?? null;
+    } catch (error) {
+      throw error;
+    }
+    if (!terminal && handle.liveTurn?.roomTurnId === turnId && handle.liveTurn.completion) {
+      terminal = await this.awaitRoomTurnTerminal(handle.liveTurn.completion, options.detachSignal);
+    }
+    if (!terminal) {
+      // Cursor's CLI exposes no exact-turn read endpoint. A successor may
+      // resume the continuation, but it must never rerun an ambiguous inbox
+      // item after losing the original per-turn stream.
+      throw new CursorRoomTurnRecoveryError(
+        "Cursor room-turn recovery cannot prove the persisted exact turn reached a terminal boundary; refusing to rerun it.",
+      );
+    }
+    if (handle.providerContinuationId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX)
+      && terminal.providerContinuationId) {
+      handle.providerContinuationId = requireCursorSessionId(
+        terminal.providerContinuationId,
+        "Cursor recovered session",
+      );
+    }
+    try {
+      await options.checkpointProviderState?.({
+        providerContinuationId: handle.providerContinuationId!,
+        providerConnection: handle.providerConnection,
+      });
+    } catch (error) {
+      // The manifest write may already have committed before a later durable
+      // checkpoint failed. Keep the continuation proven by the exact terminal
+      // so an idempotent retry converges from either old or new durable state.
+      throw new CursorRoomTurnRecoveryError(
+        `Cursor terminal recovery could not checkpoint its exact continuation: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      if (terminal.state === "attempt_terminal") {
+        // Recovery has the same attempt-level semantics as live completion. A
+        // trusted wrapper terminal with init but no result proves this native
+        // lane ended. Checkpoint its recovered continuation first because the
+        // daemon's synchronous onExit listener retires the live handle and
+        // would otherwise invalidate that checkpoint's ownership fence. The
+        // finally still guarantees terminalization before either checkpoint
+        // failure or providerRoomTurnResult escapes to the delivery worker.
+        const attemptTerminal = this.finishAttempt(
+          handle,
+          terminal.exit,
+          terminal.attemptTerminal?.terminalCause,
+        );
+        terminal = { ...terminal, attemptTerminal };
+      }
+    }
+    const result = this.providerRoomTurnResult(turnId, terminal);
+    await options.checkpointTerminalResult?.(result);
+    if (options.checkpointTerminalResult && result.outcome !== "unreadable") {
+      this.removeDurableTurnJournal(handle, turnId);
+    }
+    handle.roomTurnResults.delete(turnId);
+    return result;
+  }
+
+  private readDurableTurnTerminal(
+    handle: CursorProviderHandle,
+    turnId: string,
+  ): CursorTurnTerminal | null {
+    const profile = handle.supervisedProfile;
+    if (!profile) return null;
+    const statePath = join(
+      profile.configDir,
+      `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`,
+    );
+    const terminalPath = `${statePath}.terminal.json`;
+    const terminalJson = readBoundedCursorTurnFile(
+      terminalPath,
+      MAX_DURABLE_TURN_TERMINAL_BYTES,
+      "Cursor durable terminal evidence",
+    );
+    if (terminalJson === null) return null;
+    let exit: ProviderProcessExit;
+    let initMessage: CursorStreamMessage;
+    let resultMessage: CursorStreamMessage | null;
+    try {
+      const raw = JSON.parse(terminalJson) as Record<string, unknown>;
+      const currentContainmentEvidence = raw.native_process_group_reaped === true
+        && raw.reap_scope === "native_process_group"
+        && raw.turn_authority_revoked === true;
+      if (!currentContainmentEvidence) {
+        throw new CursorRoomTurnRecoveryError("Cursor terminal evidence does not prove native process-group retirement and turn-authority revocation.");
+      }
+      if (raw.type === "not_started") {
+        throw new CursorRoomTurnNotDispatchedError(
+          "Cursor's prepared wrapper exited before native dispatch; the exact inbox item is safe to retry.",
+        );
+      }
+      if (raw.type !== "exit" && raw.type !== "error") {
+        throw new CursorRoomTurnRecoveryError("Cursor terminal evidence has an unknown type.");
+      }
+      if (raw.session_contract_valid !== true || raw.stream_contract_complete !== true) {
+        throw new CursorRoomTurnRecoveryError("Cursor terminal evidence did not preserve a complete session contract.");
+      }
+      if (!raw.init || typeof raw.init !== "object" || Array.isArray(raw.init)) {
+        throw new CursorRoomTurnRecoveryError("Cursor terminal evidence has no verified init snapshot.");
+      }
+      initMessage = raw.init as CursorStreamMessage;
+      resultMessage = raw.result === null
+        ? null
+        : raw.result && typeof raw.result === "object" && !Array.isArray(raw.result)
+          ? raw.result as CursorStreamMessage
+          : (() => { throw new CursorRoomTurnRecoveryError("Cursor terminal result snapshot is malformed."); })();
+      exit = raw.type === "exit"
+        ? {
+          type: "exit",
+          code: typeof raw.code === "number" ? raw.code : null,
+          signal: typeof raw.signal === "string" ? raw.signal as NodeJS.Signals : null,
+        }
+        : { type: "error", error: new Error(typeof raw.error === "string" ? raw.error : "Cursor wrapper launch failed.") };
+    } catch (error) {
+      if (error instanceof CursorRoomTurnNotDispatchedError) throw error;
+      if (error instanceof CursorRoomTurnRecoveryError) throw error;
+      throw new CursorRoomTurnRecoveryError(`Cursor durable terminal evidence is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const initSessionId = sessionIdOf(initMessage);
+    if (initMessage.type !== "system" || initMessage.subtype !== "init" || !initSessionId) {
+      throw new CursorRoomTurnRecoveryError("Cursor terminal init snapshot has no valid provider session identity.");
+    }
+    const pendingContinuation = handle.providerContinuationId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX) === true;
+    if (handle.providerContinuationId && !pendingContinuation
+      && initSessionId !== handle.providerContinuationId) {
+      throw new CursorRoomTurnRecoveryError("Cursor terminal snapshot belongs to a different provider continuation.");
+    }
+    if (pendingContinuation) handle.providerContinuationId = initSessionId;
+    const resultSessionId = resultMessage ? sessionIdOf(resultMessage) : null;
+    if (resultSessionId && resultSessionId !== initSessionId) {
+      throw new CursorRoomTurnRecoveryError("Cursor terminal result belongs to a different provider continuation.");
+    }
+    const sawResult = resultMessage?.type === "result";
+    let isError = true;
+    let text: string | null = null;
+    let providerRequestId: string | null = null;
+    if (sawResult && resultMessage) {
+      isError = resultMessage.is_error === true;
+      text = typeof resultMessage.result === "string" ? resultMessage.result : null;
+      providerRequestId = typeof resultMessage.request_id === "string" && resultMessage.request_id.trim()
+        ? resultMessage.request_id.trim()
+        : null;
+    }
+    return sawResult
+      ? { state: "result", exit, text, isError, providerRequestId, attemptTerminal: null, providerContinuationId: initSessionId }
+      : {
+        state: "attempt_terminal",
+        exit,
+        text: null,
+        isError: true,
+        providerRequestId: null,
+        attemptTerminal: null,
+        providerContinuationId: initSessionId,
+      };
+  }
+
+  private removeDurableTurnJournal(handle: CursorProviderHandle, turnId: string): void {
+    const profile = handle.supervisedProfile;
+    if (!profile) return;
+    const statePath = join(
+      profile.configDir,
+      `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`,
+    );
+    // unlink never follows a symlink. Delete terminal authority first so a
+    // crash during cleanup can only leave inert stream bytes, never a terminal
+    // record that points at missing evidence.
+    for (const path of [`${statePath}.terminal.json`, statePath]) {
+      try {
+        unlinkSync(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new CursorRoomTurnRecoveryError("Cursor durable turn journal could not be retired safely.");
+        }
+      }
+    }
+  }
+
   async stop(
     providerHandle: ProviderHandle,
     options: ProviderStopOptions = {},
@@ -478,7 +3142,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
     handle.stopRequested = true;
     handle.state = "stopping";
 
-    const turn = handle.liveTurn;
+    let turn = handle.liveTurn;
+    const pendingController = turn ? null : handle.roomTurnAbortController;
+    if (pendingController) {
+      const settled = handle.roomTurnOperationSettled;
+      pendingController.abort();
+      await settled;
+      turn = handle.liveTurn;
+    }
     if (!turn) {
       // Idle lane: no process to signal. The attempt ends here with an honest
       // synthesized payload (no exit code exists because nothing was running).
@@ -486,16 +3157,43 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
 
     if (options.force) {
-      this.deps.signalProcess(turn.pid, "SIGKILL");
+      const signalled = this.signalExactProcess(
+        turn.pid,
+        turn.processIdentity,
+        turn.child.ownsDescendantReaping ? "SIGTERM" : "SIGKILL",
+      );
+      if (signalled === "ambiguous") throw new Error("Cursor turn process birth is unverifiable; refusing force-stop.");
+      if (signalled === "absent") {
+        handle.liveTurn = null;
+        return this.finishAttempt(handle, { type: "exit", code: null, signal: null });
+      }
+      if (turn.child.ownsDescendantReaping) {
+        const reaped = await Promise.race([
+          turn.child.exited.then(() => true),
+          delay(options.graceMs ?? this.stopGraceMs).then(() => false),
+        ]);
+        if (!reaped) throw new Error("Cursor's process-reaping wrapper has not yet proved all turn descendants are gone.");
+      }
       return this.awaitTurnTerminal(handle, turn);
     }
-    this.deps.signalProcess(turn.pid, "SIGTERM");
+    const term = this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
+    if (term === "ambiguous") throw new Error("Cursor turn process birth is unverifiable; refusing stop.");
+    if (term === "absent") {
+      handle.liveTurn = null;
+      return this.finishAttempt(handle, { type: "exit", code: null, signal: null });
+    }
     const graceMs = options.graceMs ?? this.stopGraceMs;
     const graceful = await Promise.race([
       turn.child.exited.then(() => true),
       delay(graceMs).then(() => false),
     ]);
-    if (!graceful) this.deps.signalProcess(turn.pid, "SIGKILL");
+    if (!graceful && turn.child.ownsDescendantReaping) {
+      throw new Error("Cursor's process-reaping wrapper has not yet proved all turn descendants are gone.");
+    }
+    if (!graceful) {
+      const killed = this.signalExactProcess(turn.pid, turn.processIdentity, "SIGKILL");
+      if (killed === "ambiguous") throw new Error("Cursor turn process birth became unverifiable before stop escalation.");
+    }
     return this.awaitTurnTerminal(handle, turn);
   }
 
@@ -541,12 +3239,55 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (!req.agentDisplayName?.trim()) {
       throw new Error("Cursor spawn requires the durable agent display name from the manifest.");
     }
+    const deliveryMode = req.deliveryMode ?? "mcp_polling";
+    if (deliveryMode !== "mcp_polling" && deliveryMode !== "daemon_inbox") {
+      throw new Error(`Cursor does not support ${deliveryMode} room delivery.`);
+    }
     const policyArgs = [
       ...cursorLaunchPolicyArgs(attestProviderSpawnPolicy("cursor", req)),
       ...(req.model ? ["--model", req.model] : []),
     ];
-    const handle = new CursorProviderHandle(req.workAttemptId, req.cwd, policyArgs);
+    let supervisedProfile: CursorManagedProfile | null = null;
+    if (deliveryMode === "daemon_inbox") {
+      if (!req.supervisorEntryId?.trim()
+        || !req.supervisorSocketPath?.trim()
+        || !req.supervisorExecutionGenerationId?.trim()) {
+        throw new Error("Cursor daemon-inbox launch requires exact supervisor coordinates.");
+      }
+      if (req.permissionProfileId !== "read_only") {
+        throw new Error("Supervised Cursor currently supports only the read-only permission profile; write profiles cannot preserve an exact-only MCP boundary.");
+      }
+      supervisedProfile = this.supervisedProfileFactory({
+        workAttemptId: req.workAttemptId,
+        cwd: req.cwd,
+        includeAuth: false,
+        devMcpServerEntryPath: req.devMcpServerEntryPath,
+      });
+    }
+    const handle = new CursorProviderHandle(
+      req.workAttemptId,
+      req.cwd,
+      policyArgs,
+      deliveryMode,
+      req,
+      supervisedProfile,
+    );
     if (resumeRef) handle.providerContinuationId = resumeRef.providerContinuationId;
+
+    // A daemon successor must not start a bootstrap turn while an uncheckpointed
+    // predecessor child may still be finishing. The durable FIFO recovers (or
+    // blocks) that exact turn first; a later real inbox item verifies --resume.
+    if (deliveryMode === "daemon_inbox") {
+      // Cursor cannot mint a session without executing an inference. Persist a
+      // non-native placeholder and let the FIRST DURABLY JOURNALED inbox turn
+      // establish the real session instead of running uncaused bootstrap work.
+      if (!handle.providerContinuationId) {
+        handle.providerContinuationId = `${CURSOR_PENDING_CONTINUATION_PREFIX}${randomUUID()}`;
+      }
+      handle.state = "idle";
+      this.handles.set(req.workAttemptId, handle);
+      return handle;
+    }
 
     const prompt = buildCodexStartPrompt({
       roomIdentifier: req.roomId,
@@ -585,17 +3326,353 @@ export class CursorProviderAdapter implements ProviderAdapter {
     handle: CursorProviderHandle,
     prompt: string,
     resumeSessionId: string | null,
-  ): Promise<void> {
+    roomTurnId: string | null = null,
+    checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"],
+    checkpointTurnStarted?: ProviderRoomTurnOptions["checkpointTurnStarted"],
+    launchSignal?: AbortSignal,
+    markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
+  ): Promise<LiveTurn> {
+    throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+    let childEnv: NodeJS.ProcessEnv | undefined;
+    let deniedReadPaths: string[] | undefined;
+    let deniedReadSubpaths: string[] | undefined;
+    let deniedReadMetadataPaths: string[] | undefined;
+    let deniedReadWriteRegexes: string[] | undefined;
+    let deniedWritePaths: string[] | undefined;
+    let deniedWriteStructuralPaths: string[] | undefined;
+    let deniedWriteSubpaths: string[] | undefined;
+    let allowedWriteSubpaths: string[] | undefined;
+    let allowedReadSubpaths: string[] | undefined;
+    let mcpConnectorRoot: string | undefined;
+    let mcpConnectorSocketPath: string | undefined;
+    let mcpRuntimeEntryPath: string | undefined;
+    let mcpRuntimeEnv: Readonly<Record<string, string>> | undefined;
+    let providerAuthorization: string | undefined;
+    let supervisedRuntimeDataDir: string | undefined;
+    if (handle.deliveryMode === "daemon_inbox") {
+      // First enumerate from a random disposable profile with an inert local
+      // MCP and no turn/provider capability. The authority wrapper denies
+      // direct networking and confines readable data/process execution.
+      const inspectionProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-inspection-"));
+      try {
+        const enumerationProfile = this.supervisedProfileFactory({
+          workAttemptId: `${handle.workAttemptId}:mcp-inspection:${randomUUID()}`,
+          cwd: handle.cwd,
+          profileRoot: inspectionProfileRoot,
+          includeAuth: false,
+          inspectionOnly: true,
+          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+        });
+        const enumerationEnv = cursorMcpInspectionEnv({
+          ...buildCursorChildEnv(enumerationProfile.env),
+          AGENT_CLI_CREDENTIAL_STORE: "file",
+        });
+        await this.deps.attestSupervisedMcp({
+          cursorBin: this.cursorBin,
+          cwd: inspectionProfileRoot,
+          env: enumerationEnv,
+          writableProfileRoot: inspectionProfileRoot,
+          expectedServerName: enumerationProfile.mcpServerName,
+          signal: launchSignal,
+        });
+      } catch (error) {
+        if (launchSignal?.aborted) {
+          throw new CursorRoomTurnNotDispatchedError(
+            "Cursor MCP attestation was interrupted and reaped before native dispatch.",
+            roomTurnId,
+          );
+        }
+        throw error;
+      } finally {
+        rmSync(inspectionProfileRoot, { recursive: true, force: true });
+      }
+      throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+
+      // Pass one can only write its own now-deleted root. Create pass two
+      // afterward so an escaped pass-one descendant never had path authority
+      // over the profile that exercises the packaged bridge.
+      const bridgeProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-bridge-"));
+      try {
+        const bridgeProfile = this.supervisedProfileFactory({
+          workAttemptId: `${handle.workAttemptId}:mcp-bridge:${randomUUID()}`,
+          cwd: handle.cwd,
+          profileRoot: bridgeProfileRoot,
+          includeAuth: false,
+          inspectionOnly: false,
+          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+          mcpWorkingDirectory: bridgeProfileRoot,
+          // Exercise the packaged server in its real credentialless bounded
+          // mode. Owner mode would attempt repository auto-join after stdio
+          // connect and can fail for reasons unrelated to MCP readiness. The
+          // inspection never invokes a tool and its network sandbox admits no
+          // supervisor socket, so these two non-secret mode markers cannot
+          // borrow or exercise turn authority.
+          supervisorMcpEnv: {
+            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+            LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+          },
+        });
+        const bridgeEnv = cursorMcpInspectionEnv({
+          ...buildCursorChildEnv(bridgeProfile.env),
+          // Prevent Cursor's shell launcher from consulting the login keychain
+          // while validating a credentialless, local packaged bridge.
+          AGENT_CLI_CREDENTIAL_STORE: "file",
+        });
+        await this.deps.attestSupervisedMcp({
+          cursorBin: this.cursorBin,
+          cwd: bridgeProfileRoot,
+          env: bridgeEnv,
+          writableProfileRoot: bridgeProfileRoot,
+          requiredReadableRoots: bridgeProfile.mcpRuntimeReadRoots,
+          expectedServerName: bridgeProfile.mcpServerName,
+          timeoutMs: CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS,
+          signal: launchSignal,
+        });
+      } catch (error) {
+        if (supervisedRuntimeDataDir) {
+          removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
+          supervisedRuntimeDataDir = undefined;
+        }
+        if (launchSignal?.aborted) {
+          throw new CursorRoomTurnNotDispatchedError(
+            "Cursor MCP attestation was interrupted and reaped before native dispatch.",
+            roomTurnId,
+          );
+        }
+        throw error;
+      } finally {
+        rmSync(bridgeProfileRoot, { recursive: true, force: true });
+      }
+      throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+      // Prove the live credential-store identity immediately before every
+      // dispatch. Cursor's cached authInfo can lag account/team membership and
+      // ambient API credentials are deliberately scrubbed, so a fresh random
+      // profile runs only `status --format json`, requires real userInfo, and
+      // fails closed for team-managed identities. The attested auth-only files
+      // then overwrite stale metadata in the stable attempt profile.
+      const identityProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-identity-"));
+      try {
+        let identityProfile = this.supervisedProfileFactory({
+          workAttemptId: `${handle.workAttemptId}:identity:${randomUUID()}`,
+          cwd: handle.cwd,
+          profileRoot: identityProfileRoot,
+          includeAuth: true,
+          identityAttestationOnly: true,
+          inspectionOnly: true,
+          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+          mcpWorkingDirectory: identityProfileRoot,
+        });
+        const personalIdentity = await this.deps.attestPersonalIdentity({
+          cursorBin: this.cursorBin,
+          cwd: identityProfileRoot,
+          env: cursorDaemonChildEnv(identityProfile.env),
+          writableProfileRoot: identityProfileRoot,
+          requiredReadableRoots: identityProfile.authReadRoots,
+          timeoutMs: CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
+          signal: launchSignal,
+        });
+        providerAuthorization = personalIdentity.providerAuthorization;
+        if (!providerAuthorization) {
+          throw new Error("Cursor live identity attestation returned no provider authorization proof.");
+        }
+        // Reseal after status so any refreshed teamId is checked before its
+        // sanitized auth metadata becomes the final turn's source.
+        identityProfile = this.supervisedProfileFactory({
+          workAttemptId: `${handle.workAttemptId}:identity:resealed`,
+          cwd: handle.cwd,
+          profileRoot: identityProfileRoot,
+          includeAuth: true,
+          authSourceHomeDir: identityProfile.homeDir,
+          attestedPersonalIdentity: personalIdentity,
+          exposeLoginCredentials: false,
+          inspectionOnly: true,
+          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+          mcpWorkingDirectory: identityProfileRoot,
+        });
+        throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+
+        // Only after both credentialless probes are removed and live identity
+        // is proven do we atomically reseal the stable profile and mint the
+        // real MCP child's exact turn capability.
+        const supervisorMcpEnv = cursorSupervisorMcpEnv(handle.spawnRequest, roomTurnId);
+        mcpConnectorRoot = join(CURSOR_MCP_CONNECTOR_PARENT, `letagents-cursor-mcp-${randomUUID()}`);
+        mcpConnectorSocketPath = join(mcpConnectorRoot, "stdio.sock");
+        const profile = this.supervisedProfileFactory({
+          workAttemptId: handle.workAttemptId,
+          cwd: handle.cwd,
+          authSourceHomeDir: identityProfile.homeDir,
+          attestedPersonalIdentity: personalIdentity,
+          exposeLoginCredentials: false,
+          devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
+          mcpConnectorSocketPath,
+        });
+        this.deps.bindPersonalIdentity(profile, personalIdentity);
+        childEnv = cursorDaemonChildEnv(profile.env);
+        // Cursor's long stable Application Support path otherwise falls back
+        // to the shared /tmp/.cursor worker socket. A new unpredictable short
+        // root per turn prevents both ambient-worker reuse and a detached old
+        // helper from colliding with the next resumed turn.
+        supervisedRuntimeDataDir = prepareCursorTurnRuntimeDataDir();
+        childEnv.CURSOR_DATA_DIR = supervisedRuntimeDataDir;
+        // Cursor's installed launcher adds `--use-system-ca` for memory/Keychain
+        // stores, which makes Node enumerate the user's macOS Keychain. The
+        // file store is confined to this owner-private profile; Cursor writes
+        // only our public argv placeholder and the wrapper removes it before
+        // publishing terminal evidence.
+        childEnv.AGENT_CLI_CREDENTIAL_STORE = "file";
+        deniedReadPaths = profile.nativeDeniedReadPaths;
+        deniedReadSubpaths = profile.nativeDeniedReadSubpaths;
+        deniedReadMetadataPaths = profile.nativeDeniedReadMetadataPaths;
+        deniedReadWriteRegexes = profile.nativeDeniedReadWriteRegexes;
+        deniedWritePaths = profile.nativeDeniedWritePaths;
+        deniedWriteStructuralPaths = profile.nativeDeniedWriteStructuralPaths;
+        deniedWriteSubpaths = profile.nativeDeniedWriteSubpaths;
+        allowedWriteSubpaths = profile.nativeAllowedWriteSubpaths?.length
+          ? [...new Set([
+            ...profile.nativeAllowedWriteSubpaths,
+            ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+          ])]
+          : undefined;
+        allowedReadSubpaths = profile.nativeAllowedReadSubpaths?.length
+          ? [...new Set([
+            ...profile.nativeAllowedReadSubpaths,
+            ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+          ])]
+          : undefined;
+        mcpRuntimeEntryPath = profile.mcpRuntimeEntryPath;
+        if (!profile.mcpRuntimeEnv) {
+          throw new Error("Supervised Cursor's wrapper-hosted MCP environment is unavailable.");
+        }
+        const mcpRuntimeRoot = dirname(mcpConnectorSocketPath);
+        mcpRuntimeEnv = {
+          ELECTRON_RUN_AS_NODE: "1",
+          LETAGENTS_API_URL: profile.mcpRuntimeEnv.LETAGENTS_API_URL,
+          HOME: join(mcpRuntimeRoot, "home"),
+          XDG_CONFIG_HOME: join(mcpRuntimeRoot, "config"),
+          XDG_DATA_HOME: join(mcpRuntimeRoot, "data"),
+          XDG_CACHE_HOME: join(mcpRuntimeRoot, "cache"),
+          CURSOR_CONFIG_DIR: join(mcpRuntimeRoot, "config", "cursor"),
+          CURSOR_DATA_DIR: join(mcpRuntimeRoot, "data", "cursor"),
+          NODE_COMPILE_CACHE: join(mcpRuntimeRoot, "cache", "node-compile-cache"),
+          CURSOR_API_KEY: "",
+          CURSOR_AUTH_TOKEN: "",
+          ...supervisorMcpEnv,
+        };
+      } catch (error) {
+        if (launchSignal?.aborted) {
+          throw new CursorRoomTurnNotDispatchedError(
+            "Cursor identity attestation was interrupted before native dispatch.",
+            roomTurnId,
+          );
+        }
+        throw error;
+      } finally {
+        rmSync(identityProfileRoot, { recursive: true, force: true });
+      }
+    }
+    const nativeResumeSession = resumeSessionId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX)
+      ? null
+      : resumeSessionId
+        ? requireCursorSessionId(resumeSessionId, "Cursor resume session")
+        : null;
     const args = [
       "-p",
       "--output-format", "stream-json",
+      // Cursor otherwise merges every .cursor/cli.json from the Git root down
+      // to --workspace after our static check. Keep the provider's own native
+      // suppression in addition to the per-turn filesystem revalidation.
+      ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-project-configs"] : []),
+      ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-auto-update"] : []),
       "--trust",
+      // Supervised Cursor is currently read-only. Keep ask-mode approvals and
+      // add Cursor's native sandbox as an independent OS boundary against a
+      // mistakenly classified "safe" command or hostile PATH/SHELL shim.
+      ...(handle.deliveryMode === "daemon_inbox" ? ["--sandbox", "enabled"] : []),
       "--workspace", handle.cwd,
       ...handle.policyArgs,
-      ...(resumeSessionId ? ["--resume", resumeSessionId] : []),
+      ...(nativeResumeSession ? [`--resume=${nativeResumeSession}`] : []),
       prompt,
     ];
-    const child = this.deps.launchTurn({ cursorBin: this.cursorBin, args, cwd: handle.cwd });
+    const statePath = roomTurnId && handle.supervisedProfile
+      ? join(
+        handle.supervisedProfile.configDir,
+        `letagents-cursor-turn-${createHash("sha256").update(roomTurnId).digest("hex")}.jsonl`,
+      )
+      : null;
+    if (statePath) {
+      this.deps.prepareTurnState(statePath);
+    }
+    let child: CursorCliChild;
+    try {
+      child = this.deps.launchTurn({
+      cursorBin: this.cursorBin,
+      args,
+      // Start inside the sealed private profile so no ambient launch cwd can
+      // contribute config before Cursor resolves --workspace. Cursor later
+      // changes into that workspace and can discover a concurrently-added
+      // project MCP; the unpredictable bridge alias, approval-state purge, and
+      // absence of --approve-mcps keep such a late server unapproved.
+      cwd: handle.deliveryMode === "daemon_inbox" && handle.supervisedProfile
+        ? dirname(handle.supervisedProfile.homeDir)
+        : handle.cwd,
+      ...(childEnv ? { env: childEnv } : {}),
+      ...(deniedReadPaths?.length ? { deniedReadPaths } : {}),
+      ...(deniedReadSubpaths?.length ? { deniedReadSubpaths } : {}),
+      ...(deniedReadMetadataPaths?.length ? { deniedReadMetadataPaths } : {}),
+      ...(deniedReadWriteRegexes?.length ? { deniedReadWriteRegexes } : {}),
+      ...(deniedWritePaths?.length ? { deniedWritePaths } : {}),
+      ...(deniedWriteStructuralPaths?.length ? { deniedWriteStructuralPaths } : {}),
+      ...(deniedWriteSubpaths?.length ? { deniedWriteSubpaths } : {}),
+      ...(allowedWriteSubpaths?.length ? { allowedWriteSubpaths } : {}),
+      ...(allowedReadSubpaths?.length ? { allowedReadSubpaths } : {}),
+      ...(handle.deliveryMode === "daemon_inbox"
+        ? { allowedNetworkUnixSockets: [mcpConnectorSocketPath!] }
+        : {}),
+      ...(mcpConnectorSocketPath ? { mcpConnectorSocketPath } : {}),
+      ...(mcpRuntimeEntryPath ? { mcpRuntimeEntryPath } : {}),
+      ...(handle.deliveryMode === "daemon_inbox" ? { mcpRuntimeCwd: handle.cwd } : {}),
+      ...(mcpRuntimeEnv ? { mcpRuntimeEnv } : {}),
+      ...(providerAuthorization ? { providerAuthorization } : {}),
+      ...(handle.deliveryMode === "daemon_inbox" ? { deferStart: true } : {}),
+      ...(handle.deliveryMode === "daemon_inbox" ? { restrictRemoteAuthority: true } : {}),
+        ...(statePath ? { statePath } : {}),
+      });
+    } catch (error) {
+      if (supervisedRuntimeDataDir) removeCursorTurnRuntimeDataDir(supervisedRuntimeDataDir);
+      throw error;
+    }
+    if (supervisedRuntimeDataDir) {
+      const runtimeDataDir = supervisedRuntimeDataDir;
+      // The production wrapper removes this before terminal publication. This
+      // post-exit fallback also retires it for injected/test launchers and a
+      // wrapper that exits before entering its finalizer.
+      void child.exited.then(() => {
+        try { removeCursorTurnRuntimeDataDir(runtimeDataDir); } catch { /* terminal evidence remains authoritative */ }
+      });
+    }
+    if (mcpConnectorRoot) {
+      const connectorRoot = mcpConnectorRoot;
+      // The wrapper normally retires this root before terminal evidence. If
+      // the wrapper itself is SIGKILLed, the supervising adapter still owns
+      // the unpredictable path and removes the now-dead socket tree on exit.
+      void child.exited.then(() => {
+        try { rmSync(connectorRoot, { recursive: true, force: true }); } catch { /* no live socket authority remains */ }
+      });
+    }
+    const nativeLaunchIsDeferred = handle.deliveryMode === "daemon_inbox";
+
+    if (launchSignal?.aborted || handle.stopRequested) {
+      if (child.pid !== null) {
+        const wrapperIdentity = nativeLaunchIsDeferred ? this.deps.getProcessIdentity(child.pid) : undefined;
+        await this.terminateTurnChild(child.pid, child.exited, wrapperIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+      } else {
+        await child.exited;
+      }
+      throw new CursorRoomTurnNotDispatchedError(
+        "Cursor turn preparation was interrupted before native dispatch.",
+        roomTurnId,
+      );
+    }
 
     if (child.pid === null) {
       // Fail closed until the launch proves terminal; never retry beside an
@@ -604,11 +3681,42 @@ export class CursorProviderAdapter implements ProviderAdapter {
       this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
       throw new Error("cursor-agent launch did not expose a process id; refusing an unfenceable turn.");
     }
+    if (child.prepared) {
+      let preparation: "prepared" | "exited" | "aborted";
+      try {
+        preparation = await Promise.race([
+          child.prepared.then(() => "prepared" as const),
+          child.exited.then(() => "exited" as const),
+          cursorTurnLaunchAbort(launchSignal),
+        ]);
+      } catch (error) {
+        await child.exited;
+        throw new Error(`Cursor wrapper could not prepare its durable boundary: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (preparation === "exited") {
+        throw new Error("Cursor wrapper exited before preparing its durable boundary; native work was not launched.");
+      }
+      if (preparation === "aborted") {
+        const wrapperIdentity = nativeLaunchIsDeferred ? this.deps.getProcessIdentity(child.pid) : undefined;
+        await this.terminateTurnChild(child.pid, child.exited, wrapperIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+        throw new CursorRoomTurnNotDispatchedError(
+          "Cursor turn preparation was interrupted before native dispatch.",
+          roomTurnId,
+        );
+      }
+    }
     const processIdentity = this.deps.getProcessIdentity(child.pid);
     if (typeof processIdentity !== "string" || !processIdentity) {
-      await this.terminateTurnChild(child.pid, child.exited);
+      await this.terminateTurnChild(child.pid, child.exited, processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
       this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
       throw new Error("cursor-agent process identity could not be verified; refusing an unfenceable turn.");
+    }
+    if (launchSignal?.aborted || handle.stopRequested) {
+      await this.terminateTurnChild(child.pid, child.exited, processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+      throw new CursorRoomTurnNotDispatchedError(
+        "Cursor turn preparation was interrupted before native dispatch.",
+        roomTurnId,
+      );
     }
 
     const turn: LiveTurn = {
@@ -618,11 +3726,62 @@ export class CursorProviderAdapter implements ProviderAdapter {
       sawInit: false,
       sawResult: false,
       resultWasError: false,
+      resultText: null,
+      providerRequestId: null,
       interruptRequested: false,
+      roomTurnId,
+      statePath,
     };
     handle.liveTurn = turn;
     handle.state = "working";
-
+    let turnCheckpointed = false;
+    try {
+      // The wrapper already exists and has installed its disconnect/SIGTERM
+      // not-started journal, but native Cursor is still paused. Persist the
+      // exact supervisor turn and wrapper birth before release.
+      if (roomTurnId) {
+        await checkpointTurnStarted?.(roomTurnId);
+        turnCheckpointed = true;
+      }
+      await checkpointProviderState?.({
+        providerContinuationId: handle.providerContinuationId!,
+        providerConnection: handle.providerConnection,
+      });
+      throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
+      if (handle.liveTurn !== turn || turn.interruptRequested || handle.stopRequested) {
+        throw new CursorRoomTurnNotDispatchedError(
+          "Cursor turn preparation was interrupted at the durable checkpoint boundary.",
+          roomTurnId,
+        );
+      }
+      // The exact turn id and wrapper birth are both committed. Flip the
+      // daemon's drain boundary and unlink handoff cancellation in one
+      // synchronous callback immediately before native release.
+      markDurableTurnStarted?.();
+      if (handle.liveTurn !== turn || turn.interruptRequested || handle.stopRequested) {
+        throw new CursorRoomTurnNotDispatchedError(
+          "Cursor turn preparation was interrupted before native release.",
+          roomTurnId,
+        );
+      }
+    } catch (error) {
+      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+      handle.liveTurn = null;
+      handle.state = "idle";
+      if (turnCheckpointed) {
+        throw new CursorRoomTurnNotDispatchedError(
+          `Cursor wrapper state could not be checkpointed before native dispatch: ${error instanceof Error ? error.message : String(error)}`,
+          roomTurnId,
+        );
+      }
+      if (launchSignal?.aborted) {
+        throw new CursorRoomTurnNotDispatchedError(
+          "Cursor turn preparation was interrupted and reaped before native dispatch.",
+          roomTurnId,
+        );
+      }
+      throw error;
+    }
     // Startup gates on a VALID system/init — not on arbitrary stdout bytes. A
     // raw diagnostic line preceding init is published as evidence but must not
     // let spawn() return an uninitialized handle with no session identity
@@ -636,6 +3795,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       this.consumeLine(handle, turn, line);
       if (turn.sawInit) signalInit?.();
     });
+    child.release();
 
     // The timer is REF'D and cleared: startup must stay observable even on an
     // otherwise idle loop. A turn that has passed init may run arbitrarily long
@@ -652,7 +3812,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (startTimer) clearTimeout(startTimer);
     if (first === "timeout") {
       unsubscribe();
-      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity);
+      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
       handle.liveTurn = null;
       this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
       throw new Error("cursor-agent reported no stream-json init within the startup bound; refusing an unobservable turn.");
@@ -680,14 +3840,79 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
     if (!handle.providerContinuationId) {
       unsubscribe();
-      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity);
+      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
       handle.liveTurn = null;
       this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
       throw new Error("cursor-agent init carried no session id; refusing an unverifiable continuation.");
     }
 
+    try {
+      await checkpointProviderState?.({
+        providerContinuationId: handle.providerContinuationId,
+        providerConnection: handle.providerConnection,
+      });
+    } catch (error) {
+      unsubscribe();
+      await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
+      const exit = await child.exited;
+      const reportedContinuationId = handle.providerContinuationId;
+      handle.liveTurn = null;
+      handle.state = "idle";
+      // Do not roll back a session identity proven by Cursor's exact init.
+      // The daemon checkpoint may have committed its manifest update before a
+      // later durability write failed; retaining the real identity lets the
+      // recovery pass retry idempotently from either persisted side.
+      if (turn.child.requiresDurableTerminalEvidence) {
+        try {
+          // This post-init failure enters recoverRoomTurn immediately. Never
+          // seed that recovery with buffered live output: the wrapper may have
+          // been SIGKILLed during teardown before proving process-group and
+          // authority retirement. The same trusted terminal check used by the
+          // ordinary completion path is mandatory here too. It also preserves
+          // a result emitted only during TERM teardown when no live result was
+          // observed before the listener detached.
+          const durable = this.readTrustedDurableTurnTerminal(handle, turn);
+          this.rememberRoomTurnTerminal(handle, turn, durable);
+        } catch (evidenceError) {
+          handle.protocolError = true;
+          this.publishStream(handle, "turn/terminal_invalid", {
+            reason: evidenceError instanceof Error ? evidenceError.message : String(evidenceError),
+          }, "error");
+          this.finishAttempt(handle, exit, "protocol_error");
+          throw new CursorRoomTurnRecoveryError(
+            `Cursor reported a real session but its durable checkpoint failed, and trusted terminal recovery was unavailable: ${evidenceError instanceof Error ? evidenceError.message : String(evidenceError)}`,
+          );
+        }
+      } else {
+        this.rememberRoomTurnTerminal(handle, turn,
+          turn.sawResult && !handle.protocolError
+            ? {
+              state: "result",
+              exit,
+              text: turn.resultText,
+              isError: turn.resultWasError,
+              providerRequestId: turn.providerRequestId,
+              attemptTerminal: null,
+              ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
+            }
+            : {
+              state: "attempt_terminal",
+              exit,
+              text: null,
+              isError: true,
+              providerRequestId: turn.providerRequestId,
+              attemptTerminal: null,
+              ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
+            });
+      }
+      throw new CursorPostDispatchCheckpointError(
+        `Cursor reported a real session but its durable checkpoint failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     turn.completion = this.completeTurn(handle, turn, unsubscribe);
     void turn.completion;
+    return turn;
   }
 
   /** Await the turn's real exit and apply the honest end state. */
@@ -695,7 +3920,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     handle: CursorProviderHandle,
     turn: LiveTurn,
     unsubscribe: () => void,
-  ): Promise<void> {
+  ): Promise<CursorTurnTerminal> {
     const exit = await turn.child.exited;
     // Drain belt: even with close-gated exit evidence, give any line callbacks
     // already scheduled in this tick a chance to record the final result before
@@ -703,7 +3928,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
     await delay(0);
     unsubscribe();
     if (handle.liveTurn === turn) handle.liveTurn = null;
-    if (handle.terminal) return;
+    if (handle.terminal) {
+      return this.rememberRoomTurnTerminal(handle, turn, {
+        state: "attempt_terminal",
+        exit,
+        text: null,
+        isError: true,
+        providerRequestId: turn.providerRequestId,
+        attemptTerminal: handle.terminal,
+      });
+    }
 
     if (turn.interruptRequested) {
       // Cursor has no in-turn channel, so the exact turn child is fenced and
@@ -718,7 +3952,30 @@ export class CursorProviderAdapter implements ProviderAdapter {
         checking: "",
         next_action: "awaiting redirected work",
       });
-      return;
+      return this.rememberRoomTurnTerminal(handle, turn, {
+        state: "interrupted",
+        exit,
+        text: null,
+        isError: true,
+        providerRequestId: turn.providerRequestId,
+        attemptTerminal: null,
+      });
+    }
+
+    if (!handle.stopRequested && !handle.protocolError && turn.sawResult
+      && turn.child.requiresDurableTerminalEvidence) {
+      let durableEvidenceError: string | null = null;
+      try {
+        this.readTrustedDurableTurnTerminal(handle, turn);
+      } catch (error) {
+        durableEvidenceError = error instanceof Error ? error.message : String(error);
+      }
+      if (durableEvidenceError) {
+        handle.protocolError = true;
+        this.publishStream(handle, "turn/terminal_invalid", {
+          reason: durableEvidenceError,
+        }, "error");
+      }
     }
 
     if (exit.type === "error" || handle.stopRequested || handle.protocolError || !turn.sawResult) {
@@ -727,14 +3984,21 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // terminal evidence — never silently absorbed as an idle turn. The one
       // refinement: the proven usage-limit signature is provider_quota, not a
       // crash (recoverable by model switch / spend limit, per the spike).
-      this.finishAttempt(
+      const attemptTerminal = this.finishAttempt(
         handle,
         exit,
         !handle.stopRequested && !handle.protocolError && isProviderQuotaExit(turn, exit)
           ? "provider_quota"
           : undefined,
       );
-      return;
+      return this.rememberRoomTurnTerminal(handle, turn, {
+        state: "attempt_terminal",
+        exit,
+        text: null,
+        isError: true,
+        providerRequestId: turn.providerRequestId,
+        attemptTerminal,
+      });
     }
 
     // TURN-terminal, not ATTEMPT-terminal: the lane stays alive and honestly
@@ -748,6 +4012,42 @@ export class CursorProviderAdapter implements ProviderAdapter {
       checking: "",
       next_action: "awaiting next boundary delivery",
     });
+    return this.rememberRoomTurnTerminal(handle, turn, {
+      state: "result",
+      exit,
+      text: turn.resultText,
+      isError: turn.resultWasError,
+      providerRequestId: turn.providerRequestId,
+      attemptTerminal: null,
+    });
+  }
+
+  private readTrustedDurableTurnTerminal(
+    handle: CursorProviderHandle,
+    turn: LiveTurn,
+  ): CursorTurnTerminal {
+    if (!turn.roomTurnId) {
+      throw new CursorRoomTurnRecoveryError("The supervised result had no exact durable turn identity.");
+    }
+    const durable = this.readDurableTurnTerminal(handle, turn.roomTurnId);
+    if (!durable) {
+      throw new CursorRoomTurnRecoveryError("The supervised wrapper published no trusted terminal evidence.");
+    }
+    // A result written only after checkpoint failure can legitimately exist
+    // only in the wrapper journal. When a live result was already observed,
+    // however, accepting a different durable value would cross-wire terminal
+    // evidence and must fail closed.
+    if (turn.sawResult && (durable.state !== "result"
+      || durable.text !== turn.resultText
+      || durable.isError !== turn.resultWasError
+      || durable.providerRequestId !== turn.providerRequestId)) {
+      throw new CursorRoomTurnRecoveryError(
+        durable.state !== "result"
+          ? "The supervised wrapper terminal did not contain the observed result."
+          : "The live result did not match the exact durable terminal snapshot.",
+      );
+    }
+    return durable;
   }
 
   private consumeLine(handle: CursorProviderHandle, turn: LiveTurn, line: string): void {
@@ -769,7 +4069,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
       return;
     }
     const sessionId = sessionIdOf(message);
-    if (sessionId && handle.providerContinuationId && handle.providerContinuationId !== sessionId) {
+    if (Object.hasOwn(message, "session_id") && !sessionId) {
+      handle.protocolError = true;
+      this.publishStream(handle, "session/invalid", {
+        reason: "provider emitted an invalid or option-shaped session identity",
+      }, "error");
+      this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
+      return;
+    }
+    const pendingContinuation = handle.providerContinuationId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX) === true;
+    if (sessionId && handle.providerContinuationId && !pendingContinuation && handle.providerContinuationId !== sessionId) {
       // A stranger session must never silently become this lane's continuation
       // (same rule as the Claude adapter's same-id assertion).
       handle.protocolError = true;
@@ -777,7 +4086,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         expectedSessionId: handle.providerContinuationId,
         observedSessionId: sessionId,
       }, "error");
-      this.deps.signalProcess(turn.pid, "SIGTERM");
+      this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
     }
     this.publishStream(handle, streamMethod(message), message, cursorStreamKind(message));
     const type = typeof message.type === "string" ? message.type : "";
@@ -792,7 +4101,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           this.publishStream(handle, "session/missing", {
             reason: "init carried no session id",
           }, "error");
-          this.deps.signalProcess(turn.pid, "SIGTERM");
+          this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
           return;
         }
         if (!handle.protocolError) {
@@ -805,6 +4114,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (type === "result") {
       turn.sawResult = true;
       turn.resultWasError = message.is_error === true;
+      turn.resultText = typeof message.result === "string" ? message.result : null;
+      turn.providerRequestId = typeof message.request_id === "string" && message.request_id.trim()
+        ? message.request_id.trim()
+        : null;
       return;
     }
     if (type === "assistant" || type === "tool_call" || type === "tool_use" || type === "user") {
@@ -819,8 +4132,78 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
   }
 
-  /** The attach-path fence for a recorded live-turn child (msg_1188). */
-  private async fenceRecordedTurnChild(
+  private rememberRoomTurnTerminal(
+    handle: CursorProviderHandle,
+    turn: LiveTurn,
+    terminal: CursorTurnTerminal,
+  ): CursorTurnTerminal {
+    if (turn.roomTurnId) {
+      handle.roomTurnResults.set(turn.roomTurnId, terminal);
+      while (handle.roomTurnResults.size > 16) {
+        const oldest = handle.roomTurnResults.keys().next().value;
+        if (typeof oldest !== "string") break;
+        handle.roomTurnResults.delete(oldest);
+      }
+      if (handle.activeRoomTurnId === turn.roomTurnId) handle.activeRoomTurnId = null;
+    }
+    return terminal;
+  }
+
+  private awaitRoomTurnTerminal(
+    completion: Promise<CursorTurnTerminal>,
+    detachSignal?: AbortSignal,
+  ): Promise<CursorTurnTerminal> {
+    if (!detachSignal) return completion;
+    if (detachSignal.aborted) {
+      return Promise.reject(new CursorRoomTurnObservationDetachedError("Cursor room-turn observation detached."));
+    }
+    return new Promise((resolve, reject) => {
+      const detach = () => {
+        detachSignal.removeEventListener("abort", detach);
+        reject(new CursorRoomTurnObservationDetachedError("Cursor room-turn observation detached."));
+      };
+      detachSignal.addEventListener("abort", detach, { once: true });
+      void completion.then(
+        (terminal) => {
+          detachSignal.removeEventListener("abort", detach);
+          resolve(terminal);
+        },
+        (error) => {
+          detachSignal.removeEventListener("abort", detach);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private providerRoomTurnResult(
+    turnId: string,
+    terminal: CursorTurnTerminal,
+  ): ProviderRoomTurnResult {
+    if (terminal.state === "interrupted") {
+      throw new CursorRoomTurnTerminalError("Cursor bounded room turn was interrupted before publication.");
+    }
+    if (terminal.state === "attempt_terminal") {
+      const cause = terminal.attemptTerminal?.terminalCause;
+      throw new CursorRoomTurnTerminalError(
+        cause === "provider_quota"
+          ? "Cursor could not complete this turn because the provider usage limit was reached."
+          : "Cursor ended before the bounded room turn produced a terminal result.",
+      );
+    }
+    if (terminal.isError) {
+      throw new CursorRoomTurnTerminalError("Cursor returned an error result for the bounded room turn.");
+    }
+    const text = terminal.text?.trim() || null;
+    if (text === CURSOR_NO_ROOM_REPLY_SENTINEL) {
+      return { turnId, outcome: "no_reply", text: null, evidence: "stream" };
+    }
+    if (!text) return { turnId, outcome: "unreadable", text: null, evidence: "none" };
+    return { turnId, outcome: "reply", text, evidence: "stream" };
+  }
+
+  /** Inspect the exact checkpointed wrapper without waiting or signalling it. */
+  private async observeRecordedTurnChild(
     connection: Extract<ProviderConnectionRef, { kind: "cursor_cli" }>,
   ): Promise<null> {
     if (!connection.processIdentity) {
@@ -828,53 +4211,80 @@ export class CursorProviderAdapter implements ProviderAdapter {
         "Cursor attach is ambiguous; the recorded turn child has no verified process identity.",
       );
     }
-    const pid = connection.pid!;
-    const identity = this.deps.getProcessIdentity(pid);
+    const identity = this.deps.getProcessIdentity(connection.pid!);
     if (identity === undefined) {
       throw new Error("Cursor attach is ambiguous; the recorded process identity cannot be verified.");
     }
-    if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) {
-      // Verifiably gone (a recycled pid is NOT it and is never signalled).
-      return null;
-    }
-    this.deps.signalProcess(pid, "SIGTERM");
-    await delay(this.stopGraceMs);
-    const identityBeforeKill = this.deps.getProcessIdentity(pid);
-    if (identityBeforeKill === undefined) {
-      throw new Error("Cursor attach is ambiguous; the orphaned turn child's termination could not be verified.");
-    }
-    if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
-      this.deps.signalProcess(pid, "SIGKILL");
-      await this.awaitIdentityGone(pid, connection.processIdentity);
-    }
-    return null;
-  }
-
-  private async awaitIdentityGone(pid: number, processIdentity: string): Promise<void> {
-    while (true) {
-      const identity = this.deps.getProcessIdentity(pid);
-      if (identity === null || (typeof identity === "string" && !sameProcessBirthIdentity(identity, processIdentity))) return;
-      await delay(50);
-    }
+    if (identity === null || !sameProcessBirthIdentity(identity, connection.processIdentity)) return null;
+    throw new CursorRecordedTurnInProgressError(
+      "Cursor's exact recorded turn wrapper is still running; recovery will retry without starting a successor.",
+    );
   }
 
   private async terminateTurnChild(
     pid: number,
     exited: Promise<ProviderProcessExit>,
-    processIdentity?: string,
+    processIdentity?: string | null,
+    ownsDescendantReaping = false,
+    nativeLaunchIsDeferred = false,
   ): Promise<void> {
-    this.deps.signalProcess(pid, "SIGTERM");
+    // A daemon-inbox wrapper is born paused. While release() has not run it has
+    // no native child/process group to preserve, so TERM may safely escalate to
+    // KILL of the exact wrapper. After release, only the wrapper may prove its
+    // separately-detached native descendants gone; killing it would discard
+    // that proof, so the post-release path remains deliberately fail-closed.
+    // Every PID signal is birth-fenced, including late post-release timeout and
+    // protocol cleanup. `undefined` means this caller never captured a birth;
+    // a later observation cannot be adopted because the original child could
+    // have exited and its PID been recycled between those observations. Only a
+    // previously captured identity authorizes signalling. In the ambiguous
+    // case, remain attached to the exact ChildProcess exit instead.
+    if (processIdentity === null) return;
+    if (processIdentity === undefined) {
+      await exited;
+      return;
+    }
+    const term = this.signalExactProcess(pid, processIdentity, "SIGTERM");
+    if (term === "absent") return;
+    if (term === "ambiguous") {
+      await exited;
+      return;
+    }
     const graceful = await Promise.race([
       exited.then(() => true),
       delay(this.stopGraceMs).then(() => false),
     ]);
     if (graceful) return;
-    if (processIdentity) {
-      const identity = this.deps.getProcessIdentity(pid);
-      if (identity === undefined || identity === null || !sameProcessBirthIdentity(identity, processIdentity)) return;
+    if (ownsDescendantReaping && !nativeLaunchIsDeferred) {
+      throw new Error("Cursor's process-reaping wrapper has not yet proved all turn descendants are gone.");
     }
-    this.deps.signalProcess(pid, "SIGKILL");
+    const killed = this.signalExactProcess(pid, processIdentity, "SIGKILL");
+    if (killed === "absent") return;
+    if (killed === "ambiguous") {
+      // Never let a pre-native cleanup promise settle on ambiguous liveness:
+      // delivery treats settlement as proof that it may restore the FIFO.
+      await exited;
+      return;
+    }
     await exited;
+  }
+
+  private exactProcessStatus(pid: number, processIdentity: string): "exact" | "absent" | "ambiguous" {
+    const identity = this.deps.getProcessIdentity(pid);
+    if (identity === undefined) return "ambiguous";
+    if (identity === null || !sameProcessBirthIdentity(identity, processIdentity)) return "absent";
+    return "exact";
+  }
+
+  private signalExactProcess(
+    pid: number,
+    processIdentity: string,
+    signal: NodeJS.Signals,
+  ): "signalled" | "absent" | "ambiguous" {
+    const status = this.exactProcessStatus(pid, processIdentity);
+    if (status !== "exact") return status;
+    this.deps.signalProcess(pid, signal);
+    return "signalled";
   }
 
   private async awaitTurnTerminal(

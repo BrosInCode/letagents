@@ -27,7 +27,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.78";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.87";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -771,17 +771,20 @@ export class SupervisorDaemonClient {
     daemonGeneration: number,
     revokedAgentSessionId: string | null = null,
     grantRevokedWithoutWorkerSession = false,
+    includeCleanupIdentity = false,
   ): Promise<{
     outcome: "purged" | "invalid" | "revocation_required";
     operationId?: string;
     revocationKind?: "worker_session" | "grant_only";
     agentSessionId?: string;
+    purgedWorkAttemptId?: string;
     error?: string;
   }> {
     if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1
       || !(revokedAgentSessionId === null || nonEmptyString(revokedAgentSessionId))
       || (revokedAgentSessionId !== null && grantRevokedWithoutWorkerSession)
-      || typeof grantRevokedWithoutWorkerSession !== "boolean") throw new Error("Purge requires exact typed coordinates.");
+      || typeof grantRevokedWithoutWorkerSession !== "boolean"
+      || typeof includeCleanupIdentity !== "boolean") throw new Error("Purge requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
     const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", {
@@ -790,7 +793,14 @@ export class SupervisorDaemonClient {
       revoked_agent_session_id: revokedAgentSessionId,
       grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
     });
-    if (result.outcome === "purged") return { outcome: "purged" };
+    if (result.outcome === "purged") {
+      return {
+        outcome: "purged",
+        ...(includeCleanupIdentity && typeof result.purged_work_attempt_id === "string" && result.purged_work_attempt_id.trim()
+          ? { purgedWorkAttemptId: result.purged_work_attempt_id }
+          : {}),
+      };
+    }
     if (result.outcome === "revocation_required" && typeof result.operation_id === "string" && result.operation_id.trim()) {
       if (result.revocation_kind === "worker_session"
         && typeof result.agent_session_id === "string" && result.agent_session_id.trim()) {

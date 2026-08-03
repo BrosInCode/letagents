@@ -140,6 +140,12 @@ test("truthful state requires all listening authorities and preserves reconnecti
   assert.equal(agentInspectorOverallState(entry()), "listening");
   assert.equal(agentInspectorOverallState(entry({ providerPid: null })), "disconnected");
   assert.equal(agentInspectorOverallState(entry({
+    provider: "cursor",
+    providerPid: null,
+    providerContinuationId: "cursor-session-1",
+    observedState: "idle",
+  })), "listening", "Cursor's idle lane is identified by its continuation, not a nonexistent child pid");
+  assert.equal(agentInspectorOverallState(entry({
     providerPid: null,
     roomAgentState: {
       ...entry().roomAgentState!,
