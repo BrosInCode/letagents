@@ -114,6 +114,14 @@
   max-width: none;
 }
 
+.desktop-room-storage-choice {
+  display: inline-flex;
+}
+
+.desktop-room-storage-choice.is-unavailable {
+  cursor: not-allowed;
+}
+
 .desktop-room-storage-actions button {
   min-height: 28px;
   padding: 0 10px;
@@ -138,6 +146,10 @@
   opacity: 0.58;
   cursor: wait;
   pointer-events: none;
+}
+
+.desktop-room-storage-choice.is-unavailable button {
+  cursor: inherit;
 }
 
 .desktop-room-storage-progress {
