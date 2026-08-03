@@ -30,6 +30,8 @@ type SupervisorCoordinates = {
   socketPath: string;
   workAttemptId: string;
   executionGenerationId: string;
+  /** Random exact-turn capability; Cursor rotates it for every native child. */
+  providerTurnId?: string;
   /** Non-secret, exact worker route supplied only for resumed bounded turns. */
   agentSessionId?: string;
   roomId?: string;
@@ -95,6 +97,7 @@ export async function prepareCurrentSupervisedEffect(input: {
       entry_id: coordinates.entryId,
       work_attempt_id: coordinates.workAttemptId,
       execution_generation_id: coordinates.executionGenerationId,
+      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
       daemon_generation: negotiated.generation,
       mcp_request_id: input.mcpRequestId,
       tool_name: input.toolName,
@@ -133,6 +136,7 @@ export async function completeCurrentSupervisedEffect(input: {
       entry_id: coordinates.entryId,
       work_attempt_id: coordinates.workAttemptId,
       execution_generation_id: coordinates.executionGenerationId,
+      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
       daemon_generation: negotiated.generation,
       effect_id: input.effectId,
       result: input.result,
@@ -250,6 +254,7 @@ export async function borrowSupervisedWorkerCredential(
     params: {
       entry_id: coordinates.entryId, room_id: session.room_id, work_attempt_id: coordinates.workAttemptId,
       execution_generation_id: coordinates.executionGenerationId, agent_session_id: session.session_id,
+      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
       daemon_generation: negotiated.generation, api_url: apiUrl,
     },
   }, timeoutMs);
@@ -600,6 +605,7 @@ async function resolveSupervisorCoordinates(
     socketPath: env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim() ?? "",
     workAttemptId: env.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID?.trim() ?? "",
     executionGenerationId: env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID?.trim() ?? "",
+    providerTurnId: env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID?.trim() || undefined,
     agentSessionId: env.LETAGENTS_SUPERVISOR_AGENT_SESSION_ID?.trim() || undefined,
     roomId: env.LETAGENTS_SUPERVISOR_ROOM_ID?.trim() || undefined,
     agentDisplayName: env.LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME?.trim() || undefined,

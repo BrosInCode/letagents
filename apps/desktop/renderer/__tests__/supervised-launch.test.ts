@@ -80,6 +80,19 @@ test("provider child up but still starting is connecting to the room", () => {
   assert.equal(stateOf(progress, "connecting_room"), "active");
 });
 
+test("a pid-less Cursor continuation is an established provider lane", () => {
+  const progress = supervisedLaunchProgress(entry({
+    provider: "cursor",
+    workspacePath: "/tmp/wt",
+    providerPid: null,
+    providerContinuationId: "cursor-session-1",
+    observedState: "idle",
+  }));
+  assert.equal(progress.currentPhaseId, "connecting_room");
+  assert.equal(stateOf(progress, "starting_provider"), "done");
+  assert.equal(stateOf(progress, "connecting_room"), "active");
+});
+
 test("native-working but unbound with no workplace evidence stays at Connecting, NOT a failure", () => {
   // P1: a provider that is "working" locally but has not reached the room (no
   // session id, workplace not reachable) must NOT be advanced to Registering.
@@ -204,6 +217,17 @@ test("launch success projects a legacy entry-owned suffix out of its label", () 
 
 test("an idle bound reachable entry is also ready", () => {
   assert.equal(supervisedLaunchProgress(readyEntry({ observedState: "idle" })).ready, true);
+});
+
+test("a bound and reachable Cursor lane remains ready while idle without a process", () => {
+  const progress = supervisedLaunchProgress(readyEntry({
+    provider: "cursor",
+    providerPid: null,
+    providerContinuationId: "cursor-session-1",
+    observedState: "idle",
+  }));
+  assert.equal(progress.ready, true);
+  assert.equal(progress.currentPhaseId, "ready");
 });
 
 test("a bound entry whose workplace is not yet reachable stays Registering (Ready must never show)", () => {

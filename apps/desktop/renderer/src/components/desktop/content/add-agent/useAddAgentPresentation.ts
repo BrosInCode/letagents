@@ -67,7 +67,12 @@ export function useAddAgentPresentation(
   const selectedProvider = computed(() =>
     providers.value.find((provider) => provider.id === selectedProviderId.value) || null
   );
-  const selectedPermissionProfiles = computed(() => selectedProvider.value?.permissionProfiles ?? []);
+  const selectedPermissionProfiles = computed(() => {
+    const profiles = selectedProvider.value?.permissionProfiles ?? [];
+    return launchMode.value === "supervised" && selectedProvider.value?.id === "cursor"
+      ? profiles.filter((profile) => profile.id === "read_only")
+      : profiles;
+  });
   const selectedPermissionProfile = computed(() =>
     selectedPermissionProfiles.value.find((profile) => profile.id === selectedPermissionProfileId.value) ??
     selectedPermissionProfiles.value.find((profile) => profile.id === selectedProvider.value?.defaultPermissionProfileId) ??
@@ -207,7 +212,9 @@ export function useAddAgentPresentation(
     }
     return "A detached daemon owns desired state and recovery. Closing this app does not stop the supervised agent.";
   });
-  const showCursorMcpPolicySelector = computed(() => shouldShowCursorMcpPolicySelector(selectedProvider.value));
+  const showCursorMcpPolicySelector = computed(() =>
+    launchMode.value === "legacy" && shouldShowCursorMcpPolicySelector(selectedProvider.value)
+  );
   const showDeliverySelector = computed(() => shouldShowDeliveryModeSelector(selectedProvider.value));
   const showOpenModelConfig = computed(() => shouldShowOpenModelConfig(selectedProvider.value));
   const showModelSelector = computed(() => shouldShowManagedModelSelector(selectedProvider.value));

@@ -57,6 +57,7 @@ describe("durable room delivery UI contracts", () => {
 
   it("keeps reconnect exact-runtime-only and routes all controls through the Inspector", async () => {
     const exact = {
+      provider: "codex",
       deliveryMode: "daemon_inbox", desiredState: "running",
       observedState: "working", condition: "none",
       roomAgentState: { inbox: { state: "waiting_for_desktop_credentials" } },
@@ -107,6 +108,11 @@ describe("durable room delivery UI contracts", () => {
       "a durably stopped runtime is recoverable even while its historical coordinates remain");
     assert.equal(canReconnectRoomAgent(liveRuntimeWaitingForBinding as never), true,
       "a live exact provider can retry its room binding even before the replacement session is active");
+    assert.equal(canReconnectRoomAgent({
+      ...exact,
+      provider: "cursor",
+      providerPid: null,
+    } as never), true, "a pid-less Cursor lane reconnects by exact durable continuation");
 
     const [activity, shell, inspectorDomain] = await Promise.all([
       source("src/components/desktop/content/RoomActivityTabView.vue"),

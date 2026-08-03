@@ -686,7 +686,7 @@ function hasExactReconnectTarget(entry: DesktopSupervisorManifestEntry): boolean
     && entry.observedState !== "failed"
     && entry.nativeLiveness.state !== "terminal"
     && !/saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(entry.lastError ?? "")
-    && Boolean(entry.providerPid)
+    && (Boolean(entry.providerPid) || entry.provider === "cursor")
     && Boolean(entry.workAttemptId)
     && Boolean(entry.executionGenerationId)
     && Boolean(entry.providerContinuationId);

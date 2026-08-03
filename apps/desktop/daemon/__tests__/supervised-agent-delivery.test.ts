@@ -150,6 +150,177 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   });
 }
 
+test("Cursor dynamic checkpoint converges after manifest commit but attempt durability failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-cursor-provider-checkpoint-"));
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    const paths = {
+      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+      manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
+      attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
+      workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+    };
+    const workAttemptId = "00000000-0000-4000-8000-000000000041";
+    const executionGenerationId = "00000000-0000-4000-8000-000000000042";
+    const pendingContinuation = "cursor-pending:checkpoint";
+    const realContinuation = "sess-cursor-checkpoint";
+    const providerConnection = {
+      kind: "cursor_cli" as const,
+      pid: 43141,
+      processIdentity: "pid:43141:birth:exact",
+    };
+    const liveHandle = {
+      workAttemptId,
+      providerContinuationId: realContinuation,
+      pid: providerConnection.pid,
+      providerConnection,
+      observedState: () => "working" as const,
+    };
+    const ingressAgent = {
+      agentId: "cursor-checkpoint", roomId: "room", provider: "cursor",
+      deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test",
+      agentSessionId: "agent-session", bearer: "memory",
+      executionGenerationId, daemonGeneration: 1,
+      handle: liveHandle, workAttemptId,
+      providerContinuationId: pendingContinuation, pid: null,
+    };
+    daemon = new SupervisorDaemon(
+      paths,
+      "darwin",
+      provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })),
+      false,
+      60_000,
+      undefined,
+      {},
+      {
+        poll: ({ signal }) => new Promise((resolve) => {
+          signal.addEventListener("abort", () => resolve({}), { once: true });
+        }),
+        publish: async () => {},
+      },
+    );
+    await daemon.start();
+    const put = await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: {
+        id: ingressAgent.agentId, room_id: ingressAgent.roomId,
+        display_name: "Cursor Checkpoint", provider: "cursor", model: null,
+        charter: "test", desired_state: "running", observed_state: "working",
+        condition: "none", permission_profile_id: "read_only",
+        delivery_mode: "daemon_inbox", created_by: "test",
+        created_at: new Date().toISOString(), workspace_path: root,
+        work_attempt_id: workAttemptId,
+        provider_ref: {
+          work_attempt_id: workAttemptId,
+          provider_continuation_id: pendingContinuation,
+          provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null },
+          execution_generation_id: executionGenerationId,
+        },
+      },
+    });
+    assert.equal(put.ok, true, put.error);
+
+    const durableCheckpoints: string[] = [];
+    let checkpointCalls = 0;
+    const internals = daemon as unknown as {
+      liveHandles: Map<string, typeof liveHandle>;
+      store: { getEntry(id: string): Promise<{ provider_ref: { provider_continuation_id: string } } | null> };
+      durability: {
+        getAttempt(id: string): Promise<{
+          checkpoints: Array<{ provider_continuation_id: string | null }>;
+          execution_generations: Array<{
+            execution_generation_id: string;
+            actor: string;
+            generation: number;
+            terminal: { terminal_cause: "crashed" };
+          }>;
+        }>;
+        checkpoint(id: string, input: { provider_continuation_id: string | null }): Promise<void>;
+      };
+      checkpointDynamicProviderState(input: {
+        agent: typeof ingressAgent;
+        providerContinuationId: string;
+        providerConnection: typeof providerConnection;
+      }): Promise<void>;
+      handleProviderTerminal(
+        entryId: string,
+        handle: typeof liveHandle,
+        executionGenerationId: string,
+        terminalBinding: undefined,
+        terminal: {
+          endedAt: string;
+          exitCode: number;
+          signal: null;
+          terminalCause: "crashed";
+          providerContinuationId: string;
+        },
+      ): Promise<void>;
+    };
+    internals.liveHandles.set(ingressAgent.agentId, liveHandle);
+    internals.durability.getAttempt = async () => ({
+      checkpoints: durableCheckpoints.map((provider_continuation_id) => ({ provider_continuation_id })),
+      execution_generations: [{
+        execution_generation_id: executionGenerationId,
+        actor: "test",
+        generation: 1,
+        terminal: { terminal_cause: "crashed" },
+      }],
+    });
+    internals.durability.checkpoint = async (_id, checkpoint) => {
+      checkpointCalls += 1;
+      if (checkpointCalls === 1) throw new Error("attempt database unavailable after manifest commit");
+      assert.equal(checkpoint.provider_continuation_id, realContinuation);
+      durableCheckpoints.push(realContinuation);
+    };
+
+    await assert.rejects(internals.checkpointDynamicProviderState({
+      agent: ingressAgent,
+      providerContinuationId: realContinuation,
+      providerConnection,
+    }), /attempt database unavailable/);
+    assert.equal(
+      (await internals.store.getEntry(ingressAgent.agentId))?.provider_ref.provider_continuation_id,
+      realContinuation,
+      "manifest commit is retained",
+    );
+    assert.equal(ingressAgent.providerContinuationId, realContinuation, "ingress authority converges to the committed manifest");
+    assert.equal(liveHandle.providerContinuationId, realContinuation);
+
+    await internals.checkpointDynamicProviderState({
+      agent: ingressAgent,
+      providerContinuationId: realContinuation,
+      providerConnection,
+    });
+    assert.deepEqual(durableCheckpoints, [realContinuation], "retry finishes only the missing idempotent checkpoint");
+
+    await internals.handleProviderTerminal(
+      ingressAgent.agentId,
+      liveHandle,
+      executionGenerationId,
+      undefined,
+      {
+        endedAt: new Date().toISOString(),
+        exitCode: 1,
+        signal: null,
+        terminalCause: "crashed",
+        providerContinuationId: realContinuation,
+      },
+    );
+    assert.equal(internals.liveHandles.has(ingressAgent.agentId), false, "terminal notification retires the live handle");
+    await assert.rejects(
+      internals.checkpointDynamicProviderState({
+        agent: ingressAgent,
+        providerContinuationId: realContinuation,
+        providerConnection,
+      }),
+      /Cursor provider state no longer belongs to the exact supervised lane/,
+      "a Cursor recovery callback must checkpoint before emitting its terminal notification",
+    );
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
   await ingest(store, id);
   return (await store.claimHead(agent.agentId))!;
@@ -784,6 +955,60 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("refresh joins a start paused in its health write before installing the successor loop", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-start-health-"));
+  const releaseStarting = deferred<void>();
+  let store: SupervisedAgentInboxStore | undefined;
+  let delivery: SupervisedAgentDelivery | undefined;
+  try {
+    store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await ingest(store, "1");
+    const startingEntered = deferred<void>();
+    const setIngressHealth = store.setIngressHealth.bind(store);
+    let startingWrites = 0;
+    (store as unknown as { setIngressHealth(input: Parameters<typeof store.setIngressHealth>[0]): ReturnType<typeof store.setIngressHealth> }).setIngressHealth = async (input) => {
+      if (input.state === "starting" && startingWrites++ === 0) {
+        startingEntered.resolve();
+        await releaseStarting.promise;
+      }
+      return setIngressHealth(input);
+    };
+    const turnHandles: unknown[] = [];
+    delivery = new SupervisedAgentDelivery(store, provider(async (handle) => {
+      turnHandles.push(handle);
+      return { turnId: `turn:${turnHandles.length}`, outcome: "no_reply", text: null };
+    }), {
+      poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority);
+
+    const staleStart = delivery.start(agent);
+    await startingEntered.promise;
+    const internals = delivery as unknown as { loops: Map<string, Promise<void>>; loopEpochs: Map<string, number> };
+    assert.equal(internals.loops.has(agent.agentId), true, "the paused startup is registered before its health write settles");
+    assert.equal(internals.loopEpochs.get(agent.agentId), 0);
+
+    const successor = { ...agent, executionGenerationId: "generation-successor", handle: { ...agent.handle, pid: 2 } };
+    let refreshed = false;
+    const refresh = delivery.refresh(successor).then(() => { refreshed = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(refreshed, false, "refresh must drain the registered stale startup before starting its successor");
+
+    releaseStarting.resolve();
+    await Promise.all([staleStart, refresh]);
+    await waitForAsync(async () => (await store!.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
+    assert.deepEqual(turnHandles, [successor.handle], "only the successor handle may drain recovered FIFO work");
+    assert.equal(internals.loops.has(agent.agentId), true, "the successor remains in its long poll");
+    assert.equal(internals.loopEpochs.get(agent.agentId), 1, "the live loop belongs to the successor epoch");
+  } finally {
+    releaseStarting.resolve();
+    await delivery?.fenceAndDrain().catch(() => undefined);
+    await store?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("concurrent refreshes install only the newest epoch and its handle drains recovered FIFO work", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-refresh-epoch-"));
   try {
@@ -951,7 +1176,10 @@ test("SupervisorDaemon stop detaches an unresolved provider turn without retaini
   try {
     const entered = deferred<void>(); let published = 0; let providerStops = 0;
     const port = provider(async (_handle, _request, options) => {
-      await options?.markDispatched?.(); entered.resolve(); return late.promise;
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("turn:daemon-stop-live");
+      entered.resolve();
+      return late.promise;
     });
     (port as unknown as { stop: ProviderActionPort["stop"] }).stop = async () => {
       providerStops += 1;
@@ -1017,6 +1245,235 @@ test("handoff during a provider turn drains it and prevents post-turn publicatio
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("handoff drains a non-Cursor turn through its late exact checkpoint and the successor recovers it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-late-turn-checkpoint-"));
+  const lateResult = deferred<{ turnId: string; outcome: "no_reply"; text: null }>();
+  const authorityCheckEntered = deferred<void>();
+  const releaseAuthorityCheck = deferred<void>();
+  let pauseAuthorityCheck = false;
+  let store: SupervisedAgentInboxStore | undefined;
+  let retiring: SupervisedAgentDelivery | undefined;
+  let successor: SupervisedAgentDelivery | undefined;
+  try {
+    store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const claudeAgent = { ...agent, provider: "claude-code" };
+    retiring = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      pauseAuthorityCheck = true;
+      await options?.checkpointTurnStarted?.("claude:late-durable-turn");
+      return lateResult.promise;
+    }), {
+      poll: async () => ({}),
+      publish: async () => { throw new Error("must not publish"); },
+    }, async () => {
+      if (pauseAuthorityCheck) {
+        authorityCheckEntered.resolve();
+        await releaseAuthorityCheck.promise;
+      }
+      return true;
+    });
+    await retiring.pump(claudeAgent);
+    await ingest(store);
+    const pump = retiring.pump(claudeAgent);
+    await authorityCheckEntered.promise;
+
+    let drained = false;
+    const drain = retiring.fenceAndDrain().then(() => { drained = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(drained, false, "retirement waits while the admitted provider turn has no durable recovery key");
+
+    releaseAuthorityCheck.resolve();
+    await Promise.all([drain, pump]);
+    const interrupted = (await store.receipts(claudeAgent.agentId))[0]!;
+    assert.equal(interrupted.state, "dispatching");
+    assert.equal(interrupted.provider_turn_id, "claude:late-durable-turn");
+    await store.normalizeStartupRecovery(claudeAgent.agentId);
+    assert.equal((await store.receipts(claudeAgent.agentId))[0]?.state, "pending");
+
+    const recoveredTurns: string[] = [];
+    successor = new SupervisedAgentDelivery(store, provider(
+      async () => { throw new Error("the successor must not redispatch a new model turn"); },
+      async (_handle, request) => {
+        recoveredTurns.push(request.providerTurnId);
+        return { turnId: request.providerTurnId, outcome: "no_reply", text: null };
+      },
+    ), {
+      poll: async () => ({}),
+      publish: async () => { throw new Error("must not publish"); },
+    }, currentAuthority);
+    await successor.pump(claudeAgent);
+    assert.deepEqual(recoveredTurns, ["claude:late-durable-turn"]);
+    assert.equal((await store.receipts(claudeAgent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally {
+    releaseAuthorityCheck.resolve();
+    lateResult.resolve({ turnId: "claude:late-durable-turn", outcome: "no_reply", text: null });
+    await successor?.fenceAndDrain().catch(() => undefined);
+    await retiring?.fenceAndDrain().catch(() => undefined);
+    await store?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("handoff waits for pre-native provider cleanup before releasing the delivery drain", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-pre-native-drain-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const cursorAgent = { ...agent, provider: "cursor" };
+    const entered = deferred<void>();
+    const cleanupStarted = deferred<void>();
+    const releaseCleanup = deferred<void>();
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      entered.resolve();
+      await new Promise<void>((resolve) => {
+        const detach = () => {
+          cleanupStarted.resolve();
+          void releaseCleanup.promise.then(resolve);
+        };
+        if (options?.detachSignal?.aborted) detach();
+        else options?.detachSignal?.addEventListener("abort", detach, { once: true });
+      });
+      throw Object.assign(
+        new Error("pre-native provider cleanup completed after handoff"),
+        { roomTurnRecoveryOutcome: "not_dispatched" as const },
+      );
+    }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+    await delivery.pump(cursorAgent); await ingest(store);
+    const pump = delivery.pump(cursorAgent); await entered.promise;
+
+    let drained = false;
+    const drain = delivery.fenceAndDrain().then(() => { drained = true; });
+    await cleanupStarted.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(drained, false, "handoff cannot release authority while pre-native cleanup is incomplete");
+
+    releaseCleanup.resolve();
+    await drain; await pump;
+    assert.equal(
+      (await store.receipts(cursorAgent.agentId))[0]?.state,
+      "pending",
+      "proven-not-dispatched handoff cleanup returns the FIFO head to pending",
+    );
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Cursor handoff restores a claimed FIFO head when retirement wins before provider entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-pre-entry-handoff-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const cursorAgent = { ...agent, provider: "cursor" };
+    let providerTurns = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      providerTurns += 1;
+      throw new Error("provider must not be entered after clean retirement");
+    }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+    await delivery.pump(cursorAgent); await ingest(store);
+    const observedContext = store.observedContext.bind(store);
+    const contextEntered = deferred<void>();
+    const releaseContext = deferred<void>();
+    (store as unknown as {
+      observedContext(agentId: string, roomId: string, limit?: number): ReturnType<typeof store.observedContext>;
+    }).observedContext = async (agentId, roomId, limit) => {
+      contextEntered.resolve();
+      await releaseContext.promise;
+      return observedContext(agentId, roomId, limit);
+    };
+
+    const pump = delivery.pump(cursorAgent);
+    await contextEntered.promise;
+    const drain = delivery.fenceAndDrain();
+    releaseContext.resolve();
+    await drain; await pump;
+
+    assert.equal(providerTurns, 0);
+    assert.equal(
+      (await store.receipts(cursorAgent.agentId))[0]?.state,
+      "pending",
+      "a clean pre-entry handoff cannot leave a no-turn dispatching claim",
+    );
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Cursor handoff restores an evidence-free pre-native retry backoff", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-retry-handoff-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const cursorAgent = { ...agent, provider: "cursor" };
+    const retryEntered = deferred<void>();
+    const releaseRetry = deferred<void>();
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      throw new Error("Cursor preflight failed before a wrapper existed");
+    }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 50, async () => {
+      retryEntered.resolve();
+      await releaseRetry.promise;
+    });
+    await delivery.pump(cursorAgent); await ingest(store);
+    const pump = delivery.pump(cursorAgent);
+    await retryEntered.promise;
+    assert.equal((await store.receipts(cursorAgent.agentId))[0]?.state, "retryable");
+
+    const drain = delivery.fenceAndDrain();
+    releaseRetry.resolve();
+    await drain; await pump;
+
+    assert.equal(
+      (await store.receipts(cursorAgent.agentId))[0]?.state,
+      "pending",
+      "clean retirement during pre-native backoff cannot become a blocked startup ambiguity",
+    );
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Cursor handoff detaches immediately after the exact durable wrapper milestone", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-durable-detach-"));
+  let late: ReturnType<typeof deferred<{ turnId: string; outcome: "reply"; text: string }>> | null = null;
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const cursorAgent = { ...agent, provider: "cursor" };
+    const entered = deferred<void>();
+    late = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+    let published = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("cursor:durable-wrapper");
+      options?.markDurableTurnStarted?.();
+      entered.resolve();
+      return late!.promise;
+    }), { poll: async () => ({}), publish: async () => { published += 1; } }, currentAuthority);
+    await delivery.pump(cursorAgent); await ingest(store);
+    const pump = delivery.pump(cursorAgent); await entered.promise;
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        delivery.fenceAndDrain(),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("durable Cursor turn retained the retiring daemon")),
+            1_000,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    assert.equal((await store.receipts(cursorAgent.agentId))[0]?.provider_turn_id, "cursor:durable-wrapper");
+    assert.equal(published, 0);
+
+    late.resolve({ turnId: "cursor:durable-wrapper", outcome: "reply", text: "must not publish" });
+    await pump;
+    assert.equal(published, 0);
+    await store.close();
+  } finally {
+    late?.resolve({ turnId: "cursor:durable-wrapper", outcome: "reply", text: "cleanup" });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("handoff retires an unresolved provider turn without stopping it, and late settlement cannot commit", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-unresolved-turn-"));
   let store: SupervisedAgentInboxStore | null = null;
@@ -1027,7 +1484,10 @@ test("handoff retires an unresolved provider turn without stopping it, and late 
     const entered = deferred<void>(); late = deferred<{ turnId: string; outcome: "reply"; text: string }>();
     let providerStops = 0; let published = 0;
     const port = provider(async (_handle, _request, options) => {
-      await options?.markDispatched?.(); entered.resolve(); return late!.promise;
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("turn:unresolved-live");
+      entered.resolve();
+      return late!.promise;
     });
     (port as unknown as { stop: ProviderActionPort["stop"] }).stop = async () => {
       providerStops += 1;
@@ -1046,22 +1506,29 @@ test("handoff retires an unresolved provider turn without stopping it, and late 
       ]);
     } finally { if (timeout) clearTimeout(timeout); }
     assert.equal(providerStops, 0, "retirement never stops or interrupts the provider process");
-    assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", "the in-flight result remains durably ambiguous");
+    assert.equal((await store.receipts(agent.agentId))[0]?.provider_turn_id, "turn:unresolved-live");
     late.resolve({ turnId: "late", outcome: "reply", text: "must not publish" });
     await pump;
     await Promise.resolve();
     assert.equal(published, 0, "a late provider resolution cannot publish after authority retirement");
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", "a late result cannot checkpoint or acknowledge");
     await store.close(); store = null;
-    let resumedTurns = 0;
+    let newTurns = 0; const recoveredTurns: string[] = [];
     const reopened = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    const successor = new SupervisedAgentDelivery(reopened, provider(async () => {
-      resumedTurns += 1;
-      throw new Error("an ambiguous dispatch must not rerun automatically");
-    }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
+    const successor = new SupervisedAgentDelivery(reopened, provider(
+      async () => {
+        newTurns += 1;
+        throw new Error("a persisted exact turn must not rerun automatically");
+      },
+      async (_handle, request) => {
+        recoveredTurns.push(request.providerTurnId);
+        return { turnId: request.providerTurnId, outcome: "no_reply", text: null };
+      },
+    ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
     await successor.pump(agent);
-    assert.equal(resumedTurns, 0);
-    assert.equal((await reopened.receipts(agent.agentId))[0]?.state, "blocked", "the successor normalizes the detached dispatch as recoverable blocked work");
+    assert.equal(newTurns, 0);
+    assert.deepEqual(recoveredTurns, ["turn:unresolved-live"]);
+    assert.equal((await reopened.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
     await successor.fenceAndDrain();
     await reopened.close();
   } finally {
@@ -1085,7 +1552,10 @@ test("a late provider rejection after handoff is observed and cannot commit", as
     const entered = deferred<void>(); late = deferred<{ turnId: string; outcome: "reply"; text: string }>();
     let published = 0;
     delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
-      await options?.markDispatched?.(); entered.resolve(); return late!.promise;
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.("turn:late-rejection");
+      entered.resolve();
+      return late!.promise;
     }), {
       poll: async () => ({}), publish: async () => { published += 1; },
     }, currentAuthority);
@@ -1104,6 +1574,7 @@ test("a late provider rejection after handoff is observed and cannot commit", as
     assert.deepEqual(unhandled, [], "the detached provider rejection is already observed");
     assert.equal(published, 0, "a late rejection cannot publish");
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", "a late rejection cannot mutate the ambiguous receipt");
+    assert.equal((await store.receipts(agent.agentId))[0]?.provider_turn_id, "turn:late-rejection");
   } finally {
     // Resolve if an assertion failed before the provider attached its observer.
     late?.resolve({ turnId: "cleanup", outcome: "reply", text: "cleanup" });
@@ -1606,6 +2077,77 @@ test("startup recovery reattaches only a persisted exact provider turn and block
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("startup recovery retries exactly once when wrapper evidence proves native dispatch never began", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-not-dispatched-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "cursor:prepared-only");
+    let recoveries = 0;
+    let newTurns = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async (_handle, _request, options) => {
+        newTurns += 1;
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.("cursor:actual-turn");
+        return { turnId: "cursor:actual-turn", outcome: "no_reply", text: null };
+      },
+      async () => {
+        recoveries += 1;
+        throw Object.assign(new Error("prepared wrapper never released"), {
+          roomTurnRecoveryOutcome: "not_dispatched" as const,
+        });
+      },
+    ), {
+      poll: async () => ({}),
+      publish: async () => { throw new Error("no-reply must not publish"); },
+    }, currentAuthority, 0);
+
+    await delivery.pump(agent);
+
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(recoveries, 1);
+    assert.equal(newTurns, 1);
+    assert.equal(receipt.state, "acknowledged_no_reply");
+    assert.equal(receipt.provider_turn_id, "cursor:actual-turn");
+    assert.equal(receipt.attempt_count, 1, "the never-dispatched wrapper did not consume a model attempt");
+    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 1);
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("persistent undispatched wrapper failures back off and block after the bounded retry budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-not-dispatched-cap-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await ingest(store);
+    let turns = 0;
+    const delays: number[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async (_handle, _request, options) => {
+        turns += 1;
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.(`cursor:prepared-only:${turns}`);
+        throw Object.assign(new Error("persistent pre-release provider checkpoint failure"), {
+          roomTurnRecoveryOutcome: "not_dispatched" as const,
+        });
+      },
+    ), {
+      poll: async () => ({}),
+      publish: async () => { throw new Error("an undispatched turn cannot publish"); },
+    }, currentAuthority, 10, async (ms) => { delays.push(ms); });
+
+    await delivery.pump(agent);
+
+    const receipt = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(turns, 3, "safe redispatch is capped at the same three-attempt budget as ordinary delivery");
+    assert.deepEqual(delays, [10, 20], "undispatched retries use exponential backoff");
+    assert.equal(receipt.state, "blocked");
+    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 2);
+    assert.match(receipt.last_error ?? "", /failed 3 times without native dispatch/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a terminal provider rejection blocks once without result recovery or model rerun", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-terminal-provider-failure-"));
   try {
@@ -1869,6 +2411,98 @@ test("Stop settles the in-flight turn cancelled_by_user, suppresses its publish,
       assert.equal(receipts.find((receipt) => receipt.source_message_id === "2")?.state, "acknowledged", "the queue is not wedged: the next item delivers");
       assert.equal(published.length, 1, "exactly one reply was published — never the stopped turn's");
       assert.equal(calls, 2, "the stopped turn was not rerun; only the next item ran a fresh turn");
+    } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Cursor Stop settles its reserved FIFO identity after provider cleanup removes the live map", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-stop-reservation-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    let handlePid = agent.handle!.pid;
+    let handleContinuation = agent.handle!.providerContinuationId;
+    const cursorHandle = {
+      ...agent.handle!,
+      get pid() { return handlePid; },
+      get providerContinuationId() { return handleContinuation; },
+    };
+    const cursorAgent = { ...agent, provider: "cursor", handle: cursorHandle };
+    const turnEntered = deferred<void>();
+    const providerInterrupted = deferred<void>();
+    const published: string[] = [];
+    let calls = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      calls += 1;
+      await options?.checkpointTurnStarted?.(`cursor:${request.inboxItemId}`);
+      await options?.checkpointProviderState?.({
+        providerContinuationId: "cursor-session-after-wrapper",
+        providerConnection: { kind: "cursor_cli", pid: 7777, processIdentity: "cursor-wrapper-birth" },
+      });
+      options?.markDurableTurnStarted?.();
+      if (calls === 1) {
+        turnEntered.resolve();
+        await providerInterrupted.promise;
+        await options?.checkpointProviderState?.({
+          providerContinuationId: "cursor-session-after-wrapper",
+          providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+        });
+        throw Object.assign(new Error("Cursor bounded turn was interrupted after wrapper cleanup."), {
+          roomTurnRecoveryOutcome: "terminal_failure" as const,
+        });
+      }
+      await options?.checkpointProviderState?.({
+        providerContinuationId: "cursor-session-after-wrapper",
+        providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+      });
+      return { turnId: `cursor:${request.inboxItemId}`, outcome: "reply", text: "next FIFO reply" };
+    }), {
+      poll: async () => ({ messages: [
+        { id: "1", activation: { for_current_agent: { decision: "activate" } } },
+        { id: "2", activation: { for_current_agent: { decision: "activate" } } },
+      ] }),
+      publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+    }, async (authority) => authority.bearer === "memory"
+      && authority.pid === authority.handle?.pid
+      && authority.providerContinuationId === authority.handle?.providerContinuationId,
+    0, undefined, undefined, undefined, undefined, undefined, async ({ agent: checkpointedAgent, providerContinuationId, providerConnection }) => {
+      handleContinuation = providerContinuationId;
+      handlePid = providerConnection.pid;
+      checkpointedAgent.providerContinuationId = providerContinuationId;
+      checkpointedAgent.pid = providerConnection.pid;
+    });
+    try {
+      const pollPromise = delivery.poll(cursorAgent);
+      await turnEntered.promise;
+      assert.equal(cursorAgent.pid, 7777, "the production checkpoint mutates the delivery agent to the wrapper pid");
+      const reservation = delivery.captureActiveDeliveryInterrupt({ ...cursorAgent, bearer: "" });
+      assert.ok(reservation, "mutable wrapper identity does not invalidate the immutable live delivery owner");
+      assert.equal(reservation.agent, cursorAgent, "the reservation retains the real memory-only bearer and dynamic handle owner");
+      const reservedInboxItemId = reservation.inboxItemId;
+
+      // Cursor controlTurn waits for wrapper/reaper completion. Model that
+      // completion winning before main can perform durable inbox settlement.
+      providerInterrupted.resolve();
+      await pollPromise;
+      assert.equal(delivery.activeTurn(cursorAgent), null, "provider settlement has already removed the in-memory live map");
+      assert.equal((await store.get(reservedInboxItemId))?.state, "blocked");
+
+      // Model the old pump's final resolving window: it is still registered but
+      // has already observed the blocked head, so a plain coalesced wake would
+      // be lost when its cleanup removes the registry entry.
+      const resolvingPump = deferred<void>();
+      const internals = delivery as unknown as { pumping: Map<string, Promise<void>> };
+      internals.pumping.set(cursorAgent.agentId, resolvingPump.promise);
+      void resolvingPump.promise.then(() => {
+        if (internals.pumping.get(cursorAgent.agentId) === resolvingPump.promise) internals.pumping.delete(cursorAgent.agentId);
+      });
+      const settlement = await delivery.interruptActiveDelivery(reservation.agent, reservedInboxItemId);
+      assert.equal(settlement, "settled");
+      assert.equal((await store.get(reservedInboxItemId))?.state, "cancelled_by_user");
+      resolvingPump.resolve();
+      await waitForAsync(async () => (await store.receipts(cursorAgent.agentId)).find((receipt) => receipt.source_message_id === "2")?.state === "acknowledged");
+      assert.equal(calls, 2, "the cancelled turn is never rerun and the next FIFO item is woken exactly once");
+      assert.equal(published.length, 1);
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }

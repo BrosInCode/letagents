@@ -57,6 +57,7 @@ export interface DesktopAgentProviderPreflightInput {
   roomIdentifier?: string | null;
   roomGitRoom?: DesktopGitRoomInfo | null;
   repoRootPath?: string | null;
+  launchMode?: "legacy" | "supervised" | null;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
   model?: string | null;
