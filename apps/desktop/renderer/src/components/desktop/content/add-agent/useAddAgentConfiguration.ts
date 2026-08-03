@@ -63,6 +63,9 @@ export function useAddAgentConfiguration() {
   const selectedPermissionProfileIdsByProvider = ref<
     Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
   >({});
+  const selectedSupervisedPermissionProfileIdsByProvider = ref<
+    Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
+  >({});
   let modelRequestId = 0;
   let configurationVersion = 0;
   let openModelWrite: Promise<void> | null = null;
@@ -272,26 +275,47 @@ export function useAddAgentConfiguration() {
         : "";
     }
     function syncPermissionProfileSelection(): void {
+      const supervised = launchMode.value === "supervised";
+      const selections = supervised
+        ? selectedSupervisedPermissionProfileIdsByProvider.value
+        : selectedPermissionProfileIdsByProvider.value;
       const nextId = managedAgentPermissionProfileSelectionForProvider(
         bindings.selectedProvider.value,
-        selectedPermissionProfileIdsByProvider.value,
+        selections,
+        supervised && bindings.selectedProviderId.value === "cursor"
+          ? "sandboxed_write"
+          : null,
       );
       selectedPermissionProfileId.value = nextId;
       if (bindings.selectedProviderId.value && nextId) {
-        selectedPermissionProfileIdsByProvider.value = {
-          ...selectedPermissionProfileIdsByProvider.value,
-          [bindings.selectedProviderId.value]: nextId,
-        };
+        if (supervised) {
+          selectedSupervisedPermissionProfileIdsByProvider.value = {
+            ...selectedSupervisedPermissionProfileIdsByProvider.value,
+            [bindings.selectedProviderId.value]: nextId,
+          };
+        } else {
+          selectedPermissionProfileIdsByProvider.value = {
+            ...selectedPermissionProfileIdsByProvider.value,
+            [bindings.selectedProviderId.value]: nextId,
+          };
+        }
       }
     }
     function selectPermissionProfile(profile: DesktopManagedAgentPermissionProfile): void {
       if (profile.status !== "available") return;
       selectedPermissionProfileId.value = profile.id;
       if (bindings.selectedProviderId.value) {
-        selectedPermissionProfileIdsByProvider.value = {
-          ...selectedPermissionProfileIdsByProvider.value,
-          [bindings.selectedProviderId.value]: profile.id,
-        };
+        if (launchMode.value === "supervised") {
+          selectedSupervisedPermissionProfileIdsByProvider.value = {
+            ...selectedSupervisedPermissionProfileIdsByProvider.value,
+            [bindings.selectedProviderId.value]: profile.id,
+          };
+        } else {
+          selectedPermissionProfileIdsByProvider.value = {
+            ...selectedPermissionProfileIdsByProvider.value,
+            [bindings.selectedProviderId.value]: profile.id,
+          };
+        }
       }
     }
     function syncDeliveryModeSelection(): void {
@@ -317,6 +341,7 @@ export function useAddAgentConfiguration() {
         }
       },
     );
+    watch(launchMode, syncPermissionProfileSelection, { flush: "sync" });
     watch(
       () => [selectedModelMode.value, selectedProviderModelId.value] as const,
       () => {

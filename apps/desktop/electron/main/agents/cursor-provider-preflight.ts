@@ -11,6 +11,7 @@ import type {
   DesktopMcpInstallTarget,
 } from "../../ipc-types.js";
 import {
+  assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   normalizeCursorMcpPolicy,
   prepareCursorManagedProfile,
   prepareCursorSupervisedProfile,
@@ -104,7 +105,10 @@ export async function runDesktopCursorProviderPreflight(
   const supervised = input.launchMode === "supervised";
   const cursorMcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
   const requestedPermissionProfileId = normalizeRequestedPermissionProfileId(input.permissionProfileId);
-  const permissionProfile = managedAgentPermissionProfileForProvider("cursor", requestedPermissionProfileId);
+  const permissionProfile = managedAgentPermissionProfileForProvider(
+    "cursor",
+    requestedPermissionProfileId ?? (supervised ? "sandboxed_write" : null),
+  );
   if (requestedPermissionProfileId && permissionProfile.id !== requestedPermissionProfileId) {
     return {
       providerId: provider.id,
@@ -124,18 +128,6 @@ export async function runDesktopCursorProviderPreflight(
       canStart: false,
       message: `${permissionProfile.label} is not available for Cursor.`,
       detail: permissionProfile.detail || permissionProfile.description,
-      nextAction: null,
-      version,
-      mcpStatus,
-    };
-  }
-  if (supervised && permissionProfile.id !== "read_only") {
-    return {
-      providerId: provider.id,
-      status: "error",
-      canStart: false,
-      message: "Supervised Cursor write access is not available yet.",
-      detail: "Supervised Cursor currently uses the read-only profile while its broader write boundary remains gated.",
       nextAction: null,
       version,
       mcpStatus,
@@ -279,13 +271,14 @@ export async function runDesktopCursorProviderPreflight(
       };
     }
 
-    const resealAuthenticatedSupervisedProfile = (): DesktopAgentProviderPreflight | null => {
+    const resealAuthenticatedSupervisedProfile = async (): Promise<DesktopAgentProviderPreflight | null> => {
       if (!supervised || !preflightProfileRoot || !supervisedMcpRuntime) return null;
       try {
         managedProfile = prepareCursorSupervisedProfile({
           workAttemptId: `preflight:${workspaceRoot}`,
           apiBaseUrl: desktopApiUrl,
           workspaceRoot,
+          permissionProfileId: permissionProfile.id,
           profileRoot: preflightProfileRoot,
           mcpRuntime: supervisedMcpRuntime,
           authSourceHomeDir: managedProfile.homeDir,
@@ -294,6 +287,7 @@ export async function runDesktopCursorProviderPreflight(
         managedEnv = buildCursorChildEnv(managedProfile.env);
         delete managedEnv.CURSOR_API_KEY;
         delete managedEnv.CURSOR_AUTH_TOKEN;
+        await assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(managedProfile);
         return null;
       } catch (error) {
         return {
@@ -308,7 +302,7 @@ export async function runDesktopCursorProviderPreflight(
         };
       }
     };
-    const postAuthProfileError = resealAuthenticatedSupervisedProfile();
+    const postAuthProfileError = await resealAuthenticatedSupervisedProfile();
     if (postAuthProfileError) return postAuthProfileError;
 
     if (supervised && preflightProfileRoot && supervisedMcpRuntime) {
@@ -407,7 +401,13 @@ export async function runDesktopCursorProviderPreflight(
       providerId: provider.id,
       status: "ready",
       canStart: true,
-      message: `Cursor Agent is ready to start${supervised ? " supervised" : ""} with ${permissionProfile.label}.`,
+      message: `Cursor Agent is ready to start${supervised ? " supervised" : ""} with ${
+        supervised && permissionProfile.id === "sandboxed_write"
+          ? "Workspace writes"
+          : supervised && permissionProfile.id === "full_access"
+            ? "Workspace writes (compatibility)"
+            : permissionProfile.label
+      }.`,
       detail: cursorPreflightReadyDetail(cursorMcpPolicy, mcpStatus, permissionProfile.id, supervised),
       nextAction: null,
       version,
@@ -496,7 +496,7 @@ function cursorPreflightReadyDetail(
   permissionProfileId: Parameters<typeof cursorPermissionProfileReadyDetail>[0],
   supervised: boolean,
 ): string {
-  const permissionDetail = cursorPermissionProfileReadyDetail(permissionProfileId);
+  const permissionDetail = cursorPermissionProfileReadyDetail(permissionProfileId, supervised);
   if (supervised) {
     return `${permissionDetail} A per-agent Cursor profile exposes only the daemon-mediated LetAgents bridge and survives desktop restarts.`;
   }
