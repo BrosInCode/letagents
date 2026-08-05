@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttp2Server } from "node:http2";
 import { tmpdir } from "node:os";
@@ -112,7 +112,6 @@ interface HarnessOptions {
   mcpAttestationWaitForAbort?: boolean;
   /** One-based attestation pass to hold until abort. */
   mcpAttestationWaitForAbortAt?: number;
-  writableBoundaryWaitForAbort?: boolean;
   beforeLaunch?: CursorProviderAdapterDependencies["launchTurn"] extends (input: infer Input) => unknown ? (input: Input) => void : never;
 }
 
@@ -240,28 +239,12 @@ function createHarness(options: HarnessOptions = {}) {
     timeoutMs?: number;
   }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
-  const writableBoundaryAttestations: CursorManagedProfile[] = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 5200;
   let mintedSessions = 0;
 
   const dependencies: CursorProviderAdapterDependencies = {
     bindPersonalIdentity() {},
-    async attestWritableFileBoundary(profile, signal) {
-      writableBoundaryAttestations.push(profile);
-      if (!options.writableBoundaryWaitForAbort) return;
-      await new Promise<void>((_resolve, reject) => {
-        if (signal?.aborted) {
-          reject(new Error("writable boundary inspection aborted"));
-          return;
-        }
-        signal?.addEventListener(
-          "abort",
-          () => reject(new Error("writable boundary inspection aborted")),
-          { once: true },
-        );
-      });
-    },
     async attestPersonalIdentity(input) {
       identityAttestations.push(input);
       return {
@@ -331,7 +314,6 @@ function createHarness(options: HarnessOptions = {}) {
     launches,
     mcpAttestations,
     identityAttestations,
-    writableBoundaryAttestations,
     profilePreparations,
     signals,
     identities,
@@ -1260,43 +1242,6 @@ test("stopping Cursor during the packaged bridge pass cannot fall through to nat
   assert.equal(harness.launches.length, 0);
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "stopped");
-});
-
-test("stopping Cursor during writable-root inspection aborts promptly before wrapper launch", async () => {
-  const harness = createHarness({ writableBoundaryWaitForAbort: true });
-  const adapter = supervisedAdapter(harness);
-  const handle = await spawnDaemonLane(adapter, harness);
-  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
-  while (harness.writableBoundaryAttestations.length === 0) await flush();
-
-  const terminal = await adapter.stop(handle);
-
-  assert.equal(terminal.terminalCause, "stopped");
-  await assert.rejects(roomTurn, /interrupted before native dispatch/);
-  assert.equal(harness.launches.length, 0);
-  assert.equal(handle.pid, null);
-  assert.equal(handle.observedState(), "stopped");
-});
-
-test("Cursor handoff aborts writable-root inspection before any wrapper can launch", async () => {
-  const harness = createHarness({ writableBoundaryWaitForAbort: true });
-  const adapter = supervisedAdapter(harness);
-  const handle = await spawnDaemonLane(adapter, harness);
-  const detach = new AbortController();
-  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
-    detachSignal: detach.signal,
-  });
-  while (harness.writableBoundaryAttestations.length === 0) await flush();
-
-  detach.abort();
-
-  await assert.rejects(roomTurn, (error: unknown) =>
-    error instanceof Error
-    && /interrupted before native dispatch/.test(error.message)
-    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
-  assert.equal(harness.launches.length, 0);
-  assert.equal(handle.pid, null);
-  assert.equal(handle.observedState(), "idle");
 });
 
 test("Cursor handoff aborts pre-native MCP attestation and cannot leave an unjournaled launch", async () => {
@@ -2952,7 +2897,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the real supervised boundary scopes Cursor write profiles to the selected workspace", {
+test("the real supervised boundary starts without inventorying pre-existing project files", {
   skip: process.platform !== "darwin",
 }, async () => {
   for (const [permissionProfileId, sandbox, workspaceWritable] of [
@@ -2970,12 +2915,16 @@ test("the real supervised boundary scopes Cursor write profiles to the selected 
       const outsideViaWorkspaceSymlink = join(workspace, "outside-link", "symlink-escape.txt");
       const workspaceHardlinkSource = join(workspace, "hardlink-source.txt");
       const workspaceHardlink = join(workspace, "hardlink-escape.txt");
+      const preexistingOutsideTarget = join(root, "preexisting-outside-target.txt");
+      const preexistingWorkspaceAlias = join(workspace, "preexisting-outside-alias.txt");
       const cursorAuthority = join(workspace, ".cursor", "mcp.json");
       const executable = join(root, "fake-cursor-agent");
       mkdirSync(dirname(cursorAuthority), { recursive: true });
       mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
       symlinkSync(root, join(workspace, "outside-link"), "dir");
       writeFileSync(workspaceHardlinkSource, "inside-original\n");
+      writeFileSync(preexistingOutsideTarget, "preexisting-outside\n");
+      linkSync(preexistingOutsideTarget, preexistingWorkspaceAlias);
       writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
 function write(path) {
@@ -3049,6 +2998,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       assert.equal(existsSync(outsideFile), false);
       assert.equal(existsSync(join(root, "symlink-escape.txt")), false);
       assert.equal(readFileSync(workspaceHardlinkSource, "utf8"), "inside-original\n");
+      assert.equal(readFileSync(preexistingOutsideTarget, "utf8"), "preexisting-outside\n");
       assert.equal(existsSync(cursorAuthority), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
