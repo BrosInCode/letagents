@@ -520,12 +520,14 @@ test("managed agent permission profiles map provider-specific available and gate
   assert.equal(cursorProfiles.find((profile) => profile.id === "sandboxed_write")?.status, "available");
   assert.equal(cursorProfiles.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(cursorProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.equal(cursorProfiles.find((profile) => profile.id === "read_only")?.isDefault, true);
 
   const codexProfiles = listManagedAgentPermissionProfiles("codex");
   assert.equal(codexProfiles.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(codexProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
 
   assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "read_only");
+  assert.equal(managedAgentPermissionProfileForProvider("cursor", null).id, "read_only");
   assert.equal(assertManagedAgentPermissionProfileAvailable("cursor", "full_access").id, "full_access");
   assert.throws(
     () => assertManagedAgentPermissionProfileAvailable("cursor", "unknown_profile"),

@@ -117,7 +117,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
       throw new Error(`Cursor supervised launch policy contains unsupported native option '${key}'.`);
     }
   }
-  const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "sandboxed_write", "full_access"]);
+  const profile = resolveProfile(provider, input.permissionProfileId, "sandboxed_write", ["read_only", "sandboxed_write", "full_access"]);
   const authority = profile === "sandboxed_write"
     ? { mode: null, force: true, sandbox: "enabled" }
     : profile === "full_access"

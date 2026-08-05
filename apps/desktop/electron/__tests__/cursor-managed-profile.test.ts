@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -45,6 +46,7 @@ const testMcpRuntime = {
 };
 
 const {
+  assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   bindCursorSupervisedIdentity,
   filterLetAgentsCursorMcpConfig,
   cursorSupervisedMcpServerName,
@@ -199,6 +201,111 @@ test("supervised Cursor derives a stable private root from the work attempt iden
   assert.match(first.homeDir, /cursor-supervised[/\\][a-f0-9]{32}[/\\]home$/);
 });
 
+test("supervised Cursor write profiles admit only the selected workspace and protect provider authority", () => {
+  const sourceHome = join(tempDir, "source-home-supervised-write-profiles");
+  const workspace = join(tempDir, "workspace-supervised-write-profiles");
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+  mkdirSync(workspace, { recursive: true });
+  const canonicalWorkspace = realpathSync(workspace);
+
+  const readOnly = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-read-only-roots",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: workspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-read-only-roots"),
+    permissionProfileId: "read_only",
+  });
+  assert.equal(readOnly.nativeAllowedWriteSubpaths?.includes(canonicalWorkspace), false);
+
+  for (const permissionProfileId of ["sandboxed_write", "full_access"] as const) {
+    const profile = prepareCursorSupervisedProfile({
+      workAttemptId: `attempt-${permissionProfileId}-roots`,
+      apiBaseUrl: "https://desktop.letagents.example",
+      workspaceRoot: workspace,
+      sourceHomeDir: sourceHome,
+      profileRoot: join(tempDir, `supervised-profile-${permissionProfileId}-roots`),
+      permissionProfileId,
+    });
+    assert.ok(profile.nativeAllowedWriteSubpaths?.includes(canonicalWorkspace));
+    assert.ok(profile.nativeDeniedWriteSubpaths?.includes(join(canonicalWorkspace, ".cursor")));
+    assert.ok(profile.nativeDeniedWriteSubpaths?.includes(join(canonicalWorkspace, ".claude")));
+  }
+});
+
+test("supervised Cursor write profiles reject external and protected hard-link aliases", async () => {
+  const sourceHome = join(tempDir, "source-home-supervised-hardlinks");
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+
+  const externalWorkspace = join(tempDir, "workspace-supervised-external-hardlink");
+  const outsideTarget = join(tempDir, "outside-hardlink-target.txt");
+  mkdirSync(externalWorkspace, { recursive: true });
+  writeFileSync(outsideTarget, "outside\n");
+  linkSync(outsideTarget, join(externalWorkspace, "outside-alias.txt"));
+  const readOnlyProfile = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-read-only-external-hardlink",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: externalWorkspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-read-only-external-hardlink"),
+    permissionProfileId: "read_only",
+    inspectionOnly: true,
+  });
+  linkSync(outsideTarget, join(readOnlyProfile.homeDir, "outside-profile-alias.txt"));
+  await assert.rejects(
+    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(readOnlyProfile),
+    /hard-linked outside the selected workspace/,
+  );
+  const externalProfile = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-write-external-hardlink",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: externalWorkspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-write-external-hardlink"),
+    permissionProfileId: "sandboxed_write",
+    inspectionOnly: true,
+  });
+  await assert.rejects(
+    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(externalProfile),
+    /hard-linked outside the selected workspace/,
+  );
+
+  const internalWorkspace = join(tempDir, "workspace-supervised-internal-hardlinks");
+  mkdirSync(internalWorkspace, { recursive: true });
+  writeFileSync(join(internalWorkspace, "internal-a.txt"), "inside\n");
+  linkSync(join(internalWorkspace, "internal-a.txt"), join(internalWorkspace, "internal-b.txt"));
+  const internalProfile = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-write-internal-hardlink",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: internalWorkspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-write-internal-hardlink"),
+    permissionProfileId: "sandboxed_write",
+    inspectionOnly: true,
+  });
+  await assert.doesNotReject(
+    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(internalProfile),
+  );
+
+  const authorityWorkspace = join(tempDir, "workspace-supervised-authority-hardlink");
+  mkdirSync(join(authorityWorkspace, ".cursor"), { recursive: true });
+  writeFileSync(join(authorityWorkspace, "source.txt"), "inside\n");
+  linkSync(join(authorityWorkspace, "source.txt"), join(authorityWorkspace, ".cursor", "alias.txt"));
+  const authorityProfile = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-write-authority-hardlink",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: authorityWorkspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-write-authority-hardlink"),
+    permissionProfileId: "full_access",
+    inspectionOnly: true,
+  });
+  await assert.rejects(
+    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(authorityProfile),
+    /aliases protected provider authority/,
+  );
+});
+
 test("a non-authoritative supervised inspection profile contains no Cursor login material", () => {
   const sourceHome = join(tempDir, "source-home-supervised-inspection");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
@@ -281,7 +388,7 @@ test("supervised Cursor refuses project MCP servers before creating its private 
   assert.equal(existsSync(profileRoot), false);
 });
 
-test("supervised Cursor rejects authority configs inherited from the Git root to a nested workspace", () => {
+test("supervised Cursor rejects Cursor authority configs inherited from the Git root to a nested workspace", () => {
   const sourceHome = join(tempDir, "source-home-supervised-parent-authority");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   const repository = join(tempDir, "workspace-supervised-parent-authority");
@@ -317,13 +424,73 @@ test("supervised Cursor rejects authority configs inherited from the Git root to
   assert.throws(() => prepareCursorSupervisedProfile(input), /workspace authority config is not allowed/);
   assert.equal(existsSync(profileRoot), false);
   unlinkSync(join(repository, ".cursor", "settings.json"));
+});
+
+test("supervised Cursor isolates inherited Claude settings without rejecting the workspace", () => {
+  const sourceHome = join(tempDir, "source-home-supervised-parent-claude-settings");
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+  const repository = join(tempDir, "workspace-supervised-parent-claude-settings");
+  const workspace = join(repository, "packages", "child");
+  assert.equal(spawnSync("git", ["init", repository], { encoding: "utf8" }).status, 0);
+  mkdirSync(workspace, { recursive: true });
 
   mkdirSync(join(repository, ".claude"), { recursive: true });
-  writeFileSync(join(repository, ".claude", "settings.local.json"), JSON.stringify({
-    enabledPlugins: { "workspace-plugin": true },
+  writeFileSync(join(repository, ".claude", "settings.json"), JSON.stringify({
+    hooks: { PreToolUse: [{ command: "parent-hook" }] },
   }));
-  assert.throws(() => prepareCursorSupervisedProfile(input), /workspace authority config is not allowed/);
-  assert.equal(existsSync(profileRoot), false);
+  writeFileSync(join(repository, ".claude", "settings.local.json"), JSON.stringify({
+    permissions: { allow: ["Bash(*)"] },
+  }));
+
+  const profile = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-parent-claude-settings",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: workspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-parent-claude-settings"),
+  });
+  const canonicalRepository = realpathSync(repository);
+
+  assert.ok(profile.nativeDeniedReadPaths?.includes(join(canonicalRepository, ".claude", "settings.json")));
+  assert.ok(profile.nativeDeniedReadPaths?.includes(join(canonicalRepository, ".claude", "settings.local.json")));
+  assert.ok(profile.nativeDeniedReadMetadataPaths?.includes(join(canonicalRepository, ".claude")));
+  assert.deepEqual(JSON.parse(readFileSync(join(repository, ".claude", "settings.local.json"), "utf8")), {
+    permissions: { allow: ["Bash(*)"] },
+  }, "preparing Cursor leaves Claude's local settings untouched");
+});
+
+test("supervised Cursor accepts a validated Git submodule workspace", () => {
+  const sourceHome = join(tempDir, "source-home-supervised-submodule");
+  const childRepository = join(tempDir, "source-supervised-submodule");
+  const superproject = join(tempDir, "workspace-supervised-superproject");
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+  assert.equal(spawnSync("git", ["init", childRepository], { encoding: "utf8" }).status, 0);
+  writeFileSync(join(childRepository, "child.txt"), "child\n");
+  assert.equal(spawnSync("git", ["-C", childRepository, "add", "child.txt"], { encoding: "utf8" }).status, 0);
+  assert.equal(spawnSync("git", [
+    "-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test",
+    "-C", childRepository, "commit", "-m", "child",
+  ], { encoding: "utf8" }).status, 0);
+  assert.equal(spawnSync("git", ["init", superproject], { encoding: "utf8" }).status, 0);
+  assert.equal(spawnSync("git", [
+    "-c", "protocol.file.allow=always", "-c", "clone.local=false", "-C", superproject,
+    "submodule", "add", `file://${childRepository}`, "modules/child",
+  ], { encoding: "utf8" }).status, 0);
+  const workspace = join(superproject, "modules", "child");
+  const gitDirectory = realpathSync(join(superproject, ".git", "modules", "modules", "child"));
+
+  const profile = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-submodule",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: workspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-submodule"),
+    permissionProfileId: "sandboxed_write",
+    inspectionOnly: true,
+  });
+
+  assert.ok(profile.nativeAllowedWriteSubpaths?.includes(realpathSync(workspace)));
+  assert.ok(profile.nativeAllowedWriteSubpaths?.includes(gitDirectory));
 });
 
 test("supervised Cursor rejects a Git root redirected outside the selected workspace ancestry", () => {

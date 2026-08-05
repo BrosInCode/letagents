@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 
 import { redactCredentialText } from "./agents/provider-evidence.js";
 import { removeCursorSupervisedProfile } from "./agents/cursor-managed-profile.js";
+import { assertManagedAgentPermissionProfileAvailable } from "./agents/managed-agent-permission-profiles.js";
 
 import type {
   DesktopActivityEntry,
@@ -941,8 +942,13 @@ export function registerDesktopIpcHandlers(
         if (provider === "claude-code" && input.permissionProfileId === "ask_before_write") {
           throw new LaunchBlockedError("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged. Choose Read-only or Full access.", "retry");
         }
-        if (provider === "cursor" && input.permissionProfileId !== "read_only") {
-          throw new LaunchBlockedError("Supervised Cursor currently supports only Read-only. Cursor write profiles cannot yet preserve the exact supervised MCP and process boundary.", "retry");
+        try {
+          assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId);
+        } catch (error) {
+          throw new LaunchBlockedError(
+            error instanceof Error ? error.message : "The selected permission profile is unavailable.",
+            "retry",
+          );
         }
         // Contact the background supervisor first so its (un)availability is an
         // honest, owner-visible fact rather than a hidden part of the claim.

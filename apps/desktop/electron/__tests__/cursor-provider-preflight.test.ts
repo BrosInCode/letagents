@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -207,8 +208,47 @@ test("Cursor supervised preflight requires and accepts its isolated LetAgents br
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
-  assert.equal(result.message, "Cursor Agent is ready to start supervised with Read-only.");
+  assert.equal(result.message, "Cursor Agent is ready to start supervised with Workspace writes.");
+  assert.match(result.detail ?? "", /inside the selected workspace/i);
   assert.match(result.detail ?? "", /per-agent Cursor profile exposes only the daemon-mediated LetAgents bridge/i);
+  setFakeCursorMcpMode(null);
+});
+
+test("Cursor supervised preflight preserves explicit read-only and full-access choices", async () => {
+  setFakeCursorMcpMode("ready");
+  for (const [name, permissionProfileId, label] of [
+    ["supervised-explicit-read-only", "read_only", "Read-only"],
+    ["supervised-explicit-full-access", "full_access", "Workspace writes (compatibility)"],
+  ] as const) {
+    const workspace = workspaceFixture(name);
+    const result = await runPreflight({
+      repoRootPath: workspace,
+      launchMode: "supervised",
+      permissionProfileId,
+    });
+    assert.equal(result.status, "ready");
+    assert.equal(result.canStart, true);
+    assert.equal(result.message, `Cursor Agent is ready to start supervised with ${label}.`);
+  }
+  setFakeCursorMcpMode(null);
+});
+
+test("Cursor supervised write preflight exercises the selected workspace boundary", async () => {
+  const workspace = workspaceFixture("supervised-write-hardlink-boundary");
+  const outside = join(tempDir, "preflight-outside-hardlink.txt");
+  writeFileSync(outside, "outside\n");
+  linkSync(outside, join(workspace, "outside-alias.txt"));
+  setFakeCursorMcpMode("ready");
+
+  const result = await runPreflight({
+    repoRootPath: workspace,
+    launchMode: "supervised",
+    permissionProfileId: "full_access",
+  });
+
+  assert.equal(result.status, "error");
+  assert.equal(result.canStart, false);
+  assert.match(result.detail ?? "", /hard-linked outside the selected workspace/);
   setFakeCursorMcpMode(null);
 });
 

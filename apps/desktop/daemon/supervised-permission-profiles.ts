@@ -101,19 +101,19 @@ const openModelProfiles: readonly SupervisedPermissionProfile[] = [
 const cursorProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "read_only", label: "Read-only", description: "Lets Cursor inspect and answer without editing the workspace.",
-    status: "available", risk: "low", detail: "Maps to Cursor mode=ask without --force.", isDefault: true,
+    status: "available", risk: "low", detail: "Maps to Cursor mode=ask without --force.", isDefault: false,
   },
   {
     id: "ask_before_write", label: "Ask before writes", description: "Requires prompt bridging and a supervised Cursor runtime.",
     status: "gated", risk: "medium", detail: "Cursor supervised prompt bridging is not available yet.", isDefault: false,
   },
   {
-    id: "sandboxed_write", label: "Sandboxed writes", description: "Lets Cursor write through its native sandboxed headless mode.",
-    status: "gated", risk: "medium", detail: "Cursor supervised write access has not completed its permission-boundary review.", isDefault: false,
+    id: "sandboxed_write", label: "Workspace writes", description: "Lets Cursor read, edit, and run normal development commands inside the selected workspace.",
+    status: "available", risk: "medium", detail: "Cursor's native sandbox and the independent LetAgents host boundary remain enabled.", isDefault: true,
   },
   {
-    id: "full_access", label: "Full access", description: "Lets Cursor use broad local write and shell access in this trusted workspace.",
-    status: "gated", risk: "high", detail: "Cursor supervised full access has not completed its permission-boundary review.", isDefault: false,
+    id: "full_access", label: "Workspace writes (compatibility)", description: "Disables Cursor's inner sandbox for repository tool compatibility.",
+    status: "available", risk: "high", detail: "Disables Cursor's native sandbox, while the supervised outer process boundary remains scoped to the selected workspace.", isDefault: false,
   },
 ];
 

@@ -1141,6 +1141,35 @@ export function managedAgentPermissionProfileSummary(
   return `${prefix}${profile.detail?.trim() || profile.description.trim()}`;
 }
 
+export function supervisedCursorPermissionProfilePresentation(
+  profile: DesktopManagedAgentPermissionProfile,
+): DesktopManagedAgentPermissionProfile {
+  if (profile.id === "sandboxed_write") {
+    return {
+      ...profile,
+      label: "Workspace writes",
+      description: "Reads, edits, and runs normal development commands inside the launched workspace.",
+      detail: "Cursor's sandbox stays enabled. LetAgents independently blocks host reads, outside writes, global configuration, and direct host-service access.",
+    };
+  }
+  if (profile.id === "full_access") {
+    return {
+      ...profile,
+      label: "Workspace writes (compatibility)",
+      description: "Runs repository tools with Cursor's inner sandbox disabled when a project needs broader tool compatibility.",
+      detail: "The LetAgents outer boundary still confines local writes to the launched workspace and blocks host authority; only Cursor's inner sandbox is disabled.",
+    };
+  }
+  if (profile.id === "read_only") {
+    return {
+      ...profile,
+      description: "Inspects and plans within the launched workspace without editing it.",
+      detail: "Choose this only when the agent should analyze the project without making changes.",
+    };
+  }
+  return profile;
+}
+
 export type ManagedAgentPermissionProfileSelections =
   Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>;
 
@@ -1150,6 +1179,7 @@ export function managedAgentPermissionProfileSelectionForProvider(
     "id" | "defaultPermissionProfileId" | "permissionProfiles"
   > | null | undefined,
   selections: ManagedAgentPermissionProfileSelections,
+  preferredProfileId?: DesktopManagedAgentPermissionProfileId | null,
 ): DesktopManagedAgentPermissionProfileId | null {
   const profiles = provider?.permissionProfiles ?? [];
   if (!provider || !profiles.length) {
@@ -1159,7 +1189,11 @@ export function managedAgentPermissionProfileSelectionForProvider(
   const saved = savedId
     ? profiles.find((profile) => profile.id === savedId && profile.status === "available")
     : null;
+  const preferred = preferredProfileId
+    ? profiles.find((profile) => profile.id === preferredProfileId && profile.status === "available")
+    : null;
   const selected = saved ??
+    preferred ??
     profiles.find((profile) =>
       profile.id === provider.defaultPermissionProfileId && profile.status === "available"
     ) ??

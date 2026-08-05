@@ -74,6 +74,22 @@ test("provider configuration maps permission profiles to native launch authority
     mode: "ask",
     force: false,
   });
+
+  assert.deepEqual(resolveProviderConfigurationSnapshot({
+    provider: "cursor",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: null,
+    launchPolicy: {},
+    configurationRevision: 7,
+  }), {
+    provider: "cursor",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "sandboxed_write",
+    launchPolicy: { force: true, sandbox: "enabled" },
+    configurationRevision: 7,
+  });
 });
 
 test("trusted profile selection replaces only native authority and preserves provider options", () => {
@@ -91,6 +107,19 @@ test("trusted profile selection replaces only native authority and preserves pro
     permissionMode: "plan", dangerouslySkipPermissions: false, allowedTools: ["Read", "Glob"], maxTurns: 6,
   }).launchPolicy, {
     allowedTools: ["Read", "Glob"], maxTurns: 6, permissionMode: "bypassPermissions", dangerouslySkipPermissions: true,
+  });
+
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: null, configurationRevision: 5,
+  }, {
+    force: true, sandbox: "disabled",
+  }), {
+    provider: "cursor",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "sandboxed_write",
+    launchPolicy: { force: true, sandbox: "enabled" },
+    configurationRevision: 5,
   });
 
   assert.deepEqual(deriveProviderConfigurationSnapshot({
@@ -162,8 +191,10 @@ test("supervised profile contract gates Claude prompt approval without changing 
   const cursor = supervisedPermissionProfilesForProvider("cursor");
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.status, "available");
   assert.equal(cursor.find((profile) => profile.id === "ask_before_write")?.status, "gated");
-  assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.status, "gated");
-  assert.equal(cursor.find((profile) => profile.id === "full_access")?.status, "gated");
+  assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.status, "available");
+  assert.equal(cursor.find((profile) => profile.id === "read_only")?.isDefault, false);
+  assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.isDefault, true);
+  assert.equal(cursor.find((profile) => profile.id === "full_access")?.status, "available");
 });
 
 test("isolated supervised provider runtimes admit multiple agents in one room", () => {

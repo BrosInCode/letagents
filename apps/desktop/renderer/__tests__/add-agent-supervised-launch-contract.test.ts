@@ -224,6 +224,14 @@ test("bounded supervised defaults never tell providers to own polling and Claude
   assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
 });
 
+test("supervised Cursor exposes the provider permission profiles instead of forcing read-only", () => {
+  assert.match(presentationSource, /const profiles = selectedProvider\.value\?\.permissionProfiles \?\? \[\]/);
+  assert.match(presentationSource, /profiles\.map\(supervisedCursorPermissionProfilePresentation\)/);
+  assert.doesNotMatch(presentationSource, /profiles\.filter\(\(profile\) => profile\.id === "read_only"\)/);
+  assert.match(presentationSource, /supervised boundary still confines local writes to this workspace/);
+  assert.match(presentationSource, /Daemon-mediated LetAgents room tools remain available/);
+});
+
 test("the supervised action island owns complete responsive interaction styles", () => {
   assert.match(launchActionsSource, /import styles from "\.\/AddAgentSupervisedLaunchActions\.module\.css"/);
   assert.match(launchActionsSource, /class: \[styles\.button, styles\.danger\]/);

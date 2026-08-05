@@ -41,6 +41,7 @@ import {
   managedAgentPermissionProfileSelectionForProvider,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
+  supervisedCursorPermissionProfilePresentation,
   managedAgentPermissionRequestTargetLabel,
   managedAgentDetailSelection,
   managedAgentProviderIdentityForTarget,
@@ -1549,6 +1550,30 @@ test("managed permission profile helpers present available and gated modes", () 
   }), "Gated: Needs config isolation.");
 });
 
+test("supervised Cursor permission copy describes workspace scope instead of machine-wide access", () => {
+  const base = {
+    id: "full_access" as const,
+    label: "Full access",
+    description: "Broad access.",
+    status: "available" as const,
+    risk: "high" as const,
+    detail: "Broad access detail.",
+    isDefault: false,
+  };
+  const compatibility = supervisedCursorPermissionProfilePresentation(base);
+  assert.equal(compatibility.label, "Workspace writes (compatibility)");
+  assert.match(compatibility.detail ?? "", /outer boundary still confines local writes to the launched workspace/i);
+
+  const writable = supervisedCursorPermissionProfilePresentation({
+    ...base,
+    id: "sandboxed_write",
+    label: "Sandboxed writes",
+    risk: "medium",
+  });
+  assert.equal(writable.label, "Workspace writes");
+  assert.match(writable.description, /inside the launched workspace/i);
+});
+
 test("managed permission profile selection is scoped by provider", () => {
   const cursorProvider = provider({
     id: "cursor",
@@ -1563,6 +1588,15 @@ test("managed permission profile selection is scoped by provider", () => {
         risk: "low",
         detail: null,
         isDefault: true,
+      },
+      {
+        id: "sandboxed_write",
+        label: "Sandboxed writes",
+        description: "Repo-scoped coding access.",
+        status: "available",
+        risk: "medium",
+        detail: null,
+        isDefault: false,
       },
       {
         id: "full_access",
@@ -1583,6 +1617,18 @@ test("managed permission profile selection is scoped by provider", () => {
   assert.equal(
     managedAgentPermissionProfileSelectionForProvider(cursorProvider, { cursor: "full_access" }),
     "full_access",
+  );
+  assert.equal(
+    managedAgentPermissionProfileSelectionForProvider(cursorProvider, {}, "sandboxed_write"),
+    "sandboxed_write",
+  );
+  assert.equal(
+    managedAgentPermissionProfileSelectionForProvider(
+      cursorProvider,
+      { cursor: "read_only" },
+      "sandboxed_write",
+    ),
+    "read_only",
   );
 });
 

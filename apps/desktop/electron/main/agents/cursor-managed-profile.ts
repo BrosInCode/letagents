@@ -21,12 +21,16 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { lstat as lstatAsync, opendir as opendirAsync } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { getLetAgentsLocalStatePath } from "../paths.js";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
-import type { DesktopCursorMcpPolicy } from "../../ipc-types.js";
+import type {
+  DesktopCursorMcpPolicy,
+  DesktopManagedAgentPermissionProfileId,
+} from "../../ipc-types.js";
 import type { LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 
 export interface CursorManagedProfile {
@@ -51,13 +55,17 @@ export interface CursorManagedProfile {
   nativeDeniedReadMetadataPaths?: string[];
   /** Generated authority paths denied for both native reads and writes. */
   nativeDeniedReadWriteRegexes?: string[];
+  /** Git/provider authority patterns denied for native writes only. */
+  nativeDeniedWriteRegexes?: string[];
   /** Private authority files Cursor must read but may never mutate. */
   nativeDeniedWritePaths?: string[];
   /** Stable directory entries that may contain writes but may not be unlinked/replaced. */
   nativeDeniedWriteStructuralPaths?: string[];
   /** Immutable packaged/runtime authority trees Cursor may read but not mutate. */
   nativeDeniedWriteSubpaths?: string[];
-  /** Attempt-private trees that remain writable inside the global read-only fence. */
+  /** Private/provider metadata trees that must never become executable launch roots. */
+  nativeDeniedExecSubpaths?: string[];
+  /** Attempt-private and attested workspace trees writable inside the global fence. */
   nativeAllowedWriteSubpaths?: string[];
   /** Repository/profile/runtime trees readable inside the global data-read fence. */
   nativeAllowedReadSubpaths?: string[];
@@ -74,6 +82,8 @@ export interface CursorSupervisedProfileOptions {
   workAttemptId: string;
   apiBaseUrl: string;
   workspaceRoot: string;
+  /** Attested native authority; write profiles remain confined to this workspace. */
+  permissionProfileId?: DesktopManagedAgentPermissionProfileId;
   sourceHomeDir?: string | null;
   /** Auth-only source refreshed by a just-completed live identity attestation. */
   authSourceHomeDir?: string | null;
@@ -110,7 +120,13 @@ const EMPTY_MCP_CONFIG = '{"mcpServers":{}}\n';
 const MAX_CURSOR_CONFIG_BYTES = 4 * 1024 * 1024;
 const MAX_WORKSPACE_MCP_BYTES = 256 * 1024;
 const MAX_CURSOR_PROFILE_ENTRIES = 4_096;
+const MAX_CURSOR_WRITABLE_TREE_ENTRIES = 1_000_000;
 const RETAINED_CURSOR_TURN_JOURNALS = 8;
+const SUPERVISED_CURSOR_PERMISSION_PROFILE_IDS = new Set<DesktopManagedAgentPermissionProfileId>([
+  "read_only",
+  "sandboxed_write",
+  "full_access",
+]);
 const CURSOR_TURN_STREAM_PATTERN = /^letagents-cursor-turn-[a-f0-9]{64}\.jsonl$/;
 const CURSOR_STATSIG_TEMP_PATTERN = /^statsig-cache\.json\.[1-9]\d{0,9}\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
 const CURSOR_CLI_AUTH_KEYS = new Set(["authInfo"]);
@@ -178,6 +194,13 @@ const SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES = [
   [".cursor", "permissions.json"],
   [".cursor", "settings.json"],
   [".cursor", "hooks.json"],
+] as const;
+const SUPERVISED_CURSOR_PROJECT_HIDDEN_AUTHORITY_FILES = [
+  ...SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES,
+  // Cursor recognizes Claude-compatible settings, but another provider's
+  // checked-in/local configuration must not make a supervised workspace
+  // unusable. Keep these files present for Claude while denying Cursor's
+  // complete native process tree both read and write access below.
   [".claude", "settings.json"],
   [".claude", "settings.local.json"],
 ] as const;
@@ -292,6 +315,11 @@ export function prepareCursorSupervisedProfile(
   if (!workAttemptId) throw new Error("A supervised Cursor work attempt id is required.");
   if (!apiBaseUrl) throw new Error("Cursor's managed LetAgents endpoint is unavailable.");
   if (!workspaceRoot) throw new Error("A supervised Cursor workspace is required.");
+  const permissionProfileId = options.permissionProfileId ?? "read_only";
+  if (!SUPERVISED_CURSOR_PERMISSION_PROFILE_IDS.has(permissionProfileId)) {
+    throw new Error(`Unsupported supervised Cursor permission profile: ${permissionProfileId}`);
+  }
+  const workspaceWriteAccess = permissionProfileId !== "read_only";
   const mcpServerName = cursorSupervisedMcpServerName(workAttemptId);
   // Cursor resolves the Git root and merges project authority from every
   // directory down to --workspace. Validate that complete effective chain,
@@ -472,7 +500,7 @@ export function prepareCursorSupervisedProfile(
   const nativeDeniedReadPaths = [...new Set([
     DARWIN_CURSOR_ENTERPRISE_HOOK_PATH,
     ...projectDirectories.flatMap((directory) =>
-      SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES.map((components) => join(directory, ...components))),
+      SUPERVISED_CURSOR_PROJECT_HIDDEN_AUTHORITY_FILES.map((components) => join(directory, ...components))),
     join(cursorRuntimeConfigDir, "hooks.json"),
     join(cursorRuntimeConfigDir, "settings.json"),
     join(cursorRuntimeConfigDir, "statsig-cache.json"),
@@ -509,9 +537,17 @@ export function prepareCursorSupervisedProfile(
   ])];
   const nativeDeniedReadWriteRegexes = statsigCachePaths.map((statsigCachePath) =>
     `^${escapeSandboxRegex(statsigCachePath)}[.][0-9]+[.][0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}[.]tmp$`);
+  const gitMetadataReadRoots = cursorGitMetadataReadRoots(workspaceRoot);
+  const gitAuthorityRoots = [...new Set(gitMetadataReadRoots.flatMap(sandboxPathVariants))];
+  const gitMarkerPath = cursorGitMarkerPath(workspaceRoot);
   const nativeDeniedWritePaths = [...new Set([
     join(cursorHomeDir, "mcp.json"),
     join(configDir, "letagents-cursor-identity.json"),
+    ...(gitMarkerPath ? [gitMarkerPath] : []),
+    ...gitAuthorityRoots.flatMap((gitRoot) => [
+      join(gitRoot, "config"),
+      join(gitRoot, "config.worktree"),
+    ]),
   ].flatMap(sandboxPathVariants))];
   const nativeDeniedWriteStructuralPaths = [...new Set([
     profileRoot,
@@ -520,15 +556,41 @@ export function prepareCursorSupervisedProfile(
     configDir,
     cursorRuntimeConfigDir,
   ].flatMap(sandboxPathVariants))];
-  const nativeDeniedWriteSubpaths = options.inspectionOnly || mcpConnectorSocketPath
-    ? []
-    : [...new Set(options.mcpRuntime!.readRoots.flatMap(sandboxPathVariants))];
-  const nativeAllowedWriteSubpaths = sandboxPathVariants(profileRoot);
+  const nativeDeniedWriteSubpaths = [...new Set([
+    ...(workspaceWriteAccess ? projectDirectories.flatMap((directory) => [
+      join(directory, ".cursor"),
+      join(directory, ".claude"),
+    ]) : []),
+    ...(options.inspectionOnly || mcpConnectorSocketPath ? [] : options.mcpRuntime!.readRoots),
+    ...gitAuthorityRoots.map((gitRoot) => join(gitRoot, "hooks")),
+  ].flatMap(sandboxPathVariants))];
+  const nativeDeniedWriteRegexes = [...new Set(gitAuthorityRoots.flatMap((gitRoot) => {
+    const escapedRoot = escapeSandboxRegex(gitRoot);
+    return [
+      `^${escapedRoot}/modules/.*/config$`,
+      `^${escapedRoot}/modules/.*/config[.]worktree$`,
+      `^${escapedRoot}/modules/.*/hooks$`,
+      `^${escapedRoot}/modules/.*/hooks/.*$`,
+      `^${escapedRoot}/worktrees/[^/]+/config[.]worktree$`,
+    ];
+  }))];
+  const nativeAllowedWriteSubpaths = [...new Set([
+    profileRoot,
+    ...(workspaceWriteAccess ? [workspaceRoot, ...gitMetadataReadRoots] : []),
+  ].flatMap(sandboxPathVariants))];
+  // Repo-local native build products (esbuild/swc and compiled Rust/Go/C
+  // tests) are ordinary workspace effects and must remain executable. Keep
+  // executable creation out of the private Cursor profile and Git metadata
+  // instead of applying the old blanket deny to every writable tree.
+  const nativeDeniedExecSubpaths = [...new Set([
+    profileRoot,
+    ...gitMetadataReadRoots,
+  ].flatMap(sandboxPathVariants))];
   const nativeAllowedReadSubpaths = [...new Set([
     profileRoot,
     workspaceRoot,
     ...projectDirectories.map((directory) => join(directory, ".git")),
-    ...cursorGitMetadataReadRoots(workspaceRoot),
+    ...gitMetadataReadRoots,
     ...authReadRoots,
     ...(options.inspectionOnly || mcpConnectorSocketPath ? [] : options.mcpRuntime!.readRoots),
   ].flatMap(sandboxPathVariants))];
@@ -554,9 +616,11 @@ export function prepareCursorSupervisedProfile(
     nativeDeniedReadSubpaths,
     nativeDeniedReadMetadataPaths,
     nativeDeniedReadWriteRegexes,
+    nativeDeniedWriteRegexes,
     nativeDeniedWritePaths,
     nativeDeniedWriteStructuralPaths,
     nativeDeniedWriteSubpaths,
+    nativeDeniedExecSubpaths,
     nativeAllowedWriteSubpaths,
     nativeAllowedReadSubpaths,
     ...(options.inspectionOnly ? {} : {
@@ -568,10 +632,12 @@ export function prepareCursorSupervisedProfile(
 }
 
 /**
- * Reject every project file that can widen Cursor's effective execution or
- * extension policy. Cursor's hidden --disable-project-configs flag covers the
- * cli.json chain, but not project MCP discovery, so the filesystem fence is
- * independently required and is re-run before every native turn.
+ * Reject every Cursor-owned project file that can widen its effective
+ * execution or extension policy. Cursor's hidden --disable-project-configs
+ * flag covers the cli.json chain, but not project MCP discovery, so this check
+ * is independently required and re-run before every native turn. Compatible
+ * settings owned by other providers remain in place and are hidden by the
+ * native sandbox instead.
  */
 function assertWorkspaceDoesNotConfigureSupervisedCursorAuthority(
   workspaceRoot: string,
@@ -689,17 +755,22 @@ function cursorEffectiveProjectDirectories(workspaceRoot: string): string[] {
 }
 
 /** Resolve only Git's administrative directories, never the broader parent checkout. */
-function cursorGitMetadataReadRoots(workspaceRoot: string): string[] {
+function cursorGitMarkerPath(workspaceRoot: string): string | null {
   const workspace = realpathSync(resolve(workspaceRoot));
-  let gitMarker: string | null = null;
   for (let cursor = workspace;; cursor = dirname(cursor)) {
     if (pathEntryExists(join(cursor, ".git"))) {
-      gitMarker = join(cursor, ".git");
-      break;
+      return join(cursor, ".git");
     }
     const parent = dirname(cursor);
     if (parent === cursor) break;
   }
+  return null;
+}
+
+/** Resolve only Git's administrative directories, never the broader parent checkout. */
+function cursorGitMetadataReadRoots(workspaceRoot: string): string[] {
+  const workspace = realpathSync(resolve(workspaceRoot));
+  const gitMarker = cursorGitMarkerPath(workspace);
   if (!gitMarker) return [];
   let output: string;
   try {
@@ -759,29 +830,213 @@ function cursorGitMetadataReadRoots(workspaceRoot: string): string[] {
     const markerMatch = /^gitdir:\s*(.+)$/i.exec(markerText);
     if (!markerMatch) throw new Error("Cursor linked-worktree Git marker is invalid.");
     const markerGitDirectory = realpathSync(resolve(dirname(gitMarker), markerMatch[1]!));
-    if (markerGitDirectory !== gitDirectory
-      || dirname(dirname(gitDirectory)) !== commonDirectory
-      || dirname(gitDirectory) !== join(commonDirectory, "worktrees")) {
+    if (markerGitDirectory !== gitDirectory) {
       throw new Error("Cursor linked-worktree Git metadata topology is invalid.");
     }
-    const backlinkPath = resolve(
-      gitDirectory,
-      readRegularFileNoFollow(join(gitDirectory, "gitdir"), 16 * 1024).toString("utf8").trim(),
-    );
-    if (realpathSync(backlinkPath) !== realpathSync(gitMarker)) {
-      throw new Error("Cursor linked-worktree Git metadata does not point back to the selected worktree.");
-    }
-    const commondirPath = realpathSync(resolve(
-      gitDirectory,
-      readRegularFileNoFollow(join(gitDirectory, "commondir"), 16 * 1024).toString("utf8").trim(),
-    ));
-    if (commondirPath !== commonDirectory) {
-      throw new Error("Cursor linked-worktree common Git metadata is inconsistent.");
+    if (dirname(dirname(gitDirectory)) === commonDirectory
+      && dirname(gitDirectory) === join(commonDirectory, "worktrees")) {
+      const backlinkPath = resolve(
+        gitDirectory,
+        readRegularFileNoFollow(join(gitDirectory, "gitdir"), 16 * 1024).toString("utf8").trim(),
+      );
+      if (realpathSync(backlinkPath) !== realpathSync(gitMarker)) {
+        throw new Error("Cursor linked-worktree Git metadata does not point back to the selected worktree.");
+      }
+      const commondirPath = realpathSync(resolve(
+        gitDirectory,
+        readRegularFileNoFollow(join(gitDirectory, "commondir"), 16 * 1024).toString("utf8").trim(),
+      ));
+      if (commondirPath !== commonDirectory) {
+        throw new Error("Cursor linked-worktree common Git metadata is inconsistent.");
+      }
+    } else if (gitDirectory === commonDirectory) {
+      assertCursorSubmoduleGitMetadataTopology(workspace, gitDirectory);
+    } else {
+      throw new Error("Cursor linked-worktree Git metadata topology is invalid.");
     }
   } else {
     throw new Error("Cursor supervised Git marker must be a file or directory.");
   }
   return [...new Set(canonicalRoots)];
+}
+
+function assertCursorSubmoduleGitMetadataTopology(workspace: string, gitDirectory: string): void {
+  let reportedSuperproject: string;
+  let configuredWorktree: string;
+  try {
+    const safeGitEnv = {
+      PATH: process.platform === "win32"
+        ? process.env.PATH || ""
+        : "/usr/bin:/bin:/usr/sbin:/sbin",
+      HOME: workspace,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+      LC_ALL: "C",
+    };
+    reportedSuperproject = execFileSync(
+      "git",
+      ["-C", workspace, "rev-parse", "--show-superproject-working-tree"],
+      { encoding: "utf8", timeout: 2_000, maxBuffer: 16 * 1024, stdio: ["ignore", "pipe", "pipe"], env: safeGitEnv },
+    ).trim();
+    configuredWorktree = execFileSync(
+      "git",
+      ["config", "--file", join(gitDirectory, "config"), "--no-includes", "--type=path", "--get", "core.worktree"],
+      { encoding: "utf8", timeout: 2_000, maxBuffer: 16 * 1024, stdio: ["ignore", "pipe", "pipe"], env: safeGitEnv },
+    ).trim();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cursor could not validate submodule Git metadata safely: ${detail}`);
+  }
+  if (!reportedSuperproject || !configuredWorktree) {
+    throw new Error("Cursor submodule Git metadata omitted its superproject or worktree binding.");
+  }
+  const superprojectStat = lstatSync(resolve(reportedSuperproject));
+  if (!superprojectStat.isDirectory() || superprojectStat.isSymbolicLink()) {
+    throw new Error("Cursor submodule superproject is not a real directory.");
+  }
+  const superproject = realpathSync(resolve(reportedSuperproject));
+  if (superproject === workspace || !pathIsWithin(superproject, workspace)) {
+    throw new Error("Cursor submodule escaped its reported superproject.");
+  }
+  const resolvedWorktree = realpathSync(resolve(gitDirectory, configuredWorktree));
+  if (resolvedWorktree !== workspace) {
+    throw new Error("Cursor submodule Git metadata does not point back to the selected workspace.");
+  }
+  const superprojectMetadataRoots = cursorGitMetadataReadRoots(superproject);
+  if (!superprojectMetadataRoots.some((root) => pathIsWithin(join(root, "modules"), gitDirectory))) {
+    throw new Error("Cursor submodule Git metadata is outside its superproject modules namespace.");
+  }
+}
+
+/**
+ * Seatbelt authorizes writes by path, while a hard link gives one inode more
+ * than one path. Before granting repo writes, prove every multiply-linked
+ * regular file has all of its links inside the writable roots and none cross
+ * a protected provider-authority tree. The native sandbox separately denies
+ * file-link so the supervised process cannot create a new alias afterward.
+ */
+export async function assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(
+  profile: CursorManagedProfile,
+  signal?: AbortSignal,
+): Promise<void> {
+  return assertCursorWritableRootsHaveNoExternalHardLinks(
+    profile.nativeAllowedWriteSubpaths ?? [],
+    [
+      ...(profile.nativeDeniedWritePaths ?? []),
+      ...(profile.nativeDeniedWriteSubpaths ?? []),
+      ...(profile.nativeDeniedReadPaths ?? []),
+      ...(profile.nativeDeniedReadSubpaths ?? []),
+      ...(profile.nativeDeniedReadMetadataPaths ?? []),
+    ],
+    [
+      ...(profile.nativeDeniedReadWriteRegexes ?? []),
+      ...(profile.nativeDeniedWriteRegexes ?? []),
+    ],
+    signal,
+  );
+}
+
+async function assertCursorWritableRootsHaveNoExternalHardLinks(
+  writableRoots: readonly string[],
+  protectedRoots: readonly string[],
+  protectedPatterns: readonly string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const throwIfAborted = (): void => {
+    if (signal?.aborted) {
+      throw new Error("Cursor writable-root hard-link inspection was cancelled.");
+    }
+  };
+  throwIfAborted();
+  const canonicalRoots = [...new Set(writableRoots.map((root) => realpathSync(resolve(root))))]
+    .filter((candidate, _index, roots) => !roots.some((root) =>
+      root !== candidate && pathIsWithin(root, candidate)));
+  const canonicalProtectedRoots = [...new Set(protectedRoots.map((root) =>
+    canonicalizeAuthorityPath(root)))];
+  const protectedRegexes = protectedPatterns.map((pattern) => new RegExp(pattern));
+  const touchesProtectedAuthority = (entryPath: string): boolean =>
+    canonicalProtectedRoots.some((root) => pathIsWithin(root, entryPath))
+      || protectedRegexes.some((pattern) => pattern.test(entryPath));
+  const links = new Map<string, {
+    expected: bigint;
+    observed: bigint;
+    firstPath: string;
+    touchesProtectedAuthority: boolean;
+  }>();
+  const pending = [...canonicalRoots];
+  let entries = 0;
+
+  const inspectEntries = async (entryPaths: readonly string[]): Promise<void> => {
+    throwIfAborted();
+    const inspected = await Promise.all(entryPaths.map(async (entryPath) => ({
+      entryPath,
+      stat: await lstatAsync(entryPath, { bigint: true }),
+    })));
+    throwIfAborted();
+    for (const { entryPath, stat } of inspected) {
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        pending.push(entryPath);
+        continue;
+      }
+      if (!stat.isFile() || stat.nlink <= 1n) continue;
+      const key = `${stat.dev}:${stat.ino}`;
+      const existing = links.get(key);
+      if (existing) {
+        existing.observed += 1n;
+        existing.touchesProtectedAuthority ||= touchesProtectedAuthority(entryPath);
+      } else {
+        links.set(key, {
+          expected: stat.nlink,
+          observed: 1n,
+          firstPath: entryPath,
+          touchesProtectedAuthority: touchesProtectedAuthority(entryPath),
+        });
+      }
+    }
+  };
+
+  while (pending.length) {
+    throwIfAborted();
+    const directoryPath = pending.pop()!;
+    const directory = await opendirAsync(directoryPath);
+    let batch: string[] = [];
+    try {
+      for await (const entry of directory) {
+        entries += 1;
+        if (entries > MAX_CURSOR_WRITABLE_TREE_ENTRIES) {
+          throw new Error("Cursor supervised writable-root hard-link inspection exceeded its bounded entry limit.");
+        }
+        batch.push(join(directoryPath, entry.name));
+        if (batch.length >= 128) {
+          await inspectEntries(batch);
+          batch = [];
+        }
+      }
+      if (batch.length) await inspectEntries(batch);
+    } finally {
+      try { await directory.close(); } catch {}
+    }
+  }
+
+  for (const link of links.values()) {
+    if (link.observed !== link.expected) {
+      throw new Error(
+        `Cursor supervised writes refuse a file hard-linked outside the selected workspace: ${link.firstPath}`,
+      );
+    }
+    if (link.touchesProtectedAuthority) {
+      throw new Error(
+        `Cursor supervised writes refuse a hard link that aliases protected provider authority: ${link.firstPath}`,
+      );
+    }
+  }
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const suffix = relative(root, candidate);
+  return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
 }
 
 function supervisedCursorMcpEnvironment(

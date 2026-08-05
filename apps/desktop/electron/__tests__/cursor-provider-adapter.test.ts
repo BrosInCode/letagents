@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttp2Server } from "node:http2";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -25,7 +25,11 @@ import type {
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
-import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
+import {
+  cursorSupervisedMcpServerName,
+  prepareCursorSupervisedProfile,
+  type CursorManagedProfile,
+} from "../main/agents/cursor-managed-profile.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -108,6 +112,7 @@ interface HarnessOptions {
   mcpAttestationWaitForAbort?: boolean;
   /** One-based attestation pass to hold until abort. */
   mcpAttestationWaitForAbortAt?: number;
+  writableBoundaryWaitForAbort?: boolean;
   beforeLaunch?: CursorProviderAdapterDependencies["launchTurn"] extends (input: infer Input) => unknown ? (input: Input) => void : never;
 }
 
@@ -148,6 +153,11 @@ function wrapperHostedMcpFixture(root: string): Pick<
     join(sandboxRoot, "tmp"),
     join(sandboxRoot, "bridge"),
   ]);
+  if (existsSync(root)) {
+    for (const writableRoot of sandboxWritableRoots) {
+      mkdirSync(writableRoot, { recursive: true });
+    }
+  }
   return {
     // The fake Cursor binaries below never open their MCP connector. This
     // absolute executable is therefore only a bounded wrapper-input fixture.
@@ -203,6 +213,7 @@ function createHarness(options: HarnessOptions = {}) {
   const profilePreparations: Array<{
     workAttemptId: string;
     cwd: string;
+    permissionProfileId?: string | null;
     profileRoot?: string;
     includeAuth?: boolean;
     authSourceHomeDir?: string;
@@ -229,12 +240,28 @@ function createHarness(options: HarnessOptions = {}) {
     timeoutMs?: number;
   }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const writableBoundaryAttestations: CursorManagedProfile[] = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 5200;
   let mintedSessions = 0;
 
   const dependencies: CursorProviderAdapterDependencies = {
     bindPersonalIdentity() {},
+    async attestWritableFileBoundary(profile, signal) {
+      writableBoundaryAttestations.push(profile);
+      if (!options.writableBoundaryWaitForAbort) return;
+      await new Promise<void>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new Error("writable boundary inspection aborted"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () => reject(new Error("writable boundary inspection aborted")),
+          { once: true },
+        );
+      });
+    },
     async attestPersonalIdentity(input) {
       identityAttestations.push(input);
       return {
@@ -299,7 +326,17 @@ function createHarness(options: HarnessOptions = {}) {
     now: () => new Date(1_700_000_000_000).toISOString(),
   };
 
-  return { children, launches, mcpAttestations, identityAttestations, profilePreparations, signals, identities, dependencies };
+  return {
+    children,
+    launches,
+    mcpAttestations,
+    identityAttestations,
+    writableBoundaryAttestations,
+    profilePreparations,
+    signals,
+    identities,
+    dependencies,
+  };
 }
 
 function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
@@ -1223,6 +1260,43 @@ test("stopping Cursor during the packaged bridge pass cannot fall through to nat
   assert.equal(harness.launches.length, 0);
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "stopped");
+});
+
+test("stopping Cursor during writable-root inspection aborts promptly before wrapper launch", async () => {
+  const harness = createHarness({ writableBoundaryWaitForAbort: true });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
+  while (harness.writableBoundaryAttestations.length === 0) await flush();
+
+  const terminal = await adapter.stop(handle);
+
+  assert.equal(terminal.terminalCause, "stopped");
+  await assert.rejects(roomTurn, /interrupted before native dispatch/);
+  assert.equal(harness.launches.length, 0);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "stopped");
+});
+
+test("Cursor handoff aborts writable-root inspection before any wrapper can launch", async () => {
+  const harness = createHarness({ writableBoundaryWaitForAbort: true });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const detach = new AbortController();
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    detachSignal: detach.signal,
+  });
+  while (harness.writableBoundaryAttestations.length === 0) await flush();
+
+  detach.abort();
+
+  await assert.rejects(roomTurn, (error: unknown) =>
+    error instanceof Error
+    && /interrupted before native dispatch/.test(error.message)
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
+  assert.equal(harness.launches.length, 0);
+  assert.equal(handle.pid, null);
+  assert.equal(handle.observedState(), "idle");
 });
 
 test("Cursor handoff aborts pre-native MCP attestation and cannot leave an unjournaled launch", async () => {
@@ -2818,7 +2892,737 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the supervised native sandbox blocks macOS effect-delegating helpers and writable copied executables", {
+test("the real supervised profile hides compatible workspace Claude settings from native Cursor", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-workspace-claude-settings-"));
+  try {
+    const workspace = join(root, "workspace");
+    const sourceHomeDir = join(root, "source-home");
+    const stableProfileRoot = join(root, "stable-profile");
+    const claudeSettings = join(workspace, ".claude", "settings.local.json");
+    const redirectedClaudeSettings = join(workspace, ".claude", "settings.json");
+    const externalSettings = join(root, "external-claude-settings.json");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(dirname(claudeSettings), { recursive: true });
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    writeFileSync(claudeSettings, '{"permissions":{"allow":["Bash(*)"]}}\n');
+    writeFileSync(externalSettings, '{"hooks":{"PreToolUse":[{"command":"steal"}]}}\n');
+    symlinkSync(externalSettings, redirectedClaudeSettings);
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const authorityPaths = ${JSON.stringify([claudeSettings, redirectedClaudeSettings])};
+let blocked = 0;
+for (const authorityPath of authorityPaths) {
+  try { fs.readFileSync(authorityPath, "utf8"); }
+  catch (error) {
+    if (!error || (error.code !== "EPERM" && error.code !== "EACCES")) process.exit(8);
+    blocked += 1;
+  }
+}
+const result = blocked === authorityPaths.length ? "claude-settings-blocked" : "claude-settings-readable";
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-claude-settings" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result, session_id: "sess-claude-settings" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input,
+        apiBaseUrl: "https://desktop.letagents.example",
+        workspaceRoot: input.cwd,
+        sourceHomeDir,
+        profileRoot: input.profileRoot ?? stableProfileRoot,
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+        }),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: workspace }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
+    assert.equal(result.text, "claude-settings-blocked");
+    assert.equal(readFileSync(claudeSettings, "utf8"), '{"permissions":{"allow":["Bash(*)"]}}\n');
+    assert.equal(readFileSync(externalSettings, "utf8"), '{"hooks":{"PreToolUse":[{"command":"steal"}]}}\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the real supervised boundary scopes Cursor write profiles to the selected workspace", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  for (const [permissionProfileId, sandbox, workspaceWritable] of [
+    ["read_only", "enabled", false],
+    ["sandboxed_write", "enabled", true],
+    ["full_access", "disabled", true],
+  ] as const) {
+    const root = mkdtempSync(join(tmpdir(), `letagents-cursor-${permissionProfileId}-boundary-`));
+    try {
+      const workspace = join(root, "workspace");
+      const sourceHomeDir = join(root, "source-home");
+      const stableProfileRoot = join(root, "stable-profile");
+      const workspaceFile = join(workspace, "agent-change.txt");
+      const outsideFile = join(root, "outside-workspace.txt");
+      const outsideViaWorkspaceSymlink = join(workspace, "outside-link", "symlink-escape.txt");
+      const workspaceHardlinkSource = join(workspace, "hardlink-source.txt");
+      const workspaceHardlink = join(workspace, "hardlink-escape.txt");
+      const cursorAuthority = join(workspace, ".cursor", "mcp.json");
+      const executable = join(root, "fake-cursor-agent");
+      mkdirSync(dirname(cursorAuthority), { recursive: true });
+      mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+      symlinkSync(root, join(workspace, "outside-link"), "dir");
+      writeFileSync(workspaceHardlinkSource, "inside-original\n");
+      writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+function write(path) {
+  try { fs.writeFileSync(path, "changed\\n"); return "allowed"; }
+  catch (error) {
+    if (!error || (error.code !== "EPERM" && error.code !== "EACCES")) return error && error.code || "error";
+    return "blocked";
+  }
+}
+function link(source, destination) {
+  try { fs.linkSync(source, destination); return "allowed"; }
+  catch (error) {
+    if (!error || (error.code !== "EPERM" && error.code !== "EACCES")) return error && error.code || "error";
+    return "blocked";
+  }
+}
+const outcome = {
+  workspace: write(${JSON.stringify(workspaceFile)}),
+  outside: write(${JSON.stringify(outsideFile)}),
+  symlinkEscape: write(${JSON.stringify(outsideViaWorkspaceSymlink)}),
+  hardlinkCreate: link(${JSON.stringify(workspaceHardlinkSource)}, ${JSON.stringify(workspaceHardlink)}),
+  authority: write(${JSON.stringify(cursorAuthority)}),
+};
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-write-boundary" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-write-boundary" }) + "\\n");
+`);
+      chmodSync(executable, 0o700);
+      let launchArgs: string[] = [];
+      const adapter = new CursorProviderAdapter({
+        cursorBin: executable,
+        dependencies: {
+          ...productionPersonalIdentityDependencies,
+          attestSupervisedMcp: async () => {},
+          launchTurn(input) {
+            launchArgs = [...input.args];
+            return defaultLaunchTurn(input);
+          },
+        },
+        supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+          ...input,
+          apiBaseUrl: "https://desktop.letagents.example",
+          workspaceRoot: input.cwd,
+          sourceHomeDir,
+          profileRoot: input.profileRoot ?? stableProfileRoot,
+          ...(input.inspectionOnly ? {} : {
+            mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+          }),
+        }),
+      });
+      const handle = await adapter.spawn(daemonSpawnRequest({
+        cwd: workspace,
+        workAttemptId: `wa-${permissionProfileId}-boundary`,
+        permissionProfileId,
+        launchPolicy: permissionProfileId === "read_only"
+          ? { mode: "ask", force: false }
+          : { force: true, sandbox },
+      }));
+      const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+        inboxItemId: `inbox-${permissionProfileId}-boundary`,
+      })));
+      assert.deepEqual(JSON.parse(result.text!), {
+        workspace: workspaceWritable ? "allowed" : "blocked",
+        outside: "blocked",
+        symlinkEscape: "blocked",
+        hardlinkCreate: "blocked",
+        authority: "blocked",
+      });
+      assert.equal(launchArgs.includes("--force"), permissionProfileId !== "read_only");
+      assert.equal(argValue(launchArgs, "--sandbox"), sandbox);
+      assert.equal(existsSync(workspaceFile), workspaceWritable);
+      assert.equal(existsSync(outsideFile), false);
+      assert.equal(existsSync(join(root, "symlink-escape.txt")), false);
+      assert.equal(readFileSync(workspaceHardlinkSource, "utf8"), "inside-original\n");
+      assert.equal(existsSync(cursorAuthority), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the supervised workspace boundary runs Node, npm, Git, the system compiler, and repo-native binaries", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-workspace-toolchains-"));
+  try {
+    const workspace = join(root, "workspace");
+    const sourceHomeDir = join(root, "source-home");
+    const stableProfileRoot = join(root, "stable-profile");
+    const executable = join(root, "fake-cursor-agent");
+    const nativeBinary = join(workspace, "repo-native-esbuild");
+    const hostBrokerProbeSource = join(workspace, "host-broker-probe.c");
+    const hostBrokerProbe = join(workspace, "host-broker-probe");
+    const insideCopySource = join(workspace, "copy-source.txt");
+    const insideCopyTarget = join(workspace, "copy-target.txt");
+    const outsideCopySource = join(root, "outside-copy-source.txt");
+    const outsideCloneTarget = join(workspace, "outside-clone-target.txt");
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    writeFileSync(hostBrokerProbeSource, `
+#include <Security/Security.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <CoreServices/CoreServices.h>
+#include <stdio.h>
+int main(void) {
+  CFArrayRef keychains = NULL;
+  OSStatus keychainStatus = SecKeychainCopySearchList(&keychains);
+  int keychainAccessible = keychainStatus == errSecSuccess;
+  if (keychains != NULL) CFRelease(keychains);
+  CFPropertyListRef preference = CFPreferencesCopyValue(
+    CFSTR("AppleLocale"),
+    kCFPreferencesAnyApplication,
+    kCFPreferencesCurrentUser,
+    kCFPreferencesAnyHost
+  );
+  int preferencesAccessible = preference != NULL;
+  if (preference != NULL) CFRelease(preference);
+  CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
+  int windowsAccessible = windows != NULL;
+  if (windows != NULL) CFRelease(windows);
+  MDQueryRef metadataQuery = MDQueryCreate(
+    kCFAllocatorDefault,
+    CFSTR("kMDItemFSName == 'package.json'"),
+    NULL,
+    NULL
+  );
+  int metadataAccessible = metadataQuery != NULL && MDQueryExecute(metadataQuery, kMDQuerySynchronous);
+  if (metadataQuery != NULL) CFRelease(metadataQuery);
+  printf("{\\\"keychain\\\":%s,\\\"preferences\\\":%s,\\\"windows\\\":%s,\\\"metadata\\\":%s}\\n",
+    keychainAccessible ? "true" : "false",
+    preferencesAccessible ? "true" : "false",
+    windowsAccessible ? "true" : "false",
+    metadataAccessible ? "true" : "false");
+  return 0;
+}
+`);
+    const compiler = [
+      "/Library/Developer/CommandLineTools/usr/bin/clang",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+    ].find((candidate) => existsSync(candidate));
+    assert.ok(compiler, "the macOS test host exposes a real compiler driver");
+    const sdkRoot = [
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    ].find((candidate) => existsSync(candidate));
+    assert.ok(sdkRoot, "the macOS test host exposes a selected SDK");
+    const compileProbe = spawnSync(compiler, [
+      "-isysroot", sdkRoot,
+      "-framework", "Security",
+      "-framework", "CoreFoundation",
+      "-framework", "CoreGraphics",
+      "-framework", "CoreServices",
+      hostBrokerProbeSource,
+      "-o", hostBrokerProbe,
+    ], { encoding: "utf8" });
+    assert.equal(compileProbe.status, 0, compileProbe.stderr);
+    writeFileSync(insideCopySource, "inside-copy\n");
+    writeFileSync(outsideCopySource, "outside-private\n");
+    copyFileSync(join(process.cwd(), "node_modules", "esbuild", "bin", "esbuild"), nativeBinary);
+    chmodSync(nativeBinary, 0o700);
+    writeFileSync(executable, `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const workspace = ${JSON.stringify(workspace)};
+function run(command, args) {
+  const child = spawnSync(command, args, { cwd: workspace, encoding: "utf8" });
+  return {
+    ok: child.status === 0,
+    code: child.error && child.error.code || null,
+    signal: child.signal || null,
+    output: (child.stdout || child.stderr || "").trim(),
+  };
+}
+const outcome = {
+  node: run("node", ["--version"]),
+  npm: run("npm", ["--version"]),
+  gitInit: run("git", ["init", "--quiet"]),
+  git: run("git", ["status", "--porcelain"]),
+  native: run(${JSON.stringify(nativeBinary)}, ["--version"]),
+  compiler: run("clang", ["--version"]),
+  hostBrokers: run(${JSON.stringify(hostBrokerProbe)}, []),
+  insideCopy: run("/bin/cp", [${JSON.stringify(insideCopySource)}, ${JSON.stringify(insideCopyTarget)}]),
+  outsideClone: run("/bin/cp", ["-c", ${JSON.stringify(outsideCopySource)}, ${JSON.stringify(outsideCloneTarget)}]),
+};
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-workspace-toolchains" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-workspace-toolchains" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input,
+        apiBaseUrl: "https://desktop.letagents.example",
+        workspaceRoot: input.cwd,
+        sourceHomeDir,
+        profileRoot: input.profileRoot ?? stableProfileRoot,
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+        }),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      cwd: workspace,
+      workAttemptId: "wa-workspace-toolchains",
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: "inbox-workspace-toolchains",
+    })));
+    const outcome = JSON.parse(result.text!) as Record<string, {
+      ok: boolean;
+      code: string | null;
+      signal: string | null;
+      output: string;
+    }>;
+    assert.equal(outcome.node?.ok, true, JSON.stringify(outcome.node));
+    assert.equal(outcome.npm?.ok, true, JSON.stringify(outcome.npm));
+    assert.equal(outcome.gitInit?.ok, true, JSON.stringify(outcome.gitInit));
+    assert.equal(outcome.git?.ok, true, JSON.stringify(outcome.git));
+    assert.equal(outcome.native?.ok, true, JSON.stringify(outcome.native));
+    assert.match(outcome.native?.output ?? "", /^\d+[.]\d+[.]\d+$/);
+    assert.equal(outcome.compiler?.ok, true, JSON.stringify(outcome.compiler));
+    assert.match(outcome.compiler?.output ?? "", /clang version/i);
+    assert.equal(outcome.hostBrokers?.ok, true, JSON.stringify(outcome.hostBrokers));
+    assert.deepEqual(JSON.parse(outcome.hostBrokers?.output ?? "null"), {
+      keychain: false,
+      preferences: false,
+      windows: false,
+      metadata: false,
+    }, "repo-native framework clients cannot query host keychains, preferences, or windows");
+    assert.equal(outcome.insideCopy?.ok, true, JSON.stringify(outcome.insideCopy));
+    assert.equal(outcome.outsideClone?.ok, false, "APFS clone still requires source read authority");
+    assert.equal(readFileSync(insideCopyTarget, "utf8"), "inside-copy\n");
+    assert.equal(existsSync(outsideCloneTarget), false);
+    assert.equal(existsSync(join(workspace, ".git", "HEAD")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("hostile PATH roots cannot widen supervised reads outside the selected workspace", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-hostile-path-"));
+  const previousHome = process.env.HOME;
+  try {
+    const workspace = join(root, "workspace");
+    const hostHome = join(root, "host-home");
+    const pathHomeAlias = join(root, "path-home-bin");
+    const pathSecretAlias = join(root, "path-secret-bin");
+    const customBin = join(root, "custom-bin");
+    const customTool = join(customBin, "repo-tool");
+    const secretDirectory = join(hostHome, ".ssh");
+    const secret = join(secretDirectory, "id_test");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(hostHome, { recursive: true });
+    mkdirSync(secretDirectory, { recursive: true });
+    mkdirSync(customBin, { recursive: true });
+    process.env.HOME = hostHome;
+    writeFileSync(secret, "must-stay-private\n");
+    symlinkSync(hostHome, pathHomeAlias, "dir");
+    symlinkSync(secretDirectory, pathSecretAlias, "dir");
+    writeFileSync(customTool, `#!${process.execPath}\nprocess.stdout.write("custom-tool-ok\\n");\n`);
+    chmodSync(customTool, 0o700);
+    writeFileSync(executable, `#!${process.execPath}
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+let outsideRead = "allowed";
+try { fs.readFileSync(${JSON.stringify(secret)}, "utf8"); }
+catch (error) { outsideRead = error && (error.code === "EPERM" || error.code === "EACCES") ? "blocked" : error && error.code || "error"; }
+const tool = spawnSync("repo-tool", [], { encoding: "utf8" });
+const outcome = { outsideRead, tool: tool.status === 0 ? tool.stdout.trim() : tool.error && tool.error.code || tool.signal || "blocked" };
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-hostile-path" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-hostile-path" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+
+    for (const [name, candidatePath, expectedTool] of [
+      ["root", "/", null],
+      ["home-alias", pathHomeAlias, null],
+      ["secret-child-alias", pathSecretAlias, null],
+      ["custom-bin", customBin, "custom-tool-ok"],
+    ] as const) {
+      const stableProfileRoot = join(root, `stable-profile-${name}`);
+      mkdirSync(stableProfileRoot, { recursive: true });
+      const adapter = new CursorProviderAdapter({
+        cursorBin: executable,
+        dependencies: {
+          ...productionPersonalIdentityDependencies,
+          attestSupervisedMcp: async () => {},
+        },
+        supervisedProfileFactory: (input) => {
+          const profileRoot = input.profileRoot ?? stableProfileRoot;
+          for (const directory of ["home", "config", "data", "cache"]) {
+            mkdirSync(join(profileRoot, directory), { recursive: true });
+          }
+          const mcp = wrapperHostedMcpFixture(profileRoot);
+          return {
+            homeDir: join(profileRoot, "home"),
+            configDir: join(profileRoot, "config"),
+            dataDir: join(profileRoot, "data"),
+            cacheDir: join(profileRoot, "cache"),
+            env: { HOME: join(profileRoot, "home"), PATH: candidatePath },
+            mcpRuntimeEntryPath: mcp.mcpRuntimeEntryPath,
+            mcpRuntimeEnv: mcp.mcpRuntimeEnv,
+            nativeAllowedWriteSubpaths: [profileRoot],
+            nativeAllowedReadSubpaths: [profileRoot, workspace],
+          };
+        },
+      });
+      const handle = await adapter.spawn(daemonSpawnRequest({
+        cwd: workspace,
+        workAttemptId: `wa-hostile-path-${name}`,
+      }));
+      const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+        inboxItemId: `inbox-hostile-path-${name}`,
+      })));
+      const outcome = JSON.parse(result.text!) as { outsideRead: string; tool: string };
+      assert.equal(outcome.outsideRead, "blocked", `PATH ${candidatePath} did not become broad file-read authority`);
+      if (expectedTool) assert.equal(outcome.tool, expectedTool, `PATH ${candidatePath} remains usable for narrow custom tools`);
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised workspace boundary commits inside a linked Git worktree only", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-linked-worktree-"));
+  try {
+    const repository = join(root, "repository");
+    const workspace = join(root, "selected-worktree");
+    const sourceHomeDir = join(root, "source-home");
+    const stableProfileRoot = join(root, "stable-profile");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(repository, { recursive: true });
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    assert.equal(spawnSync("git", ["init", "--quiet", repository]).status, 0);
+    writeFileSync(join(repository, "seed.txt"), "seed\n");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "seed.txt"]).status, 0);
+    assert.equal(spawnSync("git", [
+      "-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test",
+      "-C", repository, "commit", "--quiet", "-m", "seed",
+    ]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "worktree", "add", "--quiet", "-b", "cursor-write", workspace]).status, 0);
+
+    const featureFile = join(workspace, "feature.txt");
+    const outsideMainWorktree = join(repository, "outside-main.txt");
+    const gitMarker = join(workspace, ".git");
+    const originalGitMarker = readFileSync(gitMarker, "utf8");
+    const gitDirectory = spawnSync("git", ["-C", workspace, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).stdout.trim();
+    const gitCommonDirectory = spawnSync("git", ["-C", workspace, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).stdout.trim();
+    const commonDirectory = realpathSync(resolve(workspace, gitCommonDirectory));
+    const hookPath = join(commonDirectory, "hooks", "pre-commit");
+    const worktreeConfigPath = join(gitDirectory, "config.worktree");
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+function run(args) {
+  const child = spawnSync("git", args, { cwd: ${JSON.stringify(workspace)}, encoding: "utf8" });
+  return { ok: child.status === 0, output: (child.stderr || child.stdout || "").trim() };
+}
+function attempt(callback) {
+  try { callback(); return "allowed"; }
+  catch (error) { return error && (error.code === "EPERM" || error.code === "EACCES") ? "blocked" : error && error.code || "error"; }
+}
+fs.writeFileSync(${JSON.stringify(featureFile)}, "linked-worktree-change\\n");
+let outside = "allowed";
+try { fs.writeFileSync(${JSON.stringify(outsideMainWorktree)}, "must-not-write\\n"); }
+catch (error) { outside = error && (error.code === "EPERM" || error.code === "EACCES") ? "blocked" : error && error.code || "error"; }
+const hook = attempt(() => fs.writeFileSync(${JSON.stringify(hookPath)}, "#!/bin/sh\\nexit 1\\n"));
+const worktreeConfig = attempt(() => fs.writeFileSync(${JSON.stringify(worktreeConfigPath)}, "[core]\\n\\thooksPath = planted\\n"));
+const marker = attempt(() => fs.writeFileSync(${JSON.stringify(gitMarker)}, "gitdir: /tmp/planted\\n"));
+const hooksConfig = run(["config", "core.hooksPath", ".planted-hooks"]);
+const add = run(["add", "feature.txt"]);
+const commit = run(["-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test", "commit", "--quiet", "-m", "cursor linked worktree"]);
+const outcome = { add, commit, outside, hook, worktreeConfig, marker, hooksConfig };
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-linked-worktree" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-linked-worktree" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input,
+        apiBaseUrl: "https://desktop.letagents.example",
+        workspaceRoot: input.cwd,
+        sourceHomeDir,
+        profileRoot: input.profileRoot ?? stableProfileRoot,
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+        }),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      cwd: workspace,
+      workAttemptId: "wa-linked-worktree",
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: "inbox-linked-worktree",
+    })));
+    const outcome = JSON.parse(result.text!) as {
+      add: { ok: boolean; output: string };
+      commit: { ok: boolean; output: string };
+      outside: string;
+      hook: string;
+      worktreeConfig: string;
+      marker: string;
+      hooksConfig: { ok: boolean; output: string };
+    };
+    assert.equal(outcome.add.ok, true, outcome.add.output);
+    assert.equal(outcome.commit.ok, true, outcome.commit.output);
+    assert.equal(outcome.outside, "blocked");
+    assert.equal(outcome.hook, "blocked");
+    assert.equal(outcome.worktreeConfig, "blocked");
+    assert.equal(outcome.marker, "blocked");
+    assert.equal(outcome.hooksConfig.ok, false, "Git cannot persist a later unsandboxed hooks path");
+    assert.equal(readFileSync(featureFile, "utf8"), "linked-worktree-change\n");
+    assert.equal(existsSync(outsideMainWorktree), false);
+    assert.equal(existsSync(hookPath), false);
+    assert.equal(existsSync(worktreeConfigPath), false);
+    assert.equal(readFileSync(gitMarker, "utf8"), originalGitMarker);
+    assert.equal(
+      spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(),
+      "cursor linked worktree",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised workspace boundary commits inside a Git submodule only", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-submodule-boundary-"));
+  try {
+    const childRepository = join(root, "child-origin");
+    const repository = join(root, "superproject");
+    const workspace = join(repository, "modules", "child");
+    const sourceHomeDir = join(root, "source-home");
+    const stableProfileRoot = join(root, "stable-profile");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(childRepository, { recursive: true });
+    mkdirSync(repository, { recursive: true });
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    assert.equal(spawnSync("git", ["init", "--quiet", childRepository]).status, 0);
+    writeFileSync(join(childRepository, "seed.txt"), "seed\n");
+    assert.equal(spawnSync("git", ["-C", childRepository, "add", "seed.txt"]).status, 0);
+    assert.equal(spawnSync("git", [
+      "-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test",
+      "-C", childRepository, "commit", "--quiet", "-m", "child seed",
+    ]).status, 0);
+    assert.equal(spawnSync("git", ["init", "--quiet", repository]).status, 0);
+    writeFileSync(join(repository, "parent.txt"), "parent\n");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "parent.txt"]).status, 0);
+    assert.equal(spawnSync("git", [
+      "-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test",
+      "-C", repository, "commit", "--quiet", "-m", "parent seed",
+    ]).status, 0);
+    assert.equal(spawnSync("git", [
+      "-c", "protocol.file.allow=always", "-C", repository,
+      "submodule", "add", "--quiet", `file://${childRepository}`, "modules/child",
+    ]).status, 0);
+    assert.equal(spawnSync("git", [
+      "-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test",
+      "-C", repository, "commit", "--quiet", "-am", "add child",
+    ]).status, 0);
+
+    const featureFile = join(workspace, "feature.txt");
+    const parentEscape = join(repository, "parent-escape.txt");
+    const gitMarker = join(workspace, ".git");
+    const originalGitMarker = readFileSync(gitMarker, "utf8");
+    const gitDirectory = spawnSync("git", ["-C", workspace, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).stdout.trim();
+    const hookPath = join(gitDirectory, "hooks", "pre-commit");
+    const configPath = join(gitDirectory, "config");
+    const originalConfig = readFileSync(configPath, "utf8");
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+function run(args) {
+  const child = spawnSync("git", args, { cwd: ${JSON.stringify(workspace)}, encoding: "utf8" });
+  return { ok: child.status === 0, output: (child.stderr || child.stdout || "").trim() };
+}
+function attempt(callback) {
+  try { callback(); return "allowed"; }
+  catch (error) { return error && (error.code === "EPERM" || error.code === "EACCES") ? "blocked" : error && error.code || "error"; }
+}
+fs.writeFileSync(${JSON.stringify(featureFile)}, "submodule-change\\n");
+const parent = attempt(() => fs.writeFileSync(${JSON.stringify(parentEscape)}, "must-not-write\\n"));
+const hook = attempt(() => fs.writeFileSync(${JSON.stringify(hookPath)}, "#!/bin/sh\\nexit 1\\n"));
+const marker = attempt(() => fs.writeFileSync(${JSON.stringify(gitMarker)}, "gitdir: /tmp/planted\\n"));
+const hooksConfig = run(["config", "core.hooksPath", ".planted-hooks"]);
+const add = run(["add", "feature.txt"]);
+const commit = run(["-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test", "commit", "--quiet", "-m", "cursor submodule"]);
+const outcome = { add, commit, parent, hook, marker, hooksConfig };
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-submodule-boundary" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-submodule-boundary" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input,
+        apiBaseUrl: "https://desktop.letagents.example",
+        workspaceRoot: input.cwd,
+        sourceHomeDir,
+        profileRoot: input.profileRoot ?? stableProfileRoot,
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+        }),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      cwd: workspace,
+      workAttemptId: "wa-submodule-boundary",
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: "inbox-submodule-boundary",
+    })));
+    const outcome = JSON.parse(result.text!) as {
+      add: { ok: boolean; output: string };
+      commit: { ok: boolean; output: string };
+      parent: string;
+      hook: string;
+      marker: string;
+      hooksConfig: { ok: boolean; output: string };
+    };
+    assert.equal(outcome.add.ok, true, outcome.add.output);
+    assert.equal(outcome.commit.ok, true, outcome.commit.output);
+    assert.equal(outcome.parent, "blocked");
+    assert.equal(outcome.hook, "blocked");
+    assert.equal(outcome.marker, "blocked");
+    assert.equal(outcome.hooksConfig.ok, false);
+    assert.equal(existsSync(parentEscape), false);
+    assert.equal(existsSync(hookPath), false);
+    assert.equal(readFileSync(gitMarker, "utf8"), originalGitMarker);
+    assert.equal(readFileSync(configPath, "utf8"), originalConfig);
+    assert.equal(
+      spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(),
+      "cursor submodule",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the real supervised boundary blocks a late in-workspace authority symlink", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-late-authority-symlink-"));
+  try {
+    const workspace = join(root, "workspace");
+    const insideTarget = join(workspace, "inside-target");
+    const sourceHomeDir = join(root, "source-home");
+    const stableProfileRoot = join(root, "stable-profile");
+    const targetSettings = join(insideTarget, "settings.json");
+    const targetMcp = join(insideTarget, "mcp.json");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(insideTarget, { recursive: true });
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    writeFileSync(targetSettings, "inside-secret\n");
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+function attempt(callback) {
+  try { callback(); return "allowed"; }
+  catch (error) {
+    if (error && (error.code === "EPERM" || error.code === "EACCES")) return "blocked";
+    return error && error.code || "error";
+  }
+}
+const outcome = {
+  read: attempt(() => fs.readFileSync(${JSON.stringify(join(workspace, ".cursor", "settings.json"))}, "utf8")),
+  write: attempt(() => fs.writeFileSync(${JSON.stringify(join(workspace, ".cursor", "mcp.json"))}, "replaced\\n")),
+};
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-late-authority-symlink" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-late-authority-symlink" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    let launchedChild: CursorCliChild | null = null;
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+        launchTurn(input) {
+          if (!existsSync(join(workspace, ".cursor"))) {
+            symlinkSync(insideTarget, join(workspace, ".cursor"), "dir");
+          }
+          launchedChild = defaultLaunchTurn(input);
+          return launchedChild;
+        },
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input,
+        apiBaseUrl: "https://desktop.letagents.example",
+        workspaceRoot: input.cwd,
+        sourceHomeDir,
+        profileRoot: input.profileRoot ?? stableProfileRoot,
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+        }),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      cwd: workspace,
+      workAttemptId: "wa-late-authority-symlink",
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    let result: ProviderRoomTurnResult;
+    try {
+      result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+        inboxItemId: "inbox-late-authority-symlink",
+      })));
+    } catch (error) {
+      const nativeStderr = (launchedChild as CursorCliChild | null)?.stderrTail() ?? "<none>";
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; native stderr: ${nativeStderr}`);
+    }
+    assert.deepEqual(JSON.parse(result.text!), { read: "blocked", write: "blocked" });
+    assert.equal(readFileSync(targetSettings, "utf8"), "inside-secret\n");
+    assert.equal(existsSync(targetMcp), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised native sandbox blocks macOS effect-delegating helpers and private-profile executables", {
   skip: process.platform !== "darwin",
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-native-delegation-"));
@@ -2849,6 +3653,7 @@ const outcome = {
   copiedOpen: blocked(copiedOpen, ["--help"]),
   appleScript: blocked("/usr/bin/osascript", ["-e", "return 1"]),
   keychainCli: blocked("/usr/bin/security", ["list-keychains"]),
+  xcodeDispatcher: blocked("/usr/bin/xcrun", ["--find", "clang"]),
 };
 const session = "sess-native-delegation";
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: session }) + "\\n");
@@ -2865,6 +3670,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         cacheDir: join(profileRoot, "cache"),
         env: { HOME: homeDir },
         ...wrapperHostedMcpFixture(root),
+        nativeDeniedExecSubpaths: [profileRoot, realpathSync(profileRoot)],
         nativeAllowedWriteSubpaths: [profileRoot, realpathSync(profileRoot)],
         nativeAllowedReadSubpaths: [root, realpathSync(root)],
       }),
@@ -2876,6 +3682,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       copiedOpen: true,
       appleScript: true,
       keychainCli: true,
+      xcodeDispatcher: true,
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -3466,7 +4273,48 @@ test("daemon Cursor correction refuses an unjournaled side turn and native resum
   assert.equal((await turn).text, "continued safely");
 });
 
-test("daemon Cursor rejects missing supervisor coordinates and write authority before launching", async () => {
+test("daemon Cursor restart-resume preserves exact write authority and sandbox flags", async () => {
+  for (const [permissionProfileId, sandbox] of [
+    ["sandboxed_write", "enabled"],
+    ["full_access", "disabled"],
+  ] as const) {
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const request = daemonSpawnRequest({
+      workAttemptId: `wa-restart-${permissionProfileId}`,
+      permissionProfileId,
+      launchPolicy: { force: true, sandbox },
+    });
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: `sess-restart-${permissionProfileId}`,
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    assert.equal(harness.launches.length, 0, "restart recovery stays idle until a journaled inbox turn");
+
+    const turn = adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: `inbox-restart-${permissionProfileId}`,
+    }));
+    for (let index = 0; index < 100 && !harness.children[0]?.isReleased; index += 1) await flush();
+    const launch = harness.launches[0]!;
+    assert.equal(argValue(launch.args, "--resume"), `sess-restart-${permissionProfileId}`);
+    assert.equal(launch.args.includes("--force"), true);
+    assert.equal(argValue(launch.args, "--sandbox"), sandbox);
+    assert.equal(launch.mcpRuntimeEnv?.LETAGENTS_PERMISSION_PROFILE_ID, permissionProfileId);
+    assert.equal(harness.profilePreparations.at(-1)?.permissionProfileId, permissionProfileId);
+
+    harness.children[0]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: `${permissionProfileId} resumed`, session_id: `sess-restart-${permissionProfileId}`,
+    });
+    await flush();
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+    assert.equal((await turn).text, `${permissionProfileId} resumed`);
+  }
+});
+
+test("daemon Cursor rejects missing supervisor coordinates and preserves selected write authority", async () => {
   const missingHarness = createHarness();
   const missingAdapter = supervisedAdapter(missingHarness);
   await assert.rejects(
@@ -3474,16 +4322,82 @@ test("daemon Cursor rejects missing supervisor coordinates and write authority b
     /requires exact supervisor coordinates/,
   );
   assert.equal(missingHarness.launches.length, 0);
-
   await assert.rejects(
     () => missingAdapter.spawn(daemonSpawnRequest({
-      workAttemptId: "wa-write-profile",
-      permissionProfileId: "sandboxed_write",
-      launchPolicy: { force: true, sandbox: "enabled" },
+      workAttemptId: "wa-missing-permission-profile",
+      permissionProfileId: null,
     })),
-    /only the read-only permission profile/,
+    /requires an exact permission profile/,
+  );
+  await assert.rejects(
+    () => missingAdapter.spawn(daemonSpawnRequest({
+      workAttemptId: "wa-unknown-permission-profile",
+      permissionProfileId: "unknown" as ProviderSpawnRequest["permissionProfileId"],
+    })),
+    /Unknown permission profile/,
+  );
+  await assert.rejects(
+    () => missingAdapter.spawn(daemonSpawnRequest({
+      workAttemptId: "wa-gated-permission-profile",
+      permissionProfileId: "ask_before_write",
+    })),
+    /not available for cursor/,
   );
   assert.equal(missingHarness.launches.length, 0);
+
+  const readOnlyHarness = createHarness();
+  const readOnlyAdapter = supervisedAdapter(readOnlyHarness);
+  const readOnlyHandle = await readOnlyAdapter.spawn(daemonSpawnRequest({
+    workAttemptId: "wa-read-only-model-collision",
+    model: "--sandbox",
+  }));
+  const readOnlyTurn = readOnlyAdapter.runRoomTurn(readOnlyHandle, roomTurnRequest({
+    inboxItemId: "inbox-read-only-model-collision",
+  }));
+  for (let index = 0; index < 100 && readOnlyHarness.launches.length === 0; index += 1) await flush();
+  const readOnlyArgs = readOnlyHarness.launches[0]!.args;
+  assert.equal(readOnlyArgs.some((arg, index) => arg === "--sandbox" && readOnlyArgs[index + 1] === "enabled"), true);
+  for (let index = 0; index < 100 && !readOnlyHarness.children[0]?.isReleased; index += 1) await flush();
+  readOnlyHarness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: "read_only completed", session_id: readOnlyHandle.providerContinuationId,
+  });
+  await flush();
+  readOnlyHarness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.equal((await readOnlyTurn).text, "read_only completed");
+
+  for (const [permissionProfileId, sandbox] of [
+    ["sandboxed_write", "enabled"],
+    ["full_access", "disabled"],
+  ] as const) {
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      workAttemptId: `wa-${permissionProfileId}`,
+      permissionProfileId,
+      launchPolicy: { force: true, sandbox },
+    }));
+    const turn = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: `inbox-${permissionProfileId}` }));
+    for (let index = 0; index < 100 && harness.launches.length === 0; index += 1) await flush();
+    assert.ok(harness.launches[0]?.args.includes("--force"));
+    assert.equal(argValue(harness.launches[0]!.args, "--sandbox"), sandbox);
+    assert.match(harness.launches[0]!.args.at(-1) ?? "", /You may edit files and run local commands/);
+    if (permissionProfileId === "full_access") {
+      assert.match(harness.launches[0]!.args.at(-1) ?? "", /Keep all local changes inside the selected repository\/workspace/);
+      assert.doesNotMatch(harness.launches[0]!.args.at(-1) ?? "", /broader local changes/);
+    }
+    for (let index = 0; index < 100 && !harness.children[0]?.isReleased; index += 1) await flush();
+    assert.equal(harness.children[0]?.isReleased, true);
+    harness.children[0]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: `${permissionProfileId} completed`, session_id: handle.providerContinuationId,
+    });
+    await flush();
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+    assert.equal((await turn).text, `${permissionProfileId} completed`);
+  }
 });
 
 test("a successful result is TURN-terminal: the lane goes idle with NO claimed process and is not attempt-terminal", async () => {
