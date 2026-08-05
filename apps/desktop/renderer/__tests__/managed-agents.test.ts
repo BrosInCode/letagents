@@ -1562,7 +1562,8 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
   };
   const compatibility = supervisedCursorPermissionProfilePresentation(base);
   assert.equal(compatibility.label, "Workspace writes (compatibility)");
-  assert.match(compatibility.detail ?? "", /outer boundary still confines local writes to the launched workspace/i);
+  assert.match(compatibility.detail ?? "", /restricts direct write paths to the launched workspace/i);
+  assert.match(compatibility.detail ?? "", /without inventorying project files/i);
 
   const writable = supervisedCursorPermissionProfilePresentation({
     ...base,

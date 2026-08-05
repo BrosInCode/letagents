@@ -1149,7 +1149,7 @@ export function supervisedCursorPermissionProfilePresentation(
       ...profile,
       label: "Workspace writes",
       description: "Reads, edits, and runs normal development commands inside the launched workspace.",
-      detail: "Cursor's sandbox stays enabled. LetAgents independently blocks host reads, outside writes, global configuration, and direct host-service access.",
+      detail: "Cursor's sandbox stays enabled. LetAgents applies path-based host restrictions, blocks global configuration and direct host-service access, and does not inventory project files.",
     };
   }
   if (profile.id === "full_access") {
@@ -1157,7 +1157,7 @@ export function supervisedCursorPermissionProfilePresentation(
       ...profile,
       label: "Workspace writes (compatibility)",
       description: "Runs repository tools with Cursor's inner sandbox disabled when a project needs broader tool compatibility.",
-      detail: "The LetAgents outer boundary still confines local writes to the launched workspace and blocks host authority; only Cursor's inner sandbox is disabled.",
+      detail: "LetAgents still restricts direct write paths to the launched workspace and blocks host authority without inventorying project files; only Cursor's inner sandbox is disabled.",
     };
   }
   if (profile.id === "read_only") {

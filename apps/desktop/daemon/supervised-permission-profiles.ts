@@ -109,11 +109,11 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "sandboxed_write", label: "Workspace writes", description: "Lets Cursor read, edit, and run normal development commands inside the selected workspace.",
-    status: "available", risk: "medium", detail: "Cursor's native sandbox and the independent LetAgents host boundary remain enabled.", isDefault: true,
+    status: "available", risk: "medium", detail: "Cursor's native sandbox and a path-based LetAgents host boundary remain enabled without inventorying project files.", isDefault: true,
   },
   {
     id: "full_access", label: "Workspace writes (compatibility)", description: "Disables Cursor's inner sandbox for repository tool compatibility.",
-    status: "available", risk: "high", detail: "Disables Cursor's native sandbox, while the supervised outer process boundary remains scoped to the selected workspace.", isDefault: false,
+    status: "available", risk: "high", detail: "Disables Cursor's native sandbox while LetAgents restricts direct write paths to the selected workspace without inventorying project files.", isDefault: false,
   },
 ];
 

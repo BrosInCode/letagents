@@ -11,7 +11,6 @@ import type {
   DesktopMcpInstallTarget,
 } from "../../ipc-types.js";
 import {
-  assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   normalizeCursorMcpPolicy,
   prepareCursorManagedProfile,
   prepareCursorSupervisedProfile,
@@ -287,7 +286,6 @@ export async function runDesktopCursorProviderPreflight(
         managedEnv = buildCursorChildEnv(managedProfile.env);
         delete managedEnv.CURSOR_API_KEY;
         delete managedEnv.CURSOR_AUTH_TOKEN;
-        await assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(managedProfile);
         return null;
       } catch (error) {
         return {

@@ -46,7 +46,6 @@ import {
 } from "./provider-evidence.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import {
-  assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   bindCursorSupervisedIdentity,
   prepareCursorSupervisedProfile,
   type CursorPersonalIdentity,
@@ -154,7 +153,6 @@ export interface CursorProviderAdapterDependencies {
     signal?: AbortSignal;
   }): Promise<CursorPersonalIdentity>;
   bindPersonalIdentity(profile: CursorManagedProfile, identity: CursorPersonalIdentity): void;
-  attestWritableFileBoundary(profile: CursorManagedProfile, signal?: AbortSignal): Promise<void>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
@@ -1805,10 +1803,11 @@ async function start() {
           "(deny appleevent-send)",
           // Path-scoped writes are otherwise vulnerable to inode aliases:
           // hard links can mutate an outside/protected path through an allowed
-          // workspace pathname. Existing multiply-linked files are attested
-          // immediately before launch; prevent creation of new aliases. APFS
-          // clones remain usable inside the repo and still require source-read
-          // authority, so the global data-read fence blocks outside imports.
+          // workspace pathname. Do not inventory the existing project tree at
+          // startup; cheaply prevent the supervised process from creating new
+          // aliases instead. APFS clones remain usable inside the repo and
+          // still require source-read authority, so the global data-read fence
+          // blocks outside imports.
           "(deny file-link)",
           "(deny mach-lookup (global-name \"com.apple.coreservices.appleevents\"))",
           "(deny mach-lookup (global-name \"com.apple.coreservices.launchservicesd\"))",
@@ -2656,7 +2655,6 @@ const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   attestSupervisedMcp: assertCursorSupervisedMcpAuthority,
   attestPersonalIdentity: assertCursorPersonalIdentity,
   bindPersonalIdentity: bindCursorSupervisedIdentity,
-  attestWritableFileBoundary: assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   prepareTurnState: (path) => writeFileSync(path, "", { flag: "wx", mode: 0o600 }),
@@ -3712,12 +3710,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
           devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
           mcpConnectorSocketPath,
         });
-        // This walks only the profile's actual writable roots (plus workspace
-        // and Git metadata for write profiles) without blocking Electron's
-        // event loop. Read-only still owns a mutable private profile, so it
-        // needs the same pre-existing inode-alias proof. Stop/handoff can abort
-        // the walk before any wrapper or native provider process exists.
-        await this.deps.attestWritableFileBoundary(profile, launchSignal);
         this.deps.bindPersonalIdentity(profile, personalIdentity);
         childEnv = cursorDaemonChildEnv(profile.env);
         const toolchainPath = cursorSandboxToolchainBinPaths();

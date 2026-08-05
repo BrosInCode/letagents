@@ -307,10 +307,10 @@ export function useAddAgentPresentation(
     const providerName = selectedProvider.value?.name?.trim() || "this agent";
     if (launchMode.value === "supervised" && selectedProviderId.value === "cursor") {
       if (profile.id === "full_access") {
-        return "Full access disables Cursor's native sandbox, but the supervised boundary still confines local writes to this workspace. Only daemon-mediated room tools are exposed.";
+        return "Full access disables Cursor's native sandbox, but LetAgents still restricts direct write paths to this workspace without inventorying project files. Only daemon-mediated room tools are exposed.";
       }
       if (profile.id === "sandboxed_write") {
-        return "Sandboxed writes stay inside this workspace. Daemon-mediated LetAgents room tools remain available.";
+        return "LetAgents limits Cursor to workspace write paths without inventorying project files. Daemon-mediated LetAgents room tools remain available.";
       }
     }
     if (profile.risk === "high") {

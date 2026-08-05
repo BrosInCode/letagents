@@ -233,23 +233,33 @@ test("Cursor supervised preflight preserves explicit read-only and full-access c
   setFakeCursorMcpMode(null);
 });
 
-test("Cursor supervised write preflight exercises the selected workspace boundary", async () => {
-  const workspace = workspaceFixture("supervised-write-hardlink-boundary");
+test("Cursor supervised preflight does not traverse project files before launch", async () => {
+  const workspace = workspaceFixture("supervised-no-project-file-walk");
   const outside = join(tempDir, "preflight-outside-hardlink.txt");
+  const opaqueProjectDirectory = join(workspace, "opaque-project-subtree");
   writeFileSync(outside, "outside\n");
   linkSync(outside, join(workspace, "outside-alias.txt"));
+  mkdirSync(opaqueProjectDirectory);
+  writeFileSync(join(opaqueProjectDirectory, "ordinary-project-file.txt"), "project data\n");
+  if (process.platform !== "win32") chmodSync(opaqueProjectDirectory, 0o000);
   setFakeCursorMcpMode("ready");
 
-  const result = await runPreflight({
-    repoRootPath: workspace,
-    launchMode: "supervised",
-    permissionProfileId: "full_access",
-  });
+  const result = await (async () => {
+    try {
+      return await runPreflight({
+        repoRootPath: workspace,
+        launchMode: "supervised",
+        permissionProfileId: "full_access",
+      });
+    } finally {
+      if (process.platform !== "win32") chmodSync(opaqueProjectDirectory, 0o700);
+      setFakeCursorMcpMode(null);
+    }
+  })();
 
-  assert.equal(result.status, "error");
-  assert.equal(result.canStart, false);
-  assert.match(result.detail ?? "", /hard-linked outside the selected workspace/);
-  setFakeCursorMcpMode(null);
+  assert.equal(result.status, "ready");
+  assert.equal(result.canStart, true);
+  assert.equal(result.message, "Cursor Agent is ready to start supervised with Workspace writes (compatibility).");
 });
 
 test("Cursor supervised preflight fails closed when the bridge is not visible", async () => {

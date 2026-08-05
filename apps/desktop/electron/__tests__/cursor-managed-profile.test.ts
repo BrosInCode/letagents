@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -46,7 +45,6 @@ const testMcpRuntime = {
 };
 
 const {
-  assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   bindCursorSupervisedIdentity,
   filterLetAgentsCursorMcpConfig,
   cursorSupervisedMcpServerName,
@@ -231,79 +229,6 @@ test("supervised Cursor write profiles admit only the selected workspace and pro
     assert.ok(profile.nativeDeniedWriteSubpaths?.includes(join(canonicalWorkspace, ".cursor")));
     assert.ok(profile.nativeDeniedWriteSubpaths?.includes(join(canonicalWorkspace, ".claude")));
   }
-});
-
-test("supervised Cursor write profiles reject external and protected hard-link aliases", async () => {
-  const sourceHome = join(tempDir, "source-home-supervised-hardlinks");
-  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
-
-  const externalWorkspace = join(tempDir, "workspace-supervised-external-hardlink");
-  const outsideTarget = join(tempDir, "outside-hardlink-target.txt");
-  mkdirSync(externalWorkspace, { recursive: true });
-  writeFileSync(outsideTarget, "outside\n");
-  linkSync(outsideTarget, join(externalWorkspace, "outside-alias.txt"));
-  const readOnlyProfile = prepareCursorSupervisedProfile({
-    workAttemptId: "attempt-read-only-external-hardlink",
-    apiBaseUrl: "https://desktop.letagents.example",
-    workspaceRoot: externalWorkspace,
-    sourceHomeDir: sourceHome,
-    profileRoot: join(tempDir, "supervised-profile-read-only-external-hardlink"),
-    permissionProfileId: "read_only",
-    inspectionOnly: true,
-  });
-  linkSync(outsideTarget, join(readOnlyProfile.homeDir, "outside-profile-alias.txt"));
-  await assert.rejects(
-    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(readOnlyProfile),
-    /hard-linked outside the selected workspace/,
-  );
-  const externalProfile = prepareCursorSupervisedProfile({
-    workAttemptId: "attempt-write-external-hardlink",
-    apiBaseUrl: "https://desktop.letagents.example",
-    workspaceRoot: externalWorkspace,
-    sourceHomeDir: sourceHome,
-    profileRoot: join(tempDir, "supervised-profile-write-external-hardlink"),
-    permissionProfileId: "sandboxed_write",
-    inspectionOnly: true,
-  });
-  await assert.rejects(
-    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(externalProfile),
-    /hard-linked outside the selected workspace/,
-  );
-
-  const internalWorkspace = join(tempDir, "workspace-supervised-internal-hardlinks");
-  mkdirSync(internalWorkspace, { recursive: true });
-  writeFileSync(join(internalWorkspace, "internal-a.txt"), "inside\n");
-  linkSync(join(internalWorkspace, "internal-a.txt"), join(internalWorkspace, "internal-b.txt"));
-  const internalProfile = prepareCursorSupervisedProfile({
-    workAttemptId: "attempt-write-internal-hardlink",
-    apiBaseUrl: "https://desktop.letagents.example",
-    workspaceRoot: internalWorkspace,
-    sourceHomeDir: sourceHome,
-    profileRoot: join(tempDir, "supervised-profile-write-internal-hardlink"),
-    permissionProfileId: "sandboxed_write",
-    inspectionOnly: true,
-  });
-  await assert.doesNotReject(
-    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(internalProfile),
-  );
-
-  const authorityWorkspace = join(tempDir, "workspace-supervised-authority-hardlink");
-  mkdirSync(join(authorityWorkspace, ".cursor"), { recursive: true });
-  writeFileSync(join(authorityWorkspace, "source.txt"), "inside\n");
-  linkSync(join(authorityWorkspace, "source.txt"), join(authorityWorkspace, ".cursor", "alias.txt"));
-  const authorityProfile = prepareCursorSupervisedProfile({
-    workAttemptId: "attempt-write-authority-hardlink",
-    apiBaseUrl: "https://desktop.letagents.example",
-    workspaceRoot: authorityWorkspace,
-    sourceHomeDir: sourceHome,
-    profileRoot: join(tempDir, "supervised-profile-write-authority-hardlink"),
-    permissionProfileId: "full_access",
-    inspectionOnly: true,
-  });
-  await assert.rejects(
-    assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(authorityProfile),
-    /aliases protected provider authority/,
-  );
 });
 
 test("a non-authoritative supervised inspection profile contains no Cursor login material", () => {

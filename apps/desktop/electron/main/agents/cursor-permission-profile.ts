@@ -97,12 +97,12 @@ export function cursorPermissionProfileReadyDetail(
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
       if (supervised) {
-        return "Cursor can read, edit, and run normal development commands inside the selected workspace. Cursor's sandbox and the independent LetAgents host boundary remain enabled.";
+        return "Cursor can read, edit, and run normal development commands inside the selected workspace. Cursor's sandbox and a path-based LetAgents host boundary remain enabled without inventorying project files.";
       }
       return "Cursor will run with --force and Cursor sandbox enabled for write-capable local work. Selected MCP tools still follow the chosen MCP policy.";
     case "full_access":
       if (supervised) {
-        return "Cursor's inner sandbox is disabled for repository tool compatibility, while the independent LetAgents boundary still confines local writes to the selected workspace and blocks host authority.";
+        return "Cursor's inner sandbox is disabled for repository tool compatibility. LetAgents still restricts direct write paths to the selected workspace and blocks host authority without inventorying project files.";
       }
       return "Cursor will run with --force and Cursor sandbox disabled for trusted local work. Selected MCP tools still follow the chosen MCP policy.";
     default:

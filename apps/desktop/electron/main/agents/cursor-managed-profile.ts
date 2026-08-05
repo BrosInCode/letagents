@@ -21,7 +21,6 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { lstat as lstatAsync, opendir as opendirAsync } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -120,7 +119,6 @@ const EMPTY_MCP_CONFIG = '{"mcpServers":{}}\n';
 const MAX_CURSOR_CONFIG_BYTES = 4 * 1024 * 1024;
 const MAX_WORKSPACE_MCP_BYTES = 256 * 1024;
 const MAX_CURSOR_PROFILE_ENTRIES = 4_096;
-const MAX_CURSOR_WRITABLE_TREE_ENTRIES = 1_000_000;
 const RETAINED_CURSOR_TURN_JOURNALS = 8;
 const SUPERVISED_CURSOR_PERMISSION_PROFILE_IDS = new Set<DesktopManagedAgentPermissionProfileId>([
   "read_only",
@@ -906,131 +904,6 @@ function assertCursorSubmoduleGitMetadataTopology(workspace: string, gitDirector
   const superprojectMetadataRoots = cursorGitMetadataReadRoots(superproject);
   if (!superprojectMetadataRoots.some((root) => pathIsWithin(join(root, "modules"), gitDirectory))) {
     throw new Error("Cursor submodule Git metadata is outside its superproject modules namespace.");
-  }
-}
-
-/**
- * Seatbelt authorizes writes by path, while a hard link gives one inode more
- * than one path. Before granting repo writes, prove every multiply-linked
- * regular file has all of its links inside the writable roots and none cross
- * a protected provider-authority tree. The native sandbox separately denies
- * file-link so the supervised process cannot create a new alias afterward.
- */
-export async function assertCursorSupervisedWritableRootsHaveNoExternalHardLinks(
-  profile: CursorManagedProfile,
-  signal?: AbortSignal,
-): Promise<void> {
-  return assertCursorWritableRootsHaveNoExternalHardLinks(
-    profile.nativeAllowedWriteSubpaths ?? [],
-    [
-      ...(profile.nativeDeniedWritePaths ?? []),
-      ...(profile.nativeDeniedWriteSubpaths ?? []),
-      ...(profile.nativeDeniedReadPaths ?? []),
-      ...(profile.nativeDeniedReadSubpaths ?? []),
-      ...(profile.nativeDeniedReadMetadataPaths ?? []),
-    ],
-    [
-      ...(profile.nativeDeniedReadWriteRegexes ?? []),
-      ...(profile.nativeDeniedWriteRegexes ?? []),
-    ],
-    signal,
-  );
-}
-
-async function assertCursorWritableRootsHaveNoExternalHardLinks(
-  writableRoots: readonly string[],
-  protectedRoots: readonly string[],
-  protectedPatterns: readonly string[],
-  signal?: AbortSignal,
-): Promise<void> {
-  const throwIfAborted = (): void => {
-    if (signal?.aborted) {
-      throw new Error("Cursor writable-root hard-link inspection was cancelled.");
-    }
-  };
-  throwIfAborted();
-  const canonicalRoots = [...new Set(writableRoots.map((root) => realpathSync(resolve(root))))]
-    .filter((candidate, _index, roots) => !roots.some((root) =>
-      root !== candidate && pathIsWithin(root, candidate)));
-  const canonicalProtectedRoots = [...new Set(protectedRoots.map((root) =>
-    canonicalizeAuthorityPath(root)))];
-  const protectedRegexes = protectedPatterns.map((pattern) => new RegExp(pattern));
-  const touchesProtectedAuthority = (entryPath: string): boolean =>
-    canonicalProtectedRoots.some((root) => pathIsWithin(root, entryPath))
-      || protectedRegexes.some((pattern) => pattern.test(entryPath));
-  const links = new Map<string, {
-    expected: bigint;
-    observed: bigint;
-    firstPath: string;
-    touchesProtectedAuthority: boolean;
-  }>();
-  const pending = [...canonicalRoots];
-  let entries = 0;
-
-  const inspectEntries = async (entryPaths: readonly string[]): Promise<void> => {
-    throwIfAborted();
-    const inspected = await Promise.all(entryPaths.map(async (entryPath) => ({
-      entryPath,
-      stat: await lstatAsync(entryPath, { bigint: true }),
-    })));
-    throwIfAborted();
-    for (const { entryPath, stat } of inspected) {
-      if (stat.isSymbolicLink()) continue;
-      if (stat.isDirectory()) {
-        pending.push(entryPath);
-        continue;
-      }
-      if (!stat.isFile() || stat.nlink <= 1n) continue;
-      const key = `${stat.dev}:${stat.ino}`;
-      const existing = links.get(key);
-      if (existing) {
-        existing.observed += 1n;
-        existing.touchesProtectedAuthority ||= touchesProtectedAuthority(entryPath);
-      } else {
-        links.set(key, {
-          expected: stat.nlink,
-          observed: 1n,
-          firstPath: entryPath,
-          touchesProtectedAuthority: touchesProtectedAuthority(entryPath),
-        });
-      }
-    }
-  };
-
-  while (pending.length) {
-    throwIfAborted();
-    const directoryPath = pending.pop()!;
-    const directory = await opendirAsync(directoryPath);
-    let batch: string[] = [];
-    try {
-      for await (const entry of directory) {
-        entries += 1;
-        if (entries > MAX_CURSOR_WRITABLE_TREE_ENTRIES) {
-          throw new Error("Cursor supervised writable-root hard-link inspection exceeded its bounded entry limit.");
-        }
-        batch.push(join(directoryPath, entry.name));
-        if (batch.length >= 128) {
-          await inspectEntries(batch);
-          batch = [];
-        }
-      }
-      if (batch.length) await inspectEntries(batch);
-    } finally {
-      try { await directory.close(); } catch {}
-    }
-  }
-
-  for (const link of links.values()) {
-    if (link.observed !== link.expected) {
-      throw new Error(
-        `Cursor supervised writes refuse a file hard-linked outside the selected workspace: ${link.firstPath}`,
-      );
-    }
-    if (link.touchesProtectedAuthority) {
-      throw new Error(
-        `Cursor supervised writes refuse a hard link that aliases protected provider authority: ${link.firstPath}`,
-      );
-    }
   }
 }
 
