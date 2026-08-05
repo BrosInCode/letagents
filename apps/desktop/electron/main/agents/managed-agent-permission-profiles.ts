@@ -89,7 +89,7 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Runs Cursor Agent in ask mode for desktop-delivered room events.",
     status: "available",
     risk: "low",
-    detail: "Matches the Cursor phase-0 managed runtime gate.",
+    detail: "Runs Cursor in ask mode without workspace edits.",
     isDefault: true,
   },
   {

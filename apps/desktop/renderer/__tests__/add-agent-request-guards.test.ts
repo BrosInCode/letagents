@@ -184,6 +184,63 @@ test("configuration invalidation rejects a stale model-catalog response", async 
   assert.equal(configuration.providerModels.value, null);
 });
 
+test("Cursor keeps legacy read-only and supervised repo-write defaults independent", async () => {
+  const configuration = useAddAgentConfiguration();
+  const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("cursor");
+  const profiles: DesktopAgentProvider["permissionProfiles"] = [
+    {
+      id: "read_only", label: "Read-only", description: "Inspect only.",
+      status: "available", risk: "low", detail: null, isDefault: true,
+    },
+    {
+      id: "sandboxed_write", label: "Sandboxed writes", description: "Repo-scoped writes.",
+      status: "available", risk: "medium", detail: null, isDefault: false,
+    },
+    {
+      id: "full_access", label: "Full access", description: "Trusted repo access.",
+      status: "available", risk: "high", detail: null, isDefault: false,
+    },
+  ];
+  const selectedProvider = computed<DesktopAgentProvider>(() => ({
+    ...provider("cursor"),
+    permissionProfiles: profiles,
+    defaultPermissionProfileId: "read_only",
+  }));
+  const actions = configuration.bind({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomGitRoom: () => null,
+    repoRootPath: () => "/repo",
+    selectedProviderId,
+    selectedProvider,
+    selectedPermissionProfile: computed(() =>
+      profiles.find((profile) => profile.id === configuration.selectedPermissionProfileId.value) ?? null
+    ),
+    showOpenModelConfig: computed(() => false),
+    showModelSelector: computed(() => false),
+    showEffortSelector: computed(() => false),
+    providerModelOptions: computed(() => []),
+    selectedModel: computed(() => null),
+    selectedModelSource: computed(() => null),
+    requestPreflight: () => undefined,
+    runPreflight: async () => undefined,
+    onMessage: () => undefined,
+  });
+
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
+
+  configuration.launchMode.value = "supervised";
+  assert.equal(configuration.selectedPermissionProfileId.value, "sandboxed_write");
+  actions.selectPermissionProfile(profiles[2]!);
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+
+  configuration.launchMode.value = "legacy";
+  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
+  configuration.launchMode.value = "supervised";
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+});
+
 test("closing the modal does not unlock a second Open Model write", async () => {
   const pendingSave = deferred<{
     baseUrl: string;

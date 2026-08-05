@@ -21,6 +21,7 @@ import {
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
+  supervisedCursorPermissionProfilePresentation,
 } from "../../../../domain/managed-agents";
 import type { DesktopSelectOption } from "../../controls/DesktopSelectField.vue";
 import type { useAddAgentConfiguration } from "./useAddAgentConfiguration";
@@ -69,8 +70,8 @@ export function useAddAgentPresentation(
   );
   const selectedPermissionProfiles = computed(() => {
     const profiles = selectedProvider.value?.permissionProfiles ?? [];
-    return launchMode.value === "supervised" && selectedProvider.value?.id === "cursor"
-      ? profiles.filter((profile) => profile.id === "read_only")
+    return selectedProviderId.value === "cursor" && launchMode.value === "supervised"
+      ? profiles.map(supervisedCursorPermissionProfilePresentation)
       : profiles;
   });
   const selectedPermissionProfile = computed(() =>
@@ -304,11 +305,20 @@ export function useAddAgentPresentation(
     const profile = selectedPermissionProfile.value;
     if (!profile || profile.status !== "available") return null;
     const providerName = selectedProvider.value?.name?.trim() || "this agent";
+    if (launchMode.value === "supervised" && selectedProviderId.value === "cursor") {
+      if (profile.id === "full_access") {
+        return "Full access disables Cursor's native sandbox, but the supervised boundary still confines local writes to this workspace. Only daemon-mediated room tools are exposed.";
+      }
+      if (profile.id === "sandboxed_write") {
+        return "Sandboxed writes stay inside this workspace. Daemon-mediated LetAgents room tools remain available.";
+      }
+    }
     if (profile.risk === "high") {
       return `${profile.label} gives ${providerName} broad write and shell access. Use only with trusted repos and MCPs.`;
     }
     if (
       selectedProviderId.value === "cursor" &&
+      launchMode.value === "legacy" &&
       profile.id === "sandboxed_write" &&
       selectedCursorMcpPolicy.value !== "none"
     ) {

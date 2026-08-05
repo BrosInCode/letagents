@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readlinkSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   buildCodexStartPrompt,
@@ -46,10 +46,12 @@ import {
 } from "./provider-evidence.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import {
+  assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   bindCursorSupervisedIdentity,
   prepareCursorSupervisedProfile,
   type CursorPersonalIdentity,
   type CursorManagedProfile,
+  type CursorSupervisedProfileOptions,
 } from "./cursor-managed-profile.js";
 import {
   assertCursorSupervisedMcpAuthority,
@@ -58,6 +60,7 @@ import {
 } from "./cursor-mcp-authority.js";
 import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
+import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
 
 // P2b (plan v10 §4.8/§6, task_38, matrix row in §4.8): Cursor through its
 // native `cursor-agent` harness. Unlike Codex (durable app-server) and Claude
@@ -130,7 +133,7 @@ export interface CursorCliChild {
 }
 
 export interface CursorProviderAdapterDependencies {
-  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
+  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
   attestSupervisedMcp(input: {
     cursorBin: string;
     cwd: string;
@@ -151,6 +154,7 @@ export interface CursorProviderAdapterDependencies {
     signal?: AbortSignal;
   }): Promise<CursorPersonalIdentity>;
   bindPersonalIdentity(profile: CursorManagedProfile, identity: CursorPersonalIdentity): void;
+  attestWritableFileBoundary(profile: CursorManagedProfile, signal?: AbortSignal): Promise<void>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
@@ -171,6 +175,8 @@ export interface CursorProviderAdapterOptions {
   supervisedProfileFactory?: (input: {
     workAttemptId: string;
     cwd: string;
+    /** Exact durable permission authority selected for the supervised lane. */
+    permissionProfileId?: CursorSupervisedProfileOptions["permissionProfileId"];
     /** Disposable root for non-authoritative MCP inspection. */
     profileRoot?: string;
     /** Inspection profiles deliberately omit Cursor login credentials. */
@@ -248,10 +254,12 @@ const CURSOR_MCP_CONNECTOR_ROOT_PATTERN = `^${escapeCursorSandboxRegex(CURSOR_MC
 export function boundedCursorRoomTurnPrompt(
   request: ProviderRoomTurnRequest,
   turnId: string,
+  permissionProfileId?: string | null,
 ): string {
   return [
     "You are handling one daemon-owned room inbox item in an exact bounded turn.",
     `Your durable charter: ${request.charter?.trim() || "Help thoughtfully within the room."}`,
+    ...cursorPermissionProfileInstructionLines(permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"]),
     "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
@@ -430,6 +438,85 @@ function isExactCursorLoopbackTestOrigin(value: string): boolean {
   return Number.isSafeInteger(port) && port <= 65_535;
 }
 
+let cachedCursorSandboxDelegatingExecutablePaths: string[] | null = null;
+
+function cursorSandboxDeveloperRoots(): string[] {
+  if (process.platform !== "darwin") return [];
+  const roots: string[] = [];
+  try {
+    const selected = readlinkSync("/var/db/xcode_select_link");
+    roots.push(isAbsolute(selected) ? selected : resolve("/var/db", selected));
+  } catch {}
+  roots.push(
+    "/Library/Developer/CommandLineTools",
+    "/Applications/Xcode.app/Contents/Developer",
+  );
+  return [...new Set(roots)].filter((root) => existsSync(root));
+}
+
+function cursorSandboxToolchainBinPaths(): string[] {
+  return cursorSandboxDeveloperRoots().flatMap((developerRoot) => [
+    join(developerRoot, "Toolchains", "XcodeDefault.xctoolchain", "usr", "bin"),
+    join(developerRoot, "usr", "bin"),
+  ]).filter((directory) => existsSync(directory));
+}
+
+function cursorSandboxSdkRoot(): string | null {
+  for (const developerRoot of cursorSandboxDeveloperRoots()) {
+    for (const sdkRoot of [
+      join(developerRoot, "SDKs", "MacOSX.sdk"),
+      join(developerRoot, "Platforms", "MacOSX.platform", "Developer", "SDKs", "MacOSX.sdk"),
+    ]) {
+      if (existsSync(sdkRoot)) return sdkRoot;
+    }
+  }
+  return null;
+}
+
+function cursorSandboxPathWithToolchains(pathValue: string, toolchainPaths: readonly string[]): string {
+  const entries = pathValue.split(delimiter).filter(Boolean);
+  const insertionIndex = entries.indexOf("/usr/bin");
+  entries.splice(insertionIndex >= 0 ? insertionIndex : entries.length, 0, ...toolchainPaths);
+  return [...new Set(entries)].join(delimiter);
+}
+
+function cursorSandboxDelegatingExecutablePaths(): string[] {
+  if (cachedCursorSandboxDelegatingExecutablePaths) {
+    return [...cachedCursorSandboxDelegatingExecutablePaths];
+  }
+  const paths = new Set([
+    "/bin/launchctl", "/bin/kill",
+    "/usr/bin/afplay", "/usr/bin/automator", "/usr/bin/defaults", "/usr/bin/killall",
+    "/usr/bin/instruments", "/usr/bin/mdfind", "/usr/bin/mdls", "/usr/bin/open", "/usr/bin/osascript",
+    "/usr/bin/pbcopy", "/usr/bin/pbpaste", "/usr/bin/qlmanage", "/usr/bin/say",
+    "/usr/bin/screencapture", "/usr/bin/security", "/usr/bin/shortcuts", "/usr/bin/xcrun",
+    "/usr/sbin/diskutil", "/usr/sbin/networksetup", "/usr/sbin/scutil",
+  ]);
+  if (process.platform === "darwin") {
+    // Resolve selected Developer tool paths without spawning a process on
+    // Electron's main thread, then deny effect-delegating binaries directly
+    // as well as xcrun above. Repo builds can invoke compilers directly.
+    for (const developerRoot of cursorSandboxDeveloperRoots()) {
+      for (const relativePath of [
+        "usr/bin/simctl",
+        "usr/bin/devicectl",
+        "usr/bin/xctrace",
+        "usr/bin/xcdevice",
+        "usr/bin/notarytool",
+        "usr/bin/altool",
+        "usr/bin/stapler",
+      ]) {
+        const executable = join(developerRoot, relativePath);
+        if (!existsSync(executable)) continue;
+        paths.add(executable);
+        try { paths.add(realpathSync(executable)); } catch {}
+      }
+    }
+  }
+  cachedCursorSandboxDelegatingExecutablePaths = [...paths];
+  return [...cachedCursorSandboxDelegatingExecutablePaths];
+}
+
 export function defaultLaunchTurn(input: {
   cursorBin: string;
   args: string[];
@@ -441,9 +528,11 @@ export function defaultLaunchTurn(input: {
   deniedReadSubpaths?: string[];
   deniedReadMetadataPaths?: string[];
   deniedReadWriteRegexes?: string[];
+  deniedWriteRegexes?: string[];
   deniedWritePaths?: string[];
   deniedWriteStructuralPaths?: string[];
   deniedWriteSubpaths?: string[];
+  deniedExecSubpaths?: string[];
   allowedWriteSubpaths?: string[];
   allowedReadSubpaths?: string[];
   allowedNetworkUnixSockets?: string[];
@@ -463,13 +552,16 @@ export function defaultLaunchTurn(input: {
     stage: "mcp_listen" | "authority_listen" | "agent_listen";
   };
 }): CursorCliChild {
+  const deniedDelegatingExecutablePaths = cursorSandboxDelegatingExecutablePaths();
   const deniedReadPaths = validateCursorSandboxPaths(input.deniedReadPaths);
   const deniedReadSubpaths = validateCursorSandboxPaths(input.deniedReadSubpaths);
   const deniedReadMetadataPaths = validateCursorSandboxPaths(input.deniedReadMetadataPaths);
   const deniedReadWriteRegexes = validateCursorSandboxRegexes(input.deniedReadWriteRegexes);
+  const deniedWriteRegexes = validateCursorSandboxRegexes(input.deniedWriteRegexes);
   const deniedWritePaths = validateCursorSandboxPaths(input.deniedWritePaths);
   const deniedWriteStructuralPaths = validateCursorSandboxPaths(input.deniedWriteStructuralPaths);
   const deniedWriteSubpaths = validateCursorSandboxPaths(input.deniedWriteSubpaths);
+  const deniedExecSubpaths = validateCursorSandboxPaths(input.deniedExecSubpaths);
   const allowedWriteSubpaths = validateCursorSandboxPaths(input.allowedWriteSubpaths);
   const allowedReadSubpaths = input.allowedReadSubpaths?.length
     ? validateCursorSandboxPaths([
@@ -557,14 +649,16 @@ const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
 const { StringDecoder } = require("node:string_decoder");
-const [bin, statePath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
+const [bin, statePath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
 const deniedReadPaths = JSON.parse(deniedReadPathsJson || "[]");
 const deniedReadSubpaths = JSON.parse(deniedReadSubpathsJson || "[]");
 const deniedReadMetadataPaths = JSON.parse(deniedReadMetadataPathsJson || "[]");
 const deniedReadWriteRegexes = JSON.parse(deniedReadWriteRegexesJson || "[]");
+const deniedWriteRegexes = JSON.parse(deniedWriteRegexesJson || "[]");
 const deniedWritePaths = JSON.parse(deniedWritePathsJson || "[]");
 const deniedWriteStructuralPaths = JSON.parse(deniedWriteStructuralPathsJson || "[]");
 const deniedWriteSubpaths = JSON.parse(deniedWriteSubpathsJson || "[]");
+const deniedExecSubpaths = JSON.parse(deniedExecSubpathsJson || "[]");
 const allowedWriteSubpaths = JSON.parse(allowedWriteSubpathsJson || "[]");
 const allowedReadSubpaths = JSON.parse(allowedReadSubpathsJson || "[]");
 const allowedNetworkUnixSockets = JSON.parse(allowedNetworkUnixSocketsJson || "[]");
@@ -574,14 +668,7 @@ const publicAuthPlaceholder = ${JSON.stringify(CURSOR_SUPERVISED_PROXY_PLACEHOLD
 const supervisedAgentEndpoint = ${JSON.stringify(agentUpstreamEndpoint)};
 const supervisedControlPlaneEndpoint = ${JSON.stringify(controlPlaneUpstreamEndpoint)};
 const supervisedControlPlanePaths = new Set(${JSON.stringify(CURSOR_SUPERVISED_CONTROL_PLANE_PATHS)});
-const deniedDelegatingExecutables = ${JSON.stringify([
-  "/bin/launchctl", "/bin/kill",
-  "/usr/bin/afplay", "/usr/bin/automator", "/usr/bin/defaults", "/usr/bin/killall",
-  "/usr/bin/mdfind", "/usr/bin/mdls", "/usr/bin/open", "/usr/bin/osascript",
-  "/usr/bin/pbcopy", "/usr/bin/pbpaste", "/usr/bin/qlmanage", "/usr/bin/say",
-  "/usr/bin/screencapture", "/usr/bin/security", "/usr/bin/shortcuts", "/usr/bin/xcrun",
-  "/usr/sbin/diskutil", "/usr/sbin/networksetup", "/usr/sbin/scutil",
-])};
+const deniedDelegatingExecutables = ${JSON.stringify(deniedDelegatingExecutablePaths)};
 const mcpConnectorRootPattern = new RegExp(${JSON.stringify(CURSOR_MCP_CONNECTOR_ROOT_PATTERN)});
 let started = false;
 let startPromise = null;
@@ -993,7 +1080,7 @@ function validatedMcpRuntimeEnv(value) {
     || result.LETAGENTS_SUPERVISOR_PROVIDER !== "cursor"
     || result.LETAGENTS_SUPERVISED_BOUNDED_TURNS !== "1"
     || result.LETAGENTS_EXECUTION_PROFILE !== "supervised_room_turn"
-    || result.LETAGENTS_PERMISSION_PROFILE_ID !== "read_only"
+    || !["read_only", "sandboxed_write", "full_access"].includes(result.LETAGENTS_PERMISSION_PROFILE_ID)
     || result.CURSOR_API_KEY !== ""
     || result.CURSOR_AUTH_TOKEN !== "") {
     throw new Error("incomplete MCP runtime environment");
@@ -1677,6 +1764,7 @@ async function start() {
       || deniedReadSubpaths.length > 0
       || deniedReadMetadataPaths.length > 0
       || deniedReadWriteRegexes.length > 0
+      || deniedWriteRegexes.length > 0
       || deniedWritePaths.length > 0
       || deniedWriteStructuralPaths.length > 0
       || deniedWriteSubpaths.length > 0
@@ -1715,10 +1803,30 @@ async function start() {
           // and daemon clients can delegate effects to an unsandboxed service.
           // Block those channels independently of Cursor's command classifier.
           "(deny appleevent-send)",
+          // Path-scoped writes are otherwise vulnerable to inode aliases:
+          // hard links can mutate an outside/protected path through an allowed
+          // workspace pathname. Existing multiply-linked files are attested
+          // immediately before launch; prevent creation of new aliases. APFS
+          // clones remain usable inside the repo and still require source-read
+          // authority, so the global data-read fence blocks outside imports.
+          "(deny file-link)",
           "(deny mach-lookup (global-name \"com.apple.coreservices.appleevents\"))",
           "(deny mach-lookup (global-name \"com.apple.coreservices.launchservicesd\"))",
           "(deny mach-lookup (global-name \"com.apple.launchservices.mapdb\"))",
           "(deny mach-lookup (global-name \"com.apple.pasteboard.1\"))",
+          // Executable path denials are not a capability boundary: a
+          // repo-native binary can call Security.framework or CFPreferences
+          // directly. Fence those host-data brokers at Mach lookup instead.
+          "(deny mach-lookup (global-name \"com.apple.SecurityServer\"))",
+          "(deny mach-lookup (global-name \"com.apple.cfprefsd.agent\"))",
+          "(deny mach-lookup (global-name \"com.apple.cfprefsd.daemon\"))",
+          "(deny mach-lookup (global-name \"com.apple.CoreSimulator.CoreSimulatorService\"))",
+          "(deny mach-lookup (global-name \"com.apple.CoreSimulator.SimLaunchHost\"))",
+          "(deny mach-lookup (global-name \"com.apple.CoreSimulator.SimulatorTrampoline\"))",
+          "(deny mach-lookup (global-name \"com.apple.windowserver.active\"))",
+          "(deny mach-lookup (global-name \"com.apple.windowserver\"))",
+          "(deny mach-lookup (global-name \"com.apple.metadata.mds\"))",
+          "(deny mach-lookup (global-name \"com.apple.DiskArbitration.diskarbitrationd\"))",
           "(deny network-inbound)",
           "(deny network-outbound (require-not (require-any "
             + "(remote ip \"localhost:" + authorityProxyPort + "\") "
@@ -1731,7 +1839,7 @@ async function start() {
             "(deny process-exec (literal " + JSON.stringify(path) + "))"
           ),
         ] : []),
-        ...allowedWriteSubpaths.map((path) =>
+        ...deniedExecSubpaths.map((path) =>
           "(deny process-exec (subpath " + JSON.stringify(path) + "))"
         ),
         ...(allowedReadSubpaths.length > 0 ? [
@@ -1775,6 +1883,9 @@ async function start() {
           "(deny file-write* (literal " + JSON.stringify(path) + "))"
         ),
         ...deniedReadWriteRegexes.map((pattern) =>
+          "(deny file-write* (regex #" + JSON.stringify(pattern) + "))"
+        ),
+        ...deniedWriteRegexes.map((pattern) =>
           "(deny file-write* (regex #" + JSON.stringify(pattern) + "))"
         ),
         ...deniedWritePaths.map((path) =>
@@ -1902,9 +2013,11 @@ if (process.send) process.send({ type: "prepared" });
     JSON.stringify(deniedReadSubpaths),
     JSON.stringify(deniedReadMetadataPaths),
     JSON.stringify(deniedReadWriteRegexes),
+    JSON.stringify(deniedWriteRegexes),
     JSON.stringify(deniedWritePaths),
     JSON.stringify(deniedWriteStructuralPaths),
     JSON.stringify(deniedWriteSubpaths),
+    JSON.stringify(deniedExecSubpaths),
     JSON.stringify(allowedWriteSubpaths),
     JSON.stringify(allowedReadSubpaths),
     JSON.stringify(allowedNetworkUnixSockets),
@@ -2089,11 +2202,88 @@ function cursorSandboxRuntimeReadSubpaths(
   };
   const commandExecutables = resolveExecutable(command);
   const hostExecutables = resolveExecutable(process.execPath);
-  const commandRuntimeRoots = commandExecutables.map(({ canonical }) =>
-    appRoot(canonical) ?? dirname(canonical));
+  const commandRuntimeRoots = commandExecutables.flatMap(({ canonical }) => {
+    const applicationRoot = appRoot(canonical);
+    if (applicationRoot) return [applicationRoot];
+    const cursorInstall = /^(.*\/[.]local\/share\/cursor-agent\/versions\/[^/]+)\/cursor-agent$/.exec(canonical);
+    return cursorInstall ? [cursorInstall[1]] : [];
+  });
   const hostAppRoots = hostExecutables.flatMap(({ canonical }) => {
     const root = appRoot(canonical);
     return root ? [root] : [];
+  });
+  const pathDirectories = (env.PATH ?? "")
+    .split(delimiter)
+    .filter(Boolean)
+    .map((directory) => resolve(cwd, directory))
+    .flatMap((logical) => {
+      if (!existsSync(logical)) return [];
+      try { return [{ logical, canonical: realpathSync(logical) }]; }
+      catch { return []; }
+    });
+  let canonicalHostHome = resolve(homedir());
+  try { canonicalHostHome = realpathSync(canonicalHostHome); } catch {}
+  const isSameOrAncestor = (root: string, candidate: string): boolean => {
+    const suffix = relative(root, candidate);
+    return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
+  };
+  const toolchainRoots = pathDirectories.flatMap(({ logical, canonical }) => {
+    const roots: string[] = [];
+    const executableDirectoryName = /^(?:bin|sbin|shims|[A-Za-z0-9._-]+[-_.]bin)$/i;
+    if (executableDirectoryName.test(basename(logical))
+      && executableDirectoryName.test(basename(canonical))
+      && canonical !== "/"
+      && !isSameOrAncestor(canonical, canonicalHostHome)) {
+      // A PATH directory is an executable capability, but only conventional,
+      // narrow bin/shim directories are readable. Resolve the pair together:
+      // a harmless-looking alias must not smuggle HOME, one of its private
+      // child directories, or / into the fence.
+      roots.push(logical, canonical);
+    }
+    const versionedBinPatterns = [
+      /^(.*\/[.]nvm\/versions\/node\/[^/]+)\/bin$/,
+      /^(.*\/[.]fnm\/node-versions\/[^/]+\/installation)\/bin$/,
+      /^(.*\/[.]pyenv\/versions\/[^/]+)\/bin$/,
+      /^(.*\/[.]rustup\/toolchains\/[^/]+)\/bin$/,
+      /^(\/Library\/Frameworks\/[^/]+[.]framework\/Versions\/[^/]+)\/bin$/,
+      /^(.*\/Library\/Android\/sdk)\/(?:emulator|platform-tools|cmdline-tools\/[^/]+\/bin)$/,
+      /^(.*\/[.]cache\/codex-runtimes\/[^/]+\/dependencies)\/bin(?:\/[^/]+)?$/,
+    ];
+    for (const pattern of versionedBinPatterns) {
+      const match = pattern.exec(canonical);
+      if (match) roots.push(match[1]);
+    }
+    if ([logical, canonical].some((directory) =>
+      directory === "/opt/homebrew/bin" || directory === "/opt/homebrew/sbin")) {
+      // Homebrew's public bin directories are symlink farms. The executable,
+      // its libexec helpers, and its linked libraries live under these
+      // package-only roots; user data and Homebrew service config stay out.
+      roots.push(
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/opt/homebrew/Cellar",
+        "/opt/homebrew/opt",
+        "/opt/homebrew/lib",
+        "/opt/homebrew/share",
+        "/opt/homebrew/etc/gitconfig",
+      );
+    }
+    if ([logical, canonical].some((directory) =>
+      directory === "/usr/local/bin" || directory === "/usr/local/sbin")) {
+      // Intel Homebrew and the official Node installer both expose launchers
+      // here while keeping their runtime modules below narrower descendants.
+      // Do not admit /usr/local itself: it may contain unrelated user data.
+      roots.push(
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/usr/local/Cellar",
+        "/usr/local/opt",
+        "/usr/local/lib",
+        "/usr/local/share",
+        "/usr/local/etc/gitconfig",
+      );
+    }
+    return roots;
   });
   return [...new Set([
     // The logical launcher may sit beside unrelated user scripts (commonly
@@ -2105,8 +2295,18 @@ function cursorSandboxRuntimeReadSubpaths(
     ...hostExecutables.flatMap(({ logical, canonical }) => [logical, canonical]),
     ...commandRuntimeRoots,
     ...hostAppRoots,
+    // PATH selects inherited developer tools, but an arbitrary PATH directory
+    // is not itself read authority: it might be /, HOME, or a symlink to
+    // either. Admit only narrowly recognized installation roots so npm, git,
+    // package-managed and versioned tools can load their helpers without
+    // making the rest of the user's home directory readable.
+    ...toolchainRoots,
     "/System",
     "/Library/Apple",
+    // Compiler drivers and their SDK/linker support are read-only toolchains;
+    // their children inherit this same repo-write/network/process boundary.
+    "/Library/Developer/CommandLineTools",
+    "/Applications/Xcode.app",
     "/bin",
     "/sbin",
     "/usr/bin",
@@ -2456,6 +2656,7 @@ const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   attestSupervisedMcp: assertCursorSupervisedMcpAuthority,
   attestPersonalIdentity: assertCursorPersonalIdentity,
   bindPersonalIdentity: bindCursorSupervisedIdentity,
+  attestWritableFileBoundary: assertCursorSupervisedWritableRootsHaveNoExternalHardLinks,
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   prepareTurnState: (path) => writeFileSync(path, "", { flag: "wx", mode: 0o600 }),
@@ -2631,6 +2832,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       ?? ((input) => prepareCursorSupervisedProfile({
         workAttemptId: input.workAttemptId,
         workspaceRoot: input.cwd,
+        permissionProfileId: input.permissionProfileId,
         apiBaseUrl: desktopApiUrl,
         profileRoot: input.profileRoot,
         includeAuth: input.includeAuth,
@@ -2878,7 +3080,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       try {
         turn = await this.beginTurn(
           handle,
-          boundedCursorRoomTurnPrompt(request, turnId),
+          boundedCursorRoomTurnPrompt(request, turnId, handle.spawnRequest.permissionProfileId),
           handle.providerContinuationId,
           turnId,
           options.checkpointProviderState,
@@ -3243,6 +3445,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (deliveryMode !== "mcp_polling" && deliveryMode !== "daemon_inbox") {
       throw new Error(`Cursor does not support ${deliveryMode} room delivery.`);
     }
+    if (deliveryMode === "daemon_inbox" && !req.permissionProfileId?.trim()) {
+      throw new Error("Cursor daemon-inbox launch requires an exact permission profile.");
+    }
     const policyArgs = [
       ...cursorLaunchPolicyArgs(attestProviderSpawnPolicy("cursor", req)),
       ...(req.model ? ["--model", req.model] : []),
@@ -3254,12 +3459,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
         || !req.supervisorExecutionGenerationId?.trim()) {
         throw new Error("Cursor daemon-inbox launch requires exact supervisor coordinates.");
       }
-      if (req.permissionProfileId !== "read_only") {
-        throw new Error("Supervised Cursor currently supports only the read-only permission profile; write profiles cannot preserve an exact-only MCP boundary.");
-      }
       supervisedProfile = this.supervisedProfileFactory({
         workAttemptId: req.workAttemptId,
         cwd: req.cwd,
+        permissionProfileId: req.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
         includeAuth: false,
         devMcpServerEntryPath: req.devMcpServerEntryPath,
       });
@@ -3338,9 +3541,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let deniedReadSubpaths: string[] | undefined;
     let deniedReadMetadataPaths: string[] | undefined;
     let deniedReadWriteRegexes: string[] | undefined;
+    let deniedWriteRegexes: string[] | undefined;
     let deniedWritePaths: string[] | undefined;
     let deniedWriteStructuralPaths: string[] | undefined;
     let deniedWriteSubpaths: string[] | undefined;
+    let deniedExecSubpaths: string[] | undefined;
     let allowedWriteSubpaths: string[] | undefined;
     let allowedReadSubpaths: string[] | undefined;
     let mcpConnectorRoot: string | undefined;
@@ -3500,14 +3705,30 @@ export class CursorProviderAdapter implements ProviderAdapter {
         const profile = this.supervisedProfileFactory({
           workAttemptId: handle.workAttemptId,
           cwd: handle.cwd,
+          permissionProfileId: handle.spawnRequest.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
           authSourceHomeDir: identityProfile.homeDir,
           attestedPersonalIdentity: personalIdentity,
           exposeLoginCredentials: false,
           devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
           mcpConnectorSocketPath,
         });
+        // This walks only the profile's actual writable roots (plus workspace
+        // and Git metadata for write profiles) without blocking Electron's
+        // event loop. Read-only still owns a mutable private profile, so it
+        // needs the same pre-existing inode-alias proof. Stop/handoff can abort
+        // the walk before any wrapper or native provider process exists.
+        await this.deps.attestWritableFileBoundary(profile, launchSignal);
         this.deps.bindPersonalIdentity(profile, personalIdentity);
         childEnv = cursorDaemonChildEnv(profile.env);
+        const toolchainPath = cursorSandboxToolchainBinPaths();
+        if (toolchainPath.length > 0) {
+          // Apple's /usr/bin compiler drivers are xcrun shims, which require
+          // host temp/cache writes. Prefer the real selected compiler bins so
+          // ordinary repo builds work without widening the repo-only fence.
+          childEnv.PATH = cursorSandboxPathWithToolchains(childEnv.PATH ?? "", toolchainPath);
+        }
+        const sdkRoot = cursorSandboxSdkRoot();
+        if (sdkRoot) childEnv.SDKROOT = sdkRoot;
         // Cursor's long stable Application Support path otherwise falls back
         // to the shared /tmp/.cursor worker socket. A new unpredictable short
         // root per turn prevents both ambient-worker reuse and a detached old
@@ -3524,9 +3745,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
         deniedReadSubpaths = profile.nativeDeniedReadSubpaths;
         deniedReadMetadataPaths = profile.nativeDeniedReadMetadataPaths;
         deniedReadWriteRegexes = profile.nativeDeniedReadWriteRegexes;
+        deniedWriteRegexes = profile.nativeDeniedWriteRegexes;
         deniedWritePaths = profile.nativeDeniedWritePaths;
         deniedWriteStructuralPaths = profile.nativeDeniedWriteStructuralPaths;
         deniedWriteSubpaths = profile.nativeDeniedWriteSubpaths;
+        deniedExecSubpaths = profile.nativeDeniedExecSubpaths;
         allowedWriteSubpaths = profile.nativeAllowedWriteSubpaths?.length
           ? [...new Set([
             ...profile.nativeAllowedWriteSubpaths,
@@ -3539,6 +3762,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
             ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
           ])]
           : undefined;
+        deniedExecSubpaths = [...new Set([
+          ...(deniedExecSubpaths ?? []),
+          ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+        ])];
         mcpRuntimeEntryPath = profile.mcpRuntimeEntryPath;
         if (!profile.mcpRuntimeEnv) {
           throw new Error("Supervised Cursor's wrapper-hosted MCP environment is unavailable.");
@@ -3584,10 +3811,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
       ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-project-configs"] : []),
       ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-auto-update"] : []),
       "--trust",
-      // Supervised Cursor is currently read-only. Keep ask-mode approvals and
-      // add Cursor's native sandbox as an independent OS boundary against a
-      // mistakenly classified "safe" command or hostile PATH/SHELL shim.
-      ...(handle.deliveryMode === "daemon_inbox" ? ["--sandbox", "enabled"] : []),
+      // Read-only has no native sandbox field in its durable policy, so add
+      // the supervised outer boundary explicitly. Write profiles carry their
+      // exact enabled/disabled native choice in policyArgs; both stay inside
+      // the independent OS workspace/process/network boundary.
+      ...(handle.deliveryMode === "daemon_inbox" && handle.spawnRequest.permissionProfileId === "read_only"
+        ? ["--sandbox", "enabled"]
+        : []),
       "--workspace", handle.cwd,
       ...handle.policyArgs,
       ...(nativeResumeSession ? [`--resume=${nativeResumeSession}`] : []),
@@ -3620,9 +3850,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
       ...(deniedReadSubpaths?.length ? { deniedReadSubpaths } : {}),
       ...(deniedReadMetadataPaths?.length ? { deniedReadMetadataPaths } : {}),
       ...(deniedReadWriteRegexes?.length ? { deniedReadWriteRegexes } : {}),
+      ...(deniedWriteRegexes?.length ? { deniedWriteRegexes } : {}),
       ...(deniedWritePaths?.length ? { deniedWritePaths } : {}),
       ...(deniedWriteStructuralPaths?.length ? { deniedWriteStructuralPaths } : {}),
       ...(deniedWriteSubpaths?.length ? { deniedWriteSubpaths } : {}),
+      ...(deniedExecSubpaths?.length ? { deniedExecSubpaths } : {}),
       ...(allowedWriteSubpaths?.length ? { allowedWriteSubpaths } : {}),
       ...(allowedReadSubpaths?.length ? { allowedReadSubpaths } : {}),
       ...(handle.deliveryMode === "daemon_inbox"

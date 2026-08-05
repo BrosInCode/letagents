@@ -13,8 +13,13 @@
     },
     {
       "name": "fast-uri",
-      "version": "3.1.4",
-      "reason": "Exact patched release required to remediate the current fast-uri path traversal and host-confusion advisories before the normal cooldown expires; registry signatures and the full test suite are verified in CI."
+      "version": "3.1.5",
+      "reason": "Exact patched release required to remediate GHSA-7p8r-x3mc-p8w7 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI."
+    },
+    {
+      "name": "hono",
+      "version": "4.12.34",
+      "reason": "Exact patched release required to remediate GHSA-8j4g-w8fx-2239 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI."
     },
     {
       "name": "brace-expansion",

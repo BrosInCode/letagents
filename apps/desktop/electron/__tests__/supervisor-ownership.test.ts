@@ -19,13 +19,19 @@ test("supervisor list projects canonical agent keys for renderer mention routing
   assert.match(listHandler, /agentKey:/);
 });
 
-test("supervisor creation admits Cursor only through its read-only supervised profile", () => {
+test("supervisor creation admits available Cursor profiles before claiming durable ownership", () => {
   const createHandler = ipcSource.slice(
     ipcSource.indexOf('"desktop:supervisor:create-agent"'),
     ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),
   );
   assert.match(createHandler, /provider !== "cursor"/);
-  assert.match(createHandler, /provider === "cursor" && input\.permissionProfileId !== "read_only"/);
+  assert.doesNotMatch(createHandler, /provider === "cursor" && input\.permissionProfileId !== "read_only"/);
+  assert.match(createHandler, /assertManagedAgentPermissionProfileAvailable\(provider, input\.permissionProfileId\)/);
+  assert.ok(
+    createHandler.indexOf("assertManagedAgentPermissionProfileAvailable")
+      < createHandler.indexOf("createPausedAndInstall"),
+    "permission admission must fail before a durable ownership claim or legacy teardown",
+  );
 });
 
 test("paused launch recovery reuses guarded ownership without requiring a user Claude MCP install", () => {
