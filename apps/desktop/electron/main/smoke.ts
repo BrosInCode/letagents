@@ -402,6 +402,7 @@ export function desktopSmokeSupervisorEntries(): DesktopSupervisorManifestEntry[
     restartCount: 0,
     lastTerminal: null,
     activity: [],
+    lastTurnControlSequence: smokeTurnControl?.actionSequence ?? 0,
     turnControl: smokeTurnControl,
   }];
 }
@@ -438,8 +439,14 @@ export function desktopSmokeControlTurn(
   const now = new Date().toISOString();
   smokeTurnControl = {
     actionId: input.actionId,
+    actionSequence: input.actionSequence,
     workAttemptId: input.workAttemptId,
     executionGenerationId: input.executionGenerationId,
+    targetRoomId: input.roomId,
+    targetSourceMessageId: input.sourceMessageId,
+    targetProviderContinuationId: input.providerContinuationId,
+    inboxItemId: input.inboxItemId,
+    providerTurnId: input.providerTurnId,
     status: "completed",
     capability: result.capability,
     interrupted: result.interrupted,

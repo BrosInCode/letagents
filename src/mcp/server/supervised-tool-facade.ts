@@ -10,12 +10,18 @@ import {
 
 const READ_TOOLS = new Set([
   "get_current_room",
+  "check_repo",
+  "check_repo_visibility",
   "read_messages",
+  "wait_for_messages",
   "get_board",
   "get_board_settings",
   "get_room_artifacts",
+  "get_room_events",
+  "list_board_intents",
   "get_onboarding_status",
-  "check_repo_visibility",
+  "status_local_codex_session",
+  "rental_list_requests",
 ]);
 
 function instruction(text: string, data: Record<string, unknown> = {}): CallToolResult {
@@ -74,6 +80,13 @@ export function profileAwareToolServer(
             mutation: !READ_TOOLS.has(name),
           });
           if (prepared.state === "completed") return prepared.result as CallToolResult;
+          if (prepared.state === "uncertain") {
+            return instruction("This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.", {
+              code: "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN",
+              effect_id: prepared.effectId,
+              detail: prepared.error,
+            });
+          }
           if (prepared.action === "use_final_answer") {
             return instruction("Do not send the activating room reply with a message tool. Return it as your final answer; the daemon will publish it exactly once.", {
               code: "USE_FINAL_ANSWER",

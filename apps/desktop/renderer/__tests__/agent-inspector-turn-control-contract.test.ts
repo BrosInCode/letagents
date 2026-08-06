@@ -17,6 +17,8 @@ test("the Inspector routes a correction and uncertain resolution through durable
   assert.match(surface, /emitTurnControl\('steer_turn', \$event\)/);
   assert.match(surface, /emitTurnControl\('resolve_turn_control', undefined, \$event\)/);
   assert.match(shell, /desktopIpc\.supervisor\.controlTurn\(/);
+  assert.match(shell, /agentInspectorRetryableTurnControlInput\(entry, control, status\.generation\)/);
+  assert.match(shell, /desktopIpc\.supervisor\.controlTurn\(retryInput\)/);
   assert.match(shell, /desktopIpc\.supervisor\.resolveTurnControl\(/);
   assert.match(shell, /agentInspectorTurnControlActionId\(/);
   assert.match(shell, /agentInspectorTurnControlActionIdIfCurrent\(/);
@@ -28,6 +30,8 @@ test("the Inspector routes a correction and uncertain resolution through durable
 });
 
 test("the Inspector fences stale control completions and makes uncertainty recoverable instead of retrying blindly", () => {
+  assert.match(shell, /const turnControlAvailable = projection\.resourceFreshness === "fresh" && \(intent\.kind === "stop_turn"/);
+  assert.match(control, /:disabled="busy \|\| !control\.canRetry"/);
   assert.match(shell, /let turnControlFence: AgentInspectorTurnControlFence \| null = null/);
   assert.match(shell, /agentInspectorTurnControlFenceMatches\(turnControlFence, currentEntry, supervisorStatus\.value\?\.generation \?\? null\)/);
   assert.match(shell, /const currentEntryAfterDigest = agentInspectorProjections\.value\.find/);
@@ -40,6 +44,15 @@ test("the Inspector fences stale control completions and makes uncertainty recov
   assert.match(control, /Mark as not applied/);
   assert.match(control, /Confirming “not applied” unlocks a new request; it never replays the old one\./);
   assert.doesNotMatch(control, /aria-live/, "the Inspector host owns one live region for action results");
+  const resolveStart = shell.indexOf('if (intent.kind === "resolve_turn_control")');
+  const retryStart = shell.indexOf('} else if (intent.kind === "retry_turn_control")', resolveStart);
+  const liveFenceStart = shell.indexOf("const currentWorkAttemptId = entry.workAttemptId", retryStart);
+  assert.ok(resolveStart >= 0 && retryStart > resolveStart && liveFenceStart > retryStart);
+  const resolveBranch = shell.slice(resolveStart, retryStart);
+  assert.match(resolveBranch, /workAttemptId: control\.workAttemptId/);
+  assert.match(resolveBranch, /executionGenerationId: control\.executionGenerationId/);
+  assert.doesNotMatch(resolveBranch, /entry\.(?:executionGenerationId|providerContinuationId)/,
+    "historical resolution cannot be fenced by a detached or successor provider runtime");
 });
 
 test("turn actions stay contextual, keyboard-sized, and do not introduce broad motion", () => {

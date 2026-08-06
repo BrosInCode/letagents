@@ -57,6 +57,7 @@ class FakeCursorChild implements CursorCliChild {
     private readonly onRelease: () => void = () => {},
     readonly ownsDescendantReaping = false,
     readonly requiresDurableTerminalEvidence = false,
+    private readonly releaseError?: Error,
   ) {
     this.exited = new Promise((resolve) => { this.resolveExited = resolve; });
   }
@@ -69,6 +70,7 @@ class FakeCursorChild implements CursorCliChild {
     if (this.released) return;
     this.released = true;
     queueMicrotask(this.onRelease);
+    if (this.releaseError) throw this.releaseError;
   }
 
   get isReleased(): boolean {
@@ -107,6 +109,8 @@ interface HarnessOptions {
   /** Defaults to true (a well-behaved CLI); fence tests opt out. */
   dieOnSigterm?: boolean;
   ownsDescendantReaping?: boolean;
+  /** Simulate an IPC send that may have delivered release before throwing. */
+  releaseError?: Error;
   mcpAttestationError?: Error;
   mcpBridgeAttestationError?: Error;
   mcpAttestationWaitForAbort?: boolean;
@@ -124,6 +128,17 @@ function argValue(args: string[], flag: string): string | null {
   if (assigned) return assigned.slice(flag.length + 1);
   const index = args.indexOf(flag);
   return index >= 0 && index + 1 < args.length ? args[index + 1]! : null;
+}
+
+function initializeGitWorkspace(workspace: string): void {
+  mkdirSync(workspace, { recursive: true });
+  assert.equal(spawnSync("git", ["init", "--quiet", workspace]).status, 0);
+  assert.equal(spawnSync("git", [
+    "-c", "user.name=Cursor Test",
+    "-c", "user.email=cursor@example.test",
+    "-C", workspace,
+    "commit", "--quiet", "--allow-empty", "-m", "workspace seed",
+  ]).status, 0);
 }
 
 const productionPersonalIdentityDependencies: Partial<CursorProviderAdapterDependencies> = {
@@ -239,6 +254,7 @@ function createHarness(options: HarnessOptions = {}) {
     timeoutMs?: number;
   }> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const workspaceGenerationEvents: Array<{ kind: "create" | "retire" | "recover" | "abandon" | "remove"; turnIdentity?: string }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 5200;
   let mintedSessions = 0;
@@ -286,7 +302,7 @@ function createHarness(options: HarnessOptions = {}) {
           ?? argValue(input.args, "--resume")
           ?? `sess-cursor-${++mintedSessions}`;
         child.emit({ type: "system", subtype: "init", session_id: sessionId, model: "cursor-fast" });
-      }, options.ownsDescendantReaping);
+      }, options.ownsDescendantReaping, false, options.releaseError);
       children.push(child);
       if (pid !== null && !identities.has(pid)) identities.set(pid, birthIdentity(pid));
       return child;
@@ -306,6 +322,38 @@ function createHarness(options: HarnessOptions = {}) {
       return identities.get(pid);
     },
     prepareTurnState() {},
+    async createWorkspaceGeneration(input) {
+      workspaceGenerationEvents.push({ kind: "create", turnIdentity: input.turnIdentity });
+      const manifestPath = `/tmp/letagents-test-generation-${createHash("sha256").update(input.turnIdentity).digest("hex")}.json`;
+      return {
+        generationId: createHash("sha256").update(input.turnIdentity).digest("hex").slice(0, 32),
+        manifestPath,
+        sourceRoot: input.realWorkspace,
+        realWorkspace: input.realWorkspace,
+        liveSourceRoot: input.realWorkspace,
+        liveWorkspace: input.realWorkspace,
+        readOnlyRoots: [],
+        async retireAndReconcile() {
+          workspaceGenerationEvents.push({ kind: "retire", turnIdentity: input.turnIdentity });
+          return { phase: "cleaned" as const, appliedPaths: [], manifestPath };
+        },
+        async recover() {
+          workspaceGenerationEvents.push({ kind: "recover", turnIdentity: input.turnIdentity });
+          return { phase: "cleaned" as const, appliedPaths: [], manifestPath };
+        },
+        async abandon() {
+          workspaceGenerationEvents.push({ kind: "abandon", turnIdentity: input.turnIdentity });
+          return { phase: "aborted" as const, appliedPaths: [], manifestPath };
+        },
+      };
+    },
+    async recoverWorkspaceGeneration(manifestPath) {
+      workspaceGenerationEvents.push({ kind: "recover" });
+      return { phase: "cleaned", appliedPaths: [], manifestPath };
+    },
+    async removeWorkspaceGenerationReceipt() {
+      workspaceGenerationEvents.push({ kind: "remove" });
+    },
     now: () => new Date(1_700_000_000_000).toISOString(),
   };
 
@@ -317,6 +365,7 @@ function createHarness(options: HarnessOptions = {}) {
     profilePreparations,
     signals,
     identities,
+    workspaceGenerationEvents,
     dependencies,
   };
 }
@@ -884,6 +933,7 @@ test("the production wrapper hosts one exact MCP connector across fresh and resu
   const runtimePackage = join(root, "runtime", "node_modules", "letagents");
   const runtimeEntry = join(runtimePackage, "dist", "mcp", "server.js");
   const runtimePidPath = join(root, "runtime.pid");
+  const runtimeDescendantPidPath = join(root, "runtime-descendant.pid");
   const managedProfileRoot = join(
     dirname(statePath),
     "cursor-supervised",
@@ -902,9 +952,15 @@ test("the production wrapper hosts one exact MCP connector across fresh and resu
 writeFileSync(runtimeEntry, `
 const readline = require("node:readline");
 const fs = require("node:fs");
+const { spawn } = require("node:child_process");
 fs.writeFileSync(${JSON.stringify(runtimePidPath)}, String(process.pid));
 process.on("SIGTERM", () => {});
 setInterval(() => {}, 1000);
+const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+  stdio: "ignore",
+});
+descendant.unref();
+fs.writeFileSync(${JSON.stringify(runtimeDescendantPidPath)}, String(descendant.pid));
 const required = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR", "NODE_COMPILE_CACHE"];
 const boundaryValid = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID === "supervised_cursor_1"
   && process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET === "/tmp/letagents-supervisor.sock"
@@ -1000,6 +1056,7 @@ setTimeout(() => process.exit(73), 5000).unref();
   const previousDevMode = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
   let stubbornPid: number | null = null;
   let thirdRuntimePid: number | null = null;
+  let thirdRuntimeDescendantPid: number | null = null;
   const connectorRoots: string[] = [];
   process.env.LETAGENTS_STATE_PATH = statePath;
   process.env.LETAGENTS_CURSOR_SOURCE_HOME = sourceHome;
@@ -1042,21 +1099,33 @@ setTimeout(() => process.exit(73), 5000).unref();
     const firstSocket = first.text!.slice("connector-ok:".length);
     assert.equal(existsSync(dirname(firstSocket)), false, "fresh-turn connector root is removed at terminal");
     const firstRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
+    const firstRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.throws(
       () => process.kill(firstRuntimePid, 0),
       (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
       "terminal publication waits for TERM-resistant wrapper MCP retirement",
+    );
+    assert.throws(
+      () => process.kill(firstRuntimeDescendantPid, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "terminal publication waits for the detached MCP process group's descendants",
     );
     const second = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-resume" })));
     const secondSocket = second.text!.slice("connector-ok:".length);
     assert.notEqual(secondSocket, firstSocket, "resume receives a new one-turn connector capability");
     assert.equal(existsSync(dirname(secondSocket)), false, "resume connector root is removed at terminal");
     const secondRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
+    const secondRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.notEqual(secondRuntimePid, firstRuntimePid);
     assert.throws(
       () => process.kill(secondRuntimePid, 0),
       (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
       "resume terminal also proves wrapper MCP retirement",
+    );
+    assert.throws(
+      () => process.kill(secondRuntimeDescendantPid, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "resume terminal also proves the MCP runtime group is empty",
     );
     assert.equal(handle.providerContinuationId, "sess-connector-e2e");
 
@@ -1074,11 +1143,17 @@ setTimeout(() => process.exit(73), 5000).unref();
     assert.equal(await waitForPath(stubbornPidPath), true, "the combined teardown fixture launched its stubborn native member");
     stubbornPid = Number(readFileSync(stubbornPidPath, "utf8"));
     thirdRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
+    thirdRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.notEqual(thirdRuntimePid, secondRuntimePid);
     assert.throws(
       () => process.kill(thirdRuntimePid!, 0),
       (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
       "detached MCP retirement completes before native group escalation can kill the wrapper",
+    );
+    assert.throws(
+      () => process.kill(thirdRuntimeDescendantPid!, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "MCP group retirement kills a TERM-resistant descendant before terminal evidence",
     );
     assert.throws(
       () => process.kill(stubbornPid!, 0),
@@ -1092,7 +1167,7 @@ setTimeout(() => process.exit(73), 5000).unref();
       "adapter-owned exit cleanup removes the connector root when SIGKILL prevents wrapper cleanup",
     );
   } finally {
-    for (const pid of [thirdRuntimePid, stubbornPid]) {
+    for (const pid of [thirdRuntimeDescendantPid, thirdRuntimePid, stubbornPid]) {
       if (pid && Number.isSafeInteger(pid)) {
         try { process.kill(pid, "SIGKILL"); } catch {}
       }
@@ -1193,11 +1268,14 @@ test("Cursor turn control cancels an in-flight MCP attestation before any wrappe
   while (harness.mcpAttestations.length === 0) await flush();
 
   let controlCheckpointed = false;
+  let targetTurnId = "";
   const control = await adapter.controlTurn(handle, null, {
+    checkpointTurnStarted: async (turnId) => { targetTurnId = turnId; },
     markDispatched: async () => { controlCheckpointed = true; },
   });
 
   assert.equal(controlCheckpointed, true);
+  assert.match(targetTurnId, /^cursor:/, "pre-native cancellation checkpoints the exact bounded turn before abort");
   assert.equal(control.interrupted, true);
   assert.equal(control.resumed, false);
   await assert.rejects(roomTurn, /attestation was interrupted/);
@@ -1276,12 +1354,17 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
   const providerCheckpointEntered = new Promise<void>((resolve) => { enterProviderCheckpoint = resolve; });
   let durableBoundaryReached = false;
   let persistedTurnId = "";
+  const retiredConnections: unknown[] = [];
   const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
-    checkpointTurnStarted: async (turnId) => { persistedTurnId = turnId; },
-    checkpointProviderState: async () => {
+    checkpointPreparedTurn: async (state) => {
+      persistedTurnId = state.providerTurnId;
+      assert.equal(state.providerConnection.kind, "cursor_cli");
+      assert.notEqual(state.providerConnection.pid, null);
+      assert.ok(state.providerConnection.processIdentity);
       enterProviderCheckpoint();
       await providerCheckpointRelease;
     },
+    checkpointProviderState: async (state) => { retiredConnections.push(state.providerConnection); },
     markDurableTurnStarted: () => { durableBoundaryReached = true; },
     detachSignal: detach.signal,
   });
@@ -1297,11 +1380,12 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
   assert.match(persistedTurnId, /^cursor:/);
   assert.equal(durableBoundaryReached, false);
   assert.equal(child.isReleased, false, "native Cursor stays paused before the combined durability boundary");
+  assert.deepEqual(retiredConnections, [{ kind: "cursor_cli", pid: null, processIdentity: null }]);
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "idle");
 });
 
-test("a failed turn-id checkpoint reaps the prepared wrapper before native Cursor is released", async () => {
+test("a failed atomic prepared-turn checkpoint reaps the wrapper before native Cursor is released", async () => {
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);
   const handle = await spawnDaemonLane(adapter, harness);
@@ -1309,10 +1393,10 @@ test("a failed turn-id checkpoint reaps the prepared wrapper before native Curso
 
   await assert.rejects(
     withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
-      checkpointTurnStarted: async () => { throw new Error("turn checkpoint unavailable"); },
+      checkpointPreparedTurn: async () => { throw new Error("prepared turn checkpoint unavailable"); },
       markDurableTurnStarted: () => { durableBoundaryReached = true; },
     })),
-    /turn checkpoint unavailable/,
+    /prepared turn checkpoint unavailable/,
   );
 
   const child = harness.children[0]!;
@@ -1332,12 +1416,20 @@ test("Cursor control during a blocked provider checkpoint can never release defe
   const providerCheckpointRelease = new Promise<void>((resolve) => { releaseProviderCheckpoint = resolve; });
   let enterProviderCheckpoint!: () => void;
   const providerCheckpointEntered = new Promise<void>((resolve) => { enterProviderCheckpoint = resolve; });
+  let releaseIdleRetirement!: () => void;
+  const idleRetirementRelease = new Promise<void>((resolve) => { releaseIdleRetirement = resolve; });
+  let enterIdleRetirement!: () => void;
+  const idleRetirementEntered = new Promise<void>((resolve) => { enterIdleRetirement = resolve; });
   let durableBoundaryReached = false;
   const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
-    checkpointTurnStarted: async () => {},
-    checkpointProviderState: async () => {
+    checkpointPreparedTurn: async () => {
       enterProviderCheckpoint();
       await providerCheckpointRelease;
+    },
+    checkpointProviderState: async (state) => {
+      assert.deepEqual(state.providerConnection, { kind: "cursor_cli", pid: null, processIdentity: null });
+      enterIdleRetirement();
+      await idleRetirementRelease;
     },
     markDurableTurnStarted: () => { durableBoundaryReached = true; },
   });
@@ -1345,10 +1437,16 @@ test("Cursor control during a blocked provider checkpoint can never release defe
   const child = harness.children[0]!;
 
   const control = adapter.controlTurn(handle, null);
+  let controlSettled = false;
+  void control.finally(() => { controlSettled = true; });
   while (harness.signals.length === 0) await flush();
   assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
   assert.equal(child.isReleased, false);
   releaseProviderCheckpoint();
+  await idleRetirementEntered;
+  await flush();
+  assert.equal(controlSettled, false, "Stop cannot return before exact live-to-idle retirement commits");
+  releaseIdleRetirement();
 
   await assert.rejects(roomTurn, (error: unknown) =>
     error instanceof Error
@@ -1358,6 +1456,61 @@ test("Cursor control during a blocked provider checkpoint can never release defe
   assert.equal(child.isReleased, false, "an interrupt edge wins permanently over deferred native release");
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "idle");
+});
+
+test("Cursor Stop after native release but before init preserves the lane and permits the next turn", async () => {
+  const bounded = async <T>(work: Promise<T>, stage: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`Timed out during ${stage}.`)), 500);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  const harness = createHarness({ silent: true });
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const retiredConnections: unknown[] = [];
+  const firstTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointPreparedTurn: async () => {},
+    checkpointProviderState: async (state) => { retiredConnections.push(state.providerConnection); },
+    markDurableTurnStarted: () => {},
+  });
+  firstTurn.catch(() => {});
+  while (!harness.children[0]?.isReleased) await flush();
+
+  const control = await bounded(adapter.controlTurn(handle, null, {
+    markDispatched: async () => {},
+  }), "pre-init Stop");
+  await bounded(assert.rejects(firstTurn, (error: unknown) =>
+    error instanceof Error
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched"), "first turn rejection");
+  assert.equal(control.interrupted, true);
+  assert.equal(control.state, "idle");
+  assert.equal(handle.observedState(), "idle", "a normal turn Stop does not terminalize the Cursor attempt");
+  assert.deepEqual(retiredConnections, [{ kind: "cursor_cli", pid: null, processIdentity: null }]);
+
+  const secondTurn = adapter.runRoomTurn(handle, roomTurnRequest({
+    inboxItemId: "inbox_cursor_2",
+    actionId: "action_cursor_2",
+  }), {
+    checkpointPreparedTurn: async () => {},
+    checkpointProviderState: async () => {},
+    markDurableTurnStarted: () => {},
+  });
+  while (!harness.children[1]?.isReleased) await flush();
+  harness.children[1]!.emit({ type: "system", subtype: "init", session_id: "sess-cursor-after-stop" });
+  harness.children[1]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: "continued", session_id: "sess-cursor-after-stop",
+  });
+  harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await bounded(secondTurn, "successor turn")).text, "continued", "the preserved lane can execute the next bounded turn");
 });
 
 test("Cursor handoff SIGKILLs and reaps a TERM-resistant prepared wrapper before retiring", async () => {
@@ -1529,6 +1682,64 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   assert.equal(handle.observedState(), "idle");
 });
 
+test("writable Cursor turns launch only in their private generation and retire it before publication", async () => {
+  const harness = createHarness();
+  const createGeneration = harness.dependencies.createWorkspaceGeneration;
+  harness.dependencies.createWorkspaceGeneration = async (input) => ({
+    ...(await createGeneration(input)),
+    liveSourceRoot: "/private/letagents-generation/live",
+    liveWorkspace: "/private/letagents-generation/live/project",
+    readOnlyRoots: [{
+      sourcePath: "/private/source/.git/objects",
+      generationPath: null,
+      purpose: "git-objects" as const,
+    }],
+  });
+  const adapter = supervisedAdapter(harness);
+  const handle = await adapter.spawn(daemonSpawnRequest({
+    permissionProfileId: "sandboxed_write",
+    launchPolicy: { force: true, sandbox: "enabled" },
+  }));
+  const terminalOrder: string[] = [];
+  const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointTerminalResult: async () => { terminalOrder.push("terminal"); },
+  });
+  await flush();
+
+  const launch = harness.launches[0]!;
+  assert.equal(argValue(launch.args, "--workspace"), "/private/letagents-generation/live/project");
+  assert.equal(launch.mcpRuntimeCwd, "/private/letagents-generation/live/project");
+  assert.equal(launch.allowedReadSubpaths?.includes("/private/source/.git/objects"), true);
+  assert.equal(launch.allowedWriteSubpaths?.includes("/tmp/wa-cursor-1"), false);
+  assert.match(launch.workspaceGenerationManifestPath ?? "", /^\/tmp\/letagents-test-generation-/);
+
+  harness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false,
+    result: "generation reply", session_id: "sess-cursor-1",
+  });
+  harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await withLoopAlive(pending)).text, "generation reply");
+  assert.deepEqual(harness.workspaceGenerationEvents.map((event) => event.kind), ["create", "retire", "remove"]);
+  assert.deepEqual(terminalOrder, ["terminal"]);
+});
+
+test("an ambiguous native release failure reconciles instead of abandoning or redispatching the generation", async () => {
+  const harness = createHarness({ releaseError: new Error("IPC release acknowledgement failed") });
+  const adapter = supervisedAdapter(harness);
+  const handle = await adapter.spawn(daemonSpawnRequest({
+    permissionProfileId: "sandboxed_write",
+    launchPolicy: { force: true, sandbox: "enabled" },
+  }));
+
+  await assert.rejects(
+    withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest())),
+    /cannot prove the persisted exact turn reached a terminal boundary/i,
+  );
+  assert.equal(harness.launches.length, 1, "the ambiguous exact turn is never redispatched");
+  assert.deepEqual(harness.workspaceGenerationEvents.map((event) => event.kind), ["create", "retire"]);
+  assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }]);
+});
+
 test("Cursor bounded turns classify only the exact no-reply sentinel and preserve unreadable completion", async () => {
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);
@@ -1658,9 +1869,10 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
       type: "exit", code: 0, signal: null,
       native_process_group_reaped: true,
       reap_scope: "native_process_group",
-      turn_authority_revoked: true,
+      remote_authority_revoked: true,
       session_contract_valid: true,
       stream_contract_complete: true,
+      workspace_generation_manifest_path: "/tmp/letagents-recovered-workspace-generation.json",
       init: { type: "system", subtype: "init", session_id: "sess-after-restart" },
       result: { type: "result", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart", request_id: null },
     }));
@@ -1691,6 +1903,7 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
     assert.deepEqual(recovered, { turnId, outcome: "reply", text: "reply recovered after handoff", evidence: "stream" });
     assert.equal(checkpointed, true);
     assert.equal(harness.launches.length, 0, "recovery never starts another native turn");
+    assert.deepEqual(harness.workspaceGenerationEvents.map((event) => event.kind), ["recover"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1708,7 +1921,7 @@ test("a successor materializes a trusted durable no-result terminal on the recov
       type: "exit", code: 9, signal: null,
       native_process_group_reaped: true,
       reap_scope: "native_process_group",
-      turn_authority_revoked: true,
+      remote_authority_revoked: true,
       session_contract_valid: true,
       stream_contract_complete: true,
       init: { type: "system", subtype: "init", session_id: "sess-terminal-restart" },
@@ -1786,7 +1999,7 @@ test("Cursor recovery rejects legacy terminal evidence that did not separately p
     }, request);
     await assert.rejects(
       adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-legacy", providerTurnId: turnId }),
-      /does not prove native process-group retirement and turn-authority revocation/,
+      /does not prove native process-group retirement and remote-authority revocation/,
     );
     assert.equal(harness.launches.length, 0);
   } finally {
@@ -1806,7 +2019,7 @@ test("Cursor recovery distinguishes a prepared wrapper that never dispatched nat
       type: "not_started",
       native_process_group_reaped: true,
       reap_scope: "native_process_group",
-      turn_authority_revoked: true,
+      remote_authority_revoked: true,
       session_contract_valid: true,
       stream_contract_complete: true,
       init: null,
@@ -1848,7 +2061,7 @@ test("Cursor recovery rejects a terminal snapshot cross-wired to another session
       type: "exit", code: 0, signal: null,
       native_process_group_reaped: true,
       reap_scope: "native_process_group",
-      turn_authority_revoked: true,
+      remote_authority_revoked: true,
       session_contract_valid: true,
       stream_contract_complete: true,
       init: { type: "system", subtype: "init", session_id: "sess-stranger" },
@@ -1936,7 +2149,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
     assert.equal(order.at(-1), "idle");
     assert.equal(handle.providerContinuationId, `sess-wrapper-${wrapperPid}`, "native Cursor shares the still-live wrapper's PGID");
     const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(result.turnId).digest("hex")}.jsonl.terminal.json`);
-    assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).turn_authority_revoked, true);
+    assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).remote_authority_revoked, true);
     assert.equal(existsSync(runtimeDataDir), false, "the wrapper retires private worker state before terminal acceptance");
     assert.equal(existsSync(join(homeDir, ".cursor", "auth.json")), false, "terminal publication purges the public file-store placeholder");
   } finally {
@@ -2032,7 +2245,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
     assert.equal(terminal.descendants_reaped, undefined, "terminal evidence never overclaims complete descendant reaping");
     assert.equal(terminal.native_process_group_reaped, true);
     assert.equal(terminal.reap_scope, "native_process_group");
-    assert.equal(terminal.turn_authority_revoked, true);
+    assert.equal(terminal.remote_authority_revoked, true);
   } finally {
     if (escapedPid && Number.isSafeInteger(escapedPid)) {
       try { process.kill(escapedPid, "SIGKILL"); } catch {}
@@ -2097,7 +2310,7 @@ test("SIGTERM at every async wrapper startup boundary cannot publish not_started
       const terminal = JSON.parse(readFileSync(`${statePath}.terminal.json`, "utf8"));
       assert.equal(terminal.type, "not_started");
       assert.equal(terminal.native_process_group_reaped, true);
-      assert.equal(terminal.turn_authority_revoked, true);
+      assert.equal(terminal.remote_authority_revoked, true);
     } finally {
       if (child?.pid) {
         try { process.kill(child.pid, "SIGKILL"); } catch {}
@@ -2259,7 +2472,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
     assert.equal(handle.observedState(), "failed");
     assert.ok(turnId);
     const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl.terminal.json`);
-    assert.equal(existsSync(terminalPath), false, "the adapter never invents missing wrapper containment evidence");
+    assert.equal(existsSync(terminalPath), false, "the adapter never invents missing wrapper authority evidence");
     assert.equal(existsSync(connectorRoot), false, "the rejected live result leaves no wrapper MCP authority");
     assert.equal(existsSync(runtimeDataRoot), false, "the rejected live result leaves no turn-private worker root");
   } finally {
@@ -2272,7 +2485,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("live results require the same durable containment evidence as restart recovery", async () => {
+test("live results require the same durable remote-authority evidence as restart recovery", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-terminal-proof-"));
   const harness = createHarness({ ownsDescendantReaping: true });
   try {
@@ -2306,7 +2519,11 @@ test("live results require the same durable containment evidence as restart reco
         };
       },
     });
-    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: root }));
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      cwd: root,
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
     const terminals: ProviderTerminalPayload[] = [];
     adapter.onExit(handle, (terminal) => terminals.push(terminal));
     const pending = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-terminal-proof" }));
@@ -2326,7 +2543,7 @@ test("live results require the same durable containment evidence as restart reco
       signal: null,
       native_process_group_reaped: true,
       reap_scope: "native_process_group",
-      turn_authority_revoked: false,
+      remote_authority_revoked: false,
       session_contract_valid: true,
       stream_contract_complete: true,
       init: { type: "system", subtype: "init", session_id: "sess-cursor-1" },
@@ -2341,6 +2558,93 @@ test("live results require the same durable containment evidence as restart reco
     assert.equal(terminals.length, 1);
     assert.equal(terminals[0]!.terminalCause, "protocol_error");
     assert.equal(handle.observedState(), "failed");
+    assert.deepEqual(
+      harness.workspaceGenerationEvents.map((event) => event.kind),
+      ["create"],
+      "invalid containment evidence leaves the writable generation recoverable and never reconciles it",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a writable generation reconciles only after its exact durable containment terminal is valid", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-generation-proof-"));
+  const harness = createHarness({ ownsDescendantReaping: true });
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        Object.defineProperty(child, "requiresDurableTerminalEvidence", { value: true });
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: (input) => {
+        const profileRoot = input.profileRoot ?? root;
+        const homeDir = join(profileRoot, "home");
+        const configDir = join(profileRoot, "config");
+        mkdirSync(homeDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        return {
+          homeDir,
+          configDir,
+          dataDir: join(profileRoot, "data"),
+          cacheDir: join(profileRoot, "cache"),
+          env: { HOME: homeDir, NPM_CONFIG_CACHE: join(profileRoot, "npm-cache") },
+          ...(input.inspectionOnly ? {} : wrapperHostedMcpFixture(profileRoot)),
+        };
+      },
+    });
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      cwd: root,
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const pending = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-generation-proof" }));
+    for (let index = 0; index < 100 && harness.children.length === 0; index += 1) await flush();
+    const child = harness.children[0]!;
+    for (let index = 0; index < 100 && !child.isReleased; index += 1) await flush();
+    child.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "trusted writable reply", session_id: "sess-cursor-1",
+    });
+    assert.deepEqual(
+      harness.workspaceGenerationEvents.map((event) => event.kind),
+      ["create"],
+      "live output alone never releases the writable generation",
+    );
+    const launch = harness.launches[0]!;
+    writeFileSync(`${launch.statePath}.terminal.json`, JSON.stringify({
+      type: "exit",
+      code: 0,
+      signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      remote_authority_revoked: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      workspace_generation_manifest_path: launch.workspaceGenerationManifestPath,
+      init: { type: "system", subtype: "init", session_id: "sess-cursor-1" },
+      result: {
+        type: "result", subtype: "success", is_error: false,
+        result: "trusted writable reply", session_id: "sess-cursor-1", request_id: null,
+      },
+    }));
+    child.resolveExit({ type: "exit", code: 0, signal: null });
+
+    assert.equal((await withLoopAlive(pending)).text, "trusted writable reply");
+    assert.deepEqual(
+      harness.workspaceGenerationEvents.map((event) => event.kind),
+      ["create", "retire"],
+      "valid exact containment evidence releases reconciliation once",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2495,7 +2799,7 @@ test("terminal evidence waits for in-flight control and agent bearer authority t
 const fs = require("node:fs");
 const http = require("node:http");
 const http2 = require("node:http2");
-const [statusPath, controlEndpoint, agentEndpoint] = process.argv.slice(1);
+const [statusPath, controlEndpoint, agentEndpoint, placeholderToken] = process.argv.slice(1);
 let controlClosed = false;
 let agentClosed = false;
 const keepAlive = setInterval(() => {}, 1000);
@@ -2506,7 +2810,7 @@ function finish() {
 }
 const control = http.request(new URL("/aiserver.v1.DashboardService/GetMe", controlEndpoint), {
   method: "POST",
-  headers: { "content-length": "4", "connection": "keep-alive", "authorization": "Bearer public-placeholder" },
+  headers: { "content-length": "4", "connection": "keep-alive", "authorization": "Bearer " + placeholderToken },
 });
 control.once("response", (response) => { response.resume(); response.once("close", () => { controlClosed = true; finish(); }); });
 control.once("error", () => { controlClosed = true; finish(); });
@@ -2517,7 +2821,7 @@ const stream = session.request({
   ":method": "POST",
   ":path": "/agent.v1.AgentService/Run",
   "content-type": "application/connect+proto",
-  "authorization": "Bearer public-placeholder",
+  "authorization": "Bearer " + placeholderToken,
 });
 function agentDone() { agentClosed = true; try { session.destroy(); } catch {} finish(); }
 stream.once("error", agentDone);
@@ -2535,7 +2839,7 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
   process.exit(0);
 }
 function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
-const escaped = spawn(process.execPath, ["-e", ${JSON.stringify(detachedSource)}, ${JSON.stringify(revokedStatus)}, value("--endpoint"), value("--agent-endpoint")], {
+const escaped = spawn(process.execPath, ["-e", ${JSON.stringify(detachedSource)}, ${JSON.stringify(revokedStatus)}, value("--endpoint"), value("--agent-endpoint"), value("--auth-token")], {
   detached: true,
   stdio: "ignore",
   env: process.env,
@@ -2581,7 +2885,7 @@ const ready = setInterval(() => {
     assert.equal(controlSocketClosed, true, "control upstream is closed before the terminal result resolves");
     assert.equal(agentStreamClosed, true, "agent upstream is closed before the terminal result resolves");
     const terminalPath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(result.turnId).digest("hex")}.jsonl.terminal.json`);
-    assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).turn_authority_revoked, true);
+    assert.equal(JSON.parse(readFileSync(terminalPath, "utf8")).remote_authority_revoked, true);
   } finally {
     if (detachedPid && Number.isSafeInteger(detachedPid)) {
       try { process.kill(detachedPid, "SIGKILL"); } catch {}
@@ -2632,11 +2936,11 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
 }
 function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
 const endpoint = value("--agent-endpoint");
-function request(path, contentType, body) {
+function request(path, contentType, body, authorization = "Bearer " + value("--auth-token")) {
   return new Promise((resolve, reject) => {
     const req = http.request(new URL(path, endpoint), {
       method: "POST",
-      headers: { "content-type": contentType, "authorization": "Bearer public-placeholder", "content-length": Buffer.byteLength(body) },
+      headers: { "content-type": contentType, authorization, "content-length": Buffer.byteLength(body) },
     }, (response) => {
       const chunks = [];
       response.on("data", (chunk) => chunks.push(chunk));
@@ -2649,9 +2953,10 @@ function request(path, contentType, body) {
 (async () => {
   const wrongMedia = await request("/agent.v1.AgentService/Run", "application/connect+protobufad", "wrong");
   const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
+  const staleTurn = await request("/agent.v1.AgentService/Run", "application/connect+proto", "stale", "Bearer predecessor-placeholder");
   const accepted = await request("/agent.v1.AgentService/Run", "application/connect+proto; charset=binary", "h1-request-body");
   const replay = await request("/agent.v1.AgentService/Run", "application/connect+proto", "replay");
-  if (wrongMedia.status !== 503 || wrongPath.status !== 503
+  if (wrongMedia.status !== 503 || wrongPath.status !== 503 || staleTurn.status !== 503
     || accepted.status !== 200 || accepted.body !== "h1-upstream-ok" || replay.status !== 503) process.exit(78);
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h1" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h1-proxy-ok", session_id: "sess-agent-h1" }) + "\\n");
@@ -2729,12 +3034,12 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
 function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
 const endpoint = value("--agent-endpoint");
 const client = http2.connect(endpoint);
-function request(path, contentType, body) {
+function request(path, contentType, body, authorization = "Bearer " + value("--auth-token")) {
   return new Promise((resolve, reject) => {
     const stream = client.request({
       ":method": "POST", ":path": path,
       "content-type": contentType,
-      "authorization": "Bearer public-placeholder",
+      authorization,
     });
     const chunks = [];
     let status = 0;
@@ -2748,10 +3053,11 @@ function request(path, contentType, body) {
 (async () => {
   const wrongMedia = await request("/agent.v1.AgentService/Run", "application/connect+protobufad", "wrong");
   const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
+  const staleTurn = await request("/agent.v1.AgentService/Run", "application/connect+proto", "stale", "Bearer predecessor-placeholder");
   const accepted = await request("/agent.v1.AgentService/Run", "application/connect+proto; charset=binary", "h2-request-body");
   const replay = await request("/agent.v1.AgentService/Run", "application/connect+proto", "replay");
   client.close();
-  if (wrongMedia.status !== 503 || wrongPath.status !== 503
+  if (wrongMedia.status !== 503 || wrongPath.status !== 503 || staleTurn.status !== 503
     || accepted.status !== 200 || accepted.body !== "h2-upstream-ok" || replay.status !== 503) process.exit(88);
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h2" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h2-proxy-ok", session_id: "sess-agent-h2" }) + "\\n");
@@ -2912,21 +3218,24 @@ test("the real supervised boundary starts without inventorying pre-existing proj
       const stableProfileRoot = join(root, "stable-profile");
       const workspaceFile = join(workspace, "agent-change.txt");
       const outsideFile = join(root, "outside-workspace.txt");
-      const outsideViaWorkspaceSymlink = join(workspace, "outside-link", "symlink-escape.txt");
       const workspaceHardlinkSource = join(workspace, "hardlink-source.txt");
       const workspaceHardlink = join(workspace, "hardlink-escape.txt");
       const preexistingOutsideTarget = join(root, "preexisting-outside-target.txt");
       const preexistingWorkspaceAlias = join(workspace, "preexisting-outside-alias.txt");
       const cursorAuthority = join(workspace, ".cursor", "mcp.json");
       const executable = join(root, "fake-cursor-agent");
+      initializeGitWorkspace(workspace);
       mkdirSync(dirname(cursorAuthority), { recursive: true });
+      writeFileSync(join(workspace, ".cursor", ".keep"), "");
       mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
-      symlinkSync(root, join(workspace, "outside-link"), "dir");
       writeFileSync(workspaceHardlinkSource, "inside-original\n");
       writeFileSync(preexistingOutsideTarget, "preexisting-outside\n");
       linkSync(preexistingOutsideTarget, preexistingWorkspaceAlias);
       writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const workspace = args[args.indexOf("--workspace") + 1];
 function write(path) {
   try { fs.writeFileSync(path, "changed\\n"); return "allowed"; }
   catch (error) {
@@ -2942,11 +3251,10 @@ function link(source, destination) {
   }
 }
 const outcome = {
-  workspace: write(${JSON.stringify(workspaceFile)}),
+  workspace: write(path.join(workspace, "agent-change.txt")),
   outside: write(${JSON.stringify(outsideFile)}),
-  symlinkEscape: write(${JSON.stringify(outsideViaWorkspaceSymlink)}),
-  hardlinkCreate: link(${JSON.stringify(workspaceHardlinkSource)}, ${JSON.stringify(workspaceHardlink)}),
-  authority: write(${JSON.stringify(cursorAuthority)}),
+  hardlinkCreate: link(path.join(workspace, "hardlink-source.txt"), path.join(workspace, "hardlink-escape.txt")),
+  authority: write(path.join(workspace, ".cursor", "mcp.json")),
 };
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-write-boundary" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-write-boundary" }) + "\\n");
@@ -2988,7 +3296,6 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       assert.deepEqual(JSON.parse(result.text!), {
         workspace: workspaceWritable ? "allowed" : "blocked",
         outside: "blocked",
-        symlinkEscape: "blocked",
         hardlinkCreate: "blocked",
         authority: "blocked",
       });
@@ -3022,7 +3329,7 @@ test("the supervised workspace boundary runs Node, npm, Git, the system compiler
     const insideCopyTarget = join(workspace, "copy-target.txt");
     const outsideCopySource = join(root, "outside-copy-source.txt");
     const outsideCloneTarget = join(workspace, "outside-clone-target.txt");
-    mkdirSync(workspace, { recursive: true });
+    initializeGitWorkspace(workspace);
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
     writeFileSync(hostBrokerProbeSource, `
 #include <Security/Security.h>
@@ -3088,7 +3395,9 @@ int main(void) {
     chmodSync(nativeBinary, 0o700);
     writeFileSync(executable, `#!/usr/bin/env node
 const { spawnSync } = require("node:child_process");
-const workspace = ${JSON.stringify(workspace)};
+const path = require("node:path");
+const args = process.argv.slice(2);
+const workspace = args[args.indexOf("--workspace") + 1];
 function run(command, args) {
   const child = spawnSync(command, args, { cwd: workspace, encoding: "utf8" });
   return {
@@ -3101,13 +3410,12 @@ function run(command, args) {
 const outcome = {
   node: run("node", ["--version"]),
   npm: run("npm", ["--version"]),
-  gitInit: run("git", ["init", "--quiet"]),
   git: run("git", ["status", "--porcelain"]),
-  native: run(${JSON.stringify(nativeBinary)}, ["--version"]),
+  native: run(path.join(workspace, "repo-native-esbuild"), ["--version"]),
   compiler: run("clang", ["--version"]),
-  hostBrokers: run(${JSON.stringify(hostBrokerProbe)}, []),
-  insideCopy: run("/bin/cp", [${JSON.stringify(insideCopySource)}, ${JSON.stringify(insideCopyTarget)}]),
-  outsideClone: run("/bin/cp", ["-c", ${JSON.stringify(outsideCopySource)}, ${JSON.stringify(outsideCloneTarget)}]),
+  hostBrokers: run(path.join(workspace, "host-broker-probe"), []),
+  insideCopy: run("/bin/cp", [path.join(workspace, "copy-source.txt"), path.join(workspace, "copy-target.txt")]),
+  outsideClone: run("/bin/cp", ["-c", ${JSON.stringify(outsideCopySource)}, path.join(workspace, "outside-clone-target.txt")]),
 };
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-workspace-toolchains" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-workspace-toolchains" }) + "\\n");
@@ -3147,7 +3455,6 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
     }>;
     assert.equal(outcome.node?.ok, true, JSON.stringify(outcome.node));
     assert.equal(outcome.npm?.ok, true, JSON.stringify(outcome.npm));
-    assert.equal(outcome.gitInit?.ok, true, JSON.stringify(outcome.gitInit));
     assert.equal(outcome.git?.ok, true, JSON.stringify(outcome.git));
     assert.equal(outcome.native?.ok, true, JSON.stringify(outcome.native));
     assert.match(outcome.native?.output ?? "", /^\d+[.]\d+[.]\d+$/);
@@ -3259,7 +3566,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the supervised workspace boundary commits inside a linked Git worktree only", {
+test("the supervised workspace generation supports linked Git worktrees without exposing shared Git authority", {
   skip: process.platform !== "darwin",
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-linked-worktree-"));
@@ -3291,16 +3598,19 @@ test("the supervised workspace boundary commits inside a linked Git worktree onl
     const worktreeConfigPath = join(gitDirectory, "config.worktree");
     writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const cliArgs = process.argv.slice(2);
+const providerWorkspace = cliArgs[cliArgs.indexOf("--workspace") + 1];
 function run(args) {
-  const child = spawnSync("git", args, { cwd: ${JSON.stringify(workspace)}, encoding: "utf8" });
+  const child = spawnSync("git", args, { cwd: providerWorkspace, encoding: "utf8" });
   return { ok: child.status === 0, output: (child.stderr || child.stdout || "").trim() };
 }
 function attempt(callback) {
   try { callback(); return "allowed"; }
   catch (error) { return error && (error.code === "EPERM" || error.code === "EACCES") ? "blocked" : error && error.code || "error"; }
 }
-fs.writeFileSync(${JSON.stringify(featureFile)}, "linked-worktree-change\\n");
+fs.writeFileSync(path.join(providerWorkspace, "feature.txt"), "linked-worktree-change\\n");
 let outside = "allowed";
 try { fs.writeFileSync(${JSON.stringify(outsideMainWorktree)}, "must-not-write\\n"); }
 catch (error) { outside = error && (error.code === "EPERM" || error.code === "EACCES") ? "blocked" : error && error.code || "error"; }
@@ -3342,36 +3652,28 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       inboxItemId: "inbox-linked-worktree",
     })));
     const outcome = JSON.parse(result.text!) as {
-      add: { ok: boolean; output: string };
-      commit: { ok: boolean; output: string };
-      outside: string;
-      hook: string;
-      worktreeConfig: string;
-      marker: string;
-      hooksConfig: { ok: boolean; output: string };
+      add: { ok: boolean }; commit: { ok: boolean }; outside: string; hook: string;
+      worktreeConfig: string; marker: string; hooksConfig: { ok: boolean };
     };
-    assert.equal(outcome.add.ok, true, outcome.add.output);
-    assert.equal(outcome.commit.ok, true, outcome.commit.output);
+    assert.equal(outcome.add.ok, true);
+    assert.equal(outcome.commit.ok, true);
     assert.equal(outcome.outside, "blocked");
     assert.equal(outcome.hook, "blocked");
     assert.equal(outcome.worktreeConfig, "blocked");
     assert.equal(outcome.marker, "blocked");
-    assert.equal(outcome.hooksConfig.ok, false, "Git cannot persist a later unsandboxed hooks path");
+    assert.equal(outcome.hooksConfig.ok, false, "provider-visible Git config remains immutable after trusted setup");
     assert.equal(readFileSync(featureFile, "utf8"), "linked-worktree-change\n");
     assert.equal(existsSync(outsideMainWorktree), false);
     assert.equal(existsSync(hookPath), false);
     assert.equal(existsSync(worktreeConfigPath), false);
     assert.equal(readFileSync(gitMarker, "utf8"), originalGitMarker);
-    assert.equal(
-      spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(),
-      "cursor linked worktree",
-    );
+    assert.equal(spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(), "seed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("the supervised workspace boundary commits inside a Git submodule only", {
+test("the supervised workspace generation rejects Git submodules before native launch", {
   skip: process.platform !== "darwin",
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-submodule-boundary-"));
@@ -3462,31 +3764,18 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       permissionProfileId: "sandboxed_write",
       launchPolicy: { force: true, sandbox: "enabled" },
     }));
-    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
-      inboxItemId: "inbox-submodule-boundary",
-    })));
-    const outcome = JSON.parse(result.text!) as {
-      add: { ok: boolean; output: string };
-      commit: { ok: boolean; output: string };
-      parent: string;
-      hook: string;
-      marker: string;
-      hooksConfig: { ok: boolean; output: string };
-    };
-    assert.equal(outcome.add.ok, true, outcome.add.output);
-    assert.equal(outcome.commit.ok, true, outcome.commit.output);
-    assert.equal(outcome.parent, "blocked");
-    assert.equal(outcome.hook, "blocked");
-    assert.equal(outcome.marker, "blocked");
-    assert.equal(outcome.hooksConfig.ok, false);
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+        inboxItemId: "inbox-submodule-boundary",
+      }))),
+      /submodules|separate Git directories/i,
+    );
+    assert.equal(existsSync(featureFile), false);
     assert.equal(existsSync(parentEscape), false);
     assert.equal(existsSync(hookPath), false);
     assert.equal(readFileSync(gitMarker, "utf8"), originalGitMarker);
     assert.equal(readFileSync(configPath, "utf8"), originalConfig);
-    assert.equal(
-      spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(),
-      "cursor submodule",
-    );
+    assert.equal(spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(), "child seed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -3504,11 +3793,15 @@ test("the real supervised boundary blocks a late in-workspace authority symlink"
     const targetSettings = join(insideTarget, "settings.json");
     const targetMcp = join(insideTarget, "mcp.json");
     const executable = join(root, "fake-cursor-agent");
+    initializeGitWorkspace(workspace);
     mkdirSync(insideTarget, { recursive: true });
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
     writeFileSync(targetSettings, "inside-secret\n");
-    writeFileSync(executable, `#!/usr/bin/env node
+writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const workspace = args[args.indexOf("--workspace") + 1];
 function attempt(callback) {
   try { callback(); return "allowed"; }
   catch (error) {
@@ -3517,8 +3810,8 @@ function attempt(callback) {
   }
 }
 const outcome = {
-  read: attempt(() => fs.readFileSync(${JSON.stringify(join(workspace, ".cursor", "settings.json"))}, "utf8")),
-  write: attempt(() => fs.writeFileSync(${JSON.stringify(join(workspace, ".cursor", "mcp.json"))}, "replaced\\n")),
+  read: attempt(() => fs.readFileSync(path.join(workspace, ".cursor", "settings.json"), "utf8")),
+  write: attempt(() => fs.writeFileSync(path.join(workspace, ".cursor", "mcp.json"), "replaced\\n")),
 };
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-late-authority-symlink" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-late-authority-symlink" }) + "\\n");
@@ -3531,10 +3824,13 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         ...productionPersonalIdentityDependencies,
         attestSupervisedMcp: async () => {},
         launchTurn(input) {
-          if (!existsSync(join(workspace, ".cursor"))) {
-            symlinkSync(insideTarget, join(workspace, ".cursor"), "dir");
+          const launchWorkspace = argValue(input.args, "--workspace")!;
+          const authorityLink = join(launchWorkspace, ".cursor");
+          if (!existsSync(authorityLink)) {
+            symlinkSync(join(launchWorkspace, "inside-target"), authorityLink, "dir");
           }
           launchedChild = defaultLaunchTurn(input);
+          void launchedChild.exited.then(() => rmSync(authorityLink, { force: true }));
           return launchedChild;
         },
       },
@@ -4117,7 +4413,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("post-init checkpoint failure cannot recover a buffered result without trusted containment evidence", async () => {
+test("post-init checkpoint failure cannot recover a buffered result without trusted remote-authority evidence", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-no-terminal-"));
   const harness = createHarness({ ownsDescendantReaping: true });
   try {
@@ -4151,7 +4447,11 @@ test("post-init checkpoint failure cannot recover a buffered result without trus
         };
       },
     });
-    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: root }));
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      cwd: root,
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
     const terminals: ProviderTerminalPayload[] = [];
     adapter.onExit(handle, (terminal) => terminals.push(terminal));
     let realSessionCheckpoints = 0;
@@ -4189,6 +4489,11 @@ test("post-init checkpoint failure cannot recover a buffered result without trus
     assert.equal(handle.observedState(), "failed");
     assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }]);
     assert.equal(existsSync(`${harness.launches[0]!.statePath}.terminal.json`), false);
+    assert.deepEqual(
+      harness.workspaceGenerationEvents.map((event) => event.kind),
+      ["create"],
+      "missing containment evidence leaves the writable generation receipt untouched",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -4464,8 +4769,12 @@ test("Cursor turn control fences only the live turn child and resumes the same s
   const handle = await adapter.spawn(spawnRequest());
   const terminals: ProviderTerminalPayload[] = [];
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
+  let exactTurnA = "";
 
-  const result = await withLoopAlive(adapter.controlTurn!(handle, "Apply the corrected direction."));
+  const result = await withLoopAlive(adapter.controlTurn!(handle, "Apply the corrected direction.", {
+    checkpointTurnStarted: async (turnId) => { exactTurnA = turnId; },
+    markDispatched: async () => {},
+  }));
 
   assert.deepEqual(result, {
     capability: "restart_resume",
@@ -4480,6 +4789,17 @@ test("Cursor turn control fences only the live turn child and resumes the same s
   assert.equal(harness.launches[1]!.args.at(-1), "Apply the corrected direction.");
   assert.equal(handle.providerContinuationId, "sess-cursor-1");
   assert.equal(handle.observedState(), "working");
+  assert.ok(exactTurnA, "legacy A receives a durable control identity before its signal");
+
+  const staleRetry = await adapter.controlTurn!(handle, null, {
+    targetTurnId: exactTurnA,
+    checkpointTurnStarted: async () => { throw new Error("retry must not adopt B"); },
+    markDispatched: async () => { throw new Error("retry must not signal B"); },
+  });
+  assert.deepEqual(staleRetry, {
+    capability: "restart_resume", interrupted: false, resumed: false, state: "working",
+  });
+  assert.deepEqual(harness.signals, [{ pid: 5200, signal: "SIGTERM" }], "stale retry leaves successor B untouched");
 });
 
 test("resume presents the recorded session and a stranger session id mid-stream is a protocol violation", async () => {

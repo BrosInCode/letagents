@@ -77,6 +77,8 @@ export interface ProviderTurnControlResult {
 }
 
 export interface ProviderTurnControlOptions {
+  /** On retry, the previously checkpointed turn is the only eligible target. */
+  targetTurnId?: string | null;
   /** Persist the exact discovered native turn before an interrupt can be sent. */
   checkpointTurnStarted?: (turnId: string) => Promise<void>;
   /** Persist the dispatching journal state before the first native side effect. */
@@ -388,6 +390,12 @@ export interface ProviderRoomTurnOptions {
   beforeNativeDispatch?: () => Promise<void>;
   /** Persist the exact native turn id before awaiting its terminal state. */
   checkpointTurnStarted?: (turnId: string) => Promise<void>;
+  /** Atomically bind a paused Cursor wrapper birth to its exact durable turn. */
+  checkpointPreparedTurn?: (state: {
+    providerTurnId: string;
+    providerContinuationId: string;
+    providerConnection: ProviderConnectionRef;
+  }) => Promise<void>;
   /** Persist a provider's dynamic continuation/process identity before native work proceeds. */
   checkpointProviderState?: (state: {
     providerContinuationId: string;

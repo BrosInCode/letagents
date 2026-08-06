@@ -228,7 +228,8 @@ test("supervised Cursor exposes the provider permission profiles instead of forc
   assert.match(presentationSource, /const profiles = selectedProvider\.value\?\.permissionProfiles \?\? \[\]/);
   assert.match(presentationSource, /profiles\.map\(supervisedCursorPermissionProfilePresentation\)/);
   assert.doesNotMatch(presentationSource, /profiles\.filter\(\(profile\) => profile\.id === "read_only"\)/);
-  assert.match(presentationSource, /restricts direct write paths to this workspace without inventorying project files/);
+  assert.match(presentationSource, /private turn workspace/);
+  assert.match(presentationSource, /Git history and ignored output are not persisted/);
   assert.match(presentationSource, /Daemon-mediated LetAgents room tools remain available/);
 });
 

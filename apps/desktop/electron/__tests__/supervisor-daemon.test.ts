@@ -401,7 +401,7 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
     inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
     canonicalMessageId: "msg_reply_1",
     replyClientMessageId: "supervised-room:agent_1:msg_1:reply:v1",
-    providerTurnId: null, blockedByMessageId: null, error: "failed", failureCode: null, updatedAt: "2026-01-01T00:00:00.000Z",
+    providerTurnId: null, blockedByMessageId: null, error: "failed", failureCode: null, terminalReason: null, updatedAt: "2026-01-01T00:00:00.000Z",
     timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
 });
@@ -450,11 +450,13 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
     publication: { client_message_id: "client_1", canonical_message_id: "msg_2", room_id: "room_1" },
     timeline: [{ phase: "published", observed_at: "2026-01-01T00:00:02.000Z", detail: "msg_2" }],
     items: [{ source_message_id: "msg_1", inbox_item_id: "inbox_1", state: "acknowledged", attempt_count: 1, updated_at: "2026-01-01T00:00:02.000Z", sender: "Ada", text_preview: "ship it", created_at: "2026-01-01T00:00:00.000Z", outcome: { kind: "reply", text: "done" }, provider_turn_id: "turn_1", last_error: null, canonical_message_id: "msg_2" }],
+    uncertain_effects: [{ effect_id: "effect_1", tool_name: "send_message", mcp_request_id: "request_1", error: "May have completed.", created_at: "2026-01-01T00:00:01.000Z", updated_at: "2026-01-01T00:00:02.000Z" }],
     history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
   };
   const mapped = mapAgentInspectorDetail(wire, input);
   assert.equal(mapped.requested_source_message_id, "msg_1");
   assert.equal(mapped.items[0]?.sender, "Ada");
+  assert.equal(mapped.uncertain_effects[0]?.effect_id, "effect_1");
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
   assert.throws(() => mapAgentInspectorDetail({ ...wire, room_id: "room_2" }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, requested_source_message_id: "msg_other" }, input), /invalid or unfenced/);
@@ -463,6 +465,7 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.doesNotThrow(() => mapAgentInspectorDetail({ ...wire, availability: "not_loaded", requested_source_message_id: null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [] }, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }));
   assert.throws(() => mapAgentInspectorDetail({ ...wire, items: [{ ...wire.items[0], state: "invented" }] }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: Array.from({ length: 101 }, () => wire.timeline[0]) }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, uncertain_effects: Array.from({ length: 33 }, () => wire.uncertain_effects[0]) }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, history_boundary: { ...wire.history_boundary, earliest_retained_receipt_sequence: -1 } }, input), /invalid or unfenced/);
 });
 
@@ -880,13 +883,32 @@ test("turn control keeps the client socket alive beyond the generic request time
     });
     const result = await client.controlTurn({
       entryId: "entry_exact",
+      daemonGeneration: 3,
+      roomId: "room_exact",
       workAttemptId: "attempt_exact",
       executionGenerationId: "generation_exact",
+      providerContinuationId: "continuation_exact",
+      providerTurnId: "turn_exact",
+      inboxItemId: "inbox_exact",
+      sourceMessageId: "message_exact",
       actionId: "action_exact",
+      actionSequence: 1,
       correction: "Use the corrected direction",
     });
     assert.equal(result.actionId, "action_exact");
     assert.deepEqual(result.stages, ["delivered", "interrupting", "applied", "resumed"]);
+    const requestCount = wire.requests.length;
+    await assert.rejects(() => client.controlTurn({
+      entryId: "entry_exact", daemonGeneration: 3, roomId: "room_exact", workAttemptId: "attempt_exact", executionGenerationId: "generation_exact",
+      providerContinuationId: "continuation_exact", providerTurnId: "turn_exact", inboxItemId: "inbox_exact", sourceMessageId: "message_exact",
+      actionId: "x".repeat(257), actionSequence: 1, correction: null,
+    }), /bounded action id/i);
+    await assert.rejects(() => client.controlTurn({
+      entryId: "entry_exact", daemonGeneration: 3, roomId: "room_exact", workAttemptId: "attempt_exact", executionGenerationId: "generation_exact",
+      providerContinuationId: "continuation_exact", providerTurnId: "turn_exact", inboxItemId: "inbox_exact", sourceMessageId: "message_exact",
+      actionId: "bad action id", actionSequence: 1, correction: null,
+    }), /bounded action id/i);
+    assert.equal(wire.requests.length, requestCount, "malformed renderer input is rejected before daemon transport");
   } finally {
     await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
@@ -1165,7 +1187,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.87");
+    assert.equal(status.implementationVersion, "2.0.96");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

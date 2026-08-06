@@ -13,7 +13,9 @@ import {
   bindSupervisedWorkerSession,
   bindSupervisedWorkerSessionWithContext,
   checkpointSupervisedWorkerCursor,
+  completeCurrentSupervisedEffect,
   isRetryableSupervisorBridgeError,
+  prepareCurrentSupervisedEffect,
   resolveCurrentSupervisedWorkerSession,
   scheduleSupervisedWorkerCursorCheckpoint,
 } from "../server/runtime/supervisor-bridge.js";
@@ -93,6 +95,191 @@ test("Cursor credential borrowing carries the exact rotating provider-turn capab
     assert.deepEqual(result, { state: "available", credential: "turn-bounded-bearer" });
     const borrow = requests.find((request) => request.method === "supervisor.borrow_worker_credential");
     assert.equal(borrow.params.provider_turn_id, "cursor:unpredictable-turn-1");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded effect completion survives a real handoff socket unlink and delayed successor listen", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-handoff-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  let firstClosed = false;
+  let successorListening = false;
+  let successorTimer: NodeJS.Timeout | null = null;
+  const successor = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 21, pid: 4343, started_at: "2026-08-05T16:00:01.000Z",
+        } })}\n`);
+        return;
+      }
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: { completed: true } })}\n`);
+    });
+  });
+  const first = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 20, pid: 4242, started_at: "2026-08-05T16:00:00.000Z",
+        } })}\n`);
+        return;
+      }
+      socket.destroy();
+      first.close(() => {
+        firstClosed = true;
+        // Longer than the first three backoffs: completion must observe the
+        // actual ENOENT unlink window more than once before generation 21 is
+        // available, rather than succeeding against the same listener.
+        successorTimer = setTimeout(() => {
+          successor.listen(socketPath, () => { successorListening = true; });
+        }, 220);
+      });
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { first.once("error", reject); first.listen(socketPath, resolve); });
+    const startedAt = Date.now();
+    await writeSupervisorContext(root, "generation_exact");
+    await completeCurrentSupervisedEffect({ effectId: "effect-exact", result: { sent: true } }, {
+      LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    }, { cwd: root, trustedDaemonSocketPath: socketPath, requestTimeoutMs: 1_000 });
+    const completions = requests.filter((request) => request.method === "supervisor.complete_bounded_effect");
+    assert.equal(completions.length, 2);
+    assert.deepEqual(completions.map((request) => request.params.daemon_generation), [20, 21]);
+    assert.ok(Date.now() - startedAt >= 200, "completion waited through multiple missing-socket retries");
+    assert.ok(completions.every((request) => request.params.effect_id === "effect-exact"));
+    assert.ok(completions.every((request) => !Object.hasOwn(request.params, "provider_turn_id")),
+      "non-Cursor completion remains provider-neutral across handoff");
+  } finally {
+    if (successorTimer) clearTimeout(successorTimer);
+    if (!firstClosed) await new Promise<void>((resolve) => first.close(() => resolve()));
+    if (successorListening) await new Promise<void>((resolve) => successor.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded effect preparation preserves a daemon-owned uncertain mutation outcome", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-uncertain-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 22, pid: 4343, started_at: "2026-08-05T16:00:01.000Z" }
+        : { state: "uncertain", effect_id: "effect_uncertain", error: "The mutation may already have completed." };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const prepared = await prepareCurrentSupervisedEffect({
+      toolName: "send_message", input: { text: "once" }, mcpRequestId: "request_uncertain", mutation: true,
+    }, {
+      LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      LETAGENTS_SUPERVISOR_ENTRY_ID: "manifest_exact",
+      LETAGENTS_SUPERVISOR_DAEMON_SOCKET: socketPath,
+      LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_exact",
+      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_exact",
+    });
+    assert.deepEqual(prepared, {
+      state: "uncertain", effectId: "effect_uncertain", error: "The mutation may already have completed.",
+    });
+    assert.equal(requests.filter((request) => request.method === "supervisor.prepare_bounded_effect").length, 1);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded effect completion does not retry an authoritative non-handoff rejection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-reject-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const response = request.method === "daemon.negotiate"
+        ? { version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 30, pid: 4242, started_at: "2026-08-05T16:00:00.000Z",
+        } }
+        : { version: 2, id: request.id, ok: false, error: "Effect lost exact provider-turn authority." };
+      socket.end(`${JSON.stringify(response)}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact");
+    await assert.rejects(() => completeCurrentSupervisedEffect({ effectId: "effect-rejected" }, {
+      LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    }, { cwd: root, trustedDaemonSocketPath: socketPath }), /lost exact provider-turn authority/i);
+    assert.equal(requests.filter((request) => request.method === "daemon.negotiate").length, 1);
+    assert.equal(requests.filter((request) => request.method === "supervisor.complete_bounded_effect").length, 1);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded effect completion surfaces an authoritative successor failure after transient handoff retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-double-failure-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  let completionAttempts = 0;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 40 + completionAttempts, pid: 4242, started_at: "2026-08-05T16:00:00.000Z",
+        } })}\n`);
+        return;
+      }
+      completionAttempts += 1;
+      const error = completionAttempts === 1
+        ? "Stale daemon generation after handoff."
+        : "Successor rejected exact completion.";
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: false, error })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact");
+    await assert.rejects(() => completeCurrentSupervisedEffect({ effectId: "effect-double-failure" }, {
+      LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    }, { cwd: root, trustedDaemonSocketPath: socketPath }), /successor rejected exact completion/i);
+    assert.equal(requests.filter((request) => request.method === "daemon.negotiate").length, 2);
+    assert.equal(requests.filter((request) => request.method === "supervisor.complete_bounded_effect").length, 2);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
@@ -596,6 +783,10 @@ test("a daemon without a stable identity is rebound instead of cached across rep
 test("supervisor transport timeouts are retryable bookkeeping failures", () => {
   assert.equal(isRetryableSupervisorBridgeError(new Error("Timed out communicating with the supervisor daemon.")), true);
   assert.equal(isRetryableSupervisorBridgeError(Object.assign(new Error("connect failed"), { code: "ECONNREFUSED" })), true);
+  assert.equal(isRetryableSupervisorBridgeError(Object.assign(new Error("connect ENOENT daemon.sock"), { code: "ENOENT" })), true,
+    "the unlink-to-successor-listen handoff window is retryable");
+  assert.equal(isRetryableSupervisorBridgeError(new Error("Exact authority rejected this socket request.")), false,
+    "authoritative rejections do not become retryable merely by mentioning a socket");
   assert.equal(isRetryableSupervisorBridgeError(new Error("Worker session room does not match the supervised manifest entry.")), false);
 });
 

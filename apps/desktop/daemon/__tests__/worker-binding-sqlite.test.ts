@@ -44,18 +44,15 @@ test("slow native publication does not block another binding checkpoint or publi
   } finally { await env.cleanup(); }
 });
 
-test("a paused commit fence holds no SQLite writer lock for an independent store", async () => {
+test("a paused commit fence holds no SQLite writer lock for an independent store", { timeout: 5_000 }, async () => {
   const env = await fixture(); try {
     let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
     const fenced = new WorkerBindingStore(env.legacy, async (commit) => { await gate; await commit(); }, env.database);
     const independent = new WorkerBindingStore(join(env.root, "other.json"), undefined, env.database);
     const pending = fenced.bind(input("agent_a"));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const raced = await Promise.race([
-      independent.bind(input("agent_b")).then(() => "completed"),
-      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 150)),
-    ]);
-    assert.equal(raced, "completed"); release(); await pending; await fenced.close(); await independent.close();
+    await independent.bind(input("agent_b"));
+    release(); await pending; await fenced.close(); await independent.close();
   } finally { await env.cleanup(); }
 });
 
@@ -73,26 +70,54 @@ test("simultaneously released fenced stores and a raw writer do not deadlock", a
   } finally { await env.cleanup(); }
 });
 
-test("a child-process raw SQLite writer overlaps fenced binding commits", async () => {
-  const env = await fixture(); try {
+test("a child-process raw SQLite writer overlaps fenced binding commits", { timeout: 10_000 }, async () => {
+  const env = await fixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  let a: WorkerBindingStore | null = null;
+  let b: WorkerBindingStore | null = null;
+  try {
     let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
-    const fence = async (commit: () => Promise<void>) => { await gate; await commit(); };
-    const a = new WorkerBindingStore(join(env.root, "a.json"), fence, env.database);
-    const b = new WorkerBindingStore(join(env.root, "b.json"), fence, env.database);
+    let reached = 0;
+    let bothReached!: () => void;
+    const bothAtFence = new Promise<void>((resolve) => { bothReached = resolve; });
+    let rawReleaseSent = false;
+    const fence = async (commit: () => Promise<void>) => {
+      reached += 1;
+      if (reached === 2) bothReached();
+      await gate;
+      // The raw writer still owns BEGIN IMMEDIATE at this exact boundary. The
+      // first fenced committer asks that independent process to release, then
+      // immediately enters SQLite. No scheduler delay or elapsed-time guess is
+      // needed to create the overlap, and both fenced stores still contend.
+      if (!rawReleaseSent) {
+        rawReleaseSent = true;
+        child?.send("release");
+      }
+      await commit();
+    };
+    a = new WorkerBindingStore(join(env.root, "a.json"), fence, env.database);
+    b = new WorkerBindingStore(join(env.root, "b.json"), fence, env.database);
     // Initialize schema before launching the independent SQLite process.
     const seed = new WorkerBindingStore(join(env.root, "seed.json"), undefined, env.database); await seed.list(); await seed.close();
     const one = a.bind(input("agent_a")); const two = b.bind(input("agent_b"));
+    await bothAtFence;
     // The child announces only after it owns the write transaction. Releasing
     // both fenced commits then proves their BEGIN IMMEDIATE attempts overlap a
     // real independent writer, rather than merely running nearby in time.
-    const child = spawn(process.execPath, ["-e", `const {DatabaseSync}=require('node:sqlite'); const db=new DatabaseSync(process.argv[1]); db.exec('PRAGMA busy_timeout=5000'); db.exec('BEGIN IMMEDIATE'); process.send('holding'); setTimeout(()=>{ db.prepare("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run('child','agent_raw',1,'run','session',900001,'2026-01-01T00:00:00.000Z',1,'accepted','2026-01-01T00:00:00.000Z',null); db.exec('COMMIT'); process.send('released'); db.close(); }, 150);`, env.database], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    child = spawn(process.execPath, ["-e", `const {DatabaseSync}=require('node:sqlite'); const db=new DatabaseSync(process.argv[1]); db.exec('PRAGMA busy_timeout=5000'); db.exec('BEGIN IMMEDIATE'); process.send('holding'); process.once('message',()=>{ db.prepare("INSERT INTO worker_binding_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run('child','agent_raw',1,'run','session',900001,'2026-01-01T00:00:00.000Z',1,'accepted','2026-01-01T00:00:00.000Z',null); db.exec('COMMIT'); process.send('released'); db.close(); });`, env.database], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
     await new Promise<void>((resolve, reject) => child.once("message", (message) => message === "holding" ? resolve() : reject(new Error(`child unexpected readiness ${String(message)}`))));
     const exited = new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child SQLite writer exited ${code}`))));
-    const beganAt = Date.now(); release(); await Promise.all([one, two, exited]);
-    assert.ok(Date.now() - beganAt >= 100, "fenced commits waited for the child transaction that acknowledged readiness");
+    release(); await Promise.all([one, two, exited]);
+    assert.equal(rawReleaseSent, true, "a fenced commit explicitly released the acknowledged raw writer");
     const check = new DatabaseSync(env.database); assert.equal((check.prepare("SELECT COUNT(*) AS count FROM worker_binding_publications WHERE reservation_id='child'").get() as { count: number }).count, 1); check.close();
-    await a.close(); await b.close();
-  } finally { await env.cleanup(); }
+  } finally {
+    if (child?.exitCode === null) {
+      if (child.connected) child.send("release");
+      await new Promise<void>((resolve) => child!.once("exit", () => resolve()));
+    }
+    await Promise.allSettled([a?.close(), b?.close()]);
+    await env.cleanup();
+  }
 });
 
 test("synchronized fresh multi-process importers converge through WAL and schema bootstrap contention", async () => {
@@ -212,6 +237,7 @@ test("a canonical v4 database with no later additive tables upgrades through the
         DROP TABLE agent_room_moves;
         DROP TABLE agent_purge_operations;
         DROP TABLE supervised_agent_publications;
+        DROP TABLE supervised_agent_provider_turn_bindings;
         DROP TABLE supervised_agent_history_boundaries;
         DROP TABLE supervised_agent_pruned_sources;
         DROP TABLE supervised_agent_terminal_results;
@@ -223,12 +249,19 @@ test("a canonical v4 database with no later additive tables upgrades through the
         DROP TABLE supervised_agent_ingress_cursors;
         DROP TABLE supervised_worker_sessions;
         DROP TABLE worker_binding_watermarks;
+        DROP TABLE turn_control_sequence_watermarks;
+        DROP TABLE reconciliation_action_tombstones;
         ALTER TABLE agent_configurations DROP COLUMN runtime_configuration_revision;
         ALTER TABLE agent_configurations DROP COLUMN config_revision;
         ALTER TABLE agent_configurations DROP COLUMN reasoning_effort;
         ALTER TABLE agent_configurations DROP COLUMN delivery_cutover_json;
         ALTER TABLE agent_configurations DROP COLUMN delivery_mode;
         ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id;
+        ALTER TABLE turn_control_journals DROP COLUMN action_sequence;
+        ALTER TABLE turn_control_journals DROP COLUMN inbox_item_id;
+        ALTER TABLE turn_control_journals DROP COLUMN correction_text;
+        ALTER TABLE turn_control_journals DROP COLUMN correction_strategy;
+        ALTER TABLE turn_control_journals DROP COLUMN operator_resolution;
         DROP TABLE worker_session_bindings;
         CREATE TABLE worker_session_bindings (
           entry_id TEXT PRIMARY KEY,
