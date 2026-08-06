@@ -168,11 +168,16 @@ test("supervised Cursor profiles are stable per attempt, isolated across attempt
   );
 });
 
-test("the packaged supervised runtime stays in lockstep with the MCP package release", () => {
-  const rootPackage = JSON.parse(
-    readFileSync(new URL("../../../../package.json", import.meta.url), "utf8"),
-  ) as { version?: unknown };
-  assert.equal(LETAGENTS_MCP_RUNTIME_VERSION, rootPackage.version);
+test("the packaged supervised runtime pin agrees with its package and registry lock", () => {
+  const runtimePackage = JSON.parse(
+    readFileSync(new URL("../runtime/letagents/package.json", import.meta.url), "utf8"),
+  ) as { dependencies?: { letagents?: unknown } };
+  const runtimeLock = JSON.parse(
+    readFileSync(new URL("../runtime/letagents/package-lock.json", import.meta.url), "utf8"),
+  ) as { packages?: Record<string, { version?: unknown; dependencies?: { letagents?: unknown } }> };
+  assert.equal(runtimePackage.dependencies?.letagents, LETAGENTS_MCP_RUNTIME_VERSION);
+  assert.equal(runtimeLock.packages?.[""]?.dependencies?.letagents, LETAGENTS_MCP_RUNTIME_VERSION);
+  assert.equal(runtimeLock.packages?.["node_modules/letagents"]?.version, LETAGENTS_MCP_RUNTIME_VERSION);
 });
 
 test("supervised Cursor derives a stable private root from the work attempt identity", () => {

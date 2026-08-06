@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTools } from "../server/register-tools.js";
+import { letAgentsRuntimeContract } from "../server/runtime-contract.js";
 import type { LetAgentsExecutionProfile } from "../server/runtime/execution-profile.js";
 
 function discovered(profile: LetAgentsExecutionProfile, provider: string | null = null): Set<string> {
@@ -45,6 +46,16 @@ test("supervised room turns retain product tools but do not discover execution m
     assert.equal(discovered("supervised_room_turn", provider).has("complete_room_turn"), false,
       `${provider ?? "unknown"} supervised turns must not discover Cursor's completion contract`);
   }
+});
+
+test("the executable runtime contract is derived from the real Cursor registration path", () => {
+  const contract = letAgentsRuntimeContract();
+  assert.equal(contract.format, 1);
+  assert.deepEqual(
+    contract.profiles.cursor_supervised_room_turn.tools,
+    [...discovered("supervised_room_turn", "cursor")].sort(),
+  );
+  assert.equal(contract.profiles.cursor_supervised_room_turn.tools.includes("complete_room_turn"), true);
 });
 
 test("autonomous MCP workers retain the established full tool registry", () => {

@@ -442,8 +442,9 @@ export async function autoJoinFromContext(): Promise<void> {
   try {
     const workerRuntime = requireValidWorkerBearerRuntime();
     if (workerRuntime.mode === "supervised") {
-      // The exact room is daemon-owned context, not ambient repository or
-      // persisted MCP state. Do not bind a potentially unrelated local room.
+      // The exact room may change after a durable daemon-owned room move.
+      // Bind it per tool effect from the supervisor response, never from
+      // ambient repository, persisted state, or launch-time environment.
       console.error("ℹ️ Daemon-supervised bounded turn leaves room selection to its exact supervisor context.");
       return;
     }

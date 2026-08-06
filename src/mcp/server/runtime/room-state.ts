@@ -17,6 +17,10 @@ import {
   currentAgentIdentityKey,
 } from "./identity.js";
 import { isSupervisedBoundedTurn } from "./worker-bearer.js";
+import {
+  getCurrentSupervisedRoomAuthority,
+  runWithSupervisedRoomAuthority,
+} from "./supervised-room-authority.js";
 
 let mcpServer: McpServer | null = null;
 let sseClient: SseClient | null = null;
@@ -191,9 +195,50 @@ export function touchCurrentRoom(lastMessageId?: string): void {
 }
 
 export function getTargetRoomId(roomId?: string): string | null {
+  if (isSupervisedBoundedTurn()) {
+    const exactRoomAuthority = getCurrentSupervisedRoomAuthority();
+    if (!exactRoomAuthority) {
+      throw new Error("The daemon-supervised tool has not received its exact room authority.");
+    }
+    if (roomId && roomId !== exactRoomAuthority) {
+      throw new Error(`The daemon-supervised tool is authorized for ${exactRoomAuthority}, not ${roomId}.`);
+    }
+    return exactRoomAuthority;
+  }
   return roomId || currentRoom?.room_id || null;
 }
 
+/** The last room authority returned by this process's exact daemon effect. */
+export { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
+
+/** Public room metadata without inventing join provenance or locality. */
+export function toPublicCurrentRoomState(): Record<string, unknown> | null {
+  const exactRoomAuthority = getCurrentSupervisedRoomAuthority();
+  if (!exactRoomAuthority) return toPublicRoomState(currentRoom);
+  return {
+    ...toPublicRoomState(toRoomState({ room_id: exactRoomAuthority, joined_via: "join_room" })),
+    joined_via: null,
+    is_local: null,
+  };
+}
+
+/**
+ * Bind only the in-memory default used by one supervised MCP process. The
+ * daemon response is the authority; this performs no join, storage, SSE, or
+ * repository inspection and can safely rebind after a durable room move.
+ */
+export function runWithCurrentSupervisedRoom<T>(roomId: string, callback: () => T): T {
+  if (!isSupervisedBoundedTurn()) {
+    throw new Error("Only a daemon-supervised bounded turn can bind supervisor room authority.");
+  }
+  const normalized = roomId.trim();
+  if (!normalized || normalized.length > 1_024 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error("The daemon-supervised room authority is malformed.");
+  }
+  return runWithSupervisedRoomAuthority(normalized, callback);
+}
+
 export function getFallbackProjectId(): string | null {
+  if (isSupervisedBoundedTurn()) return null;
   return currentRoom?.project_id ?? null;
 }
