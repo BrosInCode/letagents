@@ -6789,7 +6789,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       tool_name: "send_message", input: { text: "allowed" }, mutation: true,
     });
     assert.equal(exactRetry.ok, true, exactRetry.error);
-    assert.deepEqual(exactRetry.result, { state: "completed", result: { delivered: true } },
+    assert.deepEqual(exactRetry.result, { state: "completed", result: { delivered: true }, room_id: entry.room_id },
       "a successor execution reaches the same origin-scoped effect journal");
 
     const interruptedMutationParams = {
@@ -6820,6 +6820,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       effect_id: (readRetry.result as { effect_id: string }).effect_id,
       action: "execute",
       mutation: false,
+      room_id: entry.room_id,
     }, "the exact read-only request safely reacquires execution authority");
     const readCompletion = await daemonRequest(paths.socketPath, "supervisor.complete_bounded_effect", {
       ...coordinates,
@@ -6864,7 +6865,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "completion-retry-new-id",
       tool_name: "complete_room_turn", input: { outcome: "reply", text: "Exact public answer." }, mutation: true,
     });
-    assert.deepEqual(completionRetry.result, { state: "completed", result: deterministicCompletionResult },
+    assert.deepEqual(completionRetry.result, { state: "completed", result: deterministicCompletionResult, room_id: entry.room_id },
       "an exact completion retry converges on the one durable proposal even with a new transport request id");
     const conflictingCompletion = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "completion-conflict",

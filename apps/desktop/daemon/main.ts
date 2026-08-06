@@ -1941,6 +1941,10 @@ export class SupervisorDaemon {
   }): Promise<Record<string, unknown>> {
     if (!input.mcpRequestId.trim() || !input.toolName.trim()) throw new Error("A supervised effect requires MCP request and tool identities.");
     const context = await this.exactActiveBoundedContext(input);
+    const withExactRoom = (result: Record<string, unknown>): Record<string, unknown> => ({
+      ...result,
+      room_id: context.entry.room_id,
+    });
     const args = input.input && typeof input.input === "object" && !Array.isArray(input.input) ? input.input as Record<string, unknown> : {};
     if (input.toolName === "complete_room_turn") {
       if (context.entry.provider !== "cursor") {
@@ -1968,9 +1972,9 @@ export class SupervisorDaemon {
         agent_session_id: context.agent.agentSessionId,
         activating_inbox_item_id: context.inbox.inbox_item_id,
       }, (commit) => this.fenceDaemonCommit(commit));
-      if (prepared.effect.state === "completed") return { state: "completed", result: prepared.effect.result };
+      if (prepared.effect.state === "completed") return withExactRoom({ state: "completed", result: prepared.effect.result });
       if (prepared.effect.state === "failed") throw new Error(prepared.effect.error || "The prior supervised room move failed.");
-      return { state: "prepared", effect_id: prepared.effect.effect_id, action: "room_move_prepared", destination_room: destination };
+      return withExactRoom({ state: "prepared", effect_id: prepared.effect.effect_id, action: "room_move_prepared", destination_room: destination });
     }
     const prepared = await this.supervisedInbox.prepareEffect({
       agent_id: input.entryId, room_id: context.entry.room_id,
@@ -1981,20 +1985,20 @@ export class SupervisorDaemon {
       provider_turn_id: context.inbox.provider_turn_id!, mcp_request_id: input.mcpRequestId,
       tool_name: input.toolName, request: input.input, mutation: input.mutation,
     }, (commit) => this.fenceDaemonCommit(commit));
-    if (prepared.effect.state === "completed") return { state: "completed", result: prepared.effect.result };
+    if (prepared.effect.state === "completed") return withExactRoom({ state: "completed", result: prepared.effect.result });
     if (!prepared.created) {
       if (prepared.effect.state === "failed") throw new Error(prepared.effect.error || "The prior supervised effect failed.");
-      if (prepared.effect.state === "uncertain") return {
+      if (prepared.effect.state === "uncertain") return withExactRoom({
         state: "uncertain",
         effect_id: prepared.effect.effect_id,
         mutation: prepared.effect.mutation,
         error: prepared.effect.error || "The mutating tool outcome is uncertain.",
-      };
+      });
       if (prepared.effect.state === "executing") throw new Error("The prior supervised effect is still executing; refusing a duplicate side effect.");
     }
     const targetMessage = typeof args.thread_parent_id === "string" ? args.thread_parent_id : typeof args.reply_to === "string" ? args.reply_to : null;
     if ((input.toolName === "send_message" || input.toolName === "send_thread_message") && targetMessage === context.active.sourceMessageId) {
-      return { state: "prepared", effect_id: prepared.effect.effect_id, action: "use_final_answer", source_message_id: context.active.sourceMessageId };
+      return withExactRoom({ state: "prepared", effect_id: prepared.effect.effect_id, action: "use_final_answer", source_message_id: context.active.sourceMessageId });
     }
     const executing = await this.supervisedInbox.markEffectExecuting({
       effect_id: prepared.effect.effect_id,
@@ -2009,7 +2013,7 @@ export class SupervisorDaemon {
     if (executing.state !== "executing") {
       throw new Error("The supervised effect did not acquire durable execution authority.");
     }
-    return { state: "prepared", effect_id: prepared.effect.effect_id, action: "execute", mutation: input.mutation };
+    return withExactRoom({ state: "prepared", effect_id: prepared.effect.effect_id, action: "execute", mutation: input.mutation });
   }
 
   private completeBoundedEffect(input: {
