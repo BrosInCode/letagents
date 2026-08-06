@@ -732,10 +732,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   async recoverRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRecoveryRequest,
-    options: {
-      detachSignal?: AbortSignal;
-      checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
-    } = {},
+    options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     const turnId = request.providerTurnId.trim();

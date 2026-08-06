@@ -14,7 +14,7 @@
         @status="participantAnnouncement = $event"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
-        @live-selected="emit('live-selected')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
@@ -41,7 +41,7 @@
         @status="participantAnnouncement = $event"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
-        @live-selected="emit('live-selected')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
@@ -95,7 +95,7 @@ const props = defineProps<{
   providers: readonly DesktopAgentProvider[];
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
-  liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean };
+  liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
   roomIdentifier: string;
   requestVersion: number;
   managedSessions: readonly DesktopManagedAgentSession[];
@@ -106,6 +106,7 @@ const emit = defineEmits<{
   action: [intent: AgentInspectorActionIntent];
   "presentation-change": [compact: boolean];
   "live-selected": [];
+  "live-dismissed": [];
   "work-selected": [];
   "work-retry": [];
   "work-source-select": [sourceMessageId: string];

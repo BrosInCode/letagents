@@ -117,9 +117,13 @@ export type ProviderRoomTurnRequest = {
   observedContext?: unknown[];
 };
 export type ProviderRoomTurnResult =
-  | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream" }
-  | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream" }
-  | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none" };
+  | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
+export type ProviderRoomTurnCheckpointDisposition = {
+  acceptedResult: ProviderRoomTurnResult;
+  cleanupRecoveryEvidence: boolean;
+};
 export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 export type ProviderContinuationRepairRequest = {
@@ -191,7 +195,7 @@ export interface ProviderActionPort {
     /** Synchronously marks that exact turn identity and process recovery state are durable. */
     markDurableTurnStarted?: () => void;
     /** Release provider-local output only after this durable terminal checkpoint succeeds. */
-    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>;
     /** Detach this local observation without interrupting the native turn. */
     detachSignal?: AbortSignal;
     /** @deprecated compatibility alias; new providers must use beforeNativeDispatch. */
@@ -204,7 +208,7 @@ export interface ProviderActionPort {
       providerContinuationId: string;
       providerConnection: ProviderActionConnectionRef;
     }) => Promise<void>;
-    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>;
   }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: {
     /** Persist the replacement before it becomes the sole authoritative handle. */

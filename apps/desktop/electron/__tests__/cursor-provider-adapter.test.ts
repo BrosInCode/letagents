@@ -13,6 +13,7 @@ import {
   CursorProviderAdapter,
   cursorCliEnv,
   cursorLaunchPolicyArgs,
+  cursorLiveDisplayProjections,
   defaultLaunchTurn,
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
@@ -653,6 +654,11 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     assert.equal(inspectionPreparations[0]?.inspectionOnly, true);
     assert.equal(inspectionPreparations[1]?.includeAuth, false);
     assert.equal(inspectionPreparations[1]?.inspectionOnly, false);
+    assert.deepEqual(inspectionPreparations[1]?.supervisorMcpEnv, {
+      LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+      LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
+    }, "the credentialless packaged-bridge pass discovers the exact Cursor completion tool surface");
     assert.equal(inspectionPreparations[2]?.includeAuth, true);
     assert.equal(inspectionPreparations[2]?.inspectionOnly, true);
     assert.equal(inspectionPreparations[3]?.includeAuth, true);
@@ -1660,6 +1666,7 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
   assert.equal(argValue(launch.args, "--resume"), null);
   assert.equal(launch.args.at(-1)?.includes(`Turn id: ${persistedTurnId}`), true);
   assert.equal(launch.args.at(-1)?.includes("Please fix it"), true);
+  assert.equal(launch.args.at(-1)?.includes("call complete_room_turn exactly once"), true);
   const child = harness.children[0]!;
   child.emit({
     type: "result",
@@ -1677,6 +1684,7 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
     outcome: "reply",
     text: "Reply from Cursor",
     evidence: "stream",
+    publicationContract: "structured_room_turn_v1",
   });
   assert.deepEqual(order, ["dispatch_intent", "turn_started", "durable", "terminal"]);
   assert.equal(handle.observedState(), "idle");
@@ -1759,6 +1767,7 @@ test("Cursor bounded turns classify only the exact no-reply sentinel and preserv
     outcome: "no_reply",
     text: null,
     evidence: "stream",
+    publicationContract: "structured_room_turn_v1",
   });
 
   const unreadable = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_unreadable" }));
@@ -1853,6 +1862,144 @@ test("Cursor retains terminal stream evidence when checkpointing fails and recov
   assert.equal(harness.launches.length, launchCount);
 });
 
+test("Cursor cleanup follows the daemon-accepted structured result rather than the raw aggregate", async () => {
+  const acceptedHarness = createHarness();
+  const acceptedAdapter = supervisedAdapter(acceptedHarness);
+  const acceptedHandle = await spawnDaemonLane(acceptedAdapter, acceptedHarness);
+  let acceptedTurnId = "";
+  const accepted = acceptedAdapter.runRoomTurn(acceptedHandle, roomTurnRequest({ actionId: "accepted-structured" }), {
+    checkpointTurnStarted: async (turnId) => { acceptedTurnId = turnId; },
+    checkpointTerminalResult: async (raw) => {
+      assert.equal(raw.outcome, "unreadable");
+      return {
+        acceptedResult: {
+          turnId: raw.turnId, outcome: "reply", text: "structured proposal", evidence: "stream",
+          publicationContract: "structured_room_turn_v1",
+        },
+        cleanupRecoveryEvidence: true,
+      };
+    },
+  });
+  await flush();
+  acceptedHarness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false, result: null, session_id: "sess-cursor-1",
+  });
+  acceptedHarness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await accepted).text, "structured proposal");
+  await assert.rejects(
+    () => acceptedAdapter.recoverRoomTurn(acceptedHandle, { inboxItemId: "accepted-structured", providerTurnId: acceptedTurnId }),
+    /refusing to rerun/,
+    "accepted structured publication authorizes cleanup even when Cursor's raw aggregate was empty",
+  );
+
+  const rejectedHarness = createHarness();
+  const rejectedAdapter = supervisedAdapter(rejectedHarness);
+  const rejectedHandle = await spawnDaemonLane(rejectedAdapter, rejectedHarness);
+  let rejectedTurnId = "";
+  const rejected = rejectedAdapter.runRoomTurn(rejectedHandle, roomTurnRequest({ actionId: "missing-structured" }), {
+    checkpointTurnStarted: async (turnId) => { rejectedTurnId = turnId; },
+    checkpointTerminalResult: async (raw) => ({
+      acceptedResult: {
+        turnId: raw.turnId, outcome: "unreadable", text: null, evidence: "none",
+        publicationContract: "structured_room_turn_v1",
+      },
+      cleanupRecoveryEvidence: false,
+    }),
+  });
+  await flush();
+  rejectedHarness.children[0]!.emit({
+    type: "result", subtype: "success", is_error: false, result: "raw aggregate only", session_id: "sess-cursor-1",
+  });
+  rejectedHarness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await rejected).outcome, "unreadable");
+  assert.equal((await rejectedAdapter.recoverRoomTurn(rejectedHandle, {
+    inboxItemId: "missing-structured", providerTurnId: rejectedTurnId,
+  })).text, "raw aggregate only", "missing structured publication retains exact recovery evidence");
+});
+
+test("Cursor keeps a durable no-reply journal until fallible workspace receipt cleanup succeeds in run and recovery", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-cleanup-order-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const harness = createHarness();
+    let removalAttempts = 0;
+    const adapter = new CursorProviderAdapter({
+      dependencies: {
+        ...harness.dependencies,
+        async removeWorkspaceGenerationReceipt() {
+          removalAttempts += 1;
+          throw new Error(`injected receipt cleanup failure ${removalAttempts}`);
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      cwd: root,
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    let turnId = "";
+    const run = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "cleanup-order" }), {
+      checkpointTurnStarted: async (value) => { turnId = value; },
+      checkpointTerminalResult: async (raw) => ({
+        acceptedResult: raw,
+        cleanupRecoveryEvidence: true,
+      }),
+    });
+    await flush();
+    const launch = harness.launches[0]!;
+    const sessionId = "sess-cursor-1";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    const result = {
+      type: "result", subtype: "success", is_error: false,
+      result: CURSOR_NO_ROOM_REPLY_SENTINEL, session_id: sessionId,
+    };
+    writeFileSync(statePath, [
+      JSON.stringify({ type: "system", subtype: "init", session_id: sessionId }),
+      JSON.stringify(result),
+      "",
+    ].join("\n"));
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit", code: 0, signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      remote_authority_revoked: true,
+      turn_contract_version: 1,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      workspace_generation_manifest_path: launch.workspaceGenerationManifestPath,
+      init: { type: "system", subtype: "init", session_id: sessionId },
+      result,
+    }));
+    harness.children[0]!.emit(result);
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await assert.rejects(run, /injected receipt cleanup failure 1/);
+    assert.equal(existsSync(`${statePath}.terminal.json`), true,
+      "run cleanup failure leaves the only restart-readable terminal journal intact");
+
+    await assert.rejects(adapter.recoverRoomTurn(handle, {
+      inboxItemId: "cleanup-order", providerTurnId: turnId,
+    }, {
+      checkpointTerminalResult: async (raw) => ({ acceptedResult: raw, cleanupRecoveryEvidence: true }),
+    }), /injected receipt cleanup failure 2/);
+    assert.equal(existsSync(`${statePath}.terminal.json`), true,
+      "recovery cleanup failure also leaves the no-reply journal intact");
+
+    const retried = await adapter.recoverRoomTurn(handle, {
+      inboxItemId: "cleanup-order", providerTurnId: turnId,
+    });
+    assert.equal(retried.outcome, "no_reply");
+    assert.equal(removalAttempts, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a successor recovers the exact Cursor reply from the private wrapper journal without redispatch", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-recovery-"));
   try {
@@ -1874,7 +2021,7 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
       stream_contract_complete: true,
       workspace_generation_manifest_path: "/tmp/letagents-recovered-workspace-generation.json",
       init: { type: "system", subtype: "init", session_id: "sess-after-restart" },
-      result: { type: "result", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart", request_id: null },
+      result: { type: "result", subtype: "success", is_error: false, result: "reply recovered after handoff", session_id: "sess-after-restart", request_id: null },
     }));
     const harness = createHarness();
     const adapter = new CursorProviderAdapter({
@@ -1900,10 +2047,63 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
         assert.equal(state.providerConnection.pid, null);
       },
     });
-    assert.deepEqual(recovered, { turnId, outcome: "reply", text: "reply recovered after handoff", evidence: "stream" });
+    assert.deepEqual(recovered, {
+      turnId, outcome: "reply", text: "reply recovered after handoff", evidence: "stream",
+      publicationContract: "structured_room_turn_v1",
+    });
     assert.equal(checkpointed, true);
     assert.equal(harness.launches.length, 0, "recovery never starts another native turn");
     assert.deepEqual(harness.workspaceGenerationEvents.map((event) => event.kind), ["recover"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a successor marks pre-version legacy durable Cursor results for the bounded aggregate fallback", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-legacy-turn-recovery-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:legacy-durable-turn";
+    const sessionId = "sess-legacy-restart";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    const legacyResult = { type: "result", is_error: false, result: "legacy aggregate reply", session_id: sessionId };
+    writeFileSync(statePath, [
+      JSON.stringify({ type: "system", subtype: "init", session_id: sessionId }),
+      JSON.stringify(legacyResult),
+      "",
+    ].join("\n"));
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit", code: 0, signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      remote_authority_revoked: true,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      init: { type: "system", subtype: "init", session_id: sessionId },
+      result: legacyResult,
+    }));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: sessionId,
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    assert.deepEqual(await adapter.recoverRoomTurn(handle, {
+      inboxItemId: "inbox-legacy-restart", providerTurnId: turnId,
+    }), {
+      turnId, outcome: "reply", text: "legacy aggregate reply", evidence: "stream",
+      publicationContract: "legacy_cursor_aggregate_v0",
+    });
+    assert.equal(harness.launches.length, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -5090,7 +5290,8 @@ test("stream evidence is bounded, redacted, and ordered; non-JSON output keeps m
   await adapter.spawn(spawnRequest());
   const child = harness.children[0]!;
 
-  child.emit({ type: "assistant", message: { content: [{ type: "text", text: "hi room" }] }, api_key: "sk-nope" });
+  child.emit({ type: "assistant", session_id: "sess-cursor-1", message: { role: "assistant", content: [{ type: "text", text: "hi room" }] }, api_key: "sk-nope" });
+  child.emit({ type: "system", subtype: "init", session_id: "sess-cursor-1" });
   child.emitRaw("cursor-agent plain diagnostics line");
   await flush();
 
@@ -5098,7 +5299,133 @@ test("stream evidence is bounded, redacted, and ordered; non-JSON output keeps m
   assert.ok(assistant);
   assert.equal(assistant!.payloadRedacted, true);
   assert.equal((assistant!.payload as { api_key?: unknown }).api_key, "[REDACTED]");
+  const display = streamEvents.find((event) => event.method === "item/agentMessage/delta");
+  assert.equal((display?.payload as { delta?: unknown } | undefined)?.delta, "hi room");
+  assert.match(String((display?.payload as { partId?: unknown } | undefined)?.partId), /^cursor:[0-9a-f-]+:assistant:\d+$/);
   assert.ok(streamEvents.some((event) => event.method === "stdout/raw"), "non-JSON output preserved as bounded evidence");
+  assert.equal(streamEvents.filter((event) => event.method === "system/init_duplicate").length, 1,
+    "a duplicate same-session init remains diagnostics and cannot reset the display generation");
   const sequences = streamEvents.map((event) => event.sequence);
   assert.deepEqual([...sequences].sort((a, b) => a - b), sequences, "stream sequence is ordered");
+});
+
+test("a Cursor result terminalizes any tool card that never emitted its own completion", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-open",
+    tool_call: { readToolCall: { args: { path: "README.md" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "result", subtype: "success", is_error: false, result: "done",
+    session_id: "sess-cursor-1",
+  });
+  await flush();
+  const toolStatuses = streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => (event.payload as { status?: unknown }).status);
+  assert.deepEqual(toolStatuses, ["running", "interrupted"]);
+});
+
+test("a Cursor turn that exits without result still terminalizes every running tool card", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-no-result",
+    tool_call: { shellToolCall: { args: { command: "false" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.resolveExit({ type: "exit", code: 1, signal: null });
+  await flush();
+  const toolStatuses = streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => (event.payload as { status?: unknown }).status);
+  assert.deepEqual(toolStatuses, ["running", "interrupted"],
+    "a result-less crash cannot leave a cross-turn Inspector card stuck running");
+});
+
+test("a post-init provider checkpoint failure terminalizes tools started while the checkpoint was pending", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+    supervisedProfileFactory: (input) => {
+      const root = input.profileRoot ?? `/private/cursor/${input.workAttemptId}`;
+      return {
+        homeDir: `${root}/home`, configDir: `${root}/config`, dataDir: `${root}/data`, cacheDir: `${root}/cache`,
+        env: { HOME: `${root}/home` },
+        ...wrapperHostedMcpFixture(root),
+      };
+    },
+  });
+  const handle = await spawnDaemonLane(adapter, harness);
+  await assert.rejects(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "checkpoint-tool-terminal" }), {
+    checkpointTurnStarted: async () => {},
+    checkpointProviderState: async (state) => {
+      if (state.providerContinuationId !== "sess-cursor-1") return;
+      harness.children[0]!.emit({
+        type: "tool_call", subtype: "started", call_id: "tool-during-checkpoint",
+        tool_call: { readToolCall: { args: { path: "README.md" } } },
+        session_id: "sess-cursor-1",
+      });
+      throw new Error("injected post-init checkpoint failure");
+    },
+  }), /checkpoint.*failure/i);
+  const toolStatuses = streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => (event.payload as { status?: unknown }).status);
+  assert.deepEqual(toolStatuses, ["running", "interrupted"],
+    "checkpoint teardown cannot strand a running tool outside completeTurn");
+});
+
+test("documented Cursor stream-json shapes project to namespaced response and tool display events", () => {
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "assistant",
+    message: { role: "assistant", content: [{ type: "text", text: "Checking " }, { type: "text", text: "now" }] },
+    session_id: "session-exact",
+  }, "turn-exact", "event-1"), [
+    { method: "item/agentMessage/delta", kind: "text_delta", payload: { partId: "cursor:turn-exact:assistant:event-1", delta: "Checking now" } },
+  ]);
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "assistant", message: { role: "assistant", content: "String-shaped reply" }, session_id: "session-exact",
+  }, "turn-exact", "event-string"), [{
+    method: "item/agentMessage/delta", kind: "text_delta",
+    payload: { partId: "cursor:turn-exact:assistant:event-string", delta: "String-shaped reply" },
+  }]);
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "toolu_1",
+    tool_call: { metadata: { durationMs: 12 }, readToolCall: { args: { path: "README.md" } } }, session_id: "session-exact",
+  }, "turn-exact", "event-2"), [{
+    method: "item/toolCall/updated", kind: "tool_lifecycle", payload: {
+      callID: "cursor:turn-exact:toolu_1", tool: "readToolCall", status: "running",
+      input: { path: "README.md" }, output: null, error: null,
+    },
+  }]);
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "completed", call_id: "toolu_1",
+    tool_call: { readToolCall: { args: { path: "README.md" }, result: { success: { totalLines: 54 } } } },
+    session_id: "session-exact",
+  }, "turn-exact", "event-3"), [{
+    method: "item/toolCall/updated", kind: "tool_lifecycle", payload: {
+      callID: "cursor:turn-exact:toolu_1", tool: "readToolCall", status: "completed",
+      input: { path: "README.md" }, output: { totalLines: 54 }, error: null,
+    },
+  }]);
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "user", message: { role: "user", content: [{ type: "text", text: "prompt echo" }] },
+  }, "turn-exact", "event-4"), [], "the user event is never misrendered as a tool");
 });

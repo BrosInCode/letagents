@@ -78,6 +78,7 @@
       <AgentInspectorLive
         v-else-if="selectedTab === 'live'" id="agent-inspector-live-panel" role="tabpanel" aria-labelledby="agent-inspector-live-tab"
         :feed="liveFeed"
+        :supports-reasoning="liveSupportsReasoning"
       />
       <AgentInspectorWork
         v-else-if="selectedTab === 'work'" id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"
@@ -167,12 +168,13 @@ const props = defineProps<{
   providers: readonly DesktopAgentProvider[];
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
-  liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean };
+  liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
 }>();
 const emit = defineEmits<{
   close: [];
   action: [intent: AgentInspectorActionIntent];
   "live-selected": [];
+  "live-dismissed": [];
   "work-selected": [];
   "work-retry": [];
   "work-source-select": [sourceMessageId: string];
@@ -192,6 +194,10 @@ const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
 const selectedTab = ref<InspectorTab>("overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
+const liveSupportsReasoning = computed(() => {
+  const provider = props.providers.find((candidate) => candidate.id === props.projection.provider);
+  return provider ? provider.capabilities.includes("reasoning_stream") : null;
+});
 const retryRequestIsPending = computed(() => props.projection.deliveryProgress?.requestedLocally === true);
 const lifecycleActionBusy = computed(() => props.actionState?.status === "running" || retryRequestIsPending.value);
 const lifecycleBusyKind = computed<AgentInspectorActionIntent["kind"] | null>(() =>
@@ -238,6 +244,7 @@ watch(() => props.projection.entryId, () => { selectedTab.value = "overview"; })
 
 function selectTab(tab: InspectorTab): void {
   if (selectedTab.value === tab) return;
+  if (selectedTab.value === "live" && tab !== "live") emit("live-dismissed");
   selectedTab.value = tab;
   if (tab === "live") emit("live-selected");
   if (tab === "work") emit("work-selected");

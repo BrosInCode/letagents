@@ -27,7 +27,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.96";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.98";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -68,7 +68,9 @@ let stateWatchOperation: Promise<void> | null = null;
 let stateWatchUnsupportedGeneration: number | null = null;
 /** The single agent whose live feed is currently subscribed (inspector focus). */
 let focusedAgentStreamEntryId: string | null = null;
+let focusedAgentStreamEpoch = 0;
 let agentStreamWatchOperation: Promise<void> | null = null;
+let agentStreamWatchAbortController: AbortController | null = null;
 
 /** Main-process lifecycle signal. Renderer IPC never receives this hook. */
 export function onSupervisorDaemonGeneration(
@@ -431,19 +433,24 @@ export class SupervisorDaemonClient {
     entryId: string;
     afterSequence: number;
     waitMs?: number;
-  }): Promise<{ sequence: number; events: import("../ipc-types/agents.js").DesktopAgentStreamEvent[]; ended: boolean }> {
+    signal?: AbortSignal;
+  }): Promise<{ sequence: number; streamGeneration: number; droppedEvents: number; events: import("../ipc-types/agents.js").DesktopAgentStreamEvent[]; ended: boolean }> {
     const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
     const value = await this.request<{
       sequence: number;
+      stream_generation: number;
+      dropped_events: number;
       events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown }>;
       ended: boolean;
     }>("supervisor.watch_agent_stream", {
       entry_id: input.entryId,
       after_sequence: input.afterSequence,
       wait_ms: waitMs,
-    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true);
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true, input.signal);
     return {
       sequence: Number(value.sequence ?? input.afterSequence),
+      streamGeneration: Number(value.stream_generation ?? 0),
+      droppedEvents: Number(value.dropped_events ?? 0),
       ended: value.ended === true,
       events: (Array.isArray(value.events) ? value.events : []).map((event) => ({
         sequence: Number(event.sequence),
@@ -1209,6 +1216,7 @@ export class SupervisorDaemonClient {
     version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
     timeoutMs = this.requestTimeoutMs,
     unrefSocket = false,
+    signal?: AbortSignal,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
@@ -1216,12 +1224,20 @@ export class SupervisorDaemonClient {
       if (unrefSocket) socket.unref();
       let buffer = "";
       let settled = false;
+      let onAbort: (() => void) | null = null;
       const finish = (error?: Error, value?: T) => {
         if (settled) return;
         settled = true;
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
         socket.destroy();
         if (error) reject(error); else resolve(value as T);
       };
+      onAbort = () => finish(new Error(`Supervisor daemon request aborted: ${method}`));
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
       socket.setEncoding("utf8");
       socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
       socket.once("error", (error) => finish(error));
@@ -1243,7 +1259,9 @@ export class SupervisorDaemonClient {
           finish(error instanceof Error ? error : new Error("Invalid supervisor daemon response."));
         }
       });
-      socket.once("connect", () => socket.write(`${JSON.stringify({ version, id, method, params })}\n`));
+      socket.once("connect", () => {
+        if (!settled) socket.write(`${JSON.stringify({ version, id, method, params })}\n`);
+      });
     });
   }
 }
@@ -1727,6 +1745,14 @@ export function onSupervisorAgentStream(
 export function setFocusedAgentStream(entryId: string | null): void {
   if (focusedAgentStreamEntryId === entryId) return;
   focusedAgentStreamEntryId = entryId;
+  // The epoch distinguishes close→reopen of the same agent while an old
+  // long-poll is still in flight. Entry identity alone cannot observe that
+  // lifecycle edge, and would otherwise resume the stale cursor/feed.
+  focusedAgentStreamEpoch += 1;
+  // Destroy the old long-poll socket now. Waiting for its 25-second server
+  // timeout would make close→reopen of the same agent appear frozen even
+  // though the renderer requested a new viewer lifecycle.
+  agentStreamWatchAbortController?.abort();
   if (entryId && !agentStreamWatchOperation) {
     agentStreamWatchOperation = runAgentStreamWatch().finally(() => { agentStreamWatchOperation = null; });
   }
@@ -1736,35 +1762,63 @@ async function runAgentStreamWatch(): Promise<void> {
   let afterSequence = 0;
   let watchedEntryId: string | null = null;
   let watchedGeneration = 0;
+  let watchedFocusEpoch = -1;
   let consecutiveFailures = 0;
   let endedNotified = false;
+  let watchedStreamGeneration = 0;
   while (focusedAgentStreamEntryId !== null) {
     const entryId = focusedAgentStreamEntryId;
+    const focusEpoch = focusedAgentStreamEpoch;
     try {
       const status = await supervisorDaemonClient.connectIfRunning();
       if (!status) return;
+      if (focusedAgentStreamEntryId !== entryId || focusedAgentStreamEpoch !== focusEpoch) continue;
       if (!status.capabilities.agentActivityStream) {
         // Old daemon: tell the renderer the feed is unavailable, then stop.
-        agentStreamEmitter.emit("agent-stream", { entryId, events: [], ended: true });
+        agentStreamEmitter.emit("agent-stream", {
+          entryId,
+          events: [],
+          ended: true,
+          reset: true,
+          droppedEvents: 0,
+        });
         return;
       }
       // A focus change or daemon restart resets the cursor and the ended latch.
-      if (watchedEntryId !== entryId || watchedGeneration !== status.generation) {
+      if (watchedEntryId !== entryId || watchedGeneration !== status.generation || watchedFocusEpoch !== focusEpoch) {
         watchedEntryId = entryId;
         watchedGeneration = status.generation;
+        watchedFocusEpoch = focusEpoch;
         afterSequence = 0;
         endedNotified = false;
+        watchedStreamGeneration = 0;
       }
-      const batch = await supervisorDaemonClient.watchAgentStream({ entryId, afterSequence });
+      const watchController = new AbortController();
+      agentStreamWatchAbortController = watchController;
+      const batch = await supervisorDaemonClient.watchAgentStream({
+        entryId,
+        afterSequence,
+        signal: watchController.signal,
+      }).finally(() => {
+        if (agentStreamWatchAbortController === watchController) agentStreamWatchAbortController = null;
+      });
       consecutiveFailures = 0;
-      if (focusedAgentStreamEntryId !== entryId) continue; // focus moved mid-poll
+      if (focusedAgentStreamEntryId !== entryId || focusedAgentStreamEpoch !== focusEpoch) continue; // focus moved or closed/reopened mid-poll
       afterSequence = batch.sequence;
+      const reset = watchedStreamGeneration !== batch.streamGeneration;
+      watchedStreamGeneration = batch.streamGeneration;
       // A reopened provider generation reuses the daemon buffer and keeps its
       // monotonic cursor, so post-reopen events climb past ours and clear the
       // latch; the renderer un-ends the feed on the next non-ended batch.
       if (batch.events.length > 0) endedNotified = false;
-      if (batch.events.length > 0 || (batch.ended && !endedNotified)) {
-        agentStreamEmitter.emit("agent-stream", { entryId, events: batch.events, ended: batch.ended });
+      if (reset || batch.events.length > 0 || batch.droppedEvents > 0 || (batch.ended && !endedNotified)) {
+        agentStreamEmitter.emit("agent-stream", {
+          entryId,
+          events: batch.events,
+          ended: batch.ended,
+          reset,
+          droppedEvents: batch.droppedEvents,
+        });
       }
       if (batch.ended) {
         // `ended` is a generation boundary, not a terminal state: the daemon
@@ -1775,6 +1829,7 @@ async function runAgentStreamWatch(): Promise<void> {
         if (focusedAgentStreamEntryId === entryId) await unrefDelay(AGENT_STREAM_REOPEN_POLL_MS);
       }
     } catch {
+      if (focusedAgentStreamEntryId !== entryId || focusedAgentStreamEpoch !== focusEpoch) continue;
       consecutiveFailures += 1;
       await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));
     }

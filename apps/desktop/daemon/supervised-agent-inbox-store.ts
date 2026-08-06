@@ -47,6 +47,37 @@ export type SupervisedEffectRecord = {
   state: "prepared" | "executing" | "uncertain" | "completed" | "failed";
   result: unknown | null; error: string | null; created_at: string; updated_at: string;
 };
+export type StructuredRoomTurnCompletion =
+  | { outcome: "reply"; text: string }
+  | { outcome: "no_reply"; text: null };
+
+/** Validate the durable request written by the supervised-only completion tool. */
+export function structuredRoomTurnCompletion(value: unknown): StructuredRoomTurnCompletion | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "outcome" && key !== "text")) return null;
+  if (record.outcome === "no_reply") {
+    return record.text === undefined || record.text === null || record.text === ""
+      ? { outcome: "no_reply", text: null }
+      : null;
+  }
+  if (record.outcome !== "reply" || typeof record.text !== "string") return null;
+  const text = record.text.trim();
+  if (!text || Buffer.byteLength(text, "utf8") > 32 * 1024) return null;
+  return { outcome: "reply", text };
+}
+
+function structuredRoomTurnCompletionResult(completion: StructuredRoomTurnCompletion): Record<string, unknown> {
+  const payload = {
+    accepted: true,
+    outcome: completion.outcome,
+    instruction: "The daemon recorded this exact turn completion. End the provider turn without sending the activating reply through another tool.",
+  };
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+  };
+}
 export type AgentInspectorDetail = {
   availability: "available" | "pruned" | "not_loaded";
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
@@ -644,9 +675,25 @@ export class SupervisedAgentInboxStore {
         }
         if (effect.state === "completed" || effect.state === "failed" || effect.state === "uncertain") return { created: false, effect };
         this.assertActiveEffectAuthority(database, input);
+        if (effect.tool_name === "complete_room_turn") {
+          const completion = structuredRoomTurnCompletion(input.request);
+          if (!completion) throw new Error("The supervised room-turn completion proposal is malformed.");
+          const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
+            WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+              AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+            input.agent_id, input.execution_generation_id, input.provider_turn_id,
+          );
+          if (executing) {
+            throw new Error("The supervised room turn cannot complete while an earlier effect is still executing.");
+          }
+          run(database.prepare(`UPDATE supervised_agent_effects SET state='completed',result_json=?,error=NULL,updated_at=?
+            WHERE effect_id=? AND state IN ('prepared','executing')`),
+          serializeEffectJson(structuredRoomTurnCompletionResult(completion), "result"), this.now(), effect.effect_id);
+          return { created: false, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effect.effect_id) as Row) };
+        }
         if (effect.state === "executing") {
           const timestamp = this.now();
-          if (effect.mutation) {
+          if (effect.mutation && effect.tool_name !== "complete_room_turn") {
             run(database.prepare(`UPDATE supervised_agent_effects
               SET state='uncertain',error=?,updated_at=? WHERE effect_id=? AND state='executing'`),
             "The mutating tool crossed its execution boundary without a durable result. It may have completed; verify external state before repeating it.", timestamp, effect.effect_id);
@@ -654,7 +701,9 @@ export class SupervisedAgentInboxStore {
           } else {
             run(database.prepare(`UPDATE supervised_agent_effects
               SET state='prepared',error=?,updated_at=? WHERE effect_id=? AND state='executing'`),
-            "The prior read-only execution ended without a durable result and is safe to execute again.", timestamp, effect.effect_id);
+            effect.tool_name === "complete_room_turn"
+              ? "The daemon restarted while committing the local completion proposal; its durable request is safe to commit again."
+              : "The prior read-only execution ended without a durable result and is safe to execute again.", timestamp, effect.effect_id);
           }
           return { created: false, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effect.effect_id) as Row) };
         }
@@ -673,10 +722,70 @@ export class SupervisedAgentInboxStore {
         }
         return { created: false, effect };
       }
+      const completedTurn = database.prepare(`SELECT effect_id FROM supervised_agent_effects
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+          AND tool_name='complete_room_turn' AND state='completed' LIMIT 1`).get(
+        input.agent_id, input.execution_generation_id, input.provider_turn_id,
+      ) as Row | undefined;
+      if (completedTurn && input.tool_name !== "complete_room_turn") {
+        throw new Error("The supervised room turn is already complete; no new effects may be admitted.");
+      }
+      if (input.tool_name === "complete_room_turn") {
+        const completion = structuredRoomTurnCompletion(input.request);
+        if (!completion) throw new Error("The supervised room-turn completion proposal is malformed.");
+        const completedResultJson = serializeEffectJson(structuredRoomTurnCompletionResult(completion), "result");
+        const singleton = database.prepare(`SELECT * FROM supervised_agent_effects
+          WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND tool_name='complete_room_turn'
+          ORDER BY created_at,effect_id LIMIT 1`).get(
+          input.agent_id, input.execution_generation_id, input.provider_turn_id,
+        ) as Row | undefined;
+        if (singleton) {
+          const effect = rowToEffect(singleton);
+          if (effect.room_id !== input.room_id || effect.mutation !== expectedMutation
+            || String(singleton.request_json) !== requestJson) {
+            throw new Error("The supervised room turn already recorded a different completion proposal.");
+          }
+          if (effect.state !== "completed") {
+            const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
+              WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+                AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+              input.agent_id, input.execution_generation_id, input.provider_turn_id,
+            );
+            if (executing) {
+              throw new Error("The supervised room turn cannot complete while an earlier effect is still executing.");
+            }
+          }
+          this.assertActiveEffectAuthority(database, input);
+          if (effect.state === "prepared" || effect.state === "executing") {
+            run(database.prepare(`UPDATE supervised_agent_effects SET state='completed',result_json=?,error=NULL,updated_at=?
+              WHERE effect_id=? AND state IN ('prepared','executing')`),
+            completedResultJson, this.now(), effect.effect_id);
+          }
+          return { created: false, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effect.effect_id) as Row) };
+        }
+        const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
+          WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+            AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+          input.agent_id, input.execution_generation_id, input.provider_turn_id,
+        );
+        if (executing) {
+          throw new Error("The supervised room turn cannot complete while an earlier effect is still executing.");
+        }
+      }
       this.assertActiveEffectAuthority(database, input);
-      this.assertEffectAdmissionCapacity(database, input, requestJson);
       const timestamp = this.now();
       const effectId = randomUUID();
+      if (input.tool_name === "complete_room_turn") {
+        const completion = structuredRoomTurnCompletion(input.request)!;
+        const completedResultJson = serializeEffectJson(structuredRoomTurnCompletionResult(completion), "result");
+        run(database.prepare(`INSERT INTO supervised_agent_effects
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,'completed',?,NULL,?,?)`),
+        effectId, input.agent_id, input.room_id, input.execution_generation_id, input.provider_turn_id,
+        input.mcp_request_id, input.tool_name, requestJson, expectedMutation ? 1 : 0, completedResultJson, timestamp, timestamp);
+        return { created: true, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row) };
+      }
+      this.assertEffectAdmissionCapacity(database, input, requestJson);
       run(database.prepare(`INSERT INTO supervised_agent_effects
         (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,'prepared',NULL,NULL,?,?)`),
@@ -714,6 +823,22 @@ export class SupervisedAgentInboxStore {
       if (effect.state === "completed") return { effect, rejection: null };
       if (effect.state === "uncertain") throw new Error(effect.error || "The supervised effect outcome is uncertain and cannot be executed again.");
       if (effect.state === "executing") throw new Error("This supervised effect is already executing; refusing a duplicate side effect.");
+      if (effect.tool_name !== "complete_room_turn") {
+        const completedTurn = database.prepare(`SELECT effect_id FROM supervised_agent_effects
+          WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+            AND tool_name='complete_room_turn' AND state='completed' LIMIT 1`).get(
+          effect.agent_id, effect.execution_generation_id, effect.provider_turn_id,
+        );
+        if (completedTurn) {
+          const rejection = "The supervised room turn is already complete; this prepared effect may no longer execute.";
+          run(database.prepare("UPDATE supervised_agent_effects SET state='failed',error=?,updated_at=? WHERE effect_id=? AND state='prepared'"),
+            rejection, this.now(), input.effect_id);
+          return {
+            effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(input.effect_id) as Row),
+            rejection,
+          };
+        }
+      }
       try {
         this.assertActiveEffectAuthority(database, input);
       } catch (error) {
@@ -783,6 +908,14 @@ export class SupervisedAgentInboxStore {
         if (binding.inbox_item_id !== input.activating_inbox_item_id) throw new Error("The supervised room move lost its exact activating inbox turn.");
         effectId = effect.effect_id;
       } else {
+        const completedTurn = database.prepare(`SELECT effect_id FROM supervised_agent_effects
+          WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+            AND tool_name='complete_room_turn' AND state='completed' LIMIT 1`).get(
+          input.agent_id, input.effect_execution_generation_id, input.provider_turn_id,
+        );
+        if (completedTurn) {
+          throw new Error("The supervised room turn is already complete; no new effects may be admitted.");
+        }
         const binding = this.assertActiveEffectAuthority(database, {
           agent_id: input.agent_id, room_id: input.room_id,
           execution_generation_id: input.effect_execution_generation_id, provider_turn_id: input.provider_turn_id,
@@ -858,6 +991,30 @@ export class SupervisedAgentInboxStore {
           WHERE agent_id=? AND tool_name='join_room' AND state='prepared' ORDER BY created_at`).all(agentId) as Row[]
         : database.prepare(`SELECT * FROM supervised_agent_effects
           WHERE tool_name='join_room' AND state='prepared' ORDER BY created_at`).all() as Row[];
+      return rows.map(rowToEffect);
+    });
+  }
+
+  /**
+   * Read every structured completion proposal for one exact provider turn.
+   * Callers deliberately receive the whole (normally singleton) set so a
+   * duplicate proposal is observable as a conflict, never resolved by row
+   * order or last-write-wins behavior.
+   */
+  async roomTurnCompletionEffects(
+    agentId: string,
+    originExecutionGenerationId: string,
+    providerTurnId: string,
+  ): Promise<SupervisedEffectRecord[]> {
+    return this.read(async (database) => {
+      const rows = database.prepare(`SELECT * FROM supervised_agent_effects
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+          AND tool_name='complete_room_turn'
+        ORDER BY created_at,effect_id`).all(
+        agentId,
+        originExecutionGenerationId,
+        providerTurnId,
+      ) as Row[];
       return rows.map(rowToEffect);
     });
   }
@@ -1539,13 +1696,17 @@ export class SupervisedAgentInboxStore {
   }
   private assertEffectAdmissionCapacity(
     database: DatabaseSync,
-    input: { agent_id: string; execution_generation_id: string; provider_turn_id: string },
+    input: { agent_id: string; execution_generation_id: string; provider_turn_id: string; tool_name?: string },
     requestJson: string,
   ): void {
     const requestBytes = Buffer.byteLength(requestJson, "utf8");
     if (requestBytes > MAX_EFFECT_REQUEST_BYTES) {
       throw new Error(`A supervised effect request exceeds the ${MAX_EFFECT_REQUEST_BYTES}-byte durable limit.`);
     }
+    // This exact singleton is the turn's mandatory publication contract. Its
+    // own request is bounded to 32 KiB by validation, so ordinary tools cannot
+    // consume the slot or aggregate byte budget needed to finish the turn.
+    if (input.tool_name === "complete_room_turn") return;
     const usage = database.prepare(`SELECT COUNT(*) AS effect_count,COALESCE(SUM(request_bytes),0) AS request_bytes
       FROM (
         SELECT length(CAST(request_json AS BLOB)) AS request_bytes
@@ -1685,7 +1846,15 @@ export class SupervisedAgentInboxStore {
     ];
     run(database.prepare(`UPDATE supervised_agent_effects
       SET state='uncertain',error=?,updated_at=?
-      WHERE state='executing' AND mutation=1 AND tool_name<>'join_room'${scope}`), ...mutationArgs);
+      WHERE state='executing' AND mutation=1 AND tool_name NOT IN ('join_room','complete_room_turn')${scope}`), ...mutationArgs);
+    const completionArgs = [
+      "The daemon restarted while committing the local completion proposal; its durable request is safe to commit again.",
+      interruptedAt,
+      ...(agentId ? [agentId] : []),
+    ];
+    run(database.prepare(`UPDATE supervised_agent_effects
+      SET state='prepared',error=?,updated_at=?
+      WHERE state='executing' AND tool_name='complete_room_turn'${scope}`), ...completionArgs);
   }
   private recordEvent(database: DatabaseSync, inboxItemId: string, idempotencyKey: string, phase: SupervisedInboxEvent["phase"], observedAt: string, detail: string | null): void {
     // The ordinal is allocated in the same inbox transaction as its state

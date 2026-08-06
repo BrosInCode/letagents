@@ -1941,7 +1941,6 @@ test("effect journal bounds per-turn rows and payload bytes without stranding co
       agent_session_id: "agent-session",
       activating_inbox_item_id: item!.inbox_item_id,
     }), /at most 128 effects/i, "room moves share the same transactional per-turn admission cap");
-
     for (let index = 0; index < 4; index += 1) {
       await store.markEffectExecuting({ effect_id: effects[index]!.effect_id, ...base });
       const completed = await store.completeEffect({
@@ -1987,6 +1986,12 @@ test("effect journal bounds per-turn rows and payload bytes without stranding co
     assert.equal(failed.state, "failed");
     assert.ok(Buffer.byteLength(failed.error ?? "", "utf8") <= 16 * 1024);
     assert.match(failed.error ?? "", /\[truncated\]$/);
+    const completionPastOrdinaryCap = await store.prepareEffect({
+      ...base, mcp_request_id: "completion-after-cap", tool_name: "complete_room_turn",
+      request: { outcome: "reply", text: "The final answer still fits." }, mutation: true,
+    });
+    assert.equal(completionPastOrdinaryCap.effect.state, "completed",
+      "ordinary tools cannot exhaust the reserved structured-completion contract");
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -2257,6 +2262,183 @@ test("an effect that loses runtime authority before execution is durably failed"
     const replay = await store.prepareEffect(authority);
     assert.equal(replay.effect.state, "failed", "the rejected execution CAS cannot leave an immortal prepared row");
     assert.match(replay.effect.error ?? "", /lost its exact current runtime authority/);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("structured room-turn completion is an atomic durable singleton across concurrency and restart", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:10:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "cursor-completion", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "answer this" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "cursor-turn", TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, {
+      agentId: "cursor-completion", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation",
+    });
+    const authority = {
+      agent_id: "cursor-completion", room_id: "room", execution_generation_id: "generation",
+      provider_turn_id: "cursor-turn", work_attempt_id: "attempt",
+      current_execution_generation_id: "generation", provider_continuation_id: "continuation",
+    };
+    const completion = { outcome: "reply" as const, text: "Durable public answer." };
+    const preCompletionEffect = await store.prepareEffect({
+      ...authority, mcp_request_id: "read-before-complete", tool_name: "get_board",
+      request: {}, mutation: false,
+    });
+    const preCompletionMoveInput = {
+      agent_id: authority.agent_id,
+      room_id: authority.room_id,
+      effect_execution_generation_id: authority.execution_generation_id,
+      provider_turn_id: authority.provider_turn_id,
+      mcp_request_id: "move-before-complete",
+      request: { name: "next-room" },
+      destination_room_id: "next-room",
+      daemon_generation: 1,
+      work_attempt_id: authority.work_attempt_id,
+      execution_generation_id: authority.current_execution_generation_id,
+      provider_continuation_id: authority.provider_continuation_id,
+      agent_session_id: "cursor-completion-session",
+      activating_inbox_item_id: item!.inbox_item_id,
+    };
+    const preCompletionMove = await store.prepareRoomMoveEffect(preCompletionMoveInput);
+    const competingStore = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:10:00.000Z");
+    const concurrent = await Promise.all([
+      store.prepareEffect({
+        ...authority, mcp_request_id: "complete-1", tool_name: "complete_room_turn",
+        request: completion, mutation: true,
+      }),
+      competingStore.prepareEffect({
+        ...authority, mcp_request_id: "complete-2", tool_name: "complete_room_turn",
+        request: completion, mutation: true,
+      }),
+    ]);
+    assert.equal(concurrent[0]!.effect.state, "completed");
+    assert.equal(concurrent[1]!.effect.state, "completed");
+    assert.equal(concurrent[0]!.effect.effect_id, concurrent[1]!.effect.effect_id,
+      "independent stores converge on the one exact-turn proposal");
+    assert.equal((await competingStore.prepareEffect({
+      ...authority, mcp_request_id: "read-before-complete", tool_name: "get_board",
+      request: {}, mutation: false,
+    })).effect.effect_id, preCompletionEffect.effect.effect_id,
+    "completion keeps idempotent replay of an already-admitted effect available");
+    await assert.rejects(() => competingStore.markEffectExecuting({
+      effect_id: preCompletionEffect.effect.effect_id,
+      ...authority,
+    }), /already complete.*may no longer execute/i,
+    "an effect prepared before completion cannot cross its execution boundary afterward");
+    assert.equal((await competingStore.prepareEffect({
+      ...authority, mcp_request_id: "read-before-complete", tool_name: "get_board",
+      request: {}, mutation: false,
+    })).effect.state, "failed", "the completion fence is durable across exact replay");
+    assert.equal((await competingStore.prepareRoomMoveEffect(preCompletionMoveInput)).effect.effect_id,
+      preCompletionMove.effect.effect_id,
+      "the exact prepared room move remains replayable for completion-coupled reconciliation");
+    await assert.rejects(competingStore.prepareRoomMoveEffect({
+      ...preCompletionMoveInput,
+      mcp_request_id: "move-after-complete",
+      request: { name: "another-room" },
+      destination_room_id: "another-room",
+    }), /already complete.*no new effects/i,
+    "join_room cannot bypass the completed-turn admission seal");
+    await assert.rejects(competingStore.prepareEffect({
+      ...authority, mcp_request_id: "read-after-complete", tool_name: "get_board",
+      request: {}, mutation: false,
+    }), /already complete.*no new effects/i,
+    "the atomic completion transaction seals the effect lane for every later request id");
+    await competingStore.close();
+    await store.close();
+
+    // Simulate the only pre-atomic crash shape that can exist across an
+    // upgrade: the request is durable but its old two-phase callback did not
+    // checkpoint completion. Reopen must finish it locally, never quarantine.
+    const legacy = new DatabaseSync(env.database);
+    legacy.prepare("UPDATE supervised_agent_effects SET state='executing',result_json=NULL WHERE effect_id=?")
+      .run(concurrent[0]!.effect.effect_id);
+    legacy.close();
+
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    const recovered = await reopened.prepareEffect({
+      ...authority, mcp_request_id: "complete-after-restart", tool_name: "complete_room_turn",
+      request: completion, mutation: true,
+    });
+    assert.equal(recovered.effect.state, "completed");
+    assert.equal(recovered.effect.effect_id, concurrent[0]!.effect.effect_id);
+    assert.equal((await reopened.prepareEffect({
+      ...authority, mcp_request_id: "read-before-complete", tool_name: "get_board",
+      request: {}, mutation: false,
+    })).effect.state, "failed", "restart preserves the execution fence on pre-completion effects");
+    const durable = await reopened.roomTurnCompletionEffects("cursor-completion", "generation", "cursor-turn");
+    assert.equal(durable.length, 1);
+    assert.equal(durable[0]?.state, "completed");
+    assert.deepEqual(durable[0]?.request, { outcome: "reply", text: "Durable public answer." });
+    assert.deepEqual(await reopened.roomTurnCompletionEffects("cursor-completion", "different-generation", "cursor-turn"), []);
+    assert.deepEqual(await reopened.roomTurnCompletionEffects("cursor-completion", "generation", "different-turn"), []);
+
+    await assert.rejects(() => reopened.prepareEffect({
+      ...authority, mcp_request_id: "complete-conflict", tool_name: "complete_room_turn",
+      request: { outcome: "no_reply" }, mutation: true,
+    }), /different completion proposal/i);
+    assert.equal((await reopened.roomTurnCompletionEffects("cursor-completion", "generation", "cursor-turn")).length, 1);
+    await reopened.close();
+  } finally { await env.cleanup(); }
+});
+
+test("room-turn completion waits until every already-executing effect has durably finished", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:12:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "completion-order", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "mutate then answer" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "ordered-turn", TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, {
+      agentId: "completion-order", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation",
+    });
+    const authority = {
+      agent_id: "completion-order", room_id: "room", execution_generation_id: "generation",
+      provider_turn_id: "ordered-turn", work_attempt_id: "attempt",
+      current_execution_generation_id: "generation", provider_continuation_id: "continuation",
+    };
+    const mutation = await store.prepareEffect({
+      ...authority, mcp_request_id: "mutation", tool_name: "send_message",
+      request: { text: "side effect first" }, mutation: true,
+    });
+    await store.markEffectExecuting({ effect_id: mutation.effect.effect_id, ...authority });
+    await assert.rejects(store.prepareEffect({
+      ...authority, mcp_request_id: "completion-too-early", tool_name: "complete_room_turn",
+      request: { outcome: "no_reply" }, mutation: true,
+    }), /cannot complete while an earlier effect is still executing/i,
+    "completion cannot claim to be the last action while an earlier effect is across its execution boundary");
+    const legacy = new DatabaseSync(env.database);
+    legacy.prepare(`INSERT INTO supervised_agent_effects
+      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      VALUES ('legacy-completion',?,?,?,?,?,'complete_room_turn',?,1,'executing',NULL,NULL,?,?)`).run(
+      authority.agent_id, authority.room_id, authority.execution_generation_id, authority.provider_turn_id,
+      "legacy-completion-request", JSON.stringify({ outcome: "no_reply" }),
+      "2026-08-05T13:12:00.000Z", "2026-08-05T13:12:00.000Z",
+    );
+    legacy.close();
+    await assert.rejects(store.prepareEffect({
+      ...authority, mcp_request_id: "legacy-completion-request", tool_name: "complete_room_turn",
+      request: { outcome: "no_reply" }, mutation: true,
+    }), /cannot complete while an earlier effect is still executing/i,
+    "restart replay of a pre-atomic completion cannot bypass the same ordering fence");
+    await store.completeEffect({
+      effect_id: mutation.effect.effect_id,
+      result: { delivered: true },
+      expected: { agent_id: authority.agent_id, work_attempt_id: authority.work_attempt_id, provider_turn_id: authority.provider_turn_id },
+    });
+    const completion = await store.prepareEffect({
+      ...authority, mcp_request_id: "legacy-completion-request", tool_name: "complete_room_turn",
+      request: { outcome: "no_reply" }, mutation: true,
+    });
+    assert.equal(completion.effect.state, "completed");
     await store.close();
   } finally { await env.cleanup(); }
 });
